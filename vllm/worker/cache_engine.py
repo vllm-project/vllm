@@ -1,15 +1,14 @@
 """CacheEngine class for managing the KV cache."""
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import torch
 
+from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import in_wsl, is_neuron, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available
 
 logger = init_logger(__name__)
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class CacheEngine:
@@ -38,124 +37,52 @@ class CacheEngine:
         self.num_gpu_blocks = cache_config.num_gpu_blocks
         self.num_cpu_blocks = cache_config.num_cpu_blocks
 
-        # Skip initializing CUDA stream and buffer for Neuron backend.
-        if is_neuron():
-            return
-
         if cache_config.cache_dtype == "auto":
             self.dtype = model_config.dtype
         else:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        # Get attention backend.
+        self.attn_backend = get_attn_backend(model_config.dtype)
+
         # Initialize the cache.
-        self.gpu_cache = self.allocate_gpu_cache()
-        self.cpu_cache = self.allocate_cpu_cache()
+        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
+        self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
-        # Initialize the stream for caching operations.
-        self.cache_stream = torch.cuda.Stream()
-        assert self.cache_stream != torch.cuda.current_stream()
-        # Initialize the events for stream synchronization.
-        self.events = [torch.cuda.Event() for _ in range(self.num_layers)]
-
-    def get_key_block_shape(self) -> Tuple[int, int, int, int]:
-        element_size = torch.tensor([], dtype=self.dtype).element_size()
-        x = 16 // element_size
-        return (
-            self.num_heads,
-            self.head_size // x,
-            self.block_size,
-            x,
-        )
-
-    def get_value_block_shape(self) -> Tuple[int, int, int]:
-        return (
-            self.num_heads,
-            self.head_size,
-            self.block_size,
-        )
-
-    def allocate_gpu_cache(self) -> List[KVCache]:
-        gpu_cache: List[KVCache] = []
-        key_block_shape = self.get_key_block_shape()
-        value_block_shape = self.get_value_block_shape()
-        for _ in range(self.num_layers):
-            key_blocks = torch.empty(
-                size=(self.num_gpu_blocks, *key_block_shape),
-                dtype=self.dtype,
-                device="cuda",
-            )
-            value_blocks = torch.empty(
-                size=(self.num_gpu_blocks, *value_block_shape),
-                dtype=self.dtype,
-                device="cuda",
-            )
-            gpu_cache.append((key_blocks, value_blocks))
-        return gpu_cache
-
-    def allocate_cpu_cache(self) -> List[KVCache]:
-        cpu_cache: List[KVCache] = []
-        key_block_shape = self.get_key_block_shape()
-        value_block_shape = self.get_value_block_shape()
-        pin_memory = not in_wsl()
-        if not pin_memory:
-            # Pinning memory in WSL is not supported.
-            # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
-            logger.warning("Using 'pin_memory=False' as WSL is detected. "
-                           "This may slow down the performance.")
-        for _ in range(self.num_layers):
-            key_blocks = torch.empty(
-                size=(self.num_cpu_blocks, *key_block_shape),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device="cpu",
-            )
-            value_blocks = torch.empty(
-                size=(self.num_cpu_blocks, *value_block_shape),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device="cpu",
-            )
-            cpu_cache.append((key_blocks, value_blocks))
-        return cpu_cache
-
-    def _swap(
+    def _allocate_kv_cache(
         self,
-        src: List[KVCache],
-        dst: List[KVCache],
-        src_to_dst: Dict[int, int],
-    ) -> None:
-        from vllm._C import cache_ops
-
-        with torch.cuda.stream(self.cache_stream):
-            for i in range(self.num_layers):
-                src_key_cache, src_value_cache = src[i]
-                dst_key_cache, dst_value_cache = dst[i]
-                # Copy the key blocks.
-                cache_ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-                # Copy the value blocks.
-                cache_ops.swap_blocks(src_value_cache, dst_value_cache,
-                                      src_to_dst)
-                event = self.events[i]
-                event.record(stream=self.cache_stream)
+        num_blocks: int,
+        device: str,
+    ) -> List[torch.Tensor]:
+        """Allocates KV cache on the specified device."""
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks, self.block_size, self.num_heads, self.head_size)
+        pin_memory = is_pin_memory_available() if device == "cpu" else False
+        kv_cache: List[torch.Tensor] = []
+        for _ in range(self.num_layers):
+            kv_cache.append(
+                torch.empty(kv_cache_shape,
+                            dtype=self.dtype,
+                            pin_memory=pin_memory,
+                            device=device))
+        return kv_cache
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:
-        self._swap(self.cpu_cache, self.gpu_cache, src_to_dst)
+        for i in range(self.num_layers):
+            self.attn_backend.swap_blocks(self.cpu_cache[i], self.gpu_cache[i],
+                                          src_to_dst)
 
     def swap_out(self, src_to_dst: Dict[int, int]) -> None:
-        self._swap(self.gpu_cache, self.cpu_cache, src_to_dst)
+        for i in range(self.num_layers):
+            self.attn_backend.swap_blocks(self.gpu_cache[i], self.cpu_cache[i],
+                                          src_to_dst)
 
     def copy(self, src_to_dsts: Dict[int, List[int]]) -> None:
-        from vllm._C import cache_ops
-
-        key_caches = [key_cache for key_cache, _ in self.gpu_cache]
-        value_caches = [value_cache for _, value_cache in self.gpu_cache]
-        # NOTE(woosuk): This operation implicitly synchronizes the CPU and GPU.
-        cache_ops.copy_blocks(key_caches, value_caches, src_to_dsts)
+        self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
     def get_cache_block_size(
-        block_size: int,
-        cache_dtype: str,
+        cache_config: CacheConfig,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
     ) -> int:
@@ -163,13 +90,13 @@ class CacheEngine:
         num_heads = model_config.get_num_kv_heads(parallel_config)
         num_layers = model_config.get_num_layers(parallel_config)
 
-        key_cache_block = block_size * num_heads * head_size
+        key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)
-        if cache_dtype == "auto":
+        if cache_config.cache_dtype == "auto":
             dtype = model_config.dtype
         else:
-            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
         dtype_size = _get_dtype_size(dtype)
         return dtype_size * total
 
