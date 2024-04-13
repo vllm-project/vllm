@@ -25,7 +25,8 @@ class MultiStepWorker(Worker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self._proposer: Optional[DraftModelTop1Proposer] = None
+        # Lazy initialization list.
+        self._proposer: DraftModelTop1Proposer
 
     def init_device(self):
         super().init_device()
@@ -334,10 +335,10 @@ class DraftModelTop1Proposer(SpeculativeProposer):
                                          self._vocab_size,
                                          dtype=torch.float32,
                                          device=self._device)
-            proposal_lens = torch.zeros(len(proposal_lens),
-                                        dtype=torch.long,
-                                        device=self._device)
-            return proposal_tokens, proposal_probs, proposal_lens
+            proposal_lens_tensor = torch.zeros(len(proposal_lens),
+                                               dtype=torch.long,
+                                               device=self._device)
+            return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
 
@@ -362,9 +363,9 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         proposal_tokens, proposal_probs = (entire_proposal_tokens,
                                            entire_proposal_probs)
 
-        proposal_lens = torch.zeros(batch_size,
-                                    dtype=torch.long,
-                                    device=self._device)
-        proposal_lens[nonzero_proposal_len_indices] = max_proposal_len
+        proposal_lens_tensor = torch.zeros(batch_size,
+                                           dtype=torch.long,
+                                           device=self._device)
+        proposal_lens_tensor[nonzero_proposal_len_indices] = max_proposal_len
 
-        return proposal_tokens, proposal_probs, proposal_lens
+        return proposal_tokens, proposal_probs, proposal_lens_tensor

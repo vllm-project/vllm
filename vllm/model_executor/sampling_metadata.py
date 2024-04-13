@@ -113,6 +113,9 @@ class SamplingTensors:
                              get_num_triton_sampler_splits(vocab_size))
 
         sample_indices_start_idx = 0
+        assert sampling_metadata.seq_groups is not None
+        assert sampling_metadata.prompt_lens is not None
+        assert sampling_metadata.seq_data is not None
         for i, seq_group in enumerate(sampling_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature

@@ -236,7 +236,7 @@ def hf_model_weights_iterator(
     cache_dir: Optional[str] = None,
     load_format: str = "auto",
     revision: Optional[str] = None,
-    fall_back_to_pt: Optional[bool] = True,
+    fall_back_to_pt: bool = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
     hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
         model_name_or_path,
