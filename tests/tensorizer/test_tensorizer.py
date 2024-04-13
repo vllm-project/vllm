@@ -215,9 +215,9 @@ def test_load_without_tensorizer_load_format(vllm_runner):
 def test_tensorize_vllm_model(tmp_path):
     # Test serialize command
     serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py",
-        "--model", model_ref, "--dtype", "float16", "serialize",
-        "--serialized-directory", tmp_path, "--suffix", "tests"
+        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
+        model_ref, "--dtype", "float16", "serialize", "--serialized-directory",
+        tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -229,9 +229,9 @@ def test_tensorize_vllm_model(tmp_path):
 
     # Test deserialize command
     deserialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py",
-        "--model", model_ref, "--dtype", "float16", "deserialize",
-        "--path-to-tensors", path_to_tensors
+        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
+        model_ref, "--dtype", "float16", "deserialize", "--path-to-tensors",
+        path_to_tensors
     ]
     result = subprocess.run(deserialize_args, capture_output=True, text=True)
     assert result.returncode == 0, (f"Deserialize command failed with output:"
@@ -242,9 +242,9 @@ def test_tensorize_vllm_model(tmp_path):
 def test_openai_apiserver_with_tensorizer(tmp_path):
     ## Serialize model
     serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py",
-        "--model", model_ref, "--dtype", "float16", "serialize",
-        "--serialized-directory", tmp_path, "--suffix", "tests"
+        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
+        model_ref, "--dtype", "float16", "serialize", "--serialized-directory",
+        tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -294,10 +294,9 @@ def test_tensorizer_with_tp(vllm_runner):
 def test_tensorizer_warn_quant(tmp_path):
     model_ref = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
     serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py",
-        "--model", model_ref, "--quantization", "gptq", "--tensorizer-uri",
-        "test", "serialize", "--serialized-directory", tmp_path, "--suffix",
-        "tests"
+        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
+        model_ref, "--quantization", "gptq", "--tensorizer-uri", "test",
+        "serialize", "--serialized-directory", tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     assert 'PerformanceWarning' in result.stderr
