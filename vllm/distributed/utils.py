@@ -11,7 +11,7 @@ import torch.distributed as dist
 
 from vllm.logger import init_logger
 
-from .parallel_state import get_cpu_world_group
+from .parallel_state import get_cpu_world_group, get_local_rank
 
 logger = init_logger(__name__)
 
@@ -108,9 +108,10 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
     path = os.path.expanduser(
         f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    if (not is_distributed or dist.get_rank()== 0) \
+    if (not is_distributed or get_local_rank() == 0) \
         and (not os.path.exists(path)):
-        # only the master process can enter this block to calculate the cache
+        # only the local master process (with local_rank == 0) can
+        #  enter this block to calculate the cache
         logger.info(f"generating GPU P2P access cache for in {path}")
         cache = {}
         for _i in range(num_dev):
