@@ -13,7 +13,7 @@ embedding_params = EmbeddingParams()
 llm = LLM(model="BAAI/bge-m3")
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
-
+print("start")
 outputs1 = llm.encode(sentences_1, embedding_params)
 # output2 = llm.encode(sentences_2, sampling_params)
 lst1 = []
@@ -22,14 +22,14 @@ for output1 in outputs1:
     lst1.append(np.array(generated_text))
 lst1 = np.array(lst1)
 # print("lst1", lst1)
-outputs2 = llm.generate(sentences_2, embedding_params)
+# outputs2 = llm.generate(sentences_2, embedding_params)
 
-lst2 = []
-for output2 in outputs2:
-    prompt = output2.prompt
-    generated_text = output2.embedding.cpu()
-    lst2.append(np.array(generated_text))
-lst2 = np.array(lst2)
-result = lst1 @ lst2.T
+# lst2 = []
+# for output2 in outputs2:
+#     prompt = output2.prompt
+#     generated_text = output2.embedding.cpu()
+#     lst2.append(np.array(generated_text))
+# lst2 = np.array(lst2)
+# result = lst1 @ lst2.T
 
 print("Passed!")

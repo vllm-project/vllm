@@ -15,6 +15,9 @@ from vllm.model_executor.layers.linear import (
 from tqdm import tqdm
 
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
+from vllm.sequence import SamplerOutput
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -77,6 +80,8 @@ class XLMRobertaModel(torch.nn.Module):
     ) -> torch.Tensor:
         batch_size = 12
         tensor_list = []
+        print("input_ids", input_ids)
+        print("input_metadata", input_metadata)
         # FIXME: convert the vllm input format into the hf input format
         #   [ Handle batched and non-batched cases ]
         # see https://github.com/huggingface/transformers/blob/v4.39.1/src/transformers/models/xlm_roberta/modeling_xlm_roberta.py#L830C9-L850C90
@@ -208,3 +213,10 @@ class XLMRobertaModel(torch.nn.Module):
             head_mask = [None] * num_hidden_layers
 
         return head_mask
+
+    def sample(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[SamplerOutput]:
+        return hidden_states
