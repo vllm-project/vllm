@@ -15,5 +15,5 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed_comm_ops \
-        rocm  /bin/bash -c "cd vllm/tests/distributed; python3 -m pytest -v-s test_comm_ops.py"
+        rocm  /bin/bash -c "cd vllm/tests/distributed; python3 -m pytest -v -s test_comm_ops.py"
 
