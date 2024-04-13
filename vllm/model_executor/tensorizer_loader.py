@@ -43,6 +43,10 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
     return tensorizer.deserialize()
 
 
+def tensorizer_warning(message: str):
+    return warnings.warn(message, category=PerformanceWarning, stacklevel=2)
+
+
 def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
     if tensorizer_config is None:
         return False
@@ -262,8 +266,8 @@ class TensorizerAgent:
                 new_weight[child.weight.shape[0]:].fill_(0)
                 child.weight.data = new_weight
 
-    def _check_tensors_on_meta_device(model):
-        for tensor in model.state_dict().values():
+    def _check_tensors_on_meta_device(self):
+        for tensor in self.model.state_dict().values():
             if tensor.device.type == 'meta':
                 raise ValueError(
                     "The serialized model contains tensors on the meta device,"

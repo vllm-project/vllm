@@ -914,12 +914,30 @@ class TensorizerConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        if parallel_config.tensor_parallel_size > 1:
+        if (parallel_config.tensor_parallel_size > 1
+                and self.tensorizer_uri is not None):
             raise ValueError(
                 "Loading to multiple GPUs is not currently supported with "
                 "vLLM-serialized models. Please set tensor_parallel_size=1."
                 " or use a non-vLLM-serialized model, such as a "
                 "serialized Hugging Face `PretrainedModel`.")
+
+    def verify_with_model_config(self, model_config) -> None:
+        if (model_config.quantization is not None
+                and self.tensorizer_uri is not None):
+            from vllm.model_executor.tensorizer_loader import (
+                tensorizer_warning)
+            tensorizer_warning(
+                "Loading a model using Tensorizer with quantization on vLLM"
+                " is unstable and may lead to errors.")
+
+        if (model_config.load_format != "tensorizer"
+                and self.tensorizer_uri is not None):
+            raise ValueError(
+                "A tensorizer uri was passed for tensorizer loading, but the "
+                f"load format was set to {model_config.load_format}. "
+                "Please set the load format to 'tensorizer' to use "
+                f"tensorizer args.")
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1080,6 +1098,7 @@ class EngineConfig:
         if self.tensorizer_config:
             self.tensorizer_config.verify_with_parallel_config(
                 self.parallel_config)
+            self.tensorizer_config.verify_with_model_config(self.model_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)

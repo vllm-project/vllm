@@ -183,7 +183,6 @@ def deserialize():
         model = model_class(config)
 
     before_mem = get_mem_usage()
-    # Lazy load the tensors from S3 into the model.
     start = time.time()
 
     if keyfile:

@@ -57,14 +57,6 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
     tensorizer_config = kwargs.get("tensorizer_config", None)
     model_class = _get_model_architecture(model_config)[0]
 
-    if tensorizer_config and (model_config.load_format != "tensorizer" and
-                              tensorizer_config.tensorizer_uri is not None):
-        raise ValueError(
-            "A tensorizer uri was passed for tensorizer loading, but the "
-            f"load format was set to {model_config.load_format}. "
-            "Please set the load format to 'tensorizer' to use "
-            f"tensorizer args.")
-
     # Get the (maybe quantized) linear method.
     linear_method = None
     if model_config.quantization is not None:
@@ -83,6 +75,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                 f"{model_config.dtype} is not supported for quantization "
                 f"method {model_config.quantization}. Supported dtypes: "
                 f"{supported_dtypes}")
+
         linear_method = quant_config.get_linear_method()
 
     with _set_default_torch_dtype(model_config.dtype):
