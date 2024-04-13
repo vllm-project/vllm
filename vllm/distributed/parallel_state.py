@@ -8,6 +8,10 @@ from typing import Optional
 
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
@@ -45,6 +49,8 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
+    logger.debug(f"{world_size=} {rank=} {local_rank=} "
+                 f"{distributed_init_method=} {backend=}")
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
