@@ -24,6 +24,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 model_ref = "facebook/opt-125m"
 
 
+def is_curl_installed():
+    try:
+        subprocess.check_call(['curl', '--version'])
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
 @pytest.fixture(autouse=True)
 def tensorizer_config():
     config = TensorizerConfig(tensorizer_uri="vllm", vllm_tensorized=True)
@@ -84,6 +92,7 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     assert outputs == deserialized_outputs
 
 
+@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_can_deserialize_s3(vllm_runner):
     model_ref = "EleutherAI/pythia-1.4b"
     tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
@@ -102,6 +111,7 @@ def test_can_deserialize_s3(vllm_runner):
     assert deserialized_outputs
 
 
+@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_deserialized_encrypted_vllm_model_has_same_outputs(
         vllm_runner, tmp_path):
     vllm_model = vllm_runner(model_ref)
@@ -201,12 +211,13 @@ def test_load_without_tensorizer_load_format(vllm_runner):
         vllm_runner(model_ref, tensorizer_uri="test")
 
 
+@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_tensorize_vllm_model(tmp_path):
     # Test serialize command
     serialize_args = [
-        "python3", "examples/tensorize_vllm_model.py", "--model", model_ref,
-        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
-        "--suffix", "tests"
+        "python3", "tests/tensorizer/tensorize_vllm_model_for_testing.py",
+        "--model", model_ref, "--dtype", "float16", "serialize",
+        "--serialized-directory", tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -218,21 +229,22 @@ def test_tensorize_vllm_model(tmp_path):
 
     # Test deserialize command
     deserialize_args = [
-        "python3", "examples/tensorize_vllm_model.py", "--model", model_ref,
-        "--dtype", "float16", "deserialize", "--path-to-tensors",
-        path_to_tensors
+        "python3", "tests/tensorizer/tensorize_vllm_model_for_testing.py",
+        "--model", model_ref, "--dtype", "float16", "deserialize",
+        "--path-to-tensors", path_to_tensors
     ]
     result = subprocess.run(deserialize_args, capture_output=True, text=True)
     assert result.returncode == 0, (f"Deserialize command failed with output:"
                                     f"\n{result.stdout}\n{result.stderr}")
 
 
+@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_openai_apiserver_with_tensorizer(tmp_path):
     ## Serialize model
     serialize_args = [
-        "python3", "examples/tensorize_vllm_model.py", "--model", model_ref,
-        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
-        "--suffix", "tests"
+        "python3", "tests/tensorizer/tensorize_vllm_model_for_testing.py",
+        "--model", model_ref, "--dtype", "float16", "serialize",
+        "--serialized-directory", tmp_path, "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -278,12 +290,14 @@ def test_tensorizer_with_tp(vllm_runner):
         )
 
 
-def test_tensorizer_with_llm_engine_quant(vllm_runner, tmp_path):
+@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
+def test_tensorizer_warn_quant(tmp_path):
     model_ref = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
     serialize_args = [
-        "python3", "examples/tensorize_vllm_model.py", "--model", model_ref,
-        "--quantization", "gptq", "--tensorizer-uri", "test", "serialize",
-        "--serialized-directory", tmp_path, "--suffix", "tests"
+        "python3", "tests/tensorizer/tensorize_vllm_model_for_testing.py",
+        "--model", model_ref, "--quantization", "gptq", "--tensorizer-uri",
+        "test", "serialize", "--serialized-directory", tmp_path, "--suffix",
+        "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     assert 'PerformanceWarning' in result.stderr
