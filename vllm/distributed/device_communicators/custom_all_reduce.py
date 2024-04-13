@@ -42,17 +42,22 @@ def init_custom_ar() -> None:
             " disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
-    if not _can_p2p(rank, world_size):
-        logger.warn(
-            "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability or P2P test failed. To silence this warning, specify"
-            " disable_custom_all_reduce=True explicitly.")
-        return
+    # test nvlink first, this will filter out most of the cases
+    # where custom allreduce is not supported
     full_nvlink = _is_full_nvlink(rank, world_size)
     if world_size > 2 and not full_nvlink:
         logger.warn(
             "Custom allreduce is disabled because it's not supported on more"
             " than two PCIe-only GPUs. To silence this warning, specify"
+            " disable_custom_all_reduce=True explicitly.")
+        return
+    # test P2P capability
+    # this is expensive to compute at the first time
+    # then we cache the result
+    if not _can_p2p(rank, world_size):
+        logger.warn(
+            "Custom allreduce is disabled because your platform lacks GPU P2P"
+            " capability or P2P test failed. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
         return
     _CA_HANDLE = CustomAllreduce(rank, world_size, full_nvlink)
