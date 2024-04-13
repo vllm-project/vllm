@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -40,7 +40,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 
         Swapping is not yet supported, so always return num_cpu_blocks=0.
