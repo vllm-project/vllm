@@ -47,6 +47,13 @@ class SamplingMetadata:
         self.perform_sampling = perform_sampling
 
         self.num_prompts = len(prompt_lens) if prompt_lens is not None else 0
+        self.prompt_chunk_lens = []
+        for prompt_len, seq_group in zip(prompt_lens, seq_groups):
+            seq_ids, _ = seq_group
+            # Prompt has only 1 sequnce id.
+            assert len(seq_ids) == 1
+            data = seq_data[seq_ids[0]]
+            chunk_len = data.get_prompt_len() - data.get_num_computed_tokens()
 
     def __repr__(self) -> str:
         return (

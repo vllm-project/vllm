@@ -28,7 +28,9 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
+# {token_id -> logprob} per each prompt token.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+# {token_id -> logprob} for each sampled token.
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
