@@ -586,10 +586,8 @@ def _get_logprobs(
             prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
-            query_indices.extend(
-                query_idx + j for j in range(prompt_len - 1))
-            token_indices.extend(
-                token_id for token_id in prompt_tokens[1:])
+            query_indices.extend(query_idx + j for j in range(prompt_len - 1))
+            token_indices.extend(token_id for token_id in prompt_tokens[1:])
             query_idx += prompt_len - 1
         query_indices.extend(
             [query_idx + parent_id for parent_id in parent_ids])
@@ -600,10 +598,8 @@ def _get_logprobs(
         query_idx += num_parent_seqs
     assert query_idx == logprobs.size(0)
 
-    query_indices_gpu = torch.tensor(
-        query_indices, device=logprobs.device)
-    token_indices_gpu = torch.tensor(
-        token_indices, device=logprobs.device)
+    query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
+    token_indices_gpu = torch.tensor(token_indices, device=logprobs.device)
     print(f"SANG-TODO {query_indices_gpu=}")
     print(f"SANG-TODO {token_indices_gpu=}")
     print(f"SANG-TODO {logprobs.shape=}")
@@ -658,15 +654,15 @@ def _get_logprobs(
             for token_id in prompt_tokens:
                 # First, calculate the logprob from the sampled output.
                 prompt_logprobs_dict = {
-                    token_id:
-                    (selected_logprobs[query_idx].item(),
-                     ranks[query_idx].item())
+                    token_id: (selected_logprobs[query_idx].item(),
+                               ranks[query_idx].item())
                 }
                 # Second, add top logprobs if required.
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
                         zip(
-                            top_token_ids[top_logprob_idx, :num_logprobs].tolist(),
+                            top_token_ids[
+                                top_logprob_idx, :num_logprobs].tolist(),
                             zip(
                                 top_logprobs[
                                     top_logprob_idx, :num_logprobs].tolist(),
@@ -691,12 +687,12 @@ def _get_logprobs(
         # Parent sequence > 1 if it uses beam search.
         next_token_ids, parent_seq_ids = sample_result
         # Each sample can contain multiple tokens if beam search is enabled.
-        for next_token_id, parent_seq_id in zip(next_token_ids, parent_seq_ids):
+        for next_token_id, parent_seq_id in zip(next_token_ids,
+                                                parent_seq_ids):
             # First, calculate the logprob from the sampled output.
             sampled_logprobs_dict = {
                 next_token_id:
-                (selected_logprobs[query_idx].item(),
-                 ranks[query_idx].item())
+                (selected_logprobs[query_idx].item(), ranks[query_idx].item())
             }
             query_idx += 1
 
@@ -707,8 +703,9 @@ def _get_logprobs(
                         top_token_ids[top_logprob_idx +
                                       parent_seq_id, :num_logprobs].tolist(),
                         zip(
-                            top_logprobs[top_logprob_idx +
-                                         parent_seq_id, :num_logprobs].tolist(),
+                            top_logprobs[
+                                top_logprob_idx +
+                                parent_seq_id, :num_logprobs].tolist(),
                             range(1, num_logprobs + 1))))
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_rank)
