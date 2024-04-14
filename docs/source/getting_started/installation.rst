@@ -86,8 +86,8 @@ You can also build and install vLLM from source:
         $ nvcc --version # verify that nvcc is in your PATH
         $ ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
 
-    Sometimes, forcing a reinstall and specifying the CUDA Toolkit path can help resolve build errors.
+    Sometimes, forcing a reinstall can help resolve build errors.
 
     .. code-block:: console
 
-        $ CUDACXX=/usr/local/cuda-12/bin/nvcc CMAKE_ARGS="-DLLAMA_CUBLAS=on -DCMAKE_CUDA_ARCHITECTURES=native" FORCE_CMAKE=1 pip install -e . --no-cache-dir --force-reinstall --upgrade
+        $ pip install -e . --no-cache-dir --force-reinstall
