@@ -821,8 +821,8 @@ class ModelRunner:
                 computed_block_nums=block_table[:num_computed_blocks],
             )
 
-            self.execute_model([request], kv_caches)
-            self.execute_model([request], kv_caches)
+            for _ in range(NUM_ITERATIONS):
+                self.execute_model([request], kv_caches)
 
         return
 
