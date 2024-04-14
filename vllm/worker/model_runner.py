@@ -1225,8 +1225,6 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
         memory_pool,
         conv_state: Optional[torch.Tensor] = None,
         ssm_state: Optional[torch.Tensor] = None,
