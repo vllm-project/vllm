@@ -86,7 +86,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = True,
+        disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -170,8 +170,12 @@ class LLM:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
-        num_requests = len(prompts) if prompts is not None else len(
-            prompt_token_ids)
+        if prompts is not None:
+            num_requests = len(prompts)
+        else:
+            assert prompt_token_ids is not None
+            num_requests = len(prompt_token_ids)
+
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
