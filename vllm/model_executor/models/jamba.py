@@ -583,7 +583,7 @@ class JambaForCausalLM(nn.Module):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
             self,

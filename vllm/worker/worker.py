@@ -25,7 +25,6 @@ from vllm.lora.request import LoRARequest
 from vllm.utils import is_hip
 from vllm.logger import init_logger
 
-logger = init_logger(__name__)
 
 class Worker(WorkerBase):
     """A worker class that executes (a partition of) the model on a GPU.
@@ -209,13 +208,6 @@ class Worker(WorkerBase):
             self.cache_engine.swap_out(blocks_to_swap_out)
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-
-
-    def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
-        for req_id in finished_seq_groups_req_ids:
-            if req_id in self.model_runner.request_id2index:
-                indices = self.model_runner.request_id2index.pop(req_id)
-                logger.debug(f"Deleted { req_id } from mamba_cache with indices = {indices}")
 
 
     @torch.inference_mode()

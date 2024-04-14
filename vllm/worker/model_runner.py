@@ -158,11 +158,10 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
         # cache in_wsl result
+        self.is_mamba = self.model_config.hf_config.model_type == "jamba"
         self.mamba_cache = None
         self.mamba_cache4gc = None
-        self.request_id2index: Dict[str, Dict[int, int]] = {}
-        self.in_wsl = in_wsl()
-        self.kv_cache_dtype = kv_cache_dtype
+        self.request2i: Dict[str, Dict[int, int]] = {}
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
@@ -445,13 +444,6 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=False,
             kv_cache_dtype=self.kv_cache_dtype,
-            requests_info=[
-                RequestInfo(
-                    request_id=req.request_id,
-                    seqs_id=list(req.seq_data.keys())
-                )
-                for req in seq_group_metadata_list
-            ]
         )
 
         return PreparePromptMetadata(
@@ -583,12 +575,6 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
             kv_cache_dtype=self.kv_cache_dtype,
-            requests_info=[
-                RequestInfo(
-                    request_id=req.request_id,
-                    seqs_id=list(req.seq_data.keys())
-                )
-                for req in seq_group_metadata_list]
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -782,6 +768,10 @@ class ModelRunner:
                 batch_type = BatchType.PREFILL
             else:
                 batch_type = BatchType.DECODE
+            requests_info = [ RequestInfo(
+                    request_id=req.request_id,
+                    seqs_id=list(req.seq_data.keys())
+                ) for req in seq_group_metadata_list]
 
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -796,7 +786,7 @@ class ModelRunner:
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
                 "batch_type": batch_type,
-                "requests_info": input_metadata.requests_info
+                "requests_info": requests_info
             }
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
@@ -835,24 +825,8 @@ class ModelRunner:
             else:
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
+            requests_info = metadata_dict.pop("requests_info")
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-            input_tokens = metadata_dict["input_tokens"]
-            input_positions = metadata_dict["input_positions"]
-            lora_mapping = metadata_dict["lora_mapping"]
-            lora_requests = metadata_dict["lora_requests"]
-            input_metadata = InputMetadata(
-                is_prompt=metadata_dict["is_prompt"],
-                slot_mapping=metadata_dict["slot_mapping"],
-                prompt_lens=metadata_dict["prompt_lens"],
-                max_seq_len=metadata_dict["max_seq_len"],
-                start_loc=metadata_dict["start_loc"],
-                max_context_len=metadata_dict["max_context_len"],
-                context_lens=metadata_dict["context_lens"],
-                block_tables=metadata_dict["block_tables"],
-                use_cuda_graph=metadata_dict["use_cuda_graph"],
-                kv_cache_dtype=metadata_dict["kv_cache_dtype"],
-                requests_info=metadata_dict["requests_info"]
-            )
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -882,7 +856,14 @@ class ModelRunner:
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
-                multi_modal_input)
+                multi_modal_input, requests_info)
+
+    def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
+        for req_id in finished_seq_groups_req_ids:
+            if req_id in self.request2i:
+                indices = self.request2i.pop(req_id)
+                logger.debug(f"Deleted { req_id } from mamba_cache with indices = {indices}")
+
 
     @torch.inference_mode()
     def execute_model(
@@ -891,7 +872,7 @@ class ModelRunner:
         kv_caches: List[torch.Tensor]
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
+         lora_requests, lora_mapping, multi_modal_input, requests_info
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
@@ -905,6 +886,8 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
+
+        indices = []
         execute_model_kwargs = {
             "input_ids": input_tokens,
             "positions": input_positions,
@@ -913,6 +896,20 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
+
+        if self.is_mamba:
+            if self.mamba_cache is None:
+                self.prepare_contiguous_mamba_cache(self.model_config.dtype)
+            conv_state, ssm_state, indices = self._prepare_request_mamba_cache(
+                requests_info,
+                input_tokens.shape[0]
+            )
+            execute_model_kwargs = {
+                **execute_model_kwargs,
+                "conv_state":conv_state,
+                "ssm_state":ssm_state,
+            }
+
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
@@ -922,26 +919,7 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
-        is_mamba = self.model_config.hf_config.model_type == "jamba"
-        indices = []
-        conv_state = None
-        model_inputs = {
-            "input_ids":input_tokens,
-            "positions":input_positions,
-            "kv_caches":kv_caches,
-            "input_metadata":input_metadata,
-        }
-        if is_mamba:
-            if self.mamba_cache is None:
-                self.prepare_contiguous_mamba_cache(self.model_config.dtype)
-            conv_state, ssm_state, indices = self._prepare_request_mamba_cache(input_metadata, input_tokens.shape[0])
-            model_inputs = {
-                **model_inputs,
-                "conv_state":conv_state,
-                "ssm_state":ssm_state,
-            }
-        hidden_states = model_executable(**model_inputs)
-        if is_mamba:
+        if self.is_mamba:
             for i, offset in enumerate(indices):
                 self.mamba_cache[0][:, offset] = conv_state[:, i]
                 self.mamba_cache[1][:, offset] = ssm_state[:, i]
@@ -955,40 +933,55 @@ class ModelRunner:
 
     def _get_first_free_mamba_cache_index(self):
         max_possible_bs = self.mamba_cache[0].shape[1]
-        occupied = [id for seq_ids in self.request_id2index.values() for id in seq_ids.values()]
-        first_free_index = [i not in occupied for i in range(max_possible_bs)].index(True)
+        occupied = [
+            id
+            for seq_ids in self.request2i.values()
+            for id in seq_ids.values()
+        ]
+        first_free_index = [
+            i not in occupied
+            for i in range(max_possible_bs)
+        ].index(True)
         return first_free_index
 
 
     def _prepare_request_mamba_cache(
         self,
-        input_metadata: InputMetadata,
+        requests_info: List[RequestInfo],
         batch_size: int
     ):
         indices = []
         max_possible_bs = self.mamba_cache[0].shape[1]
-        for request_info in input_metadata.requests_info:
-            if request_info.request_id not in self.request_id2index:
-                self.request_id2index[request_info.request_id] = {}
+        for request_info in requests_info:
+            cur_rid = request_info.request_id
+            if cur_rid not in self.request2i:
+                self.request2i[cur_rid] = {}
                 for seq_id in request_info.seqs_id:
-                    first_free_index = self._get_first_free_mamba_cache_index()
-                    self.request_id2index[request_info.request_id][seq_id] = first_free_index
-                    indices.append(first_free_index)
+                    f_free_index = self._get_first_free_mamba_cache_index()
+                    self.request2i[cur_rid][seq_id] = f_free_index
+                    indices.append(f_free_index)
             else:
                 for seq_id in request_info.seqs_id:
-                    if seq_id not in self.request_id2index[request_info.request_id]:
-                        first_free_index = self._get_first_free_mamba_cache_index()
+                    if seq_id not in self.request2i[cur_rid]:
+                        f_free_index = self._get_first_free_mamba_cache_index()
                         ## case of decoding n>1
-                        if len(self.request_id2index[request_info.request_id].keys()) > 0:
-                            self.mamba_cache[0][:,first_free_index].copy_(self.mamba_cache[0][:,list(self.request_id2index[request_info.request_id].values())[0]])
-                            self.mamba_cache[1][:,first_free_index].copy_(self.mamba_cache[1][:,list(self.request_id2index[request_info.request_id].values())[0]])
-                        self.request_id2index[request_info.request_id][seq_id] = first_free_index
-                    indices.append(self.request_id2index[request_info.request_id][seq_id])
+                        i_exist = list(self.request2i[cur_rid].values())[0]
+                        self.mamba_cache[0][:,f_free_index].copy_(
+                            self.mamba_cache[0][:,i_exist]
+                        )
+                        self.mamba_cache[1][:,f_free_index].copy_(
+                            self.mamba_cache[1][:,i_exist]
+                        )
+                        self.request2i[cur_rid][seq_id] = f_free_index
+                    indices.append(self.request2i[cur_rid][seq_id])
         ## Pad the batch incase of running batch that was not captured via CG
         padded_indices = indices
         for _ in range(batch_size - len(indices)):
-            occupied = [id for seq_ids in self.request_id2index.values() for id in seq_ids.values()]
-            padded_indices += [[i not in set(occupied).union(padded_indices) for i in range(max_possible_bs)].index(True)]
+            occu = [i for s_ids in self.request2i.values() for i in s_ids.values()]
+            padded_indices += [[
+                i not in set(occu).union(padded_indices)
+                for i in range(max_possible_bs)
+            ].index(True)]
 
         conv_state = self.mamba_cache[0][:,padded_indices]
         ssm_state = self.mamba_cache[1][:,padded_indices]
@@ -1032,6 +1025,7 @@ class ModelRunner:
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
+        breakpoint()
         if self.vision_language_config:
             max_num_seqs = min(
                 max_num_seqs,
@@ -1059,7 +1053,7 @@ class ModelRunner:
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
-        self.request_id2index = {}
+        self.request2i = {}
         return
 
     def remove_all_loras(self) -> bool:
@@ -1167,7 +1161,6 @@ class ModelRunner:
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
 
-                is_mamba = self.model_config.hf_config.model_type == "jamba"
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
                         [0] * batch_size,
@@ -1175,7 +1168,7 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model,is_mamba)
+                graph_runner = CUDAGraphRunner(self.model,self.is_mamba)
                 capture_inputs = {
                     "input_ids" : input_tokens[:batch_size],
                     "positions" :input_positions[:batch_size],
@@ -1183,7 +1176,7 @@ class ModelRunner:
                     "attn_metadata": attn_metadata,
                     "memory_pool":self.graph_memory_pool,
                 }
-                if is_mamba:
+                if self.is_mamba:
                     capture_inputs["conv_state"]=self.mamba_cache4gc[0][:, :batch_size]
                     capture_inputs["ssm_state"]=self.mamba_cache4gc[1][:, :batch_size]
                 graph_runner.capture(**capture_inputs)
@@ -1288,7 +1281,7 @@ class CUDAGraphRunner:
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         conv_state:Optional[torch.Tensor] = None,
-        ssm_state:Optional[torch.Tensor] = None
+        ssm_state:Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
