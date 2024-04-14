@@ -91,6 +91,9 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
+- label: Tensorizer Test
+  command: apt-get install curl libsodium23 && pytest -v -s tensorizer
+
 - label: Metrics Test
   command: pytest -v -s metrics
 
