@@ -798,13 +798,12 @@ class ModelRunner:
         ~3s to process. Without this warmup, this JIT will occur on the hot
         path.
 
-        In this case, we make 2 sequences. Sequence 0 runs prompt_fwd with
-        self.block_size + 1 tokens, filling up physical block 1. Sequence
-        1 then runs the same prompt, but with metadata that block 1 is 
-        computed. This thus triggers context_attention_fwd and generates
-        the code.
+        In this case, we make a sequence with metadata to use the cache.
+        Empirically, we need to run this step 3 times.
+        Empirically, we need to use a variety of num_blocks.
         """
-        
+
+        NUM_ITERATIONS = 3 # empirically requires 3 passes.
         NUM_BLOCKS = [2, 4, 8, 16, 32]
         for num_blocks in NUM_BLOCKS:
             num_computed_blocks = num_blocks - 2
