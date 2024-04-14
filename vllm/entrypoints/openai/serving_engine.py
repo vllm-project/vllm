@@ -5,8 +5,9 @@ from http import HTTPStatus
 from typing import (Dict, Iterable, Iterator, List, Literal, Optional, Tuple,
                     TypedDict, Union, cast)
 
-from pydantic import conint
+from pydantic import Field
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import Annotated
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -187,7 +188,7 @@ class OpenAIServing:
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt: str,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[List[int], str]:
         if truncate_prompt_tokens is None:
             encoded = tokenizer(prompt)
@@ -207,7 +208,7 @@ class OpenAIServing:
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt_ids: List[int],
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[List[int], str]:
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
@@ -244,7 +245,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt_input: Union[str, List[int]],
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Tuple[List[int], str]:
         """A simpler implementation of
         :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
@@ -260,7 +261,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt_inputs: Iterable[Union[str, List[int]]],
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Iterator[Tuple[List[int], str]]:
         """A simpler implementation of
         :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
@@ -321,7 +322,7 @@ class OpenAIServing:
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Iterator[Tuple[List[int], str]]:
         """Tokenize/detokenize depending on the input format.
         
