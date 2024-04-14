@@ -909,11 +909,11 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-                use_attention_sinks = True
+                use_attn_sinks = False
                 max_context_len = self.scheduler_config.max_model_len
                 seq_len = seq.get_len()
                 block_size = 16 # where do we get this in Scheduler?
-                if use_attention_sinks and seq_len > max_context_len:
+                if use_attn_sinks and seq_len > max_context_len:
                     # 0th block is attention sink
                     block_idx_to_free = (seq_len - max_context_len - 1) // block_size + 1
                     block_to_free = self.block_manager.block_tables[seq_id][block_idx_to_free]

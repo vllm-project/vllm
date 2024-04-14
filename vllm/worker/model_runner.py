@@ -463,10 +463,10 @@ class ModelRunner:
                                              self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 
-                use_attention_sinks = True
+                use_attn_sinks = False
                 max_context_len = self.model_config.max_model_len
                 prompt_len = seq_data.get_prompt_len()
-                if use_attention_sinks and seq_len > max_context_len:
+                if use_attn_sinks and seq_len > max_context_len:
                     blocks_to_ignore = (position - max_context_len) // self.block_size + 1
                     # block_table[0] is attention sink
                     block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:]

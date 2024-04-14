@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
+from copy import deepcopy
 
 import torch
 from torch import nn
@@ -164,37 +165,91 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # qkv all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
         use_attn_sinks = True
         llama_context_len = 4096
-        if use_attn_sinks and not attn_metadata.is_prompt:
+        if use_attn_sinks and attn_metadata.decode_metadata is not None:
             k_original = k.clone().detach()
             # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q = self.rotary_emb._forward_single(positions, q)
             k = self.rotary_emb._forward_single(positions, k)
             
-            # key cache reshape: [num_blocks, num_heads, head_size, block_size]
+            # key cache reshape: [num_blocks, num_heads * head_size, block_size]
             num_blocks = kv_cache.shape[1]
-            key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads, self.head_dim, -1)
-            
-            print("\tpositions", positions)
-            seq_len = positions[0][0] + 1
+            key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads * self.head_dim, -1)
+            block_size = key_cache.shape[-1]
 
+            original_block_tables = deepcopy(attn_metadata.decode_metadata.block_tables)
+            block_tables = attn_metadata.decode_metadata.block_tables
+            
             # batch size = num sequences
-            batch_size = attn_metadata.block_tables.shape[0]
+            batch_size = block_tables.shape[0]
+            original_keys: List[dict] = []
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
-                num_tokens = attn_metadata.context_lens[i] - 1
+                num_past_tokens = attn_metadata.decode_metadata.context_lens[i] - 1
+                assert num_past_tokens == positions[i], f"{num_past_tokens} != {positions[i]}"
+                if num_past_tokens < llama_context_len: continue
+                
+                past_keys = {}
+                block_table = block_tables[i]
+                start = num_past_tokens - llama_context_len + 1 + block_size
+                end = num_past_tokens
+                # loop should have 4096 - 1 iterations
+                for abs_pos in range(start, end):
+                    logic_bnum = abs_pos // block_size
+                    phys_bnum = block_table[logic_bnum]
+                    offset = abs_pos % block_size
+
+                    # rotate k based on new relative pos
+                    past_key = key_cache[phys_bnum, :, offset]
+                    past_keys[abs_pos] = past_key
+                    pos = torch.tensor([abs_pos - start], device=positions.device)
+                    past_key = self.rotary_emb._forward_single(pos, past_key.unsqueeze(0))
+                    key_cache[phys_bnum, :, offset] = past_key.squeeze(0)
+
+                original_keys.append(past_keys)
+                
+                blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
+                # block_table[0] is attention sink
+                capped_block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:]
+                block_tables[i] = capped_block_table
+
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                            self.kv_scale, k_original)
+            
+            # put original keys back in cache
+            for i in range(batch_size):
+                num_past_tokens = attn_metadata.decode_metadata.context_lens[i] - 1
+                if num_past_tokens < llama_context_len: continue
+
+                past_keys = original_keys[i]
+                block_table = original_block_tables[i]
+                start = num_past_tokens - llama_context_len + 1 + block_size
+                end = num_past_tokens
+                for abs_pos in range(start, end):
+                    logic_bnum = abs_pos // block_size
+                    phys_bnum = block_table[logic_bnum]
+                    offset = abs_pos % block_size
+                    key_cache[phys_bnum, :, offset] = past_keys[abs_pos]
+            
+            # revert block tables inside metadata
+            # so that next attn layer starts with same block tables
+            attn_metadata.decode_metadata.block_tables = original_block_tables
+            
+            output, _ = self.o_proj(attn_output)
+            return output
 
         else:
             k_original = None
             q, k = self.rotary_emb(positions, q, k)
         
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                self.kv_scale, k_original)
-        output, _ = self.o_proj(attn_output)
-        return output
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                    self.kv_scale, k_original)
+            output, _ = self.o_proj(attn_output)
+            return output
 
 
 class LlamaDecoderLayer(nn.Module):
