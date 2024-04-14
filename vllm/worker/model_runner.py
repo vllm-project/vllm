@@ -798,9 +798,8 @@ class ModelRunner:
         ~3s to process. Without this warmup, this JIT will occur on the hot
         path.
 
-        In this case, we make a sequence with metadata to use the cache.
-        Empirically, we need to run this step 5 times.
-        Empirically, we need to use a variety of num_blocks.
+        In this case, we make a sequence with metadata that triggers 
+        the triton JIT.
         """
 
         NUM_ITERATIONS = 5 # empirically requires 5 passes.
