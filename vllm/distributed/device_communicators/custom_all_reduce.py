@@ -42,6 +42,15 @@ def init_custom_ar() -> None:
             " disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
+    num_dev = torch.cuda.device_count()
+    # note: num dev can be larger than world_size if we're only using
+    # first few GPUs
+    if num_dev < world_size:
+        logger.warn(
+            "Cannot test GPU P2P because not all GPUs are visible to the "
+            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
+            " is set.")
+        return False
     # test nvlink first, this will filter out most of the cases
     # where custom allreduce is not supported
     full_nvlink = _is_full_nvlink(rank, world_size)
@@ -149,15 +158,6 @@ def _is_full_nvlink(rank, world_size):
 
 def _can_p2p(rank: int, world_size: int) -> bool:
     from vllm.distributed.utils import gpu_p2p_access_check
-    num_dev = torch.cuda.device_count()
-    # note: num dev can be larger than world_size if we're only using
-    # first few GPUs
-    if num_dev < world_size:
-        logger.warn(
-            "Cannot test GPU P2P because not all GPUs are visible to the "
-            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
-            " is set.")
-        return False
     for i in range(world_size):
         if i == rank:
             continue
