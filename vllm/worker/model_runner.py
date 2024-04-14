@@ -799,11 +799,11 @@ class ModelRunner:
         path.
 
         In this case, we make a sequence with metadata to use the cache.
-        Empirically, we need to run this step 3 times.
+        Empirically, we need to run this step 5 times.
         Empirically, we need to use a variety of num_blocks.
         """
 
-        NUM_ITERATIONS = 3 # empirically requires 3 passes.
+        NUM_ITERATIONS = 5 # empirically requires 5 passes.
         NUM_BLOCKS = [2, 4, 8, 16, 32]
         for num_blocks in NUM_BLOCKS:
             num_computed_blocks = num_blocks - 2
