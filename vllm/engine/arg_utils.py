@@ -79,6 +79,7 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     image_processor: Optional[str] = None
     image_processor_revision: Optional[str] = None
+    no_image_processor: bool = False
     image_openai: str = VisionLanguageConfig.ImageOpenAI.SINGLE_IMAGE.name
 
     scheduler_delay_factor: float = 0.0
@@ -91,11 +92,6 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
-
-        if (self.image_processor is None
-                # Only attempt to load image processor if VLM config is given
-                and self.image_input_type is not None):
-            self.image_processor = self.model
 
     @staticmethod
     def add_cli_args(
@@ -423,6 +419,11 @@ class EngineArgs:
             help='the specific image processor version to use. It can be a '
             'branch name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
+        parser.add_argument(
+            '--no-image-processor',
+            action='store_true',
+            help='Disables the use of image processor, even if one is defined '
+            'for the model on huggingface.')
 
         parser.add_argument(
             '--scheduler-delay-factor',
@@ -528,6 +529,17 @@ class EngineArgs:
                 raise ValueError(
                     'Specify `image_token_id`, `image_input_shape` and '
                     '`image_feature_size` together with `image_input_type`.')
+
+            if self.image_processor is None:
+                self.image_processor = self.model
+            if self.no_image_processor:
+                if self.image_processor != self.model:
+                    raise ValueError(
+                        'Do not specify `image_processor` when it is disabled '
+                        'by `--no-image-processor`.')
+
+                self.image_processor = None
+
             vision_language_config = VisionLanguageConfig(
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),

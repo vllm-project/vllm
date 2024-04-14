@@ -267,13 +267,15 @@ class LLMEngine:
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
     def _init_image_processor(self, **processor_init_kwargs):
-        if self.vision_language_config is None:
+        vlm_config = self.vision_language_config
+
+        if vlm_config is None or vlm_config.image_processor is None:
             self.image_processor = None
         else:
             self.image_processor = get_image_processor(
-                self.vision_language_config.image_processor,
+                vlm_config.image_processor,
                 trust_remote_code=self.model_config.trust_remote_code,
-                revision=self.vision_language_config.image_processor_revision,
+                revision=vlm_config.image_processor_revision,
                 **processor_init_kwargs,
             )
 

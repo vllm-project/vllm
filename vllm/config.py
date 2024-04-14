@@ -921,7 +921,7 @@ class VisionLanguageConfig:
     image_input_shape: tuple
     image_feature_size: int
     # The image processor to load from HuggingFace
-    image_processor: str
+    image_processor: Optional[str]
     image_processor_revision: Optional[str]
 
     image_openai: ImageOpenAI = ImageOpenAI.SINGLE_IMAGE

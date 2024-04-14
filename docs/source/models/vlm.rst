@@ -36,6 +36,10 @@ Apart from the :ref:`basic engine arguments <engine_args>`, VLMs additionally re
 
     The specific image processor version to use. It can be a branch name, a tag name, or a commit id. If unspecified, will use the default version.
 
+.. option:: --no-image-processor
+
+    Disables the use of image processor, even if one is defined for the model on huggingface.
+
 Offline Batched Inference
 -------------------------
 

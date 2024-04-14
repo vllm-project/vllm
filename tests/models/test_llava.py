@@ -15,13 +15,17 @@ model_and_vl_config = [
          image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
          image_feature_size=576,
          image_token_id=32000,
-         image_input_shape=(1, 3, 336, 336))),
+         image_input_shape=(1, 3, 336, 336),
+         image_processor=None,
+         image_processor_revision=None)),
     ("llava-hf/llava-1.5-7b-hf",
      VisionLanguageConfig(
          image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
          image_feature_size=576,
          image_token_id=32000,
-         image_input_shape=(1, 576, 1024)))
+         image_input_shape=(1, 576, 1024),
+         image_processor=None,
+         image_processor_revision=None))
 ]
 
 
