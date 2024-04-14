@@ -804,34 +804,26 @@ class ModelRunner:
         computed. This thus triggers context_attention_fwd and generates
         the code.
         """
-        NUM_ITERATIONS = 10
-        NUM_BLOCKS = 10
-        NUM_COMPUTED_BLOCKS = NUM_BLOCKS - 1
-        prompt_tokens = list(range(self.block_size * NUM_BLOCKS + 1))
-        block_table = list(range(1, NUM_BLOCKS + 2))
+        
+        NUM_BLOCKS = [2, 4, 8, 16, 32]
+        for num_blocks in NUM_BLOCKS:
+            num_computed_blocks = num_blocks - 2
+            prompt_tokens = list(range(self.block_size * num_blocks + 1))
+            block_table = list(range(1, num_blocks + 2))
 
-        # Prompt forward to fill up the KV cache for block 1.
-        request_0 = SequenceGroupMetadata(
-            request_id="first_request",
-            is_prompt=True,
-            seq_data={0: SequenceData(prompt_tokens)},
-            sampling_params=SamplingParams(temperature=0),
-            block_tables={0: block_table},
-        )
-        self.execute_model([request_0], kv_caches)
+            # Prompt forward with block 1 computed. (Triggers
+            # context_attention_fwd).
+            request = SequenceGroupMetadata(
+                request_id="request",
+                is_prompt=True,
+                seq_data={0: SequenceData(prompt_tokens)},
+                sampling_params=SamplingParams(temperature=0),
+                block_tables={0: block_table},
+                computed_block_nums=block_table[:num_computed_blocks],
+            )
 
-        # Prompt forward with block 1 computed. (Triggers
-        # context_attention_fwd).
-        request_1 = SequenceGroupMetadata(
-            request_id="second_request",
-            is_prompt=True,
-            seq_data={0: SequenceData(prompt_tokens)},
-            sampling_params=SamplingParams(temperature=0),
-            block_tables={0: block_table},
-            computed_block_nums=block_table[:NUM_COMPUTED_BLOCKS],
-        )
-        for _ in range(NUM_ITERATIONS):
-            self.execute_model([request_1], kv_caches)
+            self.execute_model([request], kv_caches)
+            self.execute_model([request], kv_caches)
 
         return
 
