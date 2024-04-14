@@ -23,6 +23,12 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.mamba_metadata import RequestInfo
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
+from vllm.model_executor.parallel_utils.communication_op import (
+    broadcast_tensor_dict)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    with_pynccl_for_all_reduce,
+    get_tensor_model_parallel_world_size)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -169,16 +175,17 @@ class ModelRunner:
         hf_config = self.model_config.hf_config
         num_layers = hf_config.num_hidden_layers
         max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1]
+        world_size = get_tensor_model_parallel_world_size()
         conv_state_shape = (
             num_layers,
             max_batch_size,
-            hf_config.mamba_expand * hf_config.hidden_size,
+            hf_config.mamba_expand * hf_config.hidden_size // world_size,
             hf_config.mamba_d_conv,
         )
         ssm_state_shape = (
             num_layers,
             max_batch_size,
-            hf_config.mamba_expand * hf_config.hidden_size,
+            hf_config.mamba_expand * hf_config.hidden_size // world_size,
             hf_config.mamba_d_state,
         )
         if self.mamba_cache is None:
