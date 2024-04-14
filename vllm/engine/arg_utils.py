@@ -1,12 +1,15 @@
 import argparse
 import dataclasses
+import io
+import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import BinaryIO, Optional, Union
 
 from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+                         SpeculativeConfig, TensorizerConfig,
+                         TokenizerPoolConfig, VisionLanguageConfig)
+from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.utils import str_to_int_tuple
 
 
@@ -57,6 +60,17 @@ class EngineArgs:
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
+
+    # Tensorizer configuration parameters
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
+                          bytes, os.PathLike, int] = None
+    vllm_tensorized: bool = False
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
+    encryption_keyfile: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -143,7 +157,9 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            choices=[
+                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer'
+            ],
             help='The format of the model weights to load. '
             '"auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -153,7 +169,10 @@ class EngineArgs:
             '"npcache" will load the weights in pytorch format and store '
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.')
+            'which is mainly for profiling.'
+            '"tensorizer" will load the weights using tensorizer from CoreWeave'
+            'which assumes tensorizer_uri is set to the location of the '
+            'serialized weights.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -429,6 +448,7 @@ class EngineArgs:
             default=None,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding')
+        parser = TensorizerArgs.add_cli_args(parser)
         return parser
 
     @classmethod
@@ -491,6 +511,17 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        tensorizer_config = TensorizerConfig(
+            tensorizer_uri=self.tensorizer_uri,
+            vllm_tensorized=self.vllm_tensorized,
+            verify_hash=self.verify_hash,
+            num_readers=self.num_readers,
+            encryption_keyfile=self.encryption_keyfile,
+            s3_access_key_id=self.s3_access_key_id,
+            s3_secret_access_key=self.s3_secret_access_key,
+            s3_endpoint=self.s3_endpoint,
+        )
+
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):
@@ -518,7 +549,8 @@ class EngineArgs:
                             device_config=device_config,
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
-                            speculative_config=speculative_config)
+                            speculative_config=speculative_config,
+                            tensorizer_config=tensorizer_config)
 
 
 @dataclass

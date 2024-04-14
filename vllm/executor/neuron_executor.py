@@ -25,6 +25,7 @@ class NeuronExecutor(ExecutorBase):
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
         self.model_config = model_config
+        self.cache_config = cache_config
         assert lora_config is None, "LoRA is not supported for Neuron backend."
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -43,6 +44,7 @@ class NeuronExecutor(ExecutorBase):
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
+            self.cache_config,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()

@@ -36,7 +36,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     Directory to download and load the weights, default to the default cache dir of huggingface.
 
-.. option:: --load-format {auto,pt,safetensors,npcache,dummy}
+.. option:: --load-format {auto,pt,safetensors,npcache,dummy,tensorizer}
 
     The format of the model weights to load.
 
@@ -45,6 +45,7 @@ Below, you can find an explanation of every engine argument for vLLM:
     * "safetensors" will load the weights in the safetensors format.
     * "npcache" will load the weights in pytorch format and store a numpy cache to speed up the loading.
     * "dummy" will initialize the weights with random values, mainly for profiling.
+    * "tensorizer" will load serialized weights using `CoreWeave's Tensorizer model deserializer. <https://github.com/coreweave/tensorizer>`_. See `tensorized_vllm_model.py` in the examples folder to serialize a vLLM model, and for more information. Tensorizer support for vLLM can be installed with `pip install vllm[tensorizer]`.
 
 .. option:: --dtype {auto,half,float16,bfloat16,float,float32}
 
