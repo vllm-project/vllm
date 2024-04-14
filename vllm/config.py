@@ -2,7 +2,7 @@ import enum
 import json
 import os
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, ClassVar, Optional, List, Protocol, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Protocol, Union
 
 import torch
 from packaging.version import Version

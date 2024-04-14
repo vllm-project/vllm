@@ -5,7 +5,8 @@ from typing import Dict, List, Literal, Optional, Union
 
 import torch
 from openai.types.chat import ChatCompletionMessageParam
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, Field, model_validator
+from typing_extensions import Annotated
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -230,7 +231,7 @@ class CompletionRequest(BaseModel):
     min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
