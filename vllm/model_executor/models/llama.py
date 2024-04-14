@@ -48,6 +48,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               kv_cache_scales_loader)
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip
+from vllm.attention.ops.paged_attn import PagedAttention
 
 
 class LlamaMLP(nn.Module):
@@ -172,9 +173,20 @@ class LlamaAttention(nn.Module):
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q = self.rotary_emb._forward_single(positions, q)
             k = self.rotary_emb._forward_single(positions, k)
+            
+            # key cache reshape: [num_blocks, num_heads, head_size, block_size]
+            num_blocks = kv_cache.shape[1]
+            key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads, self.head_dim, -1)
+            
+            print("\tpositions", positions)
             seq_len = positions[0][0] + 1
-            key_positions = torch.arange(seq_len, device=positions.device).unsqueeze(0)
-            # k = self.rotary_emb._forward_single(key_positions, k)
+
+            # batch size = num sequences
+            batch_size = attn_metadata.block_tables.shape[0]
+            for i in range(batch_size):
+                # see paged_attn.py line 19 for context_lens definition
+                num_tokens = attn_metadata.context_lens[i] - 1
+
         else:
             k_original = None
             q, k = self.rotary_emb(positions, q, k)
