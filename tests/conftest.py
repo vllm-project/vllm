@@ -323,8 +323,8 @@ class VllmRunner:
         req_outputs = self.model.generate(
             prompts,
             sampling_params=sampling_params,
-            multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                            data=images)
+            multi_modal_datas=MultiModalData(type=MultiModalData.Type.IMAGE,
+                                             data=images)
             if images is not None else None)
         outputs = []
         for req_output in req_outputs:

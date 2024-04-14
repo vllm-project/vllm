@@ -52,10 +52,10 @@ async def get_and_parse_image(image_url: str,
         image = image.convert(image_format).resize((height, width))
         image_arr = np.array(image, copy=True)
 
+    # Passed to the image processor which is loaded from HuggingFace
     image_tensor = torch.as_tensor(image_arr) \
         .view(batch_size, height, width, num_channels) \
-        .permute((0, 3, 1, 2)) \
-        .to(torch.float16)
+        .permute((0, 3, 1, 2))  # NCHW
 
     return MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
 

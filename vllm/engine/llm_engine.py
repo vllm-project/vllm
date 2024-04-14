@@ -1,7 +1,7 @@
 import time
 from typing import Iterable, List, Optional, Tuple, Type, Union
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, TensorType
 
 import vllm
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
@@ -20,6 +20,7 @@ from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupOutput, SequenceOutput,
                            SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
@@ -113,6 +114,7 @@ class LLMEngine:
         self.log_stats = log_stats
 
         self._init_tokenizer()
+        self._init_image_processor()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
 
@@ -261,6 +263,17 @@ class LLMEngine:
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
+    def _init_image_processor(self, **processor_init_kwargs):
+        if self.vision_language_config is None:
+            self.image_processor = None
+        else:
+            self.image_processor = get_image_processor(
+                self.vision_language_config.image_processor,
+                trust_remote_code=self.model_config.trust_remote_code,
+                revision=self.vision_language_config.image_processor_revision,
+                **processor_init_kwargs,
+            )
+
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
@@ -282,6 +295,23 @@ class LLMEngine:
                                                      prompt=prompt,
                                                      lora_request=lora_request)
         return prompt_token_ids
+
+    def process_multi_modal_data(self, data: MultiModalData) -> MultiModalData:
+        if data.type == MultiModalData.Type.IMAGE:
+            image_processor = self.image_processor
+            if image_processor is None:
+                return data
+
+            out_dict = image_processor.preprocess(data.data) \
+                .convert_to_tensors(TensorType.PYTORCH)
+
+            return MultiModalData(
+                type=data.type,
+                data=out_dict["pixel_values"],
+            )
+        else:
+            msg = f"Unknown data type: {data.type}"
+            raise NotImplementedError(msg)
 
     def add_request(
         self,
@@ -366,6 +396,10 @@ class LLMEngine:
         # inject the eos token id into the sampling_params to support min_tokens
         # processing
         sampling_params.eos_token_id = seq.eos_token_id
+
+        # Process multi-modal data
+        if multi_modal_data is not None:
+            multi_modal_data = self.process_multi_modal_data(multi_modal_data)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,

@@ -1,6 +1,5 @@
 from typing import List, Optional, Union
 
-import torch
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
@@ -130,7 +129,8 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_datas: Optional[Union[
+            Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -146,7 +146,7 @@ class LLM:
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            multi_modal_data: Multi modal data.
+            multi_modal_datas: A list of multi modal data, one per prompt.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
@@ -165,9 +165,9 @@ class LLM:
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
-
-        if multi_modal_data:
-            multi_modal_data.data = multi_modal_data.data.to(torch.float16)
+        if isinstance(multi_modal_datas, MultiModalData):
+            # Convert a single multi_modal_data to a list.
+            multi_modal_datas = [multi_modal_datas]
 
         # Add requests to the engine.
         if prompts is not None:
@@ -180,16 +180,14 @@ class LLM:
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
+            multi_modal_data = multi_modal_datas[
+                i] if multi_modal_datas is not None else None
             self._add_request(
                 prompt,
                 sampling_params,
                 token_ids,
                 lora_request=lora_request,
-                # Get ith image while maintaining the batch dim.
-                multi_modal_data=MultiModalData(
-                    type=multi_modal_data.type,
-                    data=multi_modal_data.data[i].unsqueeze(0))
-                if multi_modal_data else None,
+                multi_modal_data=multi_modal_data,
             )
         return self._run_engine(use_tqdm)
 

@@ -63,6 +63,8 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    image_processor: Optional[str] = None
+    image_processor_revision: Optional[str] = None
     image_openai: str = VisionLanguageConfig.ImageOpenAI.SINGLE_IMAGE.name
 
     scheduler_delay_factor: float = 0.0
@@ -75,6 +77,11 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+
+        if (self.image_processor is None
+                # Only attempt to load image processor if VLM config is given
+                and self.image_input_type is not None):
+            self.image_processor = self.model
 
     @staticmethod
     def add_cli_args(
@@ -355,6 +362,7 @@ class EngineArgs:
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
+        # (listed separately in docs/source/models/vlm.rst)
         parser.add_argument('--image-input-type',
                             type=str,
                             default=None,
@@ -385,6 +393,19 @@ class EngineArgs:
             choices=[t.name.lower() for t in VisionLanguageConfig.ImageOpenAI],
             help=('Specifies how the model implements GPT-4 with Vision API.'))
         parser.add_argument(
+            '--image-processor',
+            type=str,
+            default=EngineArgs.image_processor,
+            help='name or path of the huggingface image processor to use')
+        parser.add_argument(
+            '--image-processor-revision',
+            type=str,
+            default=None,
+            help='the specific image processor version to use. It can be a '
+            'branch name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
+
+        parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
             default=EngineArgs.scheduler_delay_factor,
@@ -402,7 +423,6 @@ class EngineArgs:
             default=None,
             help=
             'The name of the draft model to be used in speculative decoding.')
-
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -483,6 +503,8 @@ class EngineArgs:
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
+                image_processor=self.image_processor,
+                image_processor_revision=self.image_processor_revision,
                 image_openai=VisionLanguageConfig.get_image_openai_enum_type(
                     self.image_openai),
             )

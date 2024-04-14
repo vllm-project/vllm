@@ -28,6 +28,14 @@ Apart from the :ref:`basic engine arguments <engine_args>`, VLMs additionally re
 
     The image feature size along the context dimension.
 
+.. option:: --image-processor <size>
+
+    Name or path of the huggingface image processor to use.
+
+.. option:: --image-processor-revision <revision>
+
+    The specific image processor version to use. It can be a branch name, a tag name, or a commit id. If unspecified, will use the default version.
+
 Offline Batched Inference
 -------------------------
 
@@ -57,7 +65,7 @@ For now, we only support a single image per text prompt when calling ``llm.gener
     image = ...
 
     outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
+                           multi_modal_datas=MultiModalData(
                                type=MultiModalData.Type.IMAGE, data=image))
 
     for o in outputs:

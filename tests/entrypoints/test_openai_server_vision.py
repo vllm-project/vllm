@@ -28,6 +28,8 @@ pytestmark = pytest.mark.asyncio
 def server():
     ray.init()
     server_runner = ServerRunner.remote([
+        "--port",
+        "8001",
         "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
