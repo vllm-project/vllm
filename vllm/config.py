@@ -1,6 +1,8 @@
 import enum
+import io
 import json
 import os
+import typing
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
@@ -15,6 +17,8 @@ from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
+
+    from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 logger = init_logger(__name__)
 
@@ -139,13 +143,14 @@ class ModelConfig:
     def _verify_load_format(self) -> None:
         load_format = self.load_format.lower()
         supported_load_format = [
-            "auto", "pt", "safetensors", "npcache", "dummy"
+            "auto", "pt", "safetensors", "npcache", "dummy", "tensorizer"
         ]
         rocm_not_supported_load_format: List[str] = []
         if load_format not in supported_load_format:
             raise ValueError(
                 f"Unknown load format: {self.load_format}. Must be one of "
-                "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
+                "'auto', 'pt', 'safetensors', 'npcache', 'tensorizer', or "
+                "'dummy'.")
         if is_hip() and load_format in rocm_not_supported_load_format:
             rocm_supported_load_format = [
                 f for f in supported_load_format
@@ -882,6 +887,65 @@ class VisionLanguageConfig:
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
 
+@dataclass
+class TensorizerConfig:
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
+                          str, bytes, os.PathLike, int]
+    vllm_tensorized: bool
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
+    encryption_keyfile: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
+    model_class: Optional[torch.nn.Module] = None
+    hf_config: Optional[PretrainedConfig] = None
+    dtype: Union[str, torch.dtype] = None
+
+    def _construct_tensorizer_args(self) -> "TensorizerArgs":
+        from vllm.model_executor.tensorizer_loader import TensorizerArgs
+        tensorizer_args = {
+            "tensorizer_uri": self.tensorizer_uri,
+            "vllm_tensorized": self.vllm_tensorized,
+            "verify_hash": self.verify_hash,
+            "num_readers": self.num_readers,
+            "encryption_keyfile": self.encryption_keyfile,
+            "s3_access_key_id": self.s3_access_key_id,
+            "s3_secret_access_key": self.s3_secret_access_key,
+            "s3_endpoint": self.s3_endpoint,
+        }
+        return TensorizerArgs(**tensorizer_args)
+
+    def verify_with_parallel_config(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> None:
+        if (parallel_config.tensor_parallel_size > 1
+                and self.tensorizer_uri is not None):
+            raise ValueError(
+                "Loading to multiple GPUs is not currently supported with "
+                "vLLM-serialized models. Please set tensor_parallel_size=1."
+                " or use a non-vLLM-serialized model, such as a "
+                "serialized Hugging Face `PretrainedModel`.")
+
+    def verify_with_model_config(self, model_config) -> None:
+        if (model_config.quantization is not None
+                and self.tensorizer_uri is not None):
+            from vllm.model_executor.tensorizer_loader import (
+                tensorizer_warning)
+            tensorizer_warning(
+                "Loading a model using Tensorizer with quantization on vLLM"
+                " is unstable and may lead to errors.")
+
+        if (model_config.load_format != "tensorizer"
+                and self.tensorizer_uri is not None):
+            raise ValueError(
+                "A tensorizer uri was passed for tensorizer loading, but the "
+                f"load format was set to {model_config.load_format}. "
+                "Please set the load format to 'tensorizer' to use "
+                f"tensorizer args.")
+
+
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
@@ -1029,12 +1093,18 @@ class EngineConfig:
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
+    tensorizer_config: Optional[TensorizerConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.tensorizer_config:
+            self.tensorizer_config.verify_with_parallel_config(
+                self.parallel_config)
+            self.tensorizer_config.verify_with_model_config(self.model_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
