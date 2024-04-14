@@ -1,9 +1,12 @@
 # Adapted from
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
 """Logging configuration for vLLM."""
+import datetime
 import logging
 import os
 import sys
+import threading
+from functools import partial
 from typing import Optional
 
 VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
@@ -65,3 +68,38 @@ def init_logger(name: str):
         logger.addHandler(_default_handler)
         logger.propagate = False
     return logger
+
+
+logger = init_logger(__name__)
+
+
+def trace_calls(filename, frame, event, arg):
+    if event in ['call', 'return']:
+        # Extract the filename, line number, function name, and the code object
+        filename = frame.f_code.co_filename
+        lineno = frame.f_lineno
+        func_name = frame.f_code.co_name
+        # Log every function call or return
+        if event == 'call':
+            logging.debug(f"{datetime.datetime.now()} Call to"
+                          f" {func_name} in {filename}:{lineno}")
+        else:
+            logging.debug(f"{datetime.datetime.now()} Return from"
+                          f" {func_name} in {filename}:{lineno}")
+    return trace_calls
+
+
+if int(os.getenv("VLLM_TRACE_FRAME", "0")):
+    logger.warning(
+        "VLLM_TRACE_FRAME is enabled. It will record every"
+        " function executed by Python. This will slow down the code. It "
+        "is suggested to be used for debugging hang in distributed"
+        " inference only.")
+    temp_dir = os.environ.get('TMPDIR') or os.environ.get(
+        'TEMP') or os.environ.get('TMP') or "/tmp/"
+    log_path = os.path.join(temp_dir,
+                            (f"vllm_trace_frame_for_process_{os.getpid()}"
+                             f"_thread_{threading.get_ident()}_"
+                             f"at_{datetime.datetime.now()}.log"))
+    logger.info(f"Trace frame log is saved to {log_path}")
+    sys.settrace(partial(trace_calls, log_path))
