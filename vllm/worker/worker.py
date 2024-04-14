@@ -184,7 +184,9 @@ class Worker(WorkerBase):
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
-        self.model_runner.prepare_contiguous_mamba_cache(self.cache_engine.dtype)
+        is_mamba = self.model_config.hf_config.model_type == "jamba"
+        if is_mamba:
+            self.model_runner.prepare_contiguous_mamba_cache(self.cache_engine.dtype)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -212,8 +214,8 @@ class Worker(WorkerBase):
     def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.model_runner.request_id2index:
-                index = self.model_runner.request_id2index.pop(req_id)
-                logger.info(f"deleted { req_id } from mamba_cache with index = {index}")
+                indices = self.model_runner.request_id2index.pop(req_id)
+                logger.debug(f"Deleted { req_id } from mamba_cache with indices = {indices}")
 
 
     @torch.inference_mode()

@@ -504,10 +504,12 @@ class JambaModel(nn.Module):
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-
+            kv_cache = None
+            if isinstance(layer, JambaAttentionDecoderLayer):
+                kv_cache = kv_caches[(i - self.config.attn_layer_offset) // self.config.attn_layer_period]
             hidden_states, residual = layer(positions=positions,
                                             hidden_states=hidden_states,
-                                            kv_cache=kv_caches[i],
+                                            kv_cache=kv_cache,
                                             input_metadata=input_metadata,
                                             residual=residual,
                                             conv_state=conv_state,

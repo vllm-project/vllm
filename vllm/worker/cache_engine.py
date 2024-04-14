@@ -30,7 +30,7 @@ class CacheEngine:
         self.parallel_config = parallel_config
 
         self.head_size = model_config.get_head_size()
-        self.num_layers = model_config.get_num_layers(parallel_config)
+        self.num_layers = CacheEngine.get_num_attention_layers(model_config, parallel_config)
         self.num_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size
@@ -81,6 +81,18 @@ class CacheEngine:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
     @staticmethod
+    def get_num_attention_layers(
+        model_config:ModelConfig,
+        parallel_config:ParallelConfig
+    ):
+        num_layers = model_config.get_num_layers(parallel_config)
+        is_mamba = model_config.hf_config.model_type == "jamba"
+        if is_mamba:
+            attention_period = model_config.hf_config.attn_layer_period
+            num_layers = num_layers // attention_period
+        return num_layers
+
+    @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,
         model_config: ModelConfig,
@@ -88,13 +100,7 @@ class CacheEngine:
     ) -> int:
         head_size = model_config.get_head_size()
         num_heads = model_config.get_num_kv_heads(parallel_config)
-        num_layers = model_config.get_num_layers(parallel_config)
-        is_mamba = model_config.hf_config.model_type == "jamba"
-
-        if is_mamba:
-            attention_period = model_config.hf_config.attn_layer_period
-            num_layers = max(num_layers // attention_period, 1)
-
+        num_layers = CacheEngine.get_num_attention_layers(model_config,parallel_config)
         key_cache_block = cache_config.block_size * num_heads * head_size
         value_cache_block = key_cache_block
         total = num_layers * (key_cache_block + value_cache_block)

@@ -154,7 +154,7 @@ class ModelRunner:
         # cache in_wsl result
         self.mamba_cache = None
         self.mamba_cache4gc = None
-        self.request_id2index = {}
+        self.request_id2index: Dict[str, Dict[int, int]] = {}
         self.in_wsl = in_wsl()
         self.kv_cache_dtype = kv_cache_dtype
 
@@ -441,7 +441,7 @@ class ModelRunner:
             requests_info=[
                 RequestInfo(
                     request_id=req.request_id,
-                    n=req.sampling_params.n
+                    seqs_id=list(req.seq_data.keys())
                 )
                 for req in seq_group_metadata_list
             ]
@@ -579,10 +579,9 @@ class ModelRunner:
             requests_info=[
                 RequestInfo(
                     request_id=req.request_id,
-                    n=req.sampling_params.n
+                    seqs_id=list(req.seq_data.keys())
                 )
                 for req in seq_group_metadata_list]
-
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -790,13 +789,7 @@ class ModelRunner:
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
                 "batch_type": batch_type,
-                "requests_info": [
-                    RequestInfo(
-                        request_id=req.request_id,
-                        n=req.sampling_params.n
-                    )
-                    for req in seq_group_metadata_list
-                ]
+                "requests_info": input_metadata.requests_info
             }
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
@@ -922,22 +915,29 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
-        if self.mamba_cache is None:
-            self.prepare_contiguous_mamba_cache(self.model_config.dtype)
-
-        conv_state, ssm_state, indecies = self._prepare_request_mamba_cache(input_metadata, input_tokens.shape[0])
-
-        hidden_states = model_executable(
-            input_ids=input_tokens,
-            positions=input_positions,
-            kv_caches=kv_caches,
-            input_metadata=input_metadata,
-            conv_state=conv_state,
-            ssm_state=ssm_state
-        )
-        for i,offset in enumerate(indecies):
-            self.mamba_cache[0][:,offset] = conv_state[:,i]
-            self.mamba_cache[1][:,offset] = ssm_state[:,i]
+        is_mamba = self.model_config.hf_config.model_type == "jamba"
+        indices = []
+        conv_state = None
+        model_inputs = {
+            "input_ids":input_tokens,
+            "positions":input_positions,
+            "kv_caches":kv_caches,
+            "input_metadata":input_metadata,
+        }
+        if is_mamba:
+            if self.mamba_cache is None:
+                self.prepare_contiguous_mamba_cache(self.model_config.dtype)
+            conv_state, ssm_state, indices = self._prepare_request_mamba_cache(input_metadata, input_tokens.shape[0])
+            model_inputs = {
+                **model_inputs,
+                "conv_state":conv_state,
+                "ssm_state":ssm_state,
+            }
+        hidden_states = model_executable(**model_inputs)
+        if is_mamba:
+            for i, offset in enumerate(indices):
+                self.mamba_cache[0][:, offset] = conv_state[:, i]
+                self.mamba_cache[1][:, offset] = ssm_state[:, i]
 
         # Sample the next token.
         output = self.model.sample(
@@ -945,6 +945,13 @@ class ModelRunner:
             sampling_metadata=sampling_metadata,
         )
         return output
+
+    def _get_first_free_mamba_cache_index(self):
+        max_possible_bs = self.mamba_cache[0].shape[1]
+        occupied = [id for seq_ids in self.request_id2index.values() for id in seq_ids.values()]
+        first_free_index = [i not in occupied for i in range(max_possible_bs)].index(True)
+        return first_free_index
+
 
     def _prepare_request_mamba_cache(
         self,
@@ -955,13 +962,26 @@ class ModelRunner:
         max_possible_bs = self.mamba_cache[0].shape[1]
         for request_info in input_metadata.requests_info:
             if request_info.request_id not in self.request_id2index:
-                first_free_index = [i not in self.request_id2index.values() for i in range(max_possible_bs)].index(True)
-                self.request_id2index[request_info.request_id] = first_free_index
-            indices.append(self.request_id2index[request_info.request_id])
+                self.request_id2index[request_info.request_id] = {}
+                for seq_id in request_info.seqs_id:
+                    first_free_index = self._get_first_free_mamba_cache_index()
+                    self.request_id2index[request_info.request_id][seq_id] = first_free_index
+                    indices.append(first_free_index)
+            else:
+                for seq_id in request_info.seqs_id:
+                    if seq_id not in self.request_id2index[request_info.request_id]:
+                        first_free_index = self._get_first_free_mamba_cache_index()
+                        ## case of decoding n>1
+                        if len(self.request_id2index[request_info.request_id].keys()) > 0:
+                            self.mamba_cache[0][:,first_free_index].copy_(self.mamba_cache[0][:,list(self.request_id2index[request_info.request_id].values())[0]])
+                            self.mamba_cache[1][:,first_free_index].copy_(self.mamba_cache[1][:,list(self.request_id2index[request_info.request_id].values())[0]])
+                        self.request_id2index[request_info.request_id][seq_id] = first_free_index
+                    indices.append(self.request_id2index[request_info.request_id][seq_id])
         ## Pad the batch incase of running batch that was not captured via CG
         padded_indices = indices
         for _ in range(batch_size - len(indices)):
-            padded_indices += [[i not in set(self.request_id2index.values()).union(padded_indices) for i in range(max_possible_bs)].index(True)]
+            occupied = [id for seq_ids in self.request_id2index.values() for id in seq_ids.values()]
+            padded_indices += [[i not in set(occupied).union(padded_indices) for i in range(max_possible_bs)].index(True)]
 
         conv_state = self.mamba_cache[0][:,padded_indices]
         ssm_state = self.mamba_cache[1][:,padded_indices]
@@ -1140,6 +1160,7 @@ class ModelRunner:
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
 
+                is_mamba = self.model_config.hf_config.model_type == "jamba"
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
                         [0] * batch_size,
@@ -1147,16 +1168,18 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model)
-                graph_runner.capture(
-                    input_tokens[:batch_size],
-                    input_positions[:batch_size],
-                    kv_caches,
-                    attn_metadata,
-                    memory_pool=self.graph_memory_pool,
-                    conv_state=self.mamba_cache4gc[0][:, :batch_size],
-                    ssm_state=self.mamba_cache4gc[1][:, :batch_size]
-                )
+                graph_runner = CUDAGraphRunner(self.model,is_mamba)
+                capture_inputs = {
+                    "input_ids" : input_tokens[:batch_size],
+                    "positions" :input_positions[:batch_size],
+                    "kv_caches": kv_caches,
+                    "attn_metadata": attn_metadata,
+                    "memory_pool":self.graph_memory_pool,
+                }
+                if is_mamba:
+                    capture_inputs["conv_state"]=self.mamba_cache4gc[0][:, :batch_size]
+                    capture_inputs["ssm_state"]=self.mamba_cache4gc[1][:, :batch_size]
+                graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
 
@@ -1182,11 +1205,12 @@ class ModelRunner:
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, is_mamba: bool):
         self.model = model
         self.graph = None
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
+        self.is_mamba = is_mamba
 
     def capture(
         self,
@@ -1197,22 +1221,29 @@ class CUDAGraphRunner:
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor,
         memory_pool,
+        conv_state: Optional[torch.Tensor] = None,
+        ssm_state: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         assert self.graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_pynccl():
-            self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                conv_state,
-                ssm_state
-                **kwargs,
-            )
+        model_inputs = {
+            "input_ids":input_ids,
+            "positions":positions,
+            "kv_caches":kv_caches,
+            "attn_metadata":attn_metadata,
+        }
+        if self.is_mamba:
+            model_inputs = {
+                **model_inputs,
+                "conv_state":conv_state,
+                "ssm_state":ssm_state,
+            }
+
+        with _maybe_cupy_nccl():
+            self.model(**model_inputs)
         torch.cuda.synchronize()
 
         # Capture the graph.
@@ -1220,17 +1251,8 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_pynccl():
-                hidden_states = self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    attn_metadata,
-                    input_metadata,
-                    conv_state,
-                    ssm_state
-                    **kwargs,
-                )
+            with _maybe_cupy_nccl():
+                hidden_states = self.model(**model_inputs)
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
@@ -1244,6 +1266,13 @@ class CUDAGraphRunner:
             "conv_state": conv_state,
             "ssm_state": ssm_state
         }
+        if self.is_mamba:
+            self.input_buffers = {
+                **self.input_buffers,
+                "conv_state": conv_state,
+                "ssm_state": ssm_state,
+            }
+
         self.output_buffers = {"hidden_states": hidden_states}
         return
 
@@ -1253,8 +1282,8 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        conv_state:torch.Tensor,
-        ssm_state:torch.Tensor
+        conv_state:Optional[torch.Tensor] = None,
+        ssm_state:Optional[torch.Tensor] = None
         **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
@@ -1269,16 +1298,19 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.context_lens, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        self.input_buffers["conv_state"].copy_(conv_state,
-                                               non_blocking=True)
-        self.input_buffers["ssm_state"].copy_(ssm_state,
-                                              non_blocking=True)
+        if self.is_mamba:
+            self.input_buffers["conv_state"].copy_(conv_state,
+                                                non_blocking=True)
+            self.input_buffers["ssm_state"].copy_(ssm_state,
+                                                non_blocking=True)
+
         # Run the graph.
         self.graph.replay()
 
         # in-place edit of the mamba cache states as in the KV cache
-        ssm_state.copy_(self.input_buffers["ssm_state"])
-        conv_state.copy_(self.input_buffers["conv_state"])
+        if self.is_mamba:
+            ssm_state.copy_(self.input_buffers["ssm_state"])
+            conv_state.copy_(self.input_buffers["conv_state"])
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]

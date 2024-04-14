@@ -1,7 +1,8 @@
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import List
+
 import torch
+
 
 @dataclass
 class MambaCacheParams:
@@ -13,6 +14,6 @@ class MambaCacheParams:
 @dataclass
 class RequestInfo:
     request_id: str = ''
-    n: int = 1
+    seqs_id: List[int] = field(default_factory=list)
 
 
