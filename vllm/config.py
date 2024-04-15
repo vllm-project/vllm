@@ -446,26 +446,19 @@ class LoadConfig:
             return
 
         load_format = self.load_format.lower()
-        supported_load_format = [
-            "auto", "pt", "safetensors", "npcache", "dummy", "tensorizer"
-        ]
+        self.load_format = LoadFormat(load_format)
+
         rocm_not_supported_load_format: List[str] = []
-        if load_format not in supported_load_format:
-            raise ValueError(
-                f"Unknown load format: {self.load_format}. Must be one of "
-                "'auto', 'pt', 'safetensors', 'npcache', 'tensorizer', or "
-                "'dummy'.")
         if is_hip() and load_format in rocm_not_supported_load_format:
             rocm_supported_load_format = [
-                f for f in supported_load_format
+                f for f in LoadFormat.__members__
                 if (f not in rocm_not_supported_load_format)
             ]
             raise ValueError(
                 f"load format '{load_format}' is not supported in ROCm. "
-                f"Supported load format are "
+                f"Supported load formats are "
                 f"{rocm_supported_load_format}")
 
-        self.load_format = LoadFormat(load_format)
 
 
 class ParallelConfig:
