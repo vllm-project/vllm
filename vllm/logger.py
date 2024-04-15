@@ -73,12 +73,15 @@ def init_logger(name: str):
 logger = init_logger(__name__)
 
 
-def trace_calls(log_path, frame, event, arg=None):
+def trace_calls(log_path, root_dir, frame, event, arg=None):
     if event in ['call', 'return']:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
         func_name = frame.f_code.co_name
+        if not filename.startswith(root_dir):
+            # only log the functions in the vllm root_dir
+            return
         # Log every function call or return
         try:
             with open(log_path, 'a') as f:
@@ -107,4 +110,5 @@ if int(os.getenv("VLLM_TRACE_FRAME", "0")):
                              f"at_{datetime.datetime.now()}.log").replace(
                                  " ", "_"))
     logger.info(f"Trace frame log is saved to {log_path}")
-    sys.settrace(partial(trace_calls, log_path))
+    root_dir = os.path.dirname(os.path.dirname(__file__))
+    sys.settrace(partial(trace_calls, log_path, root_dir))
