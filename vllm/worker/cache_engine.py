@@ -89,7 +89,7 @@ class CacheEngine:
         is_mamba = model_config.hf_config.model_type == "jamba"
         if is_mamba:
             attention_period = model_config.hf_config.attn_layer_period
-            num_layers = num_layers // attention_period
+            num_layers = max(num_layers // attention_period, 1)
         return num_layers
 
     @staticmethod
