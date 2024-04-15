@@ -155,7 +155,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             # AMD Radeon 7900 series (gfx1100) currently does not support
             # xFormers nor FlashAttention. As a temporary workaround, we use
             # naive PyTorch implementation of attention.
-            self.attn_fuc = _naive_attention()
+            self.attn_func = _naive_attention
             logger.debug("Using naive attention in ROCmBackend")
         elif self.use_triton_flash_attn:
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
@@ -230,7 +230,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
                     if self.use_naive_attn:
-                        output = self.attn_fuc(
+                        output = self.attn_func(
                             query,
                             key,
                             value,
@@ -317,7 +317,7 @@ def _naive_attention(
             scale,
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
-        output[start:end].copy_(out)
+        output[start:end].copy_(out.squeeze(0))
         start += prompt_len
 
     # Using view got RuntimeError: view size is not compatible
@@ -333,7 +333,7 @@ def _naive_masked_attention(
     value: torch.Tensor,
     scale: float,
 ) -> torch.Tensor:
-    seq_len, _, _ = query.shape
+    _, seq_len, _, _ = query.shape
     attn_mask = torch.triu(torch.ones(seq_len,
                                       seq_len,
                                       dtype=query.dtype,
@@ -341,8 +341,8 @@ def _naive_masked_attention(
                            diagonal=1)
     attn_mask = attn_mask * torch.finfo(query.dtype).min
 
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
+    attn_weights = scale * torch.einsum("bqhd,bkhd->bhqk", query, key).float()
     attn_weights = attn_weights + attn_mask.float()
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+    out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
     return out

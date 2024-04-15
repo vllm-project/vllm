@@ -30,7 +30,8 @@ def main(args: argparse.Namespace):
               worker_use_ray=args.worker_use_ray,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
-              block_size=args.block_size)
+              block_size=args.block_size,
+              max_model_len=args.output_len)
 
     sampling_params = SamplingParams(
         n=args.n,
