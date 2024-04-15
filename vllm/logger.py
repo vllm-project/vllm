@@ -73,19 +73,24 @@ def init_logger(name: str):
 logger = init_logger(__name__)
 
 
-def trace_calls(filename, frame, event, arg):
+def trace_calls(log_path, frame, event, arg=None):
     if event in ['call', 'return']:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
         func_name = frame.f_code.co_name
         # Log every function call or return
-        if event == 'call':
-            logging.debug(f"{datetime.datetime.now()} Call to"
-                          f" {func_name} in {filename}:{lineno}")
-        else:
-            logging.debug(f"{datetime.datetime.now()} Return from"
-                          f" {func_name} in {filename}:{lineno}")
+        try:
+            with open(log_path, 'a') as f:
+                if event == 'call':
+                    f.write(f"{datetime.datetime.now()} Call to"
+                            f" {func_name} in {filename}:{lineno}\n")
+                else:
+                    f.write(f"{datetime.datetime.now()} Return from"
+                            f" {func_name} in {filename}:{lineno}\n")
+        except NameError:
+            # modules are deleted during shutdown
+            pass
     return trace_calls
 
 
@@ -95,11 +100,11 @@ if int(os.getenv("VLLM_TRACE_FRAME", "0")):
         " function executed by Python. This will slow down the code. It "
         "is suggested to be used for debugging hang in distributed"
         " inference only.")
-    temp_dir = os.environ.get('TMPDIR') or os.environ.get(
-        'TEMP') or os.environ.get('TMP') or "/tmp/"
+    temp_dir = "/tmp/"
     log_path = os.path.join(temp_dir,
                             (f"vllm_trace_frame_for_process_{os.getpid()}"
                              f"_thread_{threading.get_ident()}_"
-                             f"at_{datetime.datetime.now()}.log"))
+                             f"at_{datetime.datetime.now()}.log").replace(
+                                 " ", "_"))
     logger.info(f"Trace frame log is saved to {log_path}")
     sys.settrace(partial(trace_calls, log_path))
