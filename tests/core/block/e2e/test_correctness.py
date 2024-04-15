@@ -17,7 +17,6 @@ from vllm import SamplingParams
         # Allow only 5 sequences of ~1024 tokens in worst case.
         "block_size": 16,
         "forced_num_gpu_blocks": 5 * (64 + 1),
-        "enable_prefix_caching": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
