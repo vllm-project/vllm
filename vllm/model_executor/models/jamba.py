@@ -6,13 +6,14 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.model_executor.mamba_metadata import MambaCacheParams
 
 from vllm.transformers_utils.configs.jamba import JambaConfig
 from torch.nn.parameter import Parameter
 from vllm.config import LoRAConfig
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear, LinearMethodBase, MergedColumnParallelLinear,
@@ -205,13 +206,45 @@ class JambaMambaMixer(nn.Module):
         contextualized_states = self.out_proj(scan_outputs.transpose(1, 2))[0]
         return contextualized_states
 
-    def forward(self, hidden_states: torch.Tensor, input_metadata: InputMetadata, conv_state: torch.Tensor, ssm_state: torch.Tensor):
-        cache = MambaCacheParams(
-            input_metadata.is_prompt, 
-            conv_state=conv_state[self.layer_idx],
-            ssm_state=ssm_state[self.layer_idx]
-        )
-        hidden_states = self.mamba_forward(hidden_states, cache_params=cache)
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        conv_state: torch.Tensor,
+        ssm_state: torch.Tensor
+    ):
+        if attn_metadata.is_prompt:
+            max_seq_len = max(attn_metadata.prompt_lens)
+            batch_size = len(attn_metadata.prompt_lens)
+            padded_hidden_states = torch.zeros((
+                batch_size,
+                max_seq_len,
+                hidden_states.shape[-1],
+            ), dtype=hidden_states.dtype, device=hidden_states.device)
+            offset = 0
+            for i,prompt_len in enumerate(attn_metadata.prompt_lens):
+                padded_hidden_states[i,-prompt_len:].copy_(hidden_states[offset:offset + prompt_len])
+                offset += prompt_len
+            cache = MambaCacheParams(
+                True,
+                conv_state=conv_state[self.layer_idx],
+                ssm_state=ssm_state[self.layer_idx]
+            )
+            padded_hidden_states = self.mamba_forward(padded_hidden_states, cache_params=cache)
+            offset = 0
+            for i,prompt_len in enumerate(attn_metadata.prompt_lens):
+                hidden_states[offset:offset + prompt_len].copy_(padded_hidden_states[i,-prompt_len:])
+                offset += prompt_len
+        else:
+            cache = MambaCacheParams(
+                False,
+                conv_state=conv_state[self.layer_idx],
+                ssm_state=ssm_state[self.layer_idx]
+            )
+            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1).contiguous(), cache_params=cache)
+            hidden_states = hidden_states.squeeze(1).contiguous()
+
+
 
         return hidden_states
 
@@ -289,7 +322,7 @@ class JambaMoE(nn.Module):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        batch_size, sequence_length, hidden_size = hidden_states.shape
+        num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (batch * sequence_length, n_experts)
         if self.num_total_experts > 1:
@@ -310,7 +343,7 @@ class JambaMoE(nn.Module):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(batch_size, sequence_length,
+        return final_hidden_states.view(num_tokens,
                                         hidden_size)
 
 
@@ -332,7 +365,7 @@ class JambaMambaDecoderLayer(nn.Module):
 
     def forward(self,
                 hidden_states: torch.Tensor,
-                input_metadata: InputMetadata,
+                attn_metadata: AttentionMetadata,
                 residual: Optional[torch.Tensor],
                 conv_state: torch.Tensor,
                 ssm_state: torch.Tensor,
@@ -346,7 +379,7 @@ class JambaMambaDecoderLayer(nn.Module):
 
         hidden_states = self.mamba(
             hidden_states,
-            input_metadata,
+            attn_metadata,
             conv_state,
             ssm_state
         )
@@ -381,7 +414,6 @@ class JambaAttentionDecoderLayer(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
-        self.use_positional_embeddings = False
         self.sliding_window = config.sliding_window
 
         self.qkv_proj = QKVParallelLinear(
@@ -399,14 +431,13 @@ class JambaAttentionDecoderLayer(nn.Module):
             linear_method=linear_method,
         )
 
-        self.attn = PagedAttention(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             sliding_window=self.sliding_window,
         )
-
 
         self.moe = JambaMoE(
             num_experts=actual_num_experts,
@@ -421,16 +452,13 @@ class JambaAttentionDecoderLayer(nn.Module):
     def self_attention(self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
-            kv_cache: KVCache,
-            input_metadata: InputMetadata,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
             **kwargs) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         #   TODO - add embedding flag
-        if self.use_positional_embeddings:
-            q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -438,8 +466,8 @@ class JambaAttentionDecoderLayer(nn.Module):
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
-            kv_cache: KVCache,
-            input_metadata: InputMetadata,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
             residual: Optional[torch.Tensor],
             **kwargs):
         if residual is None:
@@ -452,7 +480,7 @@ class JambaAttentionDecoderLayer(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
-                input_metadata=input_metadata,
+                attn_metadata=attn_metadata,
         )
         # Fully Connected
         hidden_states, residual = self.pre_moe_layernorm(
@@ -513,8 +541,8 @@ class JambaModel(nn.Module):
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+            kv_caches: List[torch.Tensor],
+            attn_metadata: AttentionMetadata,
             conv_state: torch.Tensor,
             ssm_state: torch.Tensor
     ) -> torch.Tensor:
@@ -528,7 +556,7 @@ class JambaModel(nn.Module):
             hidden_states, residual = layer(positions=positions,
                                             hidden_states=hidden_states,
                                             kv_cache=kv_cache,
-                                            input_metadata=input_metadata,
+                                            attn_metadata=attn_metadata,
                                             residual=residual,
                                             conv_state=conv_state,
                                             ssm_state=ssm_state
@@ -583,6 +611,8 @@ class JambaForCausalLM(nn.Module):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -590,7 +620,7 @@ class JambaForCausalLM(nn.Module):
             input_ids: torch.Tensor,
             positions: torch.Tensor,
             kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+            attn_metadata: AttentionMetadata,
             conv_state: torch.Tensor,
             ssm_state: torch.Tensor
         ):
@@ -598,19 +628,24 @@ class JambaForCausalLM(nn.Module):
             input_ids,
             positions,
             kv_caches,
-            input_metadata,
+            attn_metadata,
             conv_state,
             ssm_state
         )
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
     def sample(
-            self,
-            hidden_states: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head.weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
     def load_weights(self,
@@ -656,28 +691,31 @@ class JambaForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                if name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 for param_name, weight_name, expert_id in expert_params_mapping:
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  weight_name,
-                                  expert_id=expert_id)
+                    if name in params_dict:
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        weight_loader(param,
+                                    loaded_weight,
+                                    weight_name,
+                                    expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    if name in params_dict:
+                        param = params_dict[name]
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
