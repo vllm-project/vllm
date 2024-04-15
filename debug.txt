@@ -1,0 +1,246 @@
+============================= test session starts ==============================
+platform linux -- Python 3.8.18, pytest-7.4.4, pluggy-1.4.0 -- /home/ray/anaconda3/bin/python3
+cachedir: .pytest_cache
+rootdir: /home/ray/default_cld_cv8egzp1tm3uvi738tt5bycjmm/vllm-fork
+plugins: anyio-4.2.0, asyncio-0.23.4, forked-1.6.0
+asyncio: mode=strict
+collecting ... collected 24 items / 23 deselected / 1 selected
+
+tests/entrypoints/test_openai_server.py::test_check_models [36m(ServerRunner pid=55436)[0m INFO 03-15 12:43:06 api_server.py:242] vLLM API server version 0.3.3
+[36m(ServerRunner pid=55436)[0m INFO 03-15 12:43:06 api_server.py:243] args: Namespace(allow_credentials=False, allowed_headers=['*'], allowed_methods=['*'], allowed_origins=['*'], api_key=None, block_size=16, chat_template=None, code_revision=None, device='auto', disable_custom_all_reduce=False, disable_log_requests=False, disable_log_stats=False, download_dir=None, dtype='half', enable_lora=False, enable_prefix_caching=False, enforce_eager=True, engine_use_ray=False, gpu_memory_utilization=0.9, host=None, kv_cache_dtype='auto', load_format='auto', lora_dtype='auto', lora_extra_vocab_size=256, lora_modules=None, max_context_len_to_capture=8192, max_cpu_loras=None, max_log_len=None, max_logprobs=5, max_lora_rank=16, max_loras=1, max_model_len=8192, max_num_batched_tokens=None, max_num_seqs=1, max_paddings=256, max_parallel_loading_workers=None, max_queue_length=3, middleware=[], model='meta-llama/Llama-2-7b-chat-hf', pipeline_parallel_size=1, port=8000, quantization=None, ray_workers_use_nsight=False, response_role='assistant', revision=None, root_path=None, seed=0, served_model_name=None, ssl_certfile=None, ssl_keyfile=None, swap_space=4, tensor_parallel_size=1, tokenizer=None, tokenizer_mode='auto', tokenizer_revision=None, trust_remote_code=False, uvicorn_log_level='info', worker_use_ray=False)
+ERROR
+
+==================================== ERRORS ====================================
+_____________________ ERROR at setup of test_check_models ______________________
+
+    @pytest.fixture(scope="session")
+    def server():
+        ray.init()
+        server_runner = ServerRunner.remote([
+            "--model",
+            MODEL_NAME,
+            # use half precision for speed and memory savings in CI environment
+            "--dtype",
+            "half",  # use half precision for speed and memory savings in CI environment
+            "--max-model-len",
+            "8192",
+            "--enforce-eager",
+            # lora config below
+            # "--enable-lora",
+            # "--lora-modules",
+            # f"zephyr-lora={zephyr_lora_files}",
+            # f"zephyr-lora2={zephyr_lora_files}",
+            # "--max-lora-rank",
+            # "64",
+            # "--max-cpu-loras",
+            # "2",
+            "--max-num-seqs",
+            "1",
+            "--max-queue-length",
+            "3"
+        ])
+>       ray.get(server_runner.ready.remote())
+
+tests/entrypoints/test_openai_server.py:149: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+../../anaconda3/lib/python3.8/site-packages/ray/_private/auto_init_hook.py:22: in auto_init_wrapper
+    return fn(*args, **kwargs)
+../../anaconda3/lib/python3.8/site-packages/ray/_private/client_mode_hook.py:103: in wrapper
+    return func(*args, **kwargs)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+object_refs = [ObjectRef(8a2dc005c3f797b852ee25206a1a411b6c0914860600000001000000)]
+
+    @PublicAPI
+    @client_mode_hook
+    def get(
+        object_refs: Union["ObjectRef[Any]", Sequence["ObjectRef[Any]"]],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Union[Any, List[Any]]:
+        """Get a remote object or a list of remote objects from the object store.
+    
+        This method blocks until the object corresponding to the object ref is
+        available in the local object store. If this object is not in the local
+        object store, it will be shipped from an object store that has it (once the
+        object has been created). If object_refs is a list, then the objects
+        corresponding to each object in the list will be returned.
+    
+        Ordering for an input list of object refs is preserved for each object
+        returned. That is, if an object ref to A precedes an object ref to B in the
+        input list, then A will precede B in the returned list.
+    
+        This method will issue a warning if it's running inside async context,
+        you can use ``await object_ref`` instead of ``ray.get(object_ref)``. For
+        a list of object refs, you can use ``await asyncio.gather(*object_refs)``.
+    
+        Passing :class:`~ObjectRefGenerator` is not allowed.
+    
+        Related patterns and anti-patterns:
+    
+        - :doc:`/ray-core/patterns/ray-get-loop`
+        - :doc:`/ray-core/patterns/unnecessary-ray-get`
+        - :doc:`/ray-core/patterns/ray-get-submission-order`
+        - :doc:`/ray-core/patterns/ray-get-too-many-objects`
+    
+    
+        Args:
+            object_refs: Object ref of the object to get or a list of object refs
+                to get.
+            timeout (Optional[float]): The maximum amount of time in seconds to
+                wait before returning. Set this to None will block until the
+                corresponding object becomes available. Setting ``timeout=0`` will
+                return the object immediately if it's available, else raise
+                GetTimeoutError in accordance with the above docstring.
+    
+        Returns:
+            A Python object or a list of Python objects.
+    
+        Raises:
+            GetTimeoutError: A GetTimeoutError is raised if a timeout is set and
+                the get takes longer than timeout to return.
+            Exception: An exception is raised if the task that created the object
+                or that created one of the objects raised an exception.
+        """
+        worker = global_worker
+        worker.check_connected()
+    
+        if hasattr(worker, "core_worker") and worker.core_worker.current_actor_is_asyncio():
+            global blocking_get_inside_async_warned
+            if not blocking_get_inside_async_warned:
+                logger.warning(
+                    "Using blocking ray.get inside async actor. "
+                    "This blocks the event loop. Please use `await` "
+                    "on object ref with asyncio.gather if you want to "
+                    "yield execution to the event loop instead."
+                )
+                blocking_get_inside_async_warned = True
+    
+        with profiling.profile("ray.get"):
+            # TODO(sang): Should make ObjectRefGenerator
+            # compatible to ray.get for dataset.
+            if isinstance(object_refs, ObjectRefGenerator):
+                return object_refs
+    
+            is_individual_id = isinstance(object_refs, ray.ObjectRef)
+            if is_individual_id:
+                object_refs = [object_refs]
+    
+            if not isinstance(object_refs, list):
+                raise ValueError(
+                    f"Invalid type of object refs, {type(object_refs)}, is given. "
+                    "'object_refs' must either be an ObjectRef or a list of ObjectRefs. "
+                )
+    
+            # TODO(ujvl): Consider how to allow user to retrieve the ready objects.
+            values, debugger_breakpoint = worker.get_objects(object_refs, timeout=timeout)
+            for i, value in enumerate(values):
+                if isinstance(value, RayError):
+                    if isinstance(value, ray.exceptions.ObjectLostError):
+                        worker.core_worker.dump_object_store_memory_usage()
+                    if isinstance(value, RayTaskError):
+                        raise value.as_instanceof_cause()
+                    else:
+>                       raise value
+E                       ray.exceptions.RayActorError: The actor died because of an error raised in its creation task, [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/util/connection.py", line 95, in create_connection
+E                           raise err
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/util/connection.py", line 85, in create_connection
+E                           sock.connect(sa)
+E                       ConnectionRefusedError: [Errno 111] Connection refused
+E                       
+E                       During handling of the above exception, another exception occurred:
+E                       
+E                       [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connectionpool.py", line 715, in urlopen
+E                           httplib_response = self._make_request(
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connectionpool.py", line 416, in _make_request
+E                           conn.request(method, url, **httplib_request_kw)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connection.py", line 244, in request
+E                           super(HTTPConnection, self).request(method, url, body=body, headers=headers)
+E                         File "/home/ray/anaconda3/lib/python3.8/http/client.py", line 1256, in request
+E                           self._send_request(method, url, body, headers, encode_chunked)
+E                         File "/home/ray/anaconda3/lib/python3.8/http/client.py", line 1302, in _send_request
+E                           self.endheaders(body, encode_chunked=encode_chunked)
+E                         File "/home/ray/anaconda3/lib/python3.8/http/client.py", line 1251, in endheaders
+E                           self._send_output(message_body, encode_chunked=encode_chunked)
+E                         File "/home/ray/anaconda3/lib/python3.8/http/client.py", line 1011, in _send_output
+E                           self.send(msg)
+E                         File "/home/ray/anaconda3/lib/python3.8/http/client.py", line 951, in send
+E                           self.connect()
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connection.py", line 205, in connect
+E                           conn = self._new_conn()
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connection.py", line 186, in _new_conn
+E                           raise NewConnectionError(
+E                       urllib3.exceptions.NewConnectionError: <urllib3.connection.HTTPConnection object at 0x7fbef5ea93a0>: Failed to establish a new connection: [Errno 111] Connection refused
+E                       
+E                       During handling of the above exception, another exception occurred:
+E                       
+E                       [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/adapters.py", line 486, in send
+E                           resp = conn.urlopen(
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/connectionpool.py", line 799, in urlopen
+E                           retries = retries.increment(
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/urllib3/util/retry.py", line 592, in increment
+E                           raise MaxRetryError(_pool, url, error or ResponseError(cause))
+E                       urllib3.exceptions.MaxRetryError: HTTPConnectionPool(host='localhost', port=8000): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7fbef5ea93a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+E                       
+E                       During handling of the above exception, another exception occurred:
+E                       
+E                       [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+E                         File "/home/ray/default_cld_cv8egzp1tm3uvi738tt5bycjmm/vllm-fork/tests/entrypoints/test_openai_server.py", line 101, in _wait_for_server
+E                           if requests.get(
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/api.py", line 73, in get
+E                           return request("get", url, params=params, **kwargs)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/api.py", line 59, in request
+E                           return session.request(method=method, url=url, **kwargs)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/sessions.py", line 589, in request
+E                           resp = self.send(prep, **send_kwargs)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/sessions.py", line 703, in send
+E                           r = adapter.send(request, **kwargs)
+E                         File "/home/ray/anaconda3/lib/python3.8/site-packages/requests/adapters.py", line 519, in send
+E                           raise ConnectionError(e, request=request)
+E                       requests.exceptions.ConnectionError: HTTPConnectionPool(host='localhost', port=8000): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7fbef5ea93a0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+E                       
+E                       The above exception was the direct cause of the following exception:
+E                       
+E                       [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+E                         File "/home/ray/default_cld_cv8egzp1tm3uvi738tt5bycjmm/vllm-fork/tests/entrypoints/test_openai_server.py", line 91, in __init__
+E                           self._wait_for_server()
+E                         File "/home/ray/default_cld_cv8egzp1tm3uvi738tt5bycjmm/vllm-fork/tests/entrypoints/test_openai_server.py", line 106, in _wait_for_server
+E                           raise RuntimeError("Server exited unexpectedly.") from err
+E                       RuntimeError: Server exited unexpectedly.
+
+../../anaconda3/lib/python3.8/site-packages/ray/_private/worker.py:2626: RayActorError
+=============================== warnings summary ===============================
+tests/entrypoints/test_openai_server.py::test_check_models
+  /home/ray/anaconda3/lib/python3.8/site-packages/ray/_private/pydantic_compat.py:2: DeprecationWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html
+    from pkg_resources import packaging
+
+tests/entrypoints/test_openai_server.py::test_check_models
+tests/entrypoints/test_openai_server.py::test_check_models
+tests/entrypoints/test_openai_server.py::test_check_models
+  /home/ray/anaconda3/lib/python3.8/site-packages/pkg_resources/__init__.py:2868: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+tests/entrypoints/test_openai_server.py::test_check_models
+  /home/ray/anaconda3/lib/python3.8/site-packages/pkg_resources/__init__.py:2868: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google.logging')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+tests/entrypoints/test_openai_server.py::test_check_models
+  /home/ray/anaconda3/lib/python3.8/site-packages/pkg_resources/__init__.py:2348: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('google')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(parent)
+
+tests/entrypoints/test_openai_server.py::test_check_models
+tests/entrypoints/test_openai_server.py::test_check_models
+  /home/ray/anaconda3/lib/python3.8/site-packages/pkg_resources/__init__.py:2868: DeprecationWarning: Deprecated call to `pkg_resources.declare_namespace('ruamel')`.
+  Implementing implicit namespace packages (as specified in PEP 420) is preferred to `pkg_resources.declare_namespace`. See https://setuptools.pypa.io/en/latest/references/keywords.html#keyword-namespace-packages
+    declare_namespace(pkg)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR tests/entrypoints/test_openai_server.py::test_check_models - ray.exceptions.RayActorError: The actor died because of an error raised in its creation task, [36mray::ServerRunner.__init__()[39m (pid=55436, ip=10.0.0.30, actor_id=52ee25206a1a411b6c09148606000000, repr=<test_openai_server.ServerRunner object at 0x7fc1801100a0>)
+================= 23 deselected, 8 warnings, 1 error in 8.19s ==================

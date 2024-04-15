@@ -85,11 +85,15 @@ class OpenAIServingChat(OpenAIServing):
                 request, result_generator, request_id)
         else:
             try:
-                return await self.chat_completion_full_generator(
+                # print("serving_chat.py after generate, is NOT stream")
+                result = await self.chat_completion_full_generator(
                     request, raw_request, result_generator, request_id)
+                print(result)
+                return result
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
+                msg, status_code = e.args
+                return self.create_error_response(msg, status_code=status_code)
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:

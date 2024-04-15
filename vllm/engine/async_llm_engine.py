@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from http import HTTPStatus
 from functools import partial
 from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
                     Union, AsyncIterator)
@@ -23,6 +24,13 @@ ENGINE_ITERATION_TIMEOUT_S = int(
 
 class AsyncEngineDeadError(RuntimeError):
     pass
+
+
+class QueueOverflowError(BaseException):
+
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _raise_exception_on_finish(
@@ -252,14 +260,17 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
 
-        return self.add_request(
-            request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            sampling_params=sampling_params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-        )
+        try:
+            self.add_request(
+                request_id,
+                prompt=prompt,
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
+        except Exception as e:
+            raise e
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
@@ -412,7 +423,6 @@ class AsyncLLMEngine:
         """Kick the engine to process the waiting requests.
 
         Returns True if there are in-progress requests."""
-
         new_requests, finished_requests = (
             self._request_tracker.get_new_and_finished_requests())
 
@@ -421,9 +431,11 @@ class AsyncLLMEngine:
             # TODO: Maybe add add_request_batch to reduce Ray overhead
             try:
                 if self.engine_use_ray:
+                    logger.info(
+                        "going from async add_request to synch add_request")
                     await self.engine.add_request.remote(**new_request)
                 else:
-                    await self.engine.add_request_async(**new_request)
+                    result = await self.engine.add_request_async(**new_request)
             except ValueError as e:
                 # TODO: use a vLLM specific error for failed validation
                 self._request_tracker.process_exception(
@@ -482,13 +494,13 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncStream:
-
         curr_queue_len = len(self.engine.scheduler.waiting)
-        max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length()
+        max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
+        )
         if max_queue_len > -1 and curr_queue_len >= max_queue_len:
-            raise ValueError(
-                f"Request {request_id} would exceed the indicated maximum "
-                f"queue length of {max_queue_len}")
+            raise QueueOverflowError(
+                "Request would exceed the indicated maximum queue length.",
+                HTTPStatus.SERVICE_UNAVAILABLE)
         if self.log_requests:
             shortened_prompt = prompt
             shortened_token_ids = prompt_token_ids
