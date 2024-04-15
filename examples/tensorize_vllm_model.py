@@ -29,8 +29,8 @@ or locally. Tensor encryption and decryption is also supported, although
 libsodium must be installed to use it. Install vllm with tensorizer support 
 using `pip install vllm[tensorizer]`.
 
-To serialize a model, you can run something like this from the root level of 
-this repository:
+To serialize a model, install vLLM from source, then run something 
+like this from the root level of this repository:
 
 python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
@@ -82,6 +82,14 @@ to provide the path to the keyfile used to encrypt the model weights. For
 information on all the arguments that can be used to configure tensorizer's
 deserialization, check out the tensorizer options argument group in the
 `vllm/entrypoints/openai/api_server.py` script with `--help`.
+
+Tensorizer can also be invoked with the `LLM` class directly to load models:
+
+    llm = LLM(model="facebook/opt-125m",
+              load_format="tensorizer",
+              tensorizer_uri=path_to_opt_tensors,
+              num_readers=3,
+              vllm_tensorized=True)
 """
 
 
