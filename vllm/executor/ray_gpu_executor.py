@@ -3,11 +3,11 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         TensorizerConfig, VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -42,6 +42,7 @@ class RayGPUExecutor(ExecutorBase):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        tensorizer_config: Optional[TensorizerConfig],
     ) -> None:
         self.model_config = model_config
         self.cache_config = cache_config
@@ -50,6 +51,7 @@ class RayGPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+        self.tensorizer_config = tensorizer_config
         assert (not speculative_config
                 ), "Speculative decoding not yet supported for RayGPU backend."
 
@@ -171,6 +173,7 @@ class RayGPUExecutor(ExecutorBase):
                     distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
                     vision_language_config=vision_language_config,
+                    tensorizer_config=self.tensorizer_config,
                 ))
 
         # Initialize the driver worker with the Worker class.
@@ -187,6 +190,7 @@ class RayGPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
+            tensorizer_config=self.tensorizer_config,
             is_driver_worker=True,
         )
 
@@ -197,7 +201,7 @@ class RayGPUExecutor(ExecutorBase):
             max_parallel_loading_workers,
         )
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 
         This invokes `determine_num_available_blocks` on each worker and takes
@@ -205,7 +209,7 @@ class RayGPUExecutor(ExecutorBase):
         compatible with all workers.
 
         Returns:
-            - tuple[num_gpu_blocks, num_cpu_blocks]
+            - Tuple[num_gpu_blocks, num_cpu_blocks]
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
         num_blocks = self._run_workers("determine_num_available_blocks", )
@@ -276,7 +280,7 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -291,6 +295,7 @@ class RayGPUExecutor(ExecutorBase):
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
+            assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
@@ -369,7 +374,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Any:

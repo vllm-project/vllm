@@ -12,7 +12,13 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
-  command: pytest -v -s basic_correctness
+  commands:
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=ROCM_FLASH pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test
   command: pytest -v -s core
@@ -84,6 +90,9 @@ steps:
 - label: LoRA Test %N
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
+
+- label: Tensorizer Test
+  command: apt-get install curl libsodium23 && pytest -v -s tensorizer
 
 - label: Metrics Test
   command: pytest -v -s metrics

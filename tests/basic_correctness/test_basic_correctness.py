@@ -4,8 +4,6 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import pytest
 
-from vllm.attention.selector import VLLM_ATTENTION_BACKEND
-
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
@@ -16,7 +14,6 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False, True])
-@pytest.mark.parametrize("attn_backend", ["XFORMERS", "FLASH_ATTN"])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -25,10 +22,7 @@ def test_models(
     dtype: str,
     max_tokens: int,
     enforce_eager: bool,
-    attn_backend: str,
-    monkeypatch,
 ) -> None:
-    monkeypatch.setenv(VLLM_ATTENTION_BACKEND, attn_backend)
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
