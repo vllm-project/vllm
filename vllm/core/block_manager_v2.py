@@ -154,9 +154,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         del self.block_tables[seq.seq_id]
 
     def get_block_table(self, seq: Sequence) -> List[int]:
-        # assert seq.seq_id in self.block_tables
+        assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
-        # assert all(b is not None for b in block_ids)
+        assert all(b is not None for b in block_ids)
         return block_ids
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: int):
