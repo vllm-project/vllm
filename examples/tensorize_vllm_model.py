@@ -29,9 +29,9 @@ or locally. Tensor encryption and decryption is also supported, although
 libsodium must be installed to use it. Install vllm with tensorizer support 
 using `pip install vllm[tensorizer]`.
 
-To serialize a model, you can run something like this:
+To serialize a model, you can run something like this from the root directory:
 
-python tensorize_vllm_model.py \
+python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    serialize \
@@ -39,25 +39,24 @@ python tensorize_vllm_model.py \
    --suffix vllm
    
 Which downloads the model from HuggingFace, loads it into vLLM, serializes it,
-and saves it to your S3 bucket. A local directory can also be used.
+and saves it to your S3 bucket. A local directory can also be used. This
+assumes your S3 credentials are specified as environment variables. To provide 
+S3 credentials directly, you can provide `--s3-access-key-id` and 
+`--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this 
+script.
 
 You can also encrypt the model weights with a randomly-generated key by 
 providing a `--keyfile` argument.
 
 To deserialize a model, you can run something like this:
 
-python tensorize_vllm_model.py \
+python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    deserialize \
    --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/vllm/model.tensors
 
 Which downloads the model tensors from your S3 bucket and deserializes them.
-To provide S3 credentials, you can provide `--s3-access-key-id` and 
-`--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this script,
-the OpenAI entrypoint, as arguments for LLM(), or as environment variables
-in the form of `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT`.
-
 
 You can also provide a `--keyfile` argument to decrypt the model weights if 
 they were serialized with encryption.
