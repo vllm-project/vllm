@@ -9,7 +9,8 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
-from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
+from vllm.model_executor.layers.quantization import (
+    _QUANTIZATION_CONFIG_REGISTRY)
 
 
 def main(args: argparse.Namespace):

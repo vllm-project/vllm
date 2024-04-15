@@ -8,10 +8,10 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
-    "awq": 1,
-    "gptq": 2,
-    "squeezellm": 3,
-    "marlin": 4,
+    "awq": AWQConfig,
+    "gptq": GPTQConfig,
+    "squeezellm": SqueezeLLMConfig,
+    "marlin": MarlinConfig,
 }
 
 
