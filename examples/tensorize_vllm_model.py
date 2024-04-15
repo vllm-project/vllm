@@ -41,8 +41,9 @@ python -m examples.tensorize_vllm_model \
    
 Which downloads the model from HuggingFace, loads it into vLLM, serializes it,
 and saves it to your S3 bucket. A local directory can also be used. This
-assumes your S3 credentials are specified as environment variables. To provide 
-S3 credentials directly, you can provide `--s3-access-key-id` and 
+assumes your S3 credentials are specified as environment variables
+in the form of `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT`.
+To provide S3 credentials directly, you can provide `--s3-access-key-id` and 
 `--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this 
 script.
 
