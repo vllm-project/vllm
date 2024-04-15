@@ -43,6 +43,10 @@ def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
             result[field.name] = ",".join([str(item) for item in value])
         else:
             result[field.name] = value
+
+    result[
+        "no_image_processor"] = vision_language_config.image_processor is None
+
     return result
 
 

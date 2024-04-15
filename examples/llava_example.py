@@ -17,6 +17,7 @@ def run_llava_pixel_values():
         image_token_id=32000,
         image_input_shape="1,3,336,336",
         image_feature_size=576,
+        no_image_processor=True,
     )
 
     prompt = "<image>" * 576 + (
@@ -40,6 +41,7 @@ def run_llava_image_features():
         image_token_id=32000,
         image_input_shape="1,576,1024",
         image_feature_size=576,
+        no_image_processor=True,
     )
 
     prompt = "<image>" * 576 + (

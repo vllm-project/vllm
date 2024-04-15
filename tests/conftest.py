@@ -85,17 +85,15 @@ def hf_images() -> List[Image.Image]:
 
 
 @pytest.fixture()
-def vllm_images(request) -> "torch.Tensor":
+def vllm_images(request) -> List[torch.Tensor]:
     vision_language_config = request.getfixturevalue("model_and_config")[1]
-    all_images = []
     if vision_language_config.image_input_type == (
             VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
         filenames = _IMAGE_FEATURES_FILES
     else:
         filenames = _PIXEL_VALUES_FILES
-    for filename in filenames:
-        all_images.append(torch.load(filename))
-    return torch.concat(all_images, dim=0)
+
+    return [torch.load(filename) for filename in filenames]
 
 
 @pytest.fixture()
@@ -172,9 +170,10 @@ class HfRunner:
         images: Optional[List[Image.Image]] = None,
         **kwargs,
     ) -> List[Tuple[List[int], str]]:
-        outputs: List[Tuple[List[int], str]] = []
         if images:
             assert len(prompts) == len(images)
+
+        outputs: List[Tuple[List[int], str]] = []
         for i, prompt in enumerate(prompts):
             if self.model_name not in _VISION_LANGUAGE_MODELS:
                 input_ids = self.tokenizer(prompt,
@@ -207,7 +206,7 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional["torch.Tensor"] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
@@ -316,16 +315,19 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional["torch.Tensor"] = None,
+        images: Optional[List[torch.Tensor]] = None,
     ) -> List[Tuple[List[int], str]]:
         if images is not None:
-            assert len(prompts) == images.shape[0]
+            assert len(prompts) == len(images)
+
         req_outputs = self.model.generate(
             prompts,
             sampling_params=sampling_params,
-            multi_modal_datas=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                             data=images)
-            if images is not None else None)
+            multi_modal_datas=[
+                MultiModalData(type=MultiModalData.Type.IMAGE, data=image)
+                for image in images
+            ] if images is not None else None)
+
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
@@ -362,7 +364,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[torch.Tensor] = None,
+        images: Optional[List[torch.Tensor]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)

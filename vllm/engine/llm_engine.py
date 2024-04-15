@@ -310,8 +310,13 @@ class LLMEngine:
             if image_processor is None:
                 return data
 
-            out_dict = image_processor.preprocess(data.data) \
-                .convert_to_tensors(TensorType.PYTORCH)
+            try:
+                out_dict = image_processor.preprocess(data.data) \
+                    .convert_to_tensors(TensorType.PYTORCH)
+            except Exception:
+                logger.error("Failed to process image with shape %s",
+                             data.data.shape)
+                raise
 
             return MultiModalData(
                 type=data.type,

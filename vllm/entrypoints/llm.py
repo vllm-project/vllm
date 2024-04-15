@@ -160,14 +160,13 @@ class LLM:
             prompts = [prompts]
         if (prompts is not None and prompt_token_ids is not None
                 and len(prompts) != len(prompt_token_ids)):
-            raise ValueError("The lengths of prompts and prompt_token_ids "
-                             "must be the same.")
+            raise ValueError(
+                f"The lengths of prompts ({len(prompts)}) and "
+                f"prompt_token_ids ({len(prompt_token_ids)}) must be the same."
+            )
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = SamplingParams()
-        if isinstance(multi_modal_datas, MultiModalData):
-            # Convert a single multi_modal_data to a list.
-            multi_modal_datas = [multi_modal_datas]
 
         # Add requests to the engine.
         if prompts is not None:
@@ -175,6 +174,15 @@ class LLM:
         else:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
+
+        if isinstance(multi_modal_datas, MultiModalData):
+            # Convert a single multi_modal_data to a list.
+            multi_modal_datas = [multi_modal_datas]
+        if (multi_modal_datas is not None
+                and len(multi_modal_datas) != num_requests):
+            raise ValueError(f"The lengths of prompts/prompt_token_ids "
+                             f"({num_requests}) and multi_modal_datas "
+                             f"({len(multi_modal_datas)}) must be the same.")
 
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
