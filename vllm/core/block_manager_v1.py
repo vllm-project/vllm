@@ -1,9 +1,10 @@
 """A block manager that manages token blocks."""
 from abc import ABC, abstractmethod
-from collections.abc import Sequence as GenericSequence
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
