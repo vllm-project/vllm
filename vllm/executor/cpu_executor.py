@@ -3,8 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -19,7 +19,7 @@ class CPUExecutor(ExecutorBase):
     def __init__(self, model_config: ModelConfig, cache_config: CacheConfig,
                  parallel_config: ParallelConfig,
                  scheduler_config: SchedulerConfig,
-                 device_config: DeviceConfig,
+                 device_config: DeviceConfig, load_config: LoadConfig,
                  lora_config: Optional[LoRAConfig], *args, **kwargs) -> None:
         assert device_config.device_type == "cpu"
         assert lora_config is None, "cpu backend doesn't support LoRA"
@@ -30,6 +30,7 @@ class CPUExecutor(ExecutorBase):
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.load_config = load_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config

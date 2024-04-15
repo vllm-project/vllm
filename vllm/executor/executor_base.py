@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
@@ -24,6 +24,7 @@ class ExecutorBase(ABC):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],

@@ -55,8 +55,9 @@ class CPUModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
+        self.model = get_model(model_config=self.model_config,
+                               load_config=self.load_config,
+                               device_config=self.device_config,
                                lora_config=self.lora_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)

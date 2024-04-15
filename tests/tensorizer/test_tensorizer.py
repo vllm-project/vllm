@@ -7,10 +7,9 @@ import torch
 
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
-from vllm.config import TensorizerConfig
-from vllm.model_executor.tensorizer_loader import (
-    EncryptionParams, TensorSerializer, is_vllm_serialized_tensorizer,
-    load_with_tensorizer, open_stream)
+from vllm.model_executor.model_loader.tensorizer import (
+    EncryptionParams, TensorizerConfig, TensorSerializer,
+    is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
 
 prompts = [
     "Hello, my name is",
@@ -38,7 +37,7 @@ def tensorizer_config():
     return config
 
 
-@patch('vllm.model_executor.tensorizer_loader.TensorizerAgent')
+@patch('vllm.model_executor.model_loader.tensorizer.TensorizerAgent')
 def test_load_with_tensorizer(mock_agent, tensorizer_config):
     mock_linear_method = MagicMock()
     mock_agent_instance = mock_agent.return_value
@@ -81,11 +80,13 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     del vllm_model, model
     gc.collect()
     torch.cuda.empty_cache()
-    loaded_vllm_model = vllm_runner(model_ref,
-                                    load_format="tensorizer",
-                                    tensorizer_uri=model_path,
-                                    num_readers=1,
-                                    vllm_tensorized=True)
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        load_format="tensorizer",
+        model_loader_extra_config=TensorizerConfig(tensorizer_uri=model_path,
+                                                   num_readers=1,
+                                                   vllm_tensorized=True),
+    )
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
     # Assumes SamplingParams being seeded ensures the outputs are deterministic
@@ -97,14 +98,14 @@ def test_can_deserialize_s3(vllm_runner):
     model_ref = "EleutherAI/pythia-1.4b"
     tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
 
-    loaded_hf_model = vllm_runner(
-        model_ref,
-        tensorizer_uri=tensorized_path,
-        load_format="tensorizer",
-        num_readers=1,
-        vllm_tensorized=False,
-        s3_endpoint="object.ord1.coreweave.com",
-    )
+    loaded_hf_model = vllm_runner(model_ref,
+                                  load_format="tensorizer",
+                                  model_loader_extra_config=TensorizerConfig(
+                                      tensorizer_uri=tensorized_path,
+                                      num_readers=1,
+                                      vllm_tensorized=False,
+                                      s3_endpoint="object.ord1.coreweave.com",
+                                  ))
 
     deserialized_outputs = loaded_hf_model.generate(prompts, sampling_params)
 
@@ -131,11 +132,12 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
     gc.collect()
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(model_ref,
-                                    tensorizer_uri=model_path,
                                     load_format="tensorizer",
-                                    encryption_keyfile=key_path,
-                                    num_readers=1,
-                                    vllm_tensorized=True)
+                                    model_loader_extra_config=TensorizerConfig(
+                                        tensorizer_uri=model_path,
+                                        encryption_keyfile=key_path,
+                                        num_readers=1,
+                                        vllm_tensorized=True))
 
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
@@ -156,10 +158,11 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
     gc.collect()
     torch.cuda.empty_cache()
     loaded_hf_model = vllm_runner(model_ref,
-                                  tensorizer_uri=model_path,
                                   load_format="tensorizer",
-                                  num_readers=1,
-                                  vllm_tensorized=False)
+                                  model_loader_extra_config=TensorizerConfig(
+                                      tensorizer_uri=model_path,
+                                      num_readers=1,
+                                      vllm_tensorized=False))
 
     deserialized_outputs = loaded_hf_model.generate_greedy(
         prompts, max_tokens=max_tokens)
@@ -190,10 +193,12 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(
         model_ref,
-        tensorizer_uri=model_path,
         load_format="tensorizer",
-        num_readers=1,
-        vllm_tensorized=True,
+        model_loader_extra_config=TensorizerConfig(
+            tensorizer_uri=model_path,
+            num_readers=1,
+            vllm_tensorized=True,
+        ),
         enable_lora=True,
         max_loras=1,
         max_lora_rank=8,
@@ -208,7 +213,9 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
 
 def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
-        vllm_runner(model_ref, tensorizer_uri="test")
+        vllm_runner(model_ref,
+                    model_loader_extra_config=TensorizerConfig(
+                        tensorizer_uri="test", vllm_tensorized=False))
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
@@ -271,7 +278,8 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref,
                     load_format="safetensors",
-                    tensorizer_uri="test")
+                    model_loader_extra_config=TensorizerConfig(
+                        tensorizer_uri="test", vllm_tensorized=False))
 
 
 def test_tensorizer_with_tp(vllm_runner):
@@ -281,11 +289,13 @@ def test_tensorizer_with_tp(vllm_runner):
 
         vllm_runner(
             model_ref,
-            tensorizer_uri=tensorized_path,
             load_format="tensorizer",
-            num_readers=1,
-            vllm_tensorized=False,
-            s3_endpoint="object.ord1.coreweave.com",
+            model_loader_extra_config=TensorizerConfig(
+                tensorizer_uri=tensorized_path,
+                num_readers=1,
+                vllm_tensorized=False,
+                s3_endpoint="object.ord1.coreweave.com",
+            ),
             tensor_parallel_size=2,
         )
 

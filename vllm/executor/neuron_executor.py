@@ -1,8 +1,8 @@
 from typing import Dict, List, Optional, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,6 +20,7 @@ class NeuronExecutor(ExecutorBase):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
@@ -30,6 +31,7 @@ class NeuronExecutor(ExecutorBase):
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.load_config = load_config
         assert (not speculative_config
                 ), "Speculative decoding not yet supported for Neuron backend."
 

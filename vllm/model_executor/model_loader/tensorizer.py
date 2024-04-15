@@ -6,12 +6,13 @@ import time
 import typing
 import warnings
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Type, Union
+from transformers import PretrainedConfig
 
 import torch
 from torch import nn
 
-from vllm.config import TensorizerConfig
+from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -31,11 +32,61 @@ except ImportError:
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
     'TensorSerializer', 'open_stream', 'convert_bytes', 'get_mem_usage',
-    'no_init_or_tensor'
+    'no_init_or_tensor', 'TensorizerConfig'
 ]
 
 logger = init_logger(__name__)
 
+
+@dataclass
+class TensorizerConfig:
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
+                          str, bytes, os.PathLike, int]
+    vllm_tensorized: bool
+    verify_hash: Optional[bool] = False
+    num_readers: Optional[int] = 1
+    encryption_keyfile: Optional[str] = None
+    s3_access_key_id: Optional[str] = None
+    s3_secret_access_key: Optional[str] = None
+    s3_endpoint: Optional[str] = None
+    model_class: Optional[Type[torch.nn.Module]] = None
+    hf_config: Optional[PretrainedConfig] = None
+    dtype: Optional[Union[str, torch.dtype]] = None
+
+    def _construct_tensorizer_args(self) -> "TensorizerArgs":
+        from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
+        tensorizer_args = {
+            "tensorizer_uri": self.tensorizer_uri,
+            "vllm_tensorized": self.vllm_tensorized,
+            "verify_hash": self.verify_hash,
+            "num_readers": self.num_readers,
+            "encryption_keyfile": self.encryption_keyfile,
+            "s3_access_key_id": self.s3_access_key_id,
+            "s3_secret_access_key": self.s3_secret_access_key,
+            "s3_endpoint": self.s3_endpoint,
+        }
+        return TensorizerArgs(**tensorizer_args)
+
+    def verify_with_parallel_config(
+        self,
+        parallel_config: "ParallelConfig",
+    ) -> None:
+        if (parallel_config.tensor_parallel_size > 1
+                and self.tensorizer_uri is not None):
+            raise ValueError(
+                "Loading to multiple GPUs is not currently supported with "
+                "vLLM-serialized models. Please set tensor_parallel_size=1."
+                " or use a non-vLLM-serialized model, such as a "
+                "serialized Hugging Face `PretrainedModel`.")
+
+    def verify_with_model_config(self, model_config: "ModelConfig") -> None:
+        if (model_config.quantization is not None
+                and self.tensorizer_uri is not None):
+            from vllm.model_executor.model_loader.tensorizer import (
+                tensorizer_warning)
+            tensorizer_warning(
+                "Loading a model using Tensorizer with quantization on vLLM"
+                " is unstable and may lead to errors.")
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
@@ -51,11 +102,6 @@ def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
     if tensorizer_config is None:
         return False
     return tensorizer_config.vllm_tensorized
-
-
-class ParameterizedLoadFormat(str):
-    __slots__ = "params"
-
 
 class PerformanceWarning(UserWarning):
 
@@ -222,7 +268,7 @@ class TensorizerAgent:
     behavior of the TensorDeserializer when loading tensors from a serialized
     model. For deserializations of HuggingFace models, TensorDeserializer is
     instead used as an iterator directly in the func hf_model_weights_iterator
-    in vllm/model_executor/weight_utils.py
+    in vllm/model_executor/model_loader/weight_utils.py
     """
 
     def __init__(self, tensorizer_config: TensorizerConfig,
@@ -317,3 +363,20 @@ class TensorizerAgent:
         self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
         return self.model.eval()
+
+def tensorizer_weights_iterator(tensorizer_args: "TensorizerArgs"):
+    tensorizer_warning(
+        "Deserializing HuggingFace models is not optimized for "
+        "loading on vLLM, as tensorizer is forced to load to CPU. "
+        "Consider deserializing a vLLM model instead for faster "
+        "load times. See the examples/tensorize_vllm_model.py example "
+        "script for serializing vLLM models.")
+
+    deserializer_args = tensorizer_args.deserializer_params
+    stream_params = tensorizer_args.stream_params
+    stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
+    with TensorDeserializer(stream, **deserializer_args,
+                            device="cpu") as state:
+        for name, param in state.items():
+            yield name, param
+    del state
