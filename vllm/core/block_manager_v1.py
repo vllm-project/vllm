@@ -1,7 +1,6 @@
 """A block manager that manages token blocks."""
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Sequence as GenericSequence
 from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional, Set
@@ -16,6 +15,8 @@ from vllm.utils import Device
 if sys.version_info.minor == 8:
     # collections.abc.Sequence is not subscriptable in python 3.8
     from typing import Sequence as GenericSequence
+else:
+    from collections.abc import Sequence as GenericSequence
 
 
 logger = init_logger(__name__)

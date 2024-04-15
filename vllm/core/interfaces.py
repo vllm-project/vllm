@@ -1,7 +1,6 @@
 import enum
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Sequence as GenericSequence
 from typing import Dict, List
 
 from vllm.sequence import Sequence, SequenceGroup
@@ -9,6 +8,8 @@ from vllm.sequence import Sequence, SequenceGroup
 if sys.version_info.minor == 8:
     # collections.abc.Sequence is not subscriptable in python 3.8
     from typing import Sequence as GenericSequence
+else:
+    from collections.abc import Sequence as GenericSequence
 
 
 class AllocStatus(enum.Enum):

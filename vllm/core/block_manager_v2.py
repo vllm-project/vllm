@@ -1,6 +1,5 @@
 """A block manager that manages token blocks."""
 import sys
-from collections.abc import Sequence as GenericSequence
 from typing import Dict, List, Optional
 
 from vllm.core.block.block_table import BlockTable
@@ -12,6 +11,8 @@ from vllm.utils import Device
 if sys.version_info.minor == 8:
     # collections.abc.Sequence is not subscriptable in python 3.8
     from typing import Sequence as GenericSequence
+else:
+    from collections.abc import Sequence as GenericSequence
 
 SeqId = int
 

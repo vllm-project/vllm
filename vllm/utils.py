@@ -7,7 +7,7 @@ import subprocess
 import sys
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
@@ -22,6 +22,9 @@ from vllm.logger import init_logger
 if sys.version_info.minor == 8:
     # collections.OrderedDict is not subscriptable in python 3.8
     from typing import OrderedDict
+else:
+    from collections import OrderedDict
+
 
 T = TypeVar("T")
 logger = init_logger(__name__)
