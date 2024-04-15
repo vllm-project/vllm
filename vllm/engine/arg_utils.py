@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.utils import str_to_int_tuple
+from vllm.model_executor.layers.quantization import _QUANTIZATION_CONFIG_REGISTRY
 
 
 @dataclass
@@ -291,7 +292,7 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=str,
-                            choices=['awq', 'gptq', 'squeezellm', None],
+                            choices=[*_QUANTIZATION_CONFIG_REGISTRY, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '

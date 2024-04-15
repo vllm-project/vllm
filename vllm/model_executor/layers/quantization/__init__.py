@@ -8,10 +8,10 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 
 _QUANTIZATION_CONFIG_REGISTRY = {
-    "awq": AWQConfig,
-    "gptq": GPTQConfig,
-    "squeezellm": SqueezeLLMConfig,
-    "marlin": MarlinConfig,
+    "awq": 1,
+    "gptq": 2,
+    "squeezellm": 3,
+    "marlin": 4,
 }
 
 
@@ -24,4 +24,5 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
 __all__ = [
     "QuantizationConfig",
     "get_quantization_config",
+    "_QUANTIZATION_CONFIG_REGISTRY",
 ]
