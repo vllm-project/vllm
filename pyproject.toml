@@ -57,7 +57,7 @@ exclude = [
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts,./benchmarks/sonnet.txt"
+skip = "./tests/prompts,./benchmarks/sonnet.txt,./vllm/entrypoints/kobold/klite.embd"
 
 [tool.isort]
 use_parentheses = true
