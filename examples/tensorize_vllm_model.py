@@ -23,10 +23,11 @@ from vllm.model_executor.tensorizer_loader import TensorizerArgs
 # yapf: disable
 """
 tensorize_vllm_model.py is a script that can be used to serialize and 
-deserialize vLLM models. These models can be loaded using tensorizer directly 
-to the GPU extremely quickly. Tensor encryption and decryption is also 
-supported, although libsodium must be installed to use it. Install
-vllm with tensorizer support using `pip install vllm[tensorizer]`.
+deserialize vLLM models. These models can be loaded using tensorizer 
+to the GPU extremely quickly over an HTTP/HTTPS endpoint, an S3 endpoint,
+or locally. Tensor encryption and decryption is also supported, although 
+libsodium must be installed to use it. Install vllm with tensorizer support 
+using `pip install vllm[tensorizer]`.
 
 To serialize a model, you can run something like this:
 
@@ -63,6 +64,19 @@ they were serialized with encryption.
 
 For more information on the available arguments, run 
 `python tensorize_vllm_model.py --help`.
+
+Once a model is serialized, it can be used to load the model when running the
+OpenAI inference client at `vllm/entrypoints/openai/api_server.py` by providing
+the `--tensorizer-uri` CLI argument that is functionally the same as the
+`--path-to-tensors` argument in this script, along with `--vllm-tensorized`, to
+signify that the model to be deserialized is a vLLM model, rather than a 
+HuggingFace `PreTrainedModel`, which can also be deserialized using tensorizer
+in the same inference server, albeit without the speed optimizations. To
+deserialize an encrypted file, the `--encryption-keyfile` argument can be used
+to provide the path to the keyfile used to encrypt the model weights. For
+information on all the arguments that can be used to configure tensorizer's
+deserialization, check out the tensorizer options argument group in the
+`vllm/entrypoints/openai/api_server.py` script with `--help`.
 """
 
 

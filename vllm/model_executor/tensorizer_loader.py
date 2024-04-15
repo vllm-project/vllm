@@ -145,7 +145,7 @@ class TensorizerArgs:
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
 
-        # Create the argument group
+        # Tensorizer options arg group
         group = parser.add_argument_group(
             'tensorizer options',
             description=('Options for configuring the behavior of the'
