@@ -272,6 +272,8 @@ class Worker(WorkerBase):
                                                 self.model_config,
                                                 self.parallel_config)
 
+    def release_mamba_cache(self,requests_id:List[str]):
+        self.model_runner.release_mamba_cache(requests_id)
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
