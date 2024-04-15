@@ -1,10 +1,10 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+                         TensorizerConfig, VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -27,6 +27,7 @@ class XPUExecutor(ExecutorBase):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        tensorizer_config: Optional[TensorizerConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
         assert (not speculative_config
@@ -41,6 +42,7 @@ class XPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+        self.tensorizer_config = tensorizer_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_worker()
@@ -65,6 +67,7 @@ class XPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
+            tensorizer_config=self.tensorizer_config,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
@@ -80,7 +83,7 @@ class XPUExecutor(ExecutorBase):
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

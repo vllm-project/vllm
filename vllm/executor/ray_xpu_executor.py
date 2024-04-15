@@ -3,7 +3,7 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
@@ -275,7 +275,7 @@ class RayXPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -290,6 +290,7 @@ class RayXPUExecutor(ExecutorBase):
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
+            assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
@@ -368,7 +369,7 @@ class RayXPUExecutorAsync(RayXPUExecutor, ExecutorAsyncBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Any:
