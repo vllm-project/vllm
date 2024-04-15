@@ -183,7 +183,7 @@ class TLGv4SelfAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_embedding_base,
-            rope_scaling={"type":"linear","factor":self.rope_position_scale},
+            rope_scaling={"type":"linear","factor": self.rope_position_scale},
         )
 
         #blocksparse params
@@ -191,21 +191,28 @@ class TLGv4SelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.sliding_window = self.blocksparse_block_size * self.blocksparse_num_local_blocks
 
-        # self.attn = Attention(self.num_heads,
-        #                       self.num_heads_per_partition,
-        #                       self.scale,
-        #                       num_kv_heads=self.num_kv_heads_per_partion)
+        # TLGv4.8
+        use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
+            (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        self.attn = BlockSparseFlashAttention(
-                              self.lcoal_blocks,
-                              self.vert_stride,
-                              self.num_heads_per_partition,
-                              self.head_dim,
-                              self.scale,
-                              max_seqlen=self.max_position_embeddings,
-                              sparse_block_size=self.sparse_block_size,
-                              num_kv_heads=self.num_kv_heads_per_partion,
-                              layer_idx=layer_idx)
+        assert not use_dense_attn
+        # use_dense_attn = True
+        if use_dense_attn:
+            self.attn = Attention(self.num_heads_per_partition,
+                                self.head_dim,
+                                self.scale,
+                                num_kv_heads=self.num_kv_heads_per_partion)
+        else:
+            self.attn = BlockSparseFlashAttention(
+                                  self.lcoal_blocks,
+                                  self.vert_stride,
+                                  self.num_heads_per_partition,
+                                  self.head_dim,
+                                  self.scale,
+                                  max_seqlen=self.max_position_embeddings,
+                                  sparse_block_size=self.sparse_block_size,
+                                  num_kv_heads=self.num_kv_heads_per_partion,
+                                  layer_idx=layer_idx)
 
     def forward(
         self,
@@ -272,7 +279,7 @@ class TLGv4DecoderLayer(nn.Module):
 
 class TLGv4Model(nn.Module):
 
-    def __init__(self, config:TLGv4Config,linear_method: Optional[LinearMethodBase] = None,):
+    def __init__(self, config:TLGv4Config, linear_method: Optional[LinearMethodBase] = None,):
         super().__init__()
         self.config = config
 

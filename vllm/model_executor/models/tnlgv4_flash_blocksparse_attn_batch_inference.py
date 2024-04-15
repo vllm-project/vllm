@@ -228,23 +228,36 @@ def _fwd_kernel_inner(
     if LAST_K_BLOCK | M_LT_N:
         qk += tl.where(offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0, float('-inf'))
 
-    # -- compute m_ij, p, l_ij
-    m_ij = tl.max(qk, 1)
-    p = tl.exp(qk - m_ij[:, None])
+    # ### flash-attn 1
+    # # -- compute m_ij, p, l_ij
+    # m_ij = tl.max(qk, 1)
+    # p = tl.exp(qk - m_ij[:, None])
+    # l_ij = tl.sum(p, 1)
+    # # -- update m_i and l_i
+    # m_i_new = tl.maximum(m_i, m_ij)
+    # alpha = tl.exp(m_i - m_i_new)
+    # beta = tl.exp(m_ij - m_i_new)
+    # l_i_new = alpha * l_i + beta * l_ij
+    # # -- update output accumulator --
+    # # scale p
+    # p_scale = beta / l_i_new
+    # p = p * p_scale[:, None]
+    # # scale acc
+    # acc_scale = l_i / l_i_new * alpha
+    # acc = acc * acc_scale[:, None]
+    # # update m_i and l_i
+    # l_i = l_i_new
+    # m_i = m_i_new
 
+    ### flash-attn2
+    m_ij = tl.maximum(m_i, tl.max(qk, 1))
+    p = tl.math.exp2(qk - m_ij[:, None])
     l_ij = tl.sum(p, 1)
-    # -- update m_i and l_i
-    m_i_new = tl.maximum(m_i, m_ij)
-    alpha = tl.exp(m_i - m_i_new)
-    beta = tl.exp(m_ij - m_i_new)
-    l_i_new = alpha * l_i + beta * l_ij
-    # -- update output accumulator --
-    # scale p
-    p_scale = beta / l_i_new
-    p = p * p_scale[:, None]
-    # scale acc
-    acc_scale = l_i / l_i_new * alpha
-    acc = acc * acc_scale[:, None]
+    alpha = tl.math.exp2(m_i - m_ij)
+    acc = acc * alpha[:, None]
+    # update m_i
+    m_i = m_ij
+    l_i = l_i * alpha + l_ij
 
     p = p.to(Q.dtype.element_ty)
     # update acc
@@ -263,9 +276,7 @@ def _fwd_kernel_inner(
                         mask=offs_d[None, :] < D_HEAD)
 
     acc += tl.dot(p, v)
-    # update m_i and l_i
-    l_i = l_i_new
-    m_i = m_i_new
+
     return acc, l_i, m_i
 
 
@@ -402,6 +413,8 @@ def _fwd_kernel_batch_inference(
     k_ptrs = K + offs_n[None, :] * stride_kt + offs_d[:, None] * stride_kd
     v_ptrs = V + offs_n[:, None] * stride_vt + offs_d[None, :] * stride_vd
 
+    sm_scale *= 1.44269504 # 1/log2 as we use base2 for exponential and logorithm
+
     for k_block_col_idx in range(k_block_start, k_block_end - 1):
         acc, l_i, m_i = _fwd_kernel_inner(
             acc, l_i, m_i,
@@ -444,6 +457,10 @@ def _fwd_kernel_batch_inference(
         EVEN_D,
         M_LT_N
         )
+
+    ### flash-attn 2
+    m_i += tl.math.log2(l_i)
+    acc = acc / l_i[:, None]
 
     # write output
     if EVEN_D:

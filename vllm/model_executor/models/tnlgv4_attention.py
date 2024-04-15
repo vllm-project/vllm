@@ -275,7 +275,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         # print(f'>> {self.num_heads=}, {self.num_kv_heads}')
         # print(f'----> {self.layer_idx=}')
 
-
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
@@ -360,7 +359,13 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             #             }, '/tmp/vllm.pt')
 
             # exit()
-            output = self.bs_paged_attn(query, key_cache, value_cache, attn_metadata.block_tables, attn_metadata.context_lens, sm_scale=self.scale)
+
+            # output = query
+            output = self.bs_paged_attn(query, key_cache, value_cache,
+                                        attn_metadata.block_tables,
+                                        attn_metadata.context_lens,
+                                        sm_scale=self.scale,
+                                        kv_scale=kv_scale)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

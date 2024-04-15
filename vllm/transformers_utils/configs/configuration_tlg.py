@@ -25,14 +25,15 @@ from transformers.utils import logging
 """ TNLGv4 model configuration """
 logger = logging.get_logger(__name__)
 
-TLG_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-    "tnlgv4": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tnlgv4/huggingface/config.json",
-    "tlgv4.6": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tlgv4.6/huggingface/config.json",
-}
+# TLG_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+#     "tnlgv4": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tnlgv4/huggingface/config.json",
+#     "tlgv4.6": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tlgv4.6/huggingface/config.json",
+# }
 
 
 def next_mult(x, y):
     return (x + y - 1) // y * y
+
 
 class TLGv4Config(PretrainedConfig):
     """
@@ -173,6 +174,7 @@ class TLGv4Config(PretrainedConfig):
         bos_token_id: Optional[int] = None,
         eos_token_id: int = 100257,
         reorder_and_upcast_attn=False,
+        dense_attention_every_n_layers: int = 0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -215,6 +217,7 @@ class TLGv4Config(PretrainedConfig):
 
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+        self.dense_attention_every_n_layers = dense_attention_every_n_layers
 
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
