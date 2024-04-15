@@ -17,11 +17,11 @@ class BlockMetaData:
     def __init__(
         self,
         computed: bool = False,
-        last_accessed: int = 0,
+        last_accessed: float = 0,
         token_ids_len: int = 0,
     ):
         self.computed: bool = computed
-        self.last_accessed: int = last_accessed
+        self.last_accessed: float = last_accessed
         self.token_ids_len: int = token_ids_len
 
 
@@ -390,7 +390,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         ids_list = [self.get_all_computed_blocks(seq) for seq in seq_block_ids]
         return commonprefix([ids for ids in ids_list if ids != []])
 
-    def access_all_blocks_in_seq(self, seq_block_ids: List[int], now: int):
+    def access_all_blocks_in_seq(self, seq_block_ids: List[int], now: float):
         for block_id in seq_block_ids:
             # If there's a mutable block at the end of the sequence it won't
             # be in _block_meta_data yet since it's not cached.

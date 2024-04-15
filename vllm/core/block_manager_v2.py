@@ -159,7 +159,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert all(b is not None for b in block_ids)
         return block_ids
 
-    def access_all_blocks_in_seq(self, seq: Sequence, now: int):
+    def access_all_blocks_in_seq(self, seq: Sequence, now: float):
         if self.enable_caching:
             self.block_allocator.access_all_blocks_in_seq(
                 self.get_block_table(seq), now)

@@ -195,7 +195,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         device = Device.GPU
         return self._allocators[device].mark_blocks_as_computed()
 
-    def access_all_blocks_in_seq(self, seq: List[int], now) -> None:
+    def access_all_blocks_in_seq(self, seq: List[int], now: float) -> None:
         # Prefix caching only supported on GPU.
         device = Device.GPU
         return self._allocators[device].access_all_blocks_in_seq(seq, now)
