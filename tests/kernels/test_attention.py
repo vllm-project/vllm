@@ -3,11 +3,12 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
+from allclose_default import get_default_atol, get_default_rtol
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
-from vllm._C import ops, cache_ops
-from vllm.utils import get_max_shared_memory_bytes
+from vllm import _custom_ops as ops
+from vllm.utils import get_max_shared_memory_bytes, is_hip
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -17,15 +18,21 @@ MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
 PARTITION_SIZE = 512
-
-DTYPES = [torch.half, torch.bfloat16, torch.float]
+# flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
+DTYPES = [torch.half, torch.bfloat16, torch.float
+          ] if not is_hip() else [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 256]
+
+# FlashAttention forward only supports head dimension at most 128
+# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
+HEAD_SIZES = [64, 80, 96, 112, 128, 256
+              ] if not is_hip() else [64, 80, 96, 112, 128]
+
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
+KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -165,6 +172,9 @@ def test_paged_attention(
                                                 device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
+    # Using default kv_scale
+    kv_scale = 1.0
+
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
@@ -181,6 +191,7 @@ def test_paged_attention(
             max_context_len,
             alibi_slopes,
             kv_cache_dtype,
+            kv_scale,
         )
     elif version == "v2":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
@@ -212,12 +223,13 @@ def test_paged_attention(
             max_context_len,
             alibi_slopes,
             kv_cache_dtype,
+            kv_scale,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")
 
     # Run the reference implementation.
-    if kv_cache_dtype == "fp8_e5m2":
+    if kv_cache_dtype == "fp8":
         # Convert cache data back to dtype.
         x = 16 // torch.tensor([], dtype=dtype).element_size()
         key_cache_shape = (NUM_BLOCKS, num_kv_heads, head_size // x,
@@ -225,14 +237,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
                                             device=device)
-        cache_ops.convert_fp8_e5m2(key_cache, dequantized_key_cache)
+        ops.convert_fp8(key_cache, dequantized_key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
                                               device=device)
-        cache_ops.convert_fp8_e5m2(value_cache, dequantized_value_cache)
+        ops.convert_fp8(value_cache, dequantized_value_cache)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)
@@ -251,10 +263,13 @@ def test_paged_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
+    atol = get_default_atol(output) if is_hip() else 1e-3
+    rtol = get_default_rtol(output) if is_hip() else 1e-5
+
     # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
     # so we use a relaxed tolerance for the test.
     atol, rtol = 1e-3, 1e-5
-    if kv_cache_dtype == "fp8_e5m2":
+    if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
@@ -357,4 +372,6 @@ def test_multi_query_kv_attention(
         scale,
         dtype,
     )
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-5)
+    atol = get_default_atol(output) if is_hip() else 1e-3
+    rtol = get_default_rtol(output) if is_hip() else 1e-5
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)

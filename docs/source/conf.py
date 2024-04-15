@@ -10,19 +10,18 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
-import os
-import sys
-from sphinx.ext import autodoc
 import logging
+import sys
+from typing import List
 
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
+from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
 
 # -- Project information -----------------------------------------------------
 
 project = 'vLLM'
-copyright = '2023, vLLM Team'
+copyright = '2024, vLLM Team'
 author = 'the vLLM Team'
 
 # -- General configuration ---------------------------------------------------
@@ -37,6 +36,8 @@ extensions = [
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "myst_parser",
+    "sphinxarg.ext",
 ]
 
 # Add any paths that contain templates here, relative to this directory.
@@ -45,7 +46,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = []
+exclude_patterns: List[str] = []
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -72,8 +73,17 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
-    "torch", "transformers", "psutil", "aioprometheus", "sentencepiece",
-    "vllm.cuda_utils", "vllm._C"
+    "cpuinfo",
+    "torch",
+    "transformers",
+    "psutil",
+    "prometheus_client",
+    "sentencepiece",
+    "vllm.cuda_utils",
+    "vllm._C",
+    "numpy",
+    "tqdm",
+    "tensorizer",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -94,3 +104,5 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 
 
 autodoc.ClassDocumenter = MockedClassDocumenter
+
+navigation_with_keys = False
