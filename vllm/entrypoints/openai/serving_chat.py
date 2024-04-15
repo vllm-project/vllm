@@ -1,3 +1,4 @@
+import asyncio
 import codecs
 import time
 from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
@@ -30,19 +31,10 @@ class OpenAIServingChat(OpenAIServing):
                  chat_template=None):
         super().__init__(engine=engine,
                          served_model=served_model,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         await_post_init=self._load_chat_template(
+                             chat_template=chat_template))
         self.response_role = response_role
-        try:
-            event_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            event_loop = None
-
-        if event_loop is not None and event_loop.is_running(
-        ):  # If the current is instanced by Ray Serve, there is already a running event loop
-            event_loop.create_task(
-                self._load_chat_template_async(chat_template))
-        else:  # When using single vLLM without engine_use_ray
-            self._load_chat_template(chat_template)
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -324,7 +316,10 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    def _load_chat_template(self, chat_template):
+    async def _load_chat_template(self, chat_template):
+        while self.tokenizer is None:
+            # Give the parent class time to load the tokenizer
+            await asyncio.sleep(0.1)
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
@@ -345,9 +340,3 @@ class OpenAIServingChat(OpenAIServing):
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
-
-    async def _load_chat_template_async(self, chat_template):
-        while self.tokenizer is None:
-            # Give the parent class time to laod the tokenizer
-            await asyncio.sleep(0.1)
-        self._load_chat_template(chat_template)

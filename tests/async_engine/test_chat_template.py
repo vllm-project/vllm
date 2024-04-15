@@ -59,12 +59,12 @@ class MockTokenizer:
 class MockServingChat:
     tokenizer: MockTokenizer
 
-
-def test_load_chat_template():
+@pytest.mark.asyncio
+async def test_load_chat_template():
     # Testing chatml template
     tokenizer = MockTokenizer()
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
                                           chat_template=chatml_jinja_path)
 
     template_content = tokenizer.chat_template
@@ -75,14 +75,14 @@ def test_load_chat_template():
     assert template_content == """{% for message in messages %}{{'<|im_start|>' + message['role'] + '\\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '\\n'}}{% endif %}{% endfor %}
 {% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
 
-
-def test_no_load_chat_template():
+@pytest.mark.asyncio
+async def test_no_load_chat_template():
     # Testing chatml template
     template = "../../examples/does_not_exist"
     tokenizer = MockTokenizer()
 
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
                                           chat_template=template)
     template_content = tokenizer.chat_template
 
@@ -101,7 +101,7 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
                                           chat_template=template)
 
     # Create a mock request object using keyword arguments
