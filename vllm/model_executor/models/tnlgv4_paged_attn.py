@@ -19,9 +19,10 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     sparse_layout,
     *,
     vllm_block_size=16,
-    block_size=64,
+    sparse_block_size=64,
     kv_scale=1,
-    k_split=1,
+    num_local_blocks=16,
+    split_local_stride=False,
     max_seqlen=None,
 ):
     # print(f'> {q.shape=}, {k.shape=}, {v.shape=}, {block_tables.shape=}, {context_lens.shape=}')
@@ -43,10 +44,9 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     # q_batch_ids = torch.arange(batches, dtype=torch.int32, device=q.device)
     # q_start_sids = torch.zeros_like(q_batch_ids)
 
-    out = q.new_zeros(q.shape)
-
     # the following is only needed to determined q/k len
     context_lens = context_lens.contiguous()
+
     # k_batch_starts = torch.zeros_like(context_lens)
     # k_batch_ends = context_lens
 
@@ -56,7 +56,7 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     layout_crow_indices, layout_col_indices = sparse_layout
 
     # assert block_size == vllm_block_size
-    assert block_size % vllm_block_size == 0
+    assert sparse_block_size % vllm_block_size == 0
     # if block_size != vllm_block_size:
     #     factor = block_size // vllm_block_size
     #     layout_crow_indices *= factor
@@ -71,17 +71,40 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
         # import ipdb; ipdb.set_trace()
     block_d = triton.next_power_of_2(head_size)
 
+    # if split_local_stride:
+    #     grid = (batches, n_heads + n_heads // q_k_ratio, 1)
+    # else:
     grid = (batches, n_heads, 1)
+    # grid = (batches, n_heads // q_k_ratio, 1)
     # grid = (1, 1, 1)
 
-
+    # print(f'>>> {q.dim()=}, {k.dim()=}, {v.dim()=}, {out.dim()=}, {m.dim()=}, {layout_crow_indices.dim()=}, {layout_col_indices.dim()=}')
     # qk = torch.zeros((vllm_block_size, vllm_block_size), dtype=torch.float32, device=q.device)
     # ko = torch.zeros((vllm_block_size, head_size)).type_as(k)
 
     IS_FP8 = k.element_size() == 1
     X = 16 // k.element_size()
+
+    if split_local_stride:
+        out = q.new_zeros((q.size(0), q.size(1) * 2, q.size(2)))
+        m = q.new_zeros((q.size(0), q.size(1) * 2), dtype=torch.float32) - float('inf')
+        # stream = torch.cuda.Stream()
+        # stream.wait_stream(torch.cuda.default_stream())
+
+        is_locals = context_lens.new_zeros((n_heads + n_heads // q_k_ratio,))
+        is_locals[n_heads:] = 1
+
+        grid = (batches, n_heads + n_heads // q_k_ratio, 1)
+
+    else:
+        out = q.new_zeros(q.shape)
+        m = q.new_zeros((1, 1), dtype=torch.float32)
+        is_locals = context_lens.new_zeros((n_heads,))
+
+
+    print(f'>>> {grid=}, {n_heads=}, {num_local_blocks=}')
     _fwd_kernel_batch_inference_with_blocktable[grid](
-    q, k, v, out,
+    q, k, v, out, m,
     # qk,
     # ko,
 
@@ -92,6 +115,7 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     *k.stride(),
     *v.stride(),
     *out.stride(),
+    *m.stride(),
 
     # *qk.stride(),
     # *ko.stride(
@@ -105,8 +129,13 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     *block_tables.stride(),
 
     kv_scale,
-    X,
-    IS_FP8,
+
+    is_locals,
+    n_heads,
+    num_local_blocks,
+    SPARSE_BLOCK_SIZE=sparse_block_size,
+    X=X,
+    IS_FP8=IS_FP8,
 
     D_HEAD = head_size,
     BLOCK_M = vllm_block_size,
@@ -117,6 +146,71 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
     num_warps = 1,
     num_stages = 3
     )
+
+    # exit()
+    # print(f'>>> {split_local_stride}')
+    if split_local_stride:
+        # grid2 = (batches, n_heads // q_k_ratio, 1)
+
+        # with torch.cuda.stream(stream):
+        #     _fwd_kernel_batch_inference_with_blocktable[grid2](
+        #     q, k, v, out, m,
+        #     # qk,
+        #     # ko,
+
+        #     sm_scale,
+        #     context_lens,
+
+        #     *q.stride(),
+        #     *k.stride(),
+        #     *v.stride(),
+        #     *out.stride(),
+        #     *m.stride(),
+
+        #     # *qk.stride(),
+        #     # *ko.stride(
+        #     layout_crow_indices,
+        #     layout_col_indices,
+        #     *layout_crow_indices.stride(),
+        #     *layout_col_indices.stride(),
+
+        #     q_k_ratio,
+        #     block_tables,
+        #     *block_tables.stride(),
+
+        #     kv_scale,
+
+        #     is_local=True,
+        #     n_heads,
+        #     num_local_blocks,
+        #     SPARSE_BLOCK_SIZE=sparse_block_size,
+
+        #     X=X,
+        #     IS_FP8=IS_FP8,
+
+        #     D_HEAD = head_size,
+        #     BLOCK_M = vllm_block_size,
+        #     BLOCK_N = vllm_block_size,
+        #     BLOCK_D = block_d,
+        #     BLOCK_M_LOADING = 16,
+        #     EVEN_D = block_d == head_size,
+        #     num_warps = 1,
+        #     num_stages = 3
+        #     )
+
+        # # stream.wait_stream(torch.cuda.default_stream())
+        # torch.cuda.default_stream().wait_stream(stream)
+
+        # _b()
+        m = m.view(m.size(0), 2, -1)
+        m = torch.exp2(m)
+        m /= m.sum(1, keepdim=True)
+        # print(f'>>>> {m[:, 0]=}\n{m[:, 1]=}')
+
+        out = out.view(out.size(0), 2, -1, out.size(2))
+        out = out[:, 1]
+        # out = (out * m.unsqueeze(-1).type_as(out)).sum(1)
+
 
     # print(f'... {qk=}')
     # print(f'...{ko=}')
@@ -253,7 +347,7 @@ def _fwd_kernel_inner_with_blocktable(
 
 @triton.jit
 def _fwd_kernel_batch_inference_with_blocktable(
-    Q, K, V, Out,
+    Q, K, V, Out, M,
 
     # QK,
     # KO,
@@ -264,6 +358,7 @@ def _fwd_kernel_batch_inference_with_blocktable(
     stride_kb, stride_kh, stride_kd, stride_kt, stride_kx,
     stride_vb, stride_vh, stride_vd, stride_vt,
     stride_ot, stride_oh, stride_od,
+    stride_mt, stride_mh,
     # stride_qk1, stride_qk2,
     # stride_ko1, stride_ko2,
 
@@ -277,6 +372,12 @@ def _fwd_kernel_batch_inference_with_blocktable(
     stride_btb, stride_btt,
 
     kv_scale,
+
+    is_locals,
+    num_heads: tl.constexpr,
+    num_local_blocks: tl.constexpr,
+    SPARSE_BLOCK_SIZE: tl.constexpr,
+
     X: tl.constexpr,
     IS_FP8: tl.constexpr,
     D_HEAD: tl.constexpr,
@@ -316,140 +417,244 @@ def _fwd_kernel_batch_inference_with_blocktable(
     off_z = tl.program_id(0)
     off_h = tl.program_id(1)
 
-    off_h_for_kv = off_h // q_k_ratio
+    # is_local = tl.program_id(0) >= num_heads
+    # tl.device_print('> is_local:', num_heads)
+
+    is_local = tl.load(is_locals + off_h)
+    # tl.device_print('> is_local:', is_local)
+
+    num_blocks_per_sparse_block: tl.constexpr = SPARSE_BLOCK_SIZE // BLOCK_M
+
+    # is_local = (off_h >= num_heads).to(tl.int32)
+    # off_h_for_kv = off_h - H if is_local else off_h // q_k_ratio
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, D_HEAD)
+    k_seqlen = tl.load(context_lens + off_z).to(tl.int32)
+    q_pid = k_seqlen - 1
+    q_pbid = q_pid // BLOCK_M
+
+
     # off_z = tl.load(q_batch_ids + off_zm).to(tl.int32)   # [0, 0, 0, 1]
     # q_start_sid = tl.load(q_start_sids + off_zm)
     # start_m = q_start_sid // BLOCK_M # q_sbid
 
-    offs_m = tl.arange(0, BLOCK_M_LOADING)
-    offs_n = tl.arange(0, BLOCK_N)
-    offs_d = tl.arange(0, D_HEAD)
+    # tl.device_print('> off_h:', off_h)
 
-    # q_cu_start = tl.load(q_batch_starts + off_z).to(tl.int32)
-    # q_seqlen = tl.load(q_batch_ends + off_z).to(tl.int32) - q_cu_start
+    if is_local:
+        off_h_for_kv = off_h - num_heads
+        q_mask_h = tl.arange(0, BLOCK_M_LOADING)
+        q = tl.load(Q + off_z * stride_qt + (off_h_for_kv * q_k_ratio + q_mask_h[:, None]) * stride_qh + offs_d[None, :] * stride_qd,
+                    mask=q_mask_h[:, None] < q_k_ratio)
+        k_block_start = ((q_pbid // num_blocks_per_sparse_block) - num_local_blocks) * num_blocks_per_sparse_block
+        if k_block_start < 0:
+            k_block_start = 0
+        k_block_end = q_pbid + 1
+        # tl.device_print('> q_pbid',  q_pbid)
 
-    # k_cu_start = tl.load(k_batch_starts + off_z).to(tl.int32)
-    # k_seqlen = tl.load(k_batch_ends + off_z).to(tl.int32) - k_cu_start
-    k_seqlen = tl.load(context_lens + off_z).to(tl.int32)
 
-    q_pid = k_seqlen - 1
-    Q += off_z * stride_qt + off_h * stride_qh
+        # tl.device_print('> off_h, k_seqlen, q_pbid:', off_h, k_seqlen, q_pbid)
 
-    Out += off_z * stride_ot + off_h * stride_oh
-    # q_pbid = (past_len + q_start_sid) // BLOCK_M
-    q_pbid = q_pid // BLOCK_M
+        m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
+        l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) + 1.0
+        acc = tl.zeros([BLOCK_M_LOADING, D_HEAD], dtype=tl.float32)
 
-    # if EVEN_D:
-    #     q = tl.load(Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
-    #                 mask=offs_m[:, None] < q_seqlen)
-    # else:
-    #     q = tl.load(Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
-    #                 mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD),
-    #                 other=0)
+        K += off_h_for_kv * stride_kh
+        V += off_h_for_kv * stride_vh
 
-    if EVEN_D:
-        q = tl.load(Q + offs_d[None, :] * stride_qd)
-    else:
-        q = tl.load(Q + offs_d[None, :] * stride_qd, mask=(offs_d[None, :] < D_HEAD), other=0)
 
-    if IS_FP8:
-        q = q.to(tl.bfloat16)
+        if IS_FP8:
+            q = q.to(tl.bfloat16)
+        sm_scale *= 1.44269504 # 1/log2 as we use base2 for exponential and logorithm
 
-    # q = q.to(tl.float32)
-    q = tl.broadcast_to(q, (BLOCK_M_LOADING, D_HEAD))
+        # TABLE_BLOCK_SIZE = BLOCK_N
+        for k_block_col_idx in range(k_block_start, k_block_end):
+            # tl.device_print('k_block_col_idx', k_block_col_idx)
 
-    # tl.device_print('> past_len, q_seqlen, k_seqlen, q_pbid:',  past_len, q_seqlen, k_seqlen, q_pbid)
-    sparse_crow_ptr = layout_crow_ptr + off_h * layout_crow_stride_h + q_pbid * layout_crow_stride_m
-
-    # TODO: load at once, supported in new Triton
-    k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
-    k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
-
-    m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
-    l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) + 1.0
-    acc = tl.zeros([BLOCK_M_LOADING, D_HEAD], dtype=tl.float32)
-
-    K += off_h_for_kv * stride_kh
-    V += off_h_for_kv * stride_vh
-
-    sm_scale *= 1.44269504 # 1/log2 as we use base2 for exponential and logorithm
-
-    # TABLE_BLOCK_SIZE = BLOCK_N
-    for k_block_col_idx in range(k_block_start, k_block_end - 1):
-        k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + k_block_col_idx * layout_col_stride_m).to(tl.int32)
-
-        k, v = _load_kv(
-            k_block_id,
-            K, V, Q,
-            block_tables,
-            stride_kb, stride_kd, stride_kt, stride_kx,
-            stride_vb, stride_vd, stride_vt,
-            stride_btb, stride_btt,
-            off_z,
-            kv_scale,  # kv_scale
-            BLOCK_N,
-            D_HEAD,
-            X, # X = 16/ #bytes of k dtype
-            IS_FP8, # IS_FP8,
-            BLOCK_D,
-            EVEN_D
-            )
-
-        acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
-                acc, l_i, m_i,
-                q, k, v, Q,
+            k_block_id = k_block_col_idx
+    
+            k, v = _load_kv(
                 k_block_id,
-                offs_n,
-                sm_scale,
-                q_pid,
-                False,
-                BLOCK_M_LOADING,
-                BLOCK_N)
+                K, V, Q,
+                block_tables,
+                stride_kb, stride_kd, stride_kt, stride_kx,
+                stride_vb, stride_vd, stride_vt,
+                stride_btb, stride_btt,
+                off_z,
+                kv_scale,  # kv_scale
+                BLOCK_N,
+                D_HEAD,
+                X, # X = 16/ #bytes of k dtype
+                IS_FP8, # IS_FP8,
+                BLOCK_D,
+                EVEN_D
+                )
 
+            acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+                    acc, l_i, m_i,
+                    q, k, v, Q,
+                    k_block_id,
+                    offs_n,
+                    sm_scale,
+                    q_pid,
+                    True,
+                    BLOCK_M_LOADING,
+                    BLOCK_N)
 
-    k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + (k_block_end - 1) * layout_col_stride_m).to(tl.int32)
-    k, v = _load_kv(
-        k_block_id,
-        K, V, Q,
-        block_tables,
-        stride_kb, stride_kd, stride_kt, stride_kx,
-        stride_vb, stride_vd, stride_vt,
-        stride_btb, stride_btt,
-        off_z,
-        kv_scale,  # kv_scale
-        BLOCK_N,
-        D_HEAD,
-        X, # X = 16/ #bytes of k dtype
-        IS_FP8, # IS_FP8
-        BLOCK_D,
-        EVEN_D
-        )
+        ### flash-attn 2
+        m_i += tl.math.log2(l_i)
+        acc = acc / l_i[:, None]
 
-    acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
-            acc, l_i, m_i,
-            q, k, v, Q,
-            k_block_id,
-            offs_n,
-            sm_scale,
-            q_pid,
-            True,
-            BLOCK_M_LOADING,
-            BLOCK_N)
+        Out += off_z * stride_ot + (off_h_for_kv * q_k_ratio) * stride_oh +  num_heads * stride_oh
+        q_mask_h = tl.arange(0, BLOCK_M_LOADING)
+        tl.store(Out + q_mask_h[:, None] * stride_oh + offs_d[None, :] * stride_od, acc,
+                mask=q_mask_h[:, None] < q_k_ratio)
+        
+        M += off_z * stride_mt + (off_h_for_kv * q_k_ratio) * stride_mh + num_heads * stride_mh
+        tl.store(M + q_mask_h * stride_mh, m_i, mask=q_mask_h < q_k_ratio)
 
-    ### flash-attn 2
-    m_i += tl.math.log2(l_i)
-    acc = acc / l_i[:, None]
-
-
-    # write output
-    if EVEN_D:
-        tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
-                mask=offs_m[:, None] < 1)
     else:
-        tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
-                mask=(offs_m[:, None] < 1) & (offs_d[None, :] < D_HEAD))
+        off_h_for_kv = off_h // q_k_ratio
+        offs_m = tl.arange(0, BLOCK_M_LOADING)
+
+        Q += off_z * stride_qt + off_h * stride_qh
+        Out += off_z * stride_ot + off_h * stride_oh
+    
+        if EVEN_D:
+            q = tl.load(Q + offs_d[None, :] * stride_qd)
+        else:
+            q = tl.load(Q + offs_d[None, :] * stride_qd, mask=(offs_d[None, :] < D_HEAD), other=0)
+
+        # q = q.to(tl.float32)
+        q = tl.broadcast_to(q, (BLOCK_M_LOADING, D_HEAD))
+
+        sparse_crow_ptr = layout_crow_ptr + off_h * layout_crow_stride_h + q_pbid * layout_crow_stride_m
+
+        # TODO: load at once, supported in new Triton
+        k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
+        k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
+
+        m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
+        l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) + 1.0
+        acc = tl.zeros([BLOCK_M_LOADING, D_HEAD], dtype=tl.float32)
+
+        K += off_h_for_kv * stride_kh
+        V += off_h_for_kv * stride_vh
 
 
+        if IS_FP8:
+            q = q.to(tl.bfloat16)
+        sm_scale *= 1.44269504 # 1/log2 as we use base2 for exponential and logorithm
+
+        # TABLE_BLOCK_SIZE = BLOCK_N
+
+        # k_block_ids = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + tl.arange(k_block_start, k_block_end) * layout_col_stride_m)
+
+        for k_block_col_idx in range(k_block_start, k_block_end):
+        # for k_block_id in k_block_ids:
+            k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + k_block_col_idx * layout_col_stride_m).to(tl.int32)
+
+            k, v = _load_kv(
+                k_block_id,
+                K, V, Q,
+                block_tables,
+                stride_kb, stride_kd, stride_kt, stride_kx,
+                stride_vb, stride_vd, stride_vt,
+                stride_btb, stride_btt,
+                off_z,
+                kv_scale,  # kv_scale
+                BLOCK_N,
+                D_HEAD,
+                X, # X = 16/ #bytes of k dtype
+                IS_FP8, # IS_FP8,
+                BLOCK_D,
+                EVEN_D
+                )
+
+            acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+                    acc, l_i, m_i,
+                    q, k, v, Q,
+                    k_block_id,
+                    offs_n,
+                    sm_scale,
+                    q_pid,
+                    True,
+                    BLOCK_M_LOADING,
+                    BLOCK_N)
+
+        ### flash-attn 2
+        m_i += tl.math.log2(l_i)
+        acc = acc / l_i[:, None]
+
+        # write output
+        offs_m = tl.arange(0, BLOCK_M_LOADING)
+        if EVEN_D:
+            tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+                    mask=offs_m[:, None] < 1)
+        else:
+            tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+                    mask=(offs_m[:, None] < 1) & (offs_d[None, :] < D_HEAD))
+
+        M += off_z * stride_mt + off_h * stride_mh
+        tl.store(M + offs_m * stride_mh, m_i, mask=offs_m < 1)
+
+
+    # if is_local:
+    #     k_block_id = k_block_end - 1
+    # else:
+    #     k_block_id = tl.load(layout_col_ptr +  off_h * layout_col_stride_h + (k_block_end - 1) * layout_col_stride_m).to(tl.int32)
+    # k, v = _load_kv(
+    #     k_block_id,
+    #     K, V, Q,
+    #     block_tables,
+    #     stride_kb, stride_kd, stride_kt, stride_kx,
+    #     stride_vb, stride_vd, stride_vt,
+    #     stride_btb, stride_btt,
+    #     off_z,
+    #     kv_scale,  # kv_scale
+    #     BLOCK_N,
+    #     D_HEAD,
+    #     X, # X = 16/ #bytes of k dtype
+    #     IS_FP8, # IS_FP8
+    #     BLOCK_D,
+    #     EVEN_D
+    #     )
+
+    # acc, l_i, m_i = _fwd_kernel_inner_with_blocktable(
+    #         acc, l_i, m_i,
+    #         q, k, v, Q,
+    #         k_block_id,
+    #         offs_n,
+    #         sm_scale,
+    #         q_pid,
+    #         True,
+    #         BLOCK_M_LOADING,
+    #         BLOCK_N)
+
+    # ### flash-attn 2
+    # m_i += tl.math.log2(l_i)
+    # acc = acc / l_i[:, None]
+
+
+    # if is_local:
+    #     Out += off_z * stride_ot + (off_h_for_kv * q_k_ratio) * stride_oh +  num_heads * stride_oh
+    #     q_mask_h = tl.arange(0, BLOCK_M_LOADING)
+    #     tl.store(Out + q_mask_h[:, None] * stride_oh + offs_d[None, :] * stride_od, acc,
+    #             mask=q_mask_h[:, None] < q_k_ratio)
+        
+    #     M += off_z * stride_mt + (off_h_for_kv * q_k_ratio) * stride_mh + num_heads * stride_mh
+    #     tl.store(M + q_mask_h * stride_mh, m_i, mask=q_mask_h < q_k_ratio)
+    # else:
+    #     # write output
+    #     offs_m = tl.arange(0, BLOCK_M_LOADING)
+    #     if EVEN_D:
+    #         tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+    #                 mask=offs_m[:, None] < 1)
+    #     else:
+    #         tl.store(Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od, acc,
+    #                 mask=(offs_m[:, None] < 1) & (offs_d[None, :] < D_HEAD))
+
+    #     M += off_z * stride_mt + off_h * stride_mh
+    #     tl.store(M + offs_m * stride_mh, m_i, mask=offs_m < 1)
 
 
 # @triton.jit
@@ -672,7 +877,8 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
                  local_blocks, vert_stride, block_size,
                 device=None, dtype=torch.bfloat16, homo_head=False,
                 active_head_range=None,
-                vllm_block_size=None):
+                vllm_block_size=None,
+                split_local_stride=True):
         super().__init__()
         device = device or torch.cuda.current_device()
         self.max_seqlen = max_seqlen
@@ -683,6 +889,11 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=vert_stride,
                                                 homo_head=homo_head, return_dense=False)
+        self.split_local_stride = split_local_stride
+        if split_local_stride:
+            sparse_layout, sparse_pattern = self.get_strided_layout(n_heads, max_seqlen, dtype, device,
+                                                                    block_size, local_blocks, vert_stride,
+                                                                    homo_head=homo_head, return_dense=False)
 
         # import ipdb; ipdb.set_trace()
 
@@ -732,10 +943,10 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=max_seqlen + 1,
                                                 homo_head=homo_head, return_dense=return_dense)
-        sparse_pattern_strides = sparse_pattern_local - sparse_pattern_local
-        
+        sparse_pattern_strides = sparse_pattern - sparse_pattern_local
+    
         sparse_layout_strides = dense_to_crow_col(sparse_pattern_strides)
-        assert sparse_layout_strides
+        return sparse_layout_strides, sparse_pattern_strides
 
         # sparse_pattern =
 
@@ -756,13 +967,16 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
         if self.vllm_block_size is None:
             self.set_vllm_block_size(v.size(-1))
 
+
         return blocksparse_flash_attn_varlen_fwd_with_blocktable(q, k, v,
                     block_tables,
                     context_lens,
                     sm_scale,
                     self.sparse_layout,
-                    block_size=self.vllm_block_size,
+                    sparse_block_size=self.block_size,
                     vllm_block_size=self.vllm_block_size,
+                    num_local_blocks=self.local_blocks,
+                    split_local_stride=self.split_local_stride,
                     max_seqlen=self.max_seqlen)
 
     def backward(self, *args):
