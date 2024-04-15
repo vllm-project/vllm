@@ -1,6 +1,7 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
+#include "tunable.h"
 #include <torch/extension.h>
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -123,4 +124,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 "register_graph_buffers");
 #endif
 
+// Tunable Op utils
+  pybind11::module tunable_op = m.def_submodule("tunable_op", "vLLM Tunable Op utilities");
+  tunable_op.def("is_available", &vllm::tunable::is_available, "Is Tunable Op supported in PyTorch?");
+  tunable_op.def("is_enabled", &vllm::tunable::is_enabled, "Is Tunable Op enabled?");
+#ifdef VLLM_TUNABLEOP_AVAILABLE
+  tunable_op.def("enable", &vllm::tunable::enable, "Enables Tunable Op.");
+  tunable_op.def("disable", &vllm::tunable::disable, "Disables Tunable Op.");
+  tunable_op.def("enable_tuning", &vllm::tunable::enable_tuning, "Enables tuning.");
+  tunable_op.def("disable_tuning", &vllm::tunable::disable_tuning, "Disables tuning.");
+  tunable_op.def("is_tuning_enabled", &vllm::tunable::is_tuning_enabled, "Is tuning enabled?");
+  tunable_op.def("set_max_tuning_duration_ms", &vllm::tunable::set_max_tuning_duration_ms,
+                 "Set max tuning duration in milliseconds.");
+  tunable_op.def("get_max_tuning_duration_ms", &vllm::tunable::get_max_tuning_duration_ms,
+                 "Get max tuning duration in milliseconds.");
+  tunable_op.def("set_max_tuning_iterations", &vllm::tunable::set_max_tuning_iterations,
+                 "Set max tuning iterations.");
+  tunable_op.def("get_max_tuning_iterations", &vllm::tunable::get_max_tuning_iterations,
+                 "Get max tuning iterations.");
+  tunable_op.def("set_filename", &vllm::tunable::set_filename,
+                 "Set tuning filename.");
+  tunable_op.def("get_filename", &vllm::tunable::get_filename,
+                 "Get tuning filename.");
+#endif
 }

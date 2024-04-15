@@ -1,13 +1,19 @@
 import enum
+import hashlib
 import json
 import os
+import re
+import shutil
+import string
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, ClassVar, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, Optional, Set, Union
 
+import filelock
 import torch
 from packaging.version import Version
 from transformers import PretrainedConfig
 
+from vllm._C import tunable_op
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
@@ -464,6 +470,161 @@ class TokenizerPoolConfig:
         return tokenizer_pool_config
 
 
+#TODO(mattwong) Helper function for TunableOpConfig, move these somewhere else
+def get_lock(model_name_or_path: str):
+    lock_dir = os.environ.get('TMPDIR') or os.environ.get(
+        'TEMP') or os.environ.get('TMP') or "/tmp/"
+    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+    model_name = model_name_or_path.replace("/", "-")
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # add hash to avoid conflict with old users' lock files
+    lock_file_name = hash_name + model_name + ".lock"
+    # mode 0o666 is required for the filelock to be shared across users
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
+                             mode=0o666)
+    return lock
+
+
+class TunableOpConfig:
+    env_var_prefix: str = "PYTORCH_TUNABLEOP_"
+    tmp_dir: str = "tunable_tmp"
+    binary_env_vars: Set[str] = {
+        "TUNING", "VERBOSE", "NUMERICAL_CHECK", "HIPBLASLT_ENABLED"
+    }
+    numerical_env_vars: Set[str] = {
+        "MAX_TUNING_DURATION_MS", "MAX_TUNING_ITERATIONS",
+        "MAX_WARMUP_DURATION_MS", "MAX_WARMUP_ITERATIONS"
+    }
+
+    def __init__(self, config_str_or_path: Optional[str]):
+        self.config = {}
+        self.to_be_enabled = False
+        self.filename = None
+
+        for name in os.environ:
+            if name.startswith(self.env_var_prefix):
+                val = os.environ.pop(name)
+                short_name = name.replace(self.env_var_prefix, "")
+                if short_name in self.binary_env_vars:
+                    self.config[short_name] = bool(int(val))
+                elif short_name in self.numerical_env_vars:
+                    self.config[short_name] = int(val)
+                elif short_name == "FILENAME":
+                    self.filename = val
+                elif short_name == "ENABLED" and val == "1":
+                    self.to_be_enabled = True
+                else:
+                    logger.warn(
+                        f"Could not recognize Tunable Op env var: {name}={val}"
+                    )
+
+        if not config_str_or_path:
+            return
+        else:
+            self.to_be_enabled = True
+
+        if os.path.isfile(config_str_or_path):
+            with open(config_str_or_path) as f:
+                config_str = f.read()
+        else:
+            config_str = config_str_or_path
+
+        delims = "|".join(char for char in string.whitespace + ',')
+        for env_var_str in re.split(delims, config_str):
+            key, val = env_var_str.split("=")
+            key = key.replace(self.env_var_prefix, "")
+            if key in self.binary_env_vars:
+                self.config[key] = bool(int(val))
+            elif key in self.numerical_env_vars:
+                self.config[key] = int(val)
+            elif key == "FILENAME":
+                self.filename = val
+            elif key == "ENABLED" and val != "1":
+                logger.warn("By specifying a config with --tunable-op-config, "
+                            "Tunable Op is turned on by default. Please omit "
+                            "the argument if you wish to turn off Tunable Op. "
+                            f"Ignoring option {env_var_str}")
+            else:
+                logger.warn(
+                    f"Could not recognize Tunable Op env var: {env_var_str}")
+        if self.filename is None:
+            self.filename = "tunableop_results0.csv"
+
+    @property
+    def base_filename(self):
+        if not os.path.isfile(self.filename):
+            return self.filename
+        idx = self.filename.rfind("0.")
+        if idx != -1:
+            return self.filename[:idx] + self.filename[idx + 1:]
+        return self.filename[:-1]
+
+    @classmethod
+    def _set_env_var(cls, name, val):
+        is_binary = name in cls.binary_env_vars
+        is_numerical = name in cls.numerical_env_vars
+        assert is_binary or is_numerical
+        long_name = cls.env_var_prefix + name
+        if is_binary:
+            os.environ[long_name] = "1" if val else "0"
+        else:  # is_numerical
+            os.environ[long_name] = str(val)
+
+    def apply(self):
+        assert self.to_be_enabled
+        if not tunable_op.is_available():
+            return False
+        tunable_op.enable()
+        if not self.config.get("TUNING", True):
+            tunable_op.disable_tuning()
+
+        tunable_op.set_filename(os.path.join(self.tmp_dir, self.base_filename))
+        tuning_filename = tunable_op.get_filename()
+        if not os.path.isfile(tuning_filename) and os.path.isfile(
+                self.filename):
+            with get_lock(self.tmp_dir):
+                try:
+                    os.makedirs(os.path.dirname(tuning_filename),
+                                exist_ok=True)
+                    shutil.copy2(self.filename, tuning_filename)
+                except:
+                    self.cleanup(True)
+                    raise
+        for name, val in self.config.items():
+            if name == "MAX_TUNING_DURATION_MS":
+                tunable_op.set_max_tuning_duration_ms(val)
+            elif name == "MAX_TUNING_ITERATIONS":
+                tunable_op.set_max_tuning_iterations(val)
+            else:
+                self._set_env_var(name, val)
+        return tunable_op.is_tuning_enabled()
+
+    def cleanup(self, is_driver_worker: bool):
+        if is_driver_worker and os.path.isdir(self.tmp_dir):
+            shutil.rmtree(self.tmp_dir)
+            tunable_op.set_filename(self.base_filename)
+
+    def _verify_args(self):
+        if self.to_be_enabled:
+            if not tunable_op.is_available():
+                logger.warn(
+                    "Tunable Op config was specified, however Tunable Op "
+                    "is not supported! Tunable Op will not be enabled.")
+                self.to_be_enabled = False
+            for key, val in self.config.items():
+                if key in self.numerical_env_vars and val < 0:
+                    raise ValueError("Invalid Tunable Op config specified: "
+                                     f"{key}={val}")
+
+            if os.path.isfile(self.filename):
+                assert "%d" not in self.filename
+                idx = self.filename.rfind(".")
+                if idx != -1:
+                    assert idx >= 1 and self.filename[idx - 1] == "0"
+                else:
+                    assert self.filename[-1] == "0"
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
@@ -489,6 +650,7 @@ class ParallelConfig:
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: bool,
+        tunable_op_config: Optional[str],
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
@@ -499,6 +661,7 @@ class ParallelConfig:
         self.tensor_parallel_size = tensor_parallel_size
         self.worker_use_ray = worker_use_ray
         self.worker_use_torchrun = False
+        self.tunable_op_config = TunableOpConfig(tunable_op_config)
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -538,6 +701,7 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.worker_use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
+        self.tunable_op_config._verify_args()
 
 
 class SchedulerConfig:

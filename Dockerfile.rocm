@@ -173,6 +173,8 @@ RUN if [ "$BUILD_PYTORCH" = "1" ]; then \
     && git submodule sync \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
+    && sed -i 's/class TuningContext/class TORCH_CUDA_CPP_API TuningContext/g' aten/src/ATen/cuda/tunable/Tunable.h \
+    && sed -i 's/TuningContext\* getTuningContext/TORCH_CUDA_CPP_API TuningContext\* getTuningContext/g' aten/src/ATen/cuda/tunable/Tunable.h \
     && python3 tools/amd_build/build_amd.py; \
     fi
 
@@ -271,17 +273,6 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     fi
 
 
-# Install gradlib
-RUN mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/gradlib \
-    && cd gradlib \
-    && pip install . \
-    && cd .. \
-    && rm -rf gradlib \
-    && cd ..
-
-
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip numba
@@ -298,6 +289,15 @@ RUN cd /app \
     && sed -i -e "s/foreach (_ARCH \${CMAKE_HIP_ARCHITECTURES})/foreach (_ARCH \${PYTORCH_ROCM_ARCH})/g" cmake/utils.cmake \
     && python3 setup.py clean --all && python3 setup.py develop \
     && cd ..
+
+
+# Install gradlib
+RUN cd /app/vllm \
+    && git clone https://github.com/ROCm/gradlib \
+    && cd gradlib \
+    && pip install . \
+    && cd ../..
+
 
 # Update Ray to latest version + set environment variable to ensure it works on TP > 1
 RUN python3 -m pip install --no-cache-dir ray[all]==2.10.0

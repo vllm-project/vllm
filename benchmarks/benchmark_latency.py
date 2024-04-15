@@ -30,7 +30,8 @@ def main(args: argparse.Namespace):
               worker_use_ray=args.worker_use_ray,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
-              block_size=args.block_size)
+              block_size=args.block_size,
+              tunable_op_config=args.tunable_op_config)
 
     sampling_params = SamplingParams(
         n=args.n,
@@ -197,5 +198,14 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
+    parser.add_argument('--tunable-op-config',
+        help='If specified, Tunable Op is enabled. A string can be '
+        'optionally specified which changes the default behavior of '
+        'Tunable Op. This string can either be a whitespace- or '
+        'comma-separated list of environment variables, or a path to '
+        'a file containing such a list. The list of recognized '
+        'environment variables can be found at '
+        'https://github.com/pytorch/pytorch/tree/main/aten/src/ATen/cuda/tunable'
+    )
     args = parser.parse_args()
     main(args)
