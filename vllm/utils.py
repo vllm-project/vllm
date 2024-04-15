@@ -6,11 +6,12 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, Tuple, TypeVar, Union)
+                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Union)
 
 import psutil
 import torch
@@ -51,7 +52,7 @@ class Counter:
 class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
-        self.cache = OrderedDict[Hashable, T]()
+        self.cache: OrderedDict[Hashable, T] = OrderedDict()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
