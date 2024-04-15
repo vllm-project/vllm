@@ -69,6 +69,11 @@ class SequenceStatus(enum.Enum):
         return finish_reason
 
 
+class SequenceStage(enum.Enum):
+    PREFILL = enum.auto()
+    DECODE = enum.auto()
+
+
 @dataclass
 class RequestMetrics:
     """Metrics associated with a request.
@@ -115,6 +120,7 @@ class SequenceData:
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
+        self._stage: SequenceStage = SequenceStage.PREFILL
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -136,16 +142,22 @@ class SequenceData:
         """Return the number of prefill tokens that are already computed."""
         return self._num_computed_tokens
 
-    def update_num_computed_tokens(self, num_new_computed_tokens: int) -> int:
+    def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
         self._num_computed_tokens += num_new_computed_tokens
+        assert self._num_computed_tokens <= self.get_len(), (
+            self._num_computed_tokens, self.get_len())
+        # If all tokens are computed, it means it is in decoding phase.
+        if self.get_num_uncomputed_tokens() == 0:
+            self._stage = SequenceStage.DECODE
 
-    def reset_num_computed_tokens(self) -> None:
+    def reset_state_for_recompute(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
         supposed to be called when a sequence needs to be started from
         the beginning again (e.g., sequence is preempted).
         """
         self._num_computed_tokens = 0
+        self._stage = SequenceStage.PREFILL
 
     def get_num_uncomputed_tokens(self) -> int:
         """Return the number of prefil tokens that are not computed."""
@@ -159,11 +171,15 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> int:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> int:
+    def get_output_token_ids(self) -> List[int]:
         return self.output_token_ids
+
+    @property
+    def stage(self) -> SequenceStage:
+        return self._stage
 
     def __repr__(self) -> str:
         return (f"SequenceData("
@@ -219,6 +235,12 @@ class Sequence:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
+    def get_output_text_to_return(self, buffer_length: int):
+        # We return the full output text if the sequence is finished.
+        truncate = buffer_length and not self.is_finished()
+        return self.output_text[:-buffer_length] if truncate else (
+            self.output_text)
+
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
 
@@ -234,7 +256,7 @@ class Sequence:
 
     def reset_state_for_recompute(self):
         """Reset the sequence states for recomputation."""
-        self.data.reset_num_computed_tokens()
+        self.data.reset_state_for_recompute()
 
     def _append_logical_block(self) -> None:
         block = LogicalTokenBlock(
@@ -320,6 +342,23 @@ class Sequence:
         new_seq.seq_id = new_seq_id
         return new_seq
 
+    def get_num_new_tokens(self) -> int:
+        """Get the number of new tokens to be computed.
+
+        Args:
+            remainig_token_budget: The remaining token budgets.
+        Returns:
+            The new number of tokens to be computed. I.e., 1 for decode, prompt
+            size for prefill. If there's not enough remainig_token_budget, it
+            can return the chunked number of new tokens.
+        """
+        if self.data.stage == SequenceStage.DECODE:
+            return 1
+        return self.data.get_num_uncomputed_tokens()
+
+    def is_prefill(self) -> bool:
+        return self.data.stage == SequenceStage.PREFILL
+
     def __repr__(self) -> str:
         return (f"Sequence(seq_id={self.seq_id}, "
                 f"status={self.status.name}, "
@@ -331,7 +370,7 @@ class SequenceGroupState:
     """Mutable state tied to a specific sequence group"""
 
     # torch.Generator used in seeded sampling
-    generator: Optional = None
+    generator: Optional = None  # type: ignore
 
 
 class MultiModalData:
@@ -461,14 +500,15 @@ class SequenceGroup:
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
         for seq in self.seqs_dict.values():
-            seq.data.update_num_computed_tokens(num_new_computed_tokens)
+            if not seq.is_finished():
+                seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
-        # All sequences in the group should have the same prompt, so the
-        # number of unfinished prefill tokens are the same across all
-        # sequences.
-        return list(
-            self.seqs_dict.values())[0].data.get_num_uncomputed_tokens()
+        num_uncomputed_tokens = 0
+        for seq in self.get_seqs():
+            if not seq.is_finished():
+                num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+        return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
         return len(self.get_seqs(status))
@@ -497,6 +537,10 @@ class SequenceGroup:
     def is_finished(self) -> bool:
         return all(seq.is_finished() for seq in self.get_seqs())
 
+    def is_prefill(self) -> bool:
+        # Every sequences should be in the same stage.
+        return self.get_seqs()[0].is_prefill()
+
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
                 f"sampling_params={self.sampling_params}, "
@@ -513,8 +557,8 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
-        token_chunk_size: The number of tokens to be processed. None if
-            chunking is not required.
+        token_chunk_size: The number of tokens to be processed (per sequence).
+            None if chunking is not required.
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
@@ -555,7 +599,7 @@ class SequenceGroupMetadata:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     @property
-    def token_chunk_size(self) -> int:
+    def token_chunk_size(self) -> Optional[int]:
         """Return the number of tokens to be processed (chunk size)."""
         return self._token_chunk_size
 
