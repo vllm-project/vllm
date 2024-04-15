@@ -74,7 +74,10 @@ class CPUExecutor(ExecutorBase):
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
         # have GPUs.
-        logger.info(f"# CPU blocks: {num_cpu_blocks}")
+        # NOTE: `cpu block` for CPU backend is located on CPU memory but is
+        # referred as `gpu block`. Because we want to reuse the existing block
+        # management procedure.
+        logger.info(f"# CPU blocks: {num_gpu_blocks}")
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
