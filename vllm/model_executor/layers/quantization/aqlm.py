@@ -224,14 +224,11 @@ class AQLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        input_size_per_partition: int,
-        output_partition_sizes: List[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-    ) -> Dict[str, Any]:
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
         del output_size  # Unused.
         del input_size  # Unused.
 
@@ -317,21 +314,22 @@ class AQLMLinearMethod(LinearMethodBase):
             },
         )
 
-        return {
-            "codes": codes,
-            "codebooks": codebooks,
-            "scales": scales,
-        }
+        layer.register_parameter("codes", codes)
+        set_weight_attrs(codes, extra_weight_attrs)
+        layer.register_parameter("codebooks", codebooks)
+        set_weight_attrs(codebooks, extra_weight_attrs)
+        layer.register_parameter("scales", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
 
     def apply_weights(
         self,
-        weights: Dict[str, Any],
+        layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        codebooks = weights["codebooks"]
-        codes = weights["codes"]
-        scales = weights["scales"]
+        codebooks = layer.codebooks
+        codes = layer.codes
+        scales = layer.scales
         output_partition_sizes = getattr(codebooks, "output_partition_sizes",
                                          None)
 
