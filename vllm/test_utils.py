@@ -1,7 +1,7 @@
 import ray
 
-from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized, init_distributed_environment)
+from vllm.distributed import (ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.utils import get_open_port
 
 

@@ -3,7 +3,7 @@
     2. One of the provided stop tokens
     3. The EOS token
 
-Run `pytest tests/samplers/test_stop_reason.py`.
+Run `pytest tests/engine/test_stop_reason.py`.
 """
 
 import pytest
