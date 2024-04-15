@@ -94,7 +94,7 @@ def trace_calls(log_path, root_dir, frame, event, arg=None):
         except NameError:
             # modules are deleted during shutdown
             pass
-    return trace_calls
+    return partial(trace_calls, log_path, root_dir)
 
 
 if int(os.getenv("VLLM_TRACE_FRAME", "0")):
