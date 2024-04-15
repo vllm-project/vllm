@@ -1,5 +1,4 @@
 import asyncio
-
 from dataclasses import dataclass
 
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
