@@ -154,14 +154,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         del self.block_tables[seq.seq_id]
 
     def get_block_table(self, seq: Sequence) -> List[int]:
-        assert seq.seq_id in self.block_tables
+        # assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
-        assert all(b is not None for b in block_ids)
+        # assert all(b is not None for b in block_ids)
         return block_ids
 
-    def access_all_blocks_in_seq(self, seq, now):
+    def access_all_blocks_in_seq(self, seq: Sequence, now: int):
         if self.enable_caching:
-            self.block_allocator.access_all_blocks(now)
+            self.block_allocator.access_all_blocks_in_seq(
+                self.get_block_table(seq), now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # We ignore the sequence group as its not necessary. After the batch is
@@ -181,6 +182,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         This method determines which blocks can be safely skipped for all
         sequences in the sequence group.
         """
+        if not self.enable_caching:
+            return []
         seq_block_ids = [
             self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
         ]
