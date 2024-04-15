@@ -7,10 +7,10 @@ import typing
 import warnings
 from dataclasses import dataclass
 from typing import Optional, Type, Union
-from transformers import PretrainedConfig
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
