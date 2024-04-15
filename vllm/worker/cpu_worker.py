@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -157,7 +157,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of blocks available for the KV cache.
 
         This determines how many KV blocks can fit into the configured CPU
