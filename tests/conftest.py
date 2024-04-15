@@ -11,8 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
-from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel)
+from vllm.distributed import destroy_model_parallel
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -472,7 +471,7 @@ class VllmRunner:
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
 

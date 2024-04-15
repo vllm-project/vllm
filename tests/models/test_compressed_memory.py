@@ -37,19 +37,23 @@ def test_models(
                                  sparsity=None,
                                  dtype=dtype,
                                  max_model_len=1024)
-    dense_num_kv_blocks = (dense_model.model.llm_engine.scheduler.
-                           block_manager.gpu_allocator.num_blocks)
+    dense_gpu_alloc = (
+        dense_model.model.llm_engine.scheduler.block_manager.gpu_allocator)
+    dense_num_kv_blocks = dense_gpu_alloc.num_blocks
 
     del dense_model
     torch.cuda.empty_cache()
     gc.collect()
 
-    sparse_model = vllm_runner_nm(model_name=model_name,
-                                  sparsity=sparsity,
-                                  dtype=dtype,
-                                  max_model_len=1024)
-    sparse_num_kv_blocks = (sparse_model.model.llm_engine.scheduler.
-                            block_manager.gpu_allocator.num_blocks)
+    sparse_model = vllm_runner_nm(
+        model_name=model_name,
+        sparsity=sparsity,
+        dtype=dtype,
+        max_model_len=1024,
+    )
+    sparse_gpu_alloc = (
+        sparse_model.model.llm_engine.scheduler.block_manager.gpu_allocator)
+    sparse_num_kv_blocks = sparse_gpu_alloc.num_blocks
 
     del sparse_model
     torch.cuda.empty_cache()
