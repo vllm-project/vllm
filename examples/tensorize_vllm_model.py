@@ -29,7 +29,8 @@ or locally. Tensor encryption and decryption is also supported, although
 libsodium must be installed to use it. Install vllm with tensorizer support 
 using `pip install vllm[tensorizer]`.
 
-To serialize a model, you can run something like this from the root directory:
+To serialize a model, you can run something like this from the root level of 
+this repository:
 
 python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
@@ -48,7 +49,8 @@ script.
 You can also encrypt the model weights with a randomly-generated key by 
 providing a `--keyfile` argument.
 
-To deserialize a model, you can run something like this:
+To deserialize a model, you can run something like this from the root 
+level of this repository:
 
 python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
