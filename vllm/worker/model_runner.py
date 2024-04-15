@@ -902,7 +902,8 @@ class ModelRunner:
                 self.prepare_contiguous_mamba_cache(self.model_config.dtype)
             conv_state, ssm_state, indices = self._prepare_request_mamba_cache(
                 requests_info,
-                input_tokens.shape[0]
+                input_tokens.shape[0] if 
+                not attn_metadata.is_prompt else len(requests_info)
             )
             execute_model_kwargs = {
                 **execute_model_kwargs,
@@ -1025,7 +1026,6 @@ class ModelRunner:
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        breakpoint()
         if self.vision_language_config:
             max_num_seqs = min(
                 max_num_seqs,
@@ -1232,6 +1232,7 @@ class CUDAGraphRunner:
             "positions":positions,
             "kv_caches":kv_caches,
             "attn_metadata":attn_metadata,
+            **kwargs
         }
         if self.is_mamba:
             model_inputs = {
@@ -1240,7 +1241,7 @@ class CUDAGraphRunner:
                 "ssm_state":ssm_state,
             }
 
-        with _maybe_cupy_nccl():
+        with _maybe_pynccl():
             self.model(**model_inputs)
         torch.cuda.synchronize()
 
@@ -1249,7 +1250,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self.graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_cupy_nccl():
+            with _maybe_pynccl():
                 hidden_states = self.model(**model_inputs)
         torch.cuda.synchronize()
 
