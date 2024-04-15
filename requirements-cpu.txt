@@ -1,0 +1,6 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for x86_64 CPUs
+torch == 2.2.1+cpu
+triton >= 2.1.0  # FIXME(woosuk): This is a hack to avoid import error.

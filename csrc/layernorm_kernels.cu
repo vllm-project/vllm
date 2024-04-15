@@ -59,6 +59,8 @@ __global__ void rms_norm_kernel(
 template<typename torch_type>
 struct _typeConvert { static constexpr bool exists = false; };
 
+#if defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
+// CUDA < 12.0 runs into issues with packed type conversion
 template<>
 struct _typeConvert<c10::Half> {
   static constexpr bool exists = true;
@@ -73,6 +75,7 @@ struct _typeConvert<c10::Half> {
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 // CUDA_ARCH < 800 does not have BF16 support
+// TODO: Add in ROCm support once public headers handle bf16 maturely
 template<>
 struct _typeConvert<c10::BFloat16> {
   static constexpr bool exists = true;
@@ -84,16 +87,16 @@ struct _typeConvert<c10::BFloat16> {
   __device__ static inline hip_type convert(float x) { return __float2bfloat16(x); }
   __device__ static inline packed_hip_type convert(float2 x) { return __float22bfloat162_rn(x); }
 };
-#endif
+#endif // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#endif // defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
 
-
-/* Converter POD struct to generate vectorized and packed FP16/BF16 ops
+/* Vector POD struct to generate vectorized and packed FP16/BF16 ops
    for appropriate specializations of fused_add_rms_norm_kernel.
-   Only special member functions and functions that are necessary
-   in that kernel are implemented.
+   Only functions that are necessary in that kernel are implemented.
+   Alignment to 16 bytes is required to use 128-bit global memory ops.
  */
 template<typename scalar_t, int width>
-struct _f16Vec {
+struct alignas(16) _f16Vec {
   /* Not theoretically necessary that width is a power of 2 but should 
      almost always be the case for optimization purposes */ 
   static_assert(width > 0 && (width & (width - 1)) == 0,
@@ -190,8 +193,6 @@ __global__ std::enable_if_t<
   const float epsilon,
   const int num_tokens,
   const int hidden_size) {
-  // Ensures reinterpret_cast does not mutate address for alignment reasons
-  static_assert(alignof(scalar_t) == alignof(_f16Vec<scalar_t, width>));
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -335,32 +336,17 @@ void fused_add_rms_norm(
     with packed + vectorized ops.
     Max optimization is achieved with a width-8 vector of FP16/BF16s
     since we can load at most 128 bits at once in a global memory op.
-    However, we have to narrow the vectors if the hidden_size does
-    not divide 8.
-    
-    Specifically, assuming hidden-size does not divide 8:
-    If the hidden_size divides 4, we can use a width-4 vector.
-    If the hidden_size divides 2 or 6, we can use a width-2
-      vector.
-    If the hidden_size is odd, we can only use a width-1 vector
-      which provides no benefit over the base implementation
-      => we do not use the optimized kernel, which is signified
-      by setting width = 0.
+    However, this requires each tensor's data to be aligned to 16
+    bytes.
    */
-  switch (hidden_size % 8) {
-    case 0:
-      LAUNCH_FUSED_ADD_RMS_NORM(8);
-      break;
-    case 2:
-      [[fallthrough]];
-    case 6:
-      LAUNCH_FUSED_ADD_RMS_NORM(2);
-      break;
-    case 4:
-      LAUNCH_FUSED_ADD_RMS_NORM(4);
-      break;
-    default:
-      LAUNCH_FUSED_ADD_RMS_NORM(0);
-      break;
+  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
+  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
+  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
+  bool ptrs_are_aligned = inp_ptr % 16 == 0 && res_ptr % 16 == 0 \
+                          && wt_ptr % 16 == 0;
+  if (ptrs_are_aligned && hidden_size % 8 == 0) {
+    LAUNCH_FUSED_ADD_RMS_NORM(8);
+  } else {
+    LAUNCH_FUSED_ADD_RMS_NORM(0);
   }
 }

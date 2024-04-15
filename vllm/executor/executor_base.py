@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
@@ -25,7 +26,31 @@ class ExecutorBase(ABC):
         device_config: DeviceConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
     ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def determine_num_available_blocks(self) -> tuple[int, int]:
+        """Determine the number of available blocks for the GPU KV cache and
+        swappable CPU KV cache.
+
+        Normally, this should simply delegate to the underlying Worker. Some
+        ExecutorBase may require modification of the result, e.g. to ensure the
+        selected cache sizes are compatible with all workers.
+
+        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        are blocks that are "active" on the device and can be appended to.
+        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
+        appended to.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the KV cache with the given size in blocks.
+        """
         raise NotImplementedError
 
     @abstractmethod
