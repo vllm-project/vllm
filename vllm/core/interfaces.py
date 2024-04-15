@@ -117,4 +117,3 @@ class BlockSpaceManager(ABC):
     @abstractmethod
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass
-

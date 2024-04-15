@@ -25,7 +25,6 @@ if sys.version_info.minor == 8:
 else:
     from collections import OrderedDict
 
-
 T = TypeVar("T")
 logger = init_logger(__name__)
 
@@ -512,4 +511,3 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
-

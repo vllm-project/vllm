@@ -18,7 +18,6 @@ if sys.version_info.minor == 8:
 else:
     from collections.abc import Sequence as GenericSequence
 
-
 logger = init_logger(__name__)
 
 
