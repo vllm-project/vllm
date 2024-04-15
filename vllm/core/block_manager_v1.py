@@ -1,4 +1,5 @@
 """A block manager that manages token blocks."""
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Sequence as GenericSequence
 from itertools import count, takewhile
@@ -11,6 +12,11 @@ from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+
+if sys.version_info.minor == 8:
+    # collections.abc.Sequence is not subscriptable in python 3.8
+    from typing import Sequence as GenericSequence
+
 
 logger = init_logger(__name__)
 

@@ -1,4 +1,5 @@
 """A block manager that manages token blocks."""
+import sys
 from collections.abc import Sequence as GenericSequence
 from typing import Dict, List, Optional
 
@@ -7,6 +8,10 @@ from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+
+if sys.version_info.minor == 8:
+    # collections.abc.Sequence is not subscriptable in python 3.8
+    from typing import Sequence as GenericSequence
 
 SeqId = int
 

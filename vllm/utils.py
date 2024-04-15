@@ -4,6 +4,7 @@ import gc
 import os
 import socket
 import subprocess
+import sys
 import uuid
 import warnings
 from collections import OrderedDict, defaultdict
@@ -17,6 +18,10 @@ import torch
 from packaging.version import Version, parse
 
 from vllm.logger import init_logger
+
+if sys.version_info.minor == 8:
+    # collections.OrderedDict is not subscriptable in python 3.8
+    from typing import OrderedDict
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -504,3 +509,4 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
