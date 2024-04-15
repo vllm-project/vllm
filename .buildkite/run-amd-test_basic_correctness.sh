@@ -5,6 +5,9 @@ set -ex
 # Print ROCm version
 rocminfo
 
+pip install huggingface_hub
+~/.local/bin/huggingface-cli login --token $HF_TOKEN
+
 # Try building the docker image
 docker build -t rocm -f Dockerfile.rocm .
 
