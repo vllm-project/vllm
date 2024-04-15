@@ -3,7 +3,7 @@ from typing import Optional
 from torch import nn
 
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, VisionLanguageConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.model_executor.model_loader.loader import (BaseModelLoader,
                                                      get_model_loader)
 from vllm.model_executor.model_loader.utils import (
@@ -13,7 +13,7 @@ from vllm.model_executor.model_loader.utils import (
 def get_model(
         *, model_config: ModelConfig, load_config: LoadConfig,
         device_config: DeviceConfig, parallel_config: ParallelConfig,
-        scheduler_config: ParallelConfig, lora_config: Optional[LoRAConfig],
+        scheduler_config: SchedulerConfig, lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig]) -> nn.Module:
     loader = get_model_loader(load_config)
     return loader.load_model(model_config=model_config,

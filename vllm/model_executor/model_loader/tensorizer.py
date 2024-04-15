@@ -88,6 +88,7 @@ class TensorizerConfig:
                 "Loading a model using Tensorizer with quantization on vLLM"
                 " is unstable and may lead to errors.")
 
+
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
     tensorizer = TensorizerAgent(tensorizer_config, **extra_kwargs)
@@ -102,6 +103,7 @@ def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
     if tensorizer_config is None:
         return False
     return tensorizer_config.vllm_tensorized
+
 
 class PerformanceWarning(UserWarning):
 
@@ -359,6 +361,7 @@ class TensorizerAgent:
         self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
         return self.model.eval()
+
 
 def tensorizer_weights_iterator(tensorizer_args: "TensorizerArgs"):
     tensorizer_warning(

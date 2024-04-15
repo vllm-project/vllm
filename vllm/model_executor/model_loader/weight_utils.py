@@ -6,7 +6,7 @@ import json
 import os
 from collections import defaultdict
 import tempfile
-from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -16,7 +16,7 @@ from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-from vllm.config import LoadConfig, LoadFormat, ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
@@ -114,7 +114,8 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(woosuk): Move this to other place.
-def get_quant_config(model_config: ModelConfig, load_config: LoadConfig) -> QuantizationConfig:
+def get_quant_config(model_config: ModelConfig,
+                     load_config: LoadConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -153,7 +154,10 @@ def get_quant_config(model_config: ModelConfig, load_config: LoadConfig) -> Quan
     return quant_cls.from_config(config)
 
 
-def download_weights_from_hf(model_name_or_path: str, cache_dir: Optional[str], allow_patterns: List[str], revision: Optional[str] = None):
+def download_weights_from_hf(model_name_or_path: str,
+                             cache_dir: Optional[str],
+                             allow_patterns: List[str],
+                             revision: Optional[str] = None):
     # Before we download we look at that is available:
     fs = HfFileSystem()
     file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -170,13 +174,15 @@ def download_weights_from_hf(model_name_or_path: str, cache_dir: Optional[str], 
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         hf_folder = snapshot_download(model_name_or_path,
-                                    allow_patterns=allow_patterns,
-                                    cache_dir=cache_dir,
-                                    tqdm_class=DisabledTqdm,
-                                    revision=revision)
+                                      allow_patterns=allow_patterns,
+                                      cache_dir=cache_dir,
+                                      tqdm_class=DisabledTqdm,
+                                      revision=revision)
     return hf_folder
 
-def filter_files_not_needed_for_inference(hf_weights_files: List[str]) -> List[str]:
+
+def filter_files_not_needed_for_inference(
+        hf_weights_files: List[str]) -> List[str]:
     # Exclude files that are not needed for inference.
     # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     blacklist = [
@@ -192,7 +198,10 @@ def filter_files_not_needed_for_inference(hf_weights_files: List[str]) -> List[s
     ]
     return hf_weights_files
 
-def np_cache_weights_iterator(model_name_or_path: str,     cache_dir: Optional[str],  hf_folder: str, hf_weights_files: List[str]):
+
+def np_cache_weights_iterator(model_name_or_path: str,
+                              cache_dir: Optional[str], hf_folder: str,
+                              hf_weights_files: List[str]):
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
     np_folder = os.path.join(hf_folder, "np")
@@ -222,12 +231,14 @@ def np_cache_weights_iterator(model_name_or_path: str,     cache_dir: Optional[s
             param = np.load(f)
         yield name, torch.from_numpy(param)
 
+
 def safetensors_weights_iterator(hf_weights_files: List[str]):
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
                 param = f.get_tensor(name)
                 yield name, param
+
 
 def pt_weights_iterator(hf_weights_files: List[str]):
     for bin_file in hf_weights_files:
