@@ -149,58 +149,6 @@ class XPUWorker(LoraNotSupportedWorkerBase):
         torch.xpu.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-    @torch.inference_mode()
-    def profile_num_available_blocks(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        cpu_swap_space: int,
-        cache_dtype: str,
-    ) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model and returns the maximum
-        number of GPU and CPU cache blocks that can be allocated.
-
-        Args:
-            block_size: The size of the cache block.
-            gpu_memory_utilization: The fraction of the total GPU memory to use.
-            cpu_swap_space: The size of the CPU swap space in bytes.
-        """
-        # Profile the memory usage of the model and get the maximum number of
-        # cache blocks that can be allocated with the remaining free memory.
-        torch.xpu.empty_cache()
-
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        self.model_runner.profile_run()
-
-        # Calculate the number of blocks that can be allocated with the
-        # profiled peak memory.
-        torch.xpu.synchronize()
-
-        used_memory = torch.xpu.memory_allocated()
-        total_gpu_memory = torch.xpu.get_device_properties(
-            self.local_rank).total_memory
-        # print(f"rank:{self.local_rank}, used_memory:{used_memory}")
-
-        free_gpu_memory = total_gpu_memory - used_memory
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
-
-        cache_block_size = self.get_cache_block_size_bytes(
-            block_size, cache_dtype)
-        num_gpu_blocks = int(
-            (total_gpu_memory * gpu_memory_utilization - peak_memory) //
-            cache_block_size)
-        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
-        num_gpu_blocks = max(num_gpu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
-        gc.collect()
-        torch.xpu.empty_cache()
-        return num_gpu_blocks, num_cpu_blocks
-
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
