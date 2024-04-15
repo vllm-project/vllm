@@ -293,7 +293,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_num_free_blocks(self) -> int:
         # The number of free blocks is the number of hashless free blocks
-        # plus the number of hashful blocks that in the evictor.
+        # plus the number of hashful blocks that are in the evictor.
         return self._hashless_allocator.get_num_free_blocks(
         ) + self._evictor.num_blocks
 
