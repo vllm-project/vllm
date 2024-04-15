@@ -9,6 +9,8 @@ rocminfo | grep 'gfx*'
 
 rocm-smi
 
+env 
+
 # Try building the docker image
 pip install huggingface_hub
 ~/.local/bin/huggingface-cli login --token $HF_TOKEN
