@@ -179,7 +179,13 @@ class ServerContextManager:
 @pytest.mark.parametrize("model_id, eval_def", MODEL_TEST_POINTS)
 def test_lm_eval_correctness(model_id, eval_def):
 
-    vllm_args = ["--model", model_id, "--disable-log-requests"]
+    vllm_args = [
+        "--model",
+        model_id,
+        "--disable-log-requests",
+        "--max_model_len",
+        4096
+    ]
 
     if eval_def.enable_tensor_parallel:
         tp = torch.cuda.device_count()
