@@ -61,8 +61,12 @@ Which downloads the model tensors from your S3 bucket and deserializes them.
 You can also provide a `--keyfile` argument to decrypt the model weights if 
 they were serialized with encryption.
 
-For more information on the available arguments, run 
-`python tensorize_vllm_model.py --help`.
+For more information on the available arguments for serializing, run 
+`python -m examples.tensorize_vllm_model serialize --help`.
+
+Or for deserializing:
+
+`python -m examples.tensorize_vllm_model deserialize --help`.
 
 Once a model is serialized, it can be used to load the model when running the
 OpenAI inference client at `vllm/entrypoints/openai/api_server.py` by providing
