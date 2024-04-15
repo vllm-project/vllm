@@ -184,7 +184,7 @@ def test_lm_eval_correctness(model_id, eval_def):
         model_id,
         "--disable-log-requests",
         "--max_model_len",
-        4096
+        str(4096),
     ]
 
     if eval_def.enable_tensor_parallel:
