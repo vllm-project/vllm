@@ -126,7 +126,6 @@ class TensorizerArgs:
             "s3_endpoint": self.s3_endpoint,
         }
 
-        # Omitting self.dtype and self.device as this behaves weirdly
         self.deserializer_params = {
             "verify_hash": self.verify_hash,
             "encryption": self.encryption_keyfile,
@@ -145,7 +144,7 @@ class TensorizerArgs:
             parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
 
-        # Create the argument group
+        # Tensorizer options arg group
         group = parser.add_argument_group(
             'tensorizer options',
             description=('Options for configuring the behavior of the'
@@ -205,9 +204,7 @@ class TensorizerArgs:
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "TensorizerArgs":
-        # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-        # Set the attributes from the parsed arguments.
         tensorizer_args = cls(**{
             attr: getattr(args, attr)
             for attr in attrs if hasattr(args, attr)
@@ -291,7 +288,6 @@ class TensorizerAgent:
             nn.Module: The deserialized model.
         """
         before_mem = get_mem_usage()
-        # Lazy load the tensors from S3 into the model.
         start = time.perf_counter()
         with open_stream(
                 self.tensorizer_args.tensorizer_uri,
