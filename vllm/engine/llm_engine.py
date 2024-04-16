@@ -4,8 +4,9 @@ from typing import Iterable, List, Optional, Type, Union
 from transformers import PreTrainedTokenizer
 
 import vllm
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, TensorizerConfig,
                          VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
@@ -77,6 +78,8 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        decoding_config: Optional[DecodingConfig],
+        tensorizer_config: Optional[TensorizerConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -102,6 +105,7 @@ class LLMEngine:
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
+            f"decoding_config={decoding_config!r}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -113,6 +117,8 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.speculative_config = speculative_config
+        self.decoding_config = decoding_config or DecodingConfig()
+        self.tensorizer_config = tensorizer_config
         self.log_stats = log_stats
 
         self._init_tokenizer()
@@ -128,6 +134,7 @@ class LLMEngine:
             lora_config=lora_config,
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
+            tensorizer_config=tensorizer_config,
         )
 
         self._initialize_kv_caches()
@@ -282,6 +289,9 @@ class LLMEngine:
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.tensorizer_config:
+            self.tensorizer_config.verify_with_parallel_config(
+                self.parallel_config)
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
             self.lora_config.verify_with_scheduler_config(
