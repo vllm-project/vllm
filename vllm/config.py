@@ -66,8 +66,8 @@ class ModelConfig:
             weights. If None, we assume the model weights are not quantized.
         quantization_param_path: Path to JSON file containing scaling factors.
             Used to load KV cache scaling factors into the model when KV cache
-            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also 
-            be used to load activation and weight scaling factors when the 
+            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also
+            be used to load activation and weight scaling factors when the
             model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
@@ -422,7 +422,7 @@ class CacheConfig:
 @dataclass
 class TokenizerPoolConfig:
     """Configuration for the tokenizer pool.
-    
+
     Args:
         pool_size: Number of tokenizer workers in the pool.
         pool_type: Type of the pool.
@@ -446,9 +446,9 @@ class TokenizerPoolConfig:
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
-        
+
         If tokenizer_pool_size is 0, return None.
-        
+
         Args:
             tokenizer_pool_size: Number of tokenizer workers in the pool.
             tokenizer_pool_type: Type of the pool.
@@ -1079,6 +1079,21 @@ def _get_and_verify_max_len(
     return int(max_model_len)
 
 
+@dataclass
+class DecodingConfig:
+    """Dataclass which contains the decoding strategy of the engine"""
+
+    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
+    guided_decoding_backend: str = 'outlines'
+
+    def __post_init__(self):
+        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        backend = self.guided_decoding_backend
+        if backend not in valid_guided_backends:
+            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+                             f"must be one of {valid_guided_backends}")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1093,6 +1108,7 @@ class EngineConfig:
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
+    decoding_config: Optional[DecodingConfig]
     tensorizer_config: Optional[TensorizerConfig]
 
     def __post_init__(self):

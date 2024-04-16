@@ -13,9 +13,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import json
 import math
 from collections import defaultdict
+from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import torch
@@ -27,50 +29,6 @@ from transformers import PreTrainedTokenizerBase
 
 class BaseLogitsProcessor:
 
-    def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
-        """Adapt vLLM's tokenizer to use to compile the FSM.
-
-        The API of Outlines tokenizers is slightly different to that of
-        `transformers`. The decoder of outlines, returns a list whereas
-        the decode of vLLM returns an str. To sync the vLLM decoder with
-        outlines internal api, the decoder should be adapted. In addition
-        we need to handle the missing spaces to Llama's tokenizer to be
-        able to compile FSMs for this model.
-
-        """
-        if getattr(tokenizer, "_outlines_adapted", False):
-            return tokenizer
-
-        tokenizer.vocabulary = tokenizer.get_vocab()
-        tokenizer.special_tokens = set(tokenizer.all_special_tokens)
-
-        def convert_token_to_string(token: str) -> str:
-            from transformers.file_utils import SPIECE_UNDERLINE
-
-            string = tokenizer.convert_tokens_to_string([token])
-
-            # A hack to handle missing spaces to HF's Llama tokenizers
-            if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
-                return " " + string
-
-            return string
-
-        def change_decoder(
-            decoder: Callable[[List[int]], str]
-        ) -> Callable[[List[int]], List[str]]:
-            """Sync vLLM's decoder with the outlines by returning list."""
-
-            def new_decoder(inp_tokens: List[int]) -> List[str]:
-                return [decoder(inp_tokens)]
-
-            return new_decoder
-
-        tokenizer.convert_token_to_string = convert_token_to_string
-        tokenizer.decode = change_decoder(tokenizer.decode)
-        setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
-
-        return tokenizer
-
     def init_state(self):
         """Initialize the FSM states."""
         self.fsm_state: DefaultDict[int, int] = defaultdict(int)
@@ -78,7 +36,6 @@ class BaseLogitsProcessor:
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
-
         seq_id = hash(tuple(input_ids))
 
         if len(input_ids) == 0:
@@ -96,7 +53,6 @@ class BaseLogitsProcessor:
                           device=scores.device)
         mask[allowed_tokens] = 0
         scores.add_(mask)
-
         return scores
 
 
@@ -113,7 +69,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = self.adapt_tokenizer(tokenizer)
+        tokenizer = _adapt_tokenizer(tokenizer)
         fsm = RegexFSM(regex_string, tokenizer)
         self.fsm = fsm
 
@@ -167,6 +123,54 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = self.adapt_tokenizer(tokenizer)
+        tokenizer = _adapt_tokenizer(tokenizer)
         fsm = CFGFSM(cfg, tokenizer)
         self.fsm = fsm
+
+
+@lru_cache
+def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
+    """Adapt vLLM's tokenizer to use to compile the FSM.
+
+    The API of Outlines tokenizers is slightly different to that of
+    `transformers`. The decoder of outlines, returns a list whereas
+    the decode of vLLM returns an str. To sync the vLLM decoder with
+    outlines internal api, the decoder should be adapted. In addition
+    we need to handle the missing spaces to Llama's tokenizer to be
+    able to compile FSMs for this model.
+
+    """
+    if getattr(tokenizer, "_outlines_adapted", False):
+        return tokenizer
+
+    tokenizer = copy.deepcopy(tokenizer)
+
+    tokenizer.vocabulary = tokenizer.get_vocab()
+    tokenizer.special_tokens = set(tokenizer.all_special_tokens)
+
+    def convert_token_to_string(token: str) -> str:
+        from transformers.file_utils import SPIECE_UNDERLINE
+
+        string = tokenizer.convert_tokens_to_string([token])
+
+        # A hack to handle missing spaces to HF's Llama tokenizers
+        if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
+            return " " + string
+
+        return string
+
+    def change_decoder(
+        decoder: Callable[[List[int]],
+                          str]) -> Callable[[List[int]], List[str]]:
+        """Sync vLLM's decoder with the outlines by returning list."""
+
+        def new_decoder(inp_tokens: List[int]) -> List[str]:
+            return [decoder(inp_tokens)]
+
+        return new_decoder
+
+    tokenizer.convert_token_to_string = convert_token_to_string
+    tokenizer.decode = change_decoder(tokenizer.decode)
+    setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
+
+    return tokenizer

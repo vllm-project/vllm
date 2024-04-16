@@ -5,9 +5,9 @@ import os
 from dataclasses import dataclass
 from typing import BinaryIO, Optional, Union
 
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TensorizerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig, TensorizerConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.utils import str_to_int_tuple
@@ -80,6 +80,7 @@ class EngineArgs:
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
+    guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
@@ -200,6 +201,13 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        parser.add_argument(
+            '--guided-decoding-backend',
+            type=str,
+            default='outlines',
+            choices=['outlines', 'lm-format-enforcer'],
+            help='Which engine will be used for guided decoding'
+            ' (JSON schema / regex etc)')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -511,6 +519,9 @@ class EngineArgs:
         else:
             vision_language_config = None
 
+        decoding_config = DecodingConfig(
+            guided_decoding_backend=self.guided_decoding_backend)
+
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,
                             parallel_config=parallel_config,
@@ -519,6 +530,7 @@ class EngineArgs:
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
                             speculative_config=speculative_config,
+                            decoding_config=decoding_config,
                             tensorizer_config=tensorizer_config)
 
 
