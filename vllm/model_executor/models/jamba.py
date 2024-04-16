@@ -223,7 +223,7 @@ class JambaMambaMixer(nn.Module):
             ), dtype=hidden_states.dtype, device=hidden_states.device)
             offset = 0
             for i,prompt_len in enumerate(attn_metadata.prompt_lens):
-                padded_hidden_states[i,-prompt_len:].copy_(hidden_states[offset:offset + prompt_len])
+                padded_hidden_states[i,:prompt_len].copy_(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
             cache = MambaCacheParams(
                 True,
@@ -233,7 +233,7 @@ class JambaMambaMixer(nn.Module):
             padded_hidden_states = self.mamba_forward(padded_hidden_states, cache_params=cache)
             offset = 0
             for i,prompt_len in enumerate(attn_metadata.prompt_lens):
-                hidden_states[offset:offset + prompt_len].copy_(padded_hidden_states[i,-prompt_len:])
+                hidden_states[offset:offset + prompt_len].copy_(padded_hidden_states[i,:prompt_len])
                 offset += prompt_len
         else:
             cache = MambaCacheParams(
