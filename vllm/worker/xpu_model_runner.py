@@ -334,6 +334,13 @@ class XPUModelRunner(ModelRunner):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
+        # padding to 8 bytes for XeTLA
+        padding_num = (8 - len(input_tokens) % 8) % 8
+        input_tokens.extend([0] * padding_num)
+        input_positions.extend([0] * padding_num)
+        slot_mapping.extend([_PAD_SLOT_ID] * padding_num)
+        prompt_lens[-1] += padding_num
+
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,

@@ -1,6 +1,6 @@
 import torch
 import intel_extension_for_pytorch as ipex
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 class ipex_ops:
@@ -177,6 +177,7 @@ class ipex_ops:
 
 class ipex_cache_ops:
 
+    @staticmethod
     def reshape_and_cache(
         key: torch.Tensor,
         value: torch.Tensor,
@@ -187,28 +188,30 @@ class ipex_cache_ops:
         kv_scale: float,
     ) -> None:
         assert kv_cache_dtype == "auto"
-        torch.ops.torch_ipex.reshape_and_cache(key, value, key_cache,
-                                               value_cache, slot_mapping)
+        ipex.llm.modules.PageAttention.reshape_and_cache(
+            key, value, key_cache, value_cache, slot_mapping)
 
-    def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
-                    block_mapping: torch.Tensor) -> None:
+    @staticmethod
+    def copy_blocks(key_caches: List[torch.Tensor],
+                    value_caches: List[torch.Tensor],
+                    block_mapping: Dict[int, List[int]]) -> None:
         block_mapping_tensor = []
         for key, values in block_mapping.items():
             if hasattr(values, "__iter__"):
                 for value in values:
                     block_mapping_tensor.append([key, value])
-        block_mapping = torch.Tensor(block_mapping_tensor,
-                                     device=key_caches.device,
+        block_mapping = torch.tensor(block_mapping_tensor,
+                                     device=key_caches[0].device,
                                      dtype=torch.int64)
-        torch.ops.torch_ipex.copy_blocks(key_caches, value_caches,
-                                         block_mapping)
+        torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)
 
-    def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
+    @staticmethod
+    def swap_blocks(src: List[torch.Tensor], dst: List[torch.Tensor],
                     block_mapping: Dict[int, int]) -> None:
         keys = list(block_mapping.keys())
         values = list(block_mapping.values())
-        key_tensor = torch.Tensor(keys)
-        value_tensor = torch.Tensor(values)
+        key_tensor = torch.tensor(keys, dtype=torch.int64)
+        value_tensor = torch.tensor(values, dtype=torch.int64)
         block_mapping_tensor = torch.stack([key_tensor, value_tensor], dim=1)
 
-        torch.ops.torch_ipex.swap_blocks(src, dst, block_mapping_tensor)
+        torch.xpu.swap_blocks(src, dst, block_mapping_tensor)
