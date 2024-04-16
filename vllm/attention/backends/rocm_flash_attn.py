@@ -154,7 +154,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        self.use_naive_attn = torch.cuda.get_device_capability()[0] != 9
+        self.use_naive_attn = torch.cuda.get_device_capability()[0] == 11
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = (os.environ.get(
             "VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1"))
@@ -170,9 +170,17 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
         else:
-            from flash_attn import flash_attn_varlen_func  # noqa: F401
-            self.attn_func = flash_attn_varlen_func
-            logger.debug("Using CK FA in ROCmBackend")
+            # if flash-attn is installed, use flash-attn, else use naive-attn
+            try:
+                from flash_attn import flash_attn_varlen_func  # noqa: F401
+                self.attn_func = flash_attn_varlen_func
+                logger.debug("Using CK FA in ROCmBackend")
+            except ModuleNotFoundError as e:
+                self.use_naive_attn = True
+                self.attn_fuc = _naive_attention
+                logger.debug("Using naive attention in ROCmBackend")
+
+
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
