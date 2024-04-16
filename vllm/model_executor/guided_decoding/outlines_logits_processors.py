@@ -21,13 +21,16 @@ from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import torch
-from outlines.fsm.fsm import CFGFSM, RegexFSM
+from outlines.fsm.guide import CFGGuide, Generate, Guide, RegexGuide, Write
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 
 class BaseLogitsProcessor:
+
+    def __init__(self, guide: Guide) -> None:
+        self._guide: Guide = guide
 
     def init_state(self):
         """Initialize the FSM states."""
@@ -43,10 +46,16 @@ class BaseLogitsProcessor:
         else:
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
-            self.fsm_state[seq_id] = self.fsm.next_state(
-                self.fsm_state[last_seq_id], last_token)
+            self.fsm_state[seq_id] = self._guide.get_next_state(
+                state=self.fsm_state[last_seq_id], token_id=last_token)
 
-        allowed_tokens = self.fsm.allowed_token_ids(self.fsm_state[seq_id])
+        instruction = self._guide.get_next_instruction(
+            state=self.fsm_state[seq_id])
+
+        if type(instruction) == Generate:
+            allowed_tokens = instruction.tokens
+        elif type(instruction) == Write:
+            allowed_tokens = [instruction.tokens[0]]
 
         mask = torch.full((scores.shape[-1], ),
                           -math.inf,
@@ -70,8 +79,7 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
         """
         tokenizer = _adapt_tokenizer(tokenizer)
-        fsm = RegexFSM(regex_string, tokenizer)
-        self.fsm = fsm
+        super().__init__(RegexGuide(regex_string, tokenizer))
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
@@ -124,8 +132,7 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
 
         """
         tokenizer = _adapt_tokenizer(tokenizer)
-        fsm = CFGFSM(cfg, tokenizer)
-        self.fsm = fsm
+        super().__init__(CFGGuide(cfg, tokenizer))
 
 
 @lru_cache
