@@ -192,7 +192,7 @@ class TLGv4SelfAttention(nn.Module):
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        # use_dense_attn = True
+        use_dense_attn = True
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,

@@ -124,6 +124,7 @@ __device__ void paged_attention_kernel(
   const int blocksparse_local_blocks = 16;
   const int blocksparse_vert_stride = 8;
   const int blocksparse_block_size = 64;
+  const int blocksparse_head_sliding_step = 1;
   const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   const int num_blocks_per_partition = USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_context_blocks;
 
@@ -131,7 +132,6 @@ __device__ void paged_attention_kernel(
   const int start_block_idx = USE_PARTITIONING ? partition_idx * num_blocks_per_partition : 0;
   const int end_block_idx = MIN(start_block_idx + num_blocks_per_partition, num_context_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
-  // printf("======parition_id: %d; num_blocks:%d; context_len: %d, num_context_blocks: %d,start_block_idx:%d \n",partition_idx,num_blocks,context_len,num_context_blocks,start_block_idx);
 
   // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
@@ -149,7 +149,6 @@ __device__ void paged_attention_kernel(
 
   const int head_idx = blockIdx.x;
   const int num_heads = gridDim.x;
-  const int blocksparse_head_sliding_step = 1;
   const int num_queries_per_kv = num_heads / num_kv_heads;
   const int kv_head_idx = head_idx / num_queries_per_kv;
   const float alibi_slope = alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
@@ -211,19 +210,10 @@ __device__ void paged_attention_kernel(
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // (e.g., kv_block_stride).
     if (is_sparse) {
-      // int block_seq_id = DIVIDE_ROUND_UP(block_idx * BLOCK_SIZE, blocksparse_block_size);
       const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      // const int local_mult = head_idx * 1;
-      // const int local_sum = block_seq_id + local_mult;
-      // const int local_exp = local_sum + 1;
-      const int local_judge = (block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride;
-      const bool is_remote = (local_judge == 0);
-      const int left_bound =  num_blocksparse_blocks - blocksparse_local_blocks;
-      const bool within_left = (block_seq_id >= left_bound);
-      // const bool within_right = (block_seq_id < num_blocksparse_blocks);
-      const bool is_local = within_left; // && within_right;
+      const bool is_remote = ((block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride == 0);
+      const bool is_local = (block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks);
       if (!is_remote && !is_local) {
-      // if (!is_local) {
         for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
           const int physical_block_offset = (thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
           const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
