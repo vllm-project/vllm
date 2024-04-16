@@ -4,8 +4,8 @@ from typing import Iterable, List, Optional, Tuple, Type, Union
 from transformers import PreTrainedTokenizer
 
 import vllm
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
@@ -75,6 +75,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        decoding_config: Optional[DecodingConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -100,6 +101,7 @@ class LLMEngine:
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
+            f"decoding_config={decoding_config!r}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -112,6 +114,7 @@ class LLMEngine:
         self.device_config = device_config
         self.speculative_config = speculative_config
         self.load_config = load_config
+        self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
         self._init_tokenizer()
