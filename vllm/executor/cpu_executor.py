@@ -115,7 +115,7 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
         return output
 
     async def check_health_async(self) -> None:
-        # GPUExecutor will always be healthy as long as
+        # CPUExecutor will always be healthy as long as
         # it's running.
         return
 
