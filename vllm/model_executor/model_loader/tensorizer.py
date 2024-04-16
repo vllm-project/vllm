@@ -18,7 +18,7 @@ from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
-tensorizer_load_fail = False
+tensorizer_load_fail = None
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,
@@ -26,8 +26,8 @@ try:
     from tensorizer.stream_io import open_stream
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
-except ImportError:
-    tensorizer_load_fail = True
+except ImportError as e:
+    tensorizer_load_fail = e
 
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
@@ -270,6 +270,11 @@ class TensorizerAgent:
 
     def __init__(self, tensorizer_config: TensorizerConfig,
                  linear_method: LinearMethodBase, **extra_kwargs):
+        if tensorizer_load_fail is not None:
+            raise ImportError(
+                "Tensorizer is not installed. Please install tensorizer "
+                "to use this feature with `pip install vllm[tensorizer]`.") from tensorizer_load_fail
+
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
@@ -279,11 +284,6 @@ class TensorizerAgent:
         else:
             self.linear_method = linear_method
         self.model = self._init_model()
-
-        if tensorizer_load_fail:
-            raise ImportError(
-                "Tensorizer is not installed. Please install tensorizer "
-                "to use this feature with `pip install vllm[tensorizer]`.")
 
     def _init_model(self):
         model_args = self.tensorizer_config.hf_config
