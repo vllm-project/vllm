@@ -3,7 +3,7 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Set
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
@@ -268,7 +268,7 @@ class RayXPUExecutor(ExecutorBase):
             lora_id=lora_id,
         )
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 
     def _run_workers(

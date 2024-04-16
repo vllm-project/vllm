@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 import torch
 
@@ -110,7 +110,7 @@ class XPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
