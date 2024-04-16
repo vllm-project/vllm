@@ -32,7 +32,12 @@ def _prepare_test(
                              1e-2,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -591,7 +596,12 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,

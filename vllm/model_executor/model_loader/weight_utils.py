@@ -4,8 +4,9 @@ import glob
 import hashlib
 import json
 import os
+import tempfile
 from collections import defaultdict
-from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -15,7 +16,7 @@ from huggingface_hub import HfFileSystem, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-from vllm.config import ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
@@ -27,8 +28,7 @@ logger = init_logger(__name__)
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
 # system reboots, so users will not complain about annoying lock files
-temp_dir = os.environ.get('TMPDIR') or os.environ.get(
-    'TEMP') or os.environ.get('TMP') or "/tmp/"
+temp_dir = tempfile.gettempdir()
 
 
 def enable_hf_transfer():
@@ -46,7 +46,7 @@ def enable_hf_transfer():
 enable_hf_transfer()
 
 
-class Disabledtqdm(tqdm):
+class DisabledTqdm(tqdm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, disable=True)
@@ -114,7 +114,8 @@ def convert_bin_to_safetensor_file(
 
 
 # TODO(woosuk): Move this to other place.
-def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
+def get_quant_config(model_config: ModelConfig,
+                     load_config: LoadConfig) -> QuantizationConfig:
     quant_cls = get_quantization_config(model_config.quantization)
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -125,12 +126,12 @@ def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     is_local = os.path.isdir(model_name_or_path)
     if not is_local:
         # Download the config files.
-        with get_lock(model_name_or_path, model_config.download_dir):
+        with get_lock(model_name_or_path, load_config.download_dir):
             hf_folder = snapshot_download(model_name_or_path,
                                           revision=model_config.revision,
                                           allow_patterns="*.json",
-                                          cache_dir=model_config.download_dir,
-                                          tqdm_class=Disabledtqdm)
+                                          cache_dir=load_config.download_dir,
+                                          tqdm_class=DisabledTqdm)
     else:
         hf_folder = model_name_or_path
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
@@ -153,169 +154,127 @@ def get_quant_config(model_config: ModelConfig) -> QuantizationConfig:
     return quant_cls.from_config(config)
 
 
-def prepare_hf_model_weights(
-    model_name_or_path: str,
-    cache_dir: Optional[str] = None,
-    load_format: str = "auto",
-    fall_back_to_pt: bool = True,
-    revision: Optional[str] = None,
-) -> Tuple[str, List[str], bool]:
-    # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path) \
-               and load_format != "tensorizer"
-    use_safetensors = False
-    # Some quantized models use .pt files for storing the weights.
-    if load_format == "auto":
-        allow_patterns = ["*.safetensors", "*.bin"]
-    elif load_format == "safetensors":
-        use_safetensors = True
-        allow_patterns = ["*.safetensors"]
-    elif load_format == "pt":
-        allow_patterns = ["*.pt"]
-    elif load_format == "npcache":
-        allow_patterns = ["*.bin"]
-    elif load_format == "tensorizer":
-        allow_patterns = ["*.tensors"]
-    else:
-        raise ValueError(f"Unknown load_format: {load_format}")
+def download_weights_from_hf(model_name_or_path: str,
+                             cache_dir: Optional[str],
+                             allow_patterns: List[str],
+                             revision: Optional[str] = None) -> str:
+    """Download model weights from Hugging Face Hub.
+    
+    Args:
+        model_name_or_path (str): The model name or path.
+        cache_dir (Optional[str]): The cache directory to store the model
+            weights. If None, will use HF defaults.
+        allow_patterns (List[str]): The allowed patterns for the
+            weight files. Files matched by any of the patterns will be
+            downloaded.
+        revision (Optional[str]): The revision of the model.
 
-    if fall_back_to_pt:
-        allow_patterns += ["*.pt"]
+    Returns:
+        str: The path to the downloaded model weights.
+    """
+    # Before we download we look at that is available:
+    fs = HfFileSystem()
+    file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-    if not is_local and load_format != "tensorizer":
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
-
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
-                break
-
-        logger.info(f"Using model weights format {allow_patterns}")
-        # Use file lock to prevent multiple processes from
-        # downloading the same model weights at the same time.
-        with get_lock(model_name_or_path, cache_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          allow_patterns=allow_patterns,
-                                          cache_dir=cache_dir,
-                                          tqdm_class=Disabledtqdm,
-                                          revision=revision)
-    else:
-        hf_folder = model_name_or_path
-    hf_weights_files: List[str] = []
+    # depending on what is available we download different things
     for pattern in allow_patterns:
-        hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
-        if len(hf_weights_files) > 0:
-            if pattern == "*.safetensors":
-                use_safetensors = True
+        matching = fnmatch.filter(file_list, pattern)
+        if len(matching) > 0:
+            allow_patterns = [pattern]
             break
-    if not use_safetensors:
-        # Exclude files that are not needed for inference.
-        # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
-        blacklist = [
-            "training_args.bin",
-            "optimizer.bin",
-            "optimizer.pt",
-            "scheduler.pt",
-            "scaler.pt",
-        ]
-        hf_weights_files = [
-            f for f in hf_weights_files
-            if not any(f.endswith(x) for x in blacklist)
-        ]
 
-    if load_format == "tensorizer":
-        return hf_folder, hf_weights_files, use_safetensors
-
-    if len(hf_weights_files) == 0:
-        raise RuntimeError(
-            f"Cannot find any model weights with `{model_name_or_path}`")
-
-    return hf_folder, hf_weights_files, use_safetensors
+    logger.info(f"Using model weights format {allow_patterns}")
+    # Use file lock to prevent multiple processes from
+    # downloading the same model weights at the same time.
+    with get_lock(model_name_or_path, cache_dir):
+        hf_folder = snapshot_download(model_name_or_path,
+                                      allow_patterns=allow_patterns,
+                                      cache_dir=cache_dir,
+                                      tqdm_class=DisabledTqdm,
+                                      revision=revision)
+    return hf_folder
 
 
-def hf_model_weights_iterator(
-    model_name_or_path: str,
-    cache_dir: Optional[str] = None,
-    load_format: Union[Tuple, str] = "auto",
-    revision: Optional[str] = None,
-    fall_back_to_pt: Optional[bool] = True,
-) -> Iterator[Tuple[str, torch.Tensor]]:
-    hf_folder, hf_weights_files, use_safetensors = prepare_hf_model_weights(
-        model_name_or_path,
-        cache_dir=cache_dir,
-        load_format=load_format,
-        fall_back_to_pt=fall_back_to_pt,
-        revision=revision)
+def filter_files_not_needed_for_inference(
+        hf_weights_files: List[str]) -> List[str]:
+    """
+    Exclude files that are not needed for inference.
 
-    if load_format == "npcache":
-        # Currently np_cache only support *.bin checkpoints
-        assert use_safetensors is False
+    See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+    """
+    blacklist = [
+        "training_args.bin",
+        "optimizer.bin",
+        "optimizer.pt",
+        "scheduler.pt",
+        "scaler.pt",
+    ]
+    hf_weights_files = [
+        f for f in hf_weights_files
+        if not any(f.endswith(x) for x in blacklist)
+    ]
+    return hf_weights_files
 
-        # Convert the model weights from torch tensors to numpy arrays for
-        # faster loading.
-        np_folder = os.path.join(hf_folder, "np")
-        os.makedirs(np_folder, exist_ok=True)
-        weight_names_file = os.path.join(np_folder, "weight_names.json")
-        # Use file lock to prevent multiple processes from
-        # dumping the same model weights to numpy at the same time.
-        with get_lock(model_name_or_path, cache_dir):
-            if not os.path.exists(weight_names_file):
-                weight_names = []
-                for bin_file in hf_weights_files:
-                    state = torch.load(bin_file, map_location="cpu")
-                    for name, param in state.items():
-                        param_path = os.path.join(np_folder, name)
-                        with open(param_path, "wb") as f:
-                            np.save(f, param.cpu().detach().numpy())
-                        weight_names.append(name)
-                with open(weight_names_file, "w") as f:
-                    json.dump(weight_names, f)
 
-        with open(weight_names_file, "r") as f:
-            weight_names = json.load(f)
+def np_cache_weights_iterator(
+    model_name_or_path: str, cache_dir: Optional[str], hf_folder: str,
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model np files.
 
-        for name in weight_names:
-            param_path = os.path.join(np_folder, name)
-            with open(param_path, "rb") as f:
-                param = np.load(f)
-            yield name, torch.from_numpy(param)
-    elif load_format == "tensorizer":
-        from vllm.model_executor.tensorizer_loader import (TensorDeserializer,
-                                                           open_stream,
-                                                           tensorizer_warning)
-        tensorizer_args = load_format.params
-        tensorizer_warning(
-            "Deserializing HuggingFace models is not optimized for "
-            "loading on vLLM, as tensorizer is forced to load to CPU. "
-            "Consider deserializing a vLLM model instead for faster "
-            "load times. See the examples/tensorize_vllm_model.py example "
-            "script for serializing vLLM models.")
+    Will dump the model weights to numpy files if they are not already dumped.
+    """
+    # Convert the model weights from torch tensors to numpy arrays for
+    # faster loading.
+    np_folder = os.path.join(hf_folder, "np")
+    os.makedirs(np_folder, exist_ok=True)
+    weight_names_file = os.path.join(np_folder, "weight_names.json")
+    # Use file lock to prevent multiple processes from
+    # dumping the same model weights to numpy at the same time.
+    with get_lock(model_name_or_path, cache_dir):
+        if not os.path.exists(weight_names_file):
+            weight_names = []
+            for bin_file in hf_weights_files:
+                state = torch.load(bin_file, map_location="cpu")
+                for name, param in state.items():
+                    param_path = os.path.join(np_folder, name)
+                    with open(param_path, "wb") as f:
+                        np.save(f, param.cpu().detach().numpy())
+                    weight_names.append(name)
+            with open(weight_names_file, "w") as f:
+                json.dump(weight_names, f)
 
-        deserializer_args = tensorizer_args.deserializer_params
-        stream_params = tensorizer_args.stream_params
-        stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
-        with TensorDeserializer(stream, **deserializer_args,
-                                device="cpu") as state:
-            for name, param in state.items():
+    with open(weight_names_file, "r") as f:
+        weight_names = json.load(f)
+
+    for name in weight_names:
+        param_path = os.path.join(np_folder, name)
+        with open(param_path, "rb") as f:
+            param = np.load(f)
+        yield name, torch.from_numpy(param)
+
+
+def safetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model safetensor files."""
+    for st_file in hf_weights_files:
+        with safe_open(st_file, framework="pt") as f:
+            for name in f.keys():  # noqa: SIM118
+                param = f.get_tensor(name)
                 yield name, param
+
+
+def pt_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    """Iterate over the weights in the model bin/pt files."""
+    for bin_file in hf_weights_files:
+        state = torch.load(bin_file, map_location="cpu")
+        for name, param in state.items():
+            yield name, param
         del state
-    elif use_safetensors:
-        for st_file in hf_weights_files:
-            with safe_open(st_file, framework="pt") as f:
-                for name in f.keys():  # noqa: SIM118
-                    param = f.get_tensor(name)
-                    yield name, param
-    else:
-        for bin_file in hf_weights_files:
-            state = torch.load(bin_file, map_location="cpu")
-            for name, param in state.items():
-                yield name, param
-            del state
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
 
 def kv_cache_scales_loader(

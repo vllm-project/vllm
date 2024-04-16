@@ -1,8 +1,10 @@
+import os
 from typing import Optional, Union
 
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
+from vllm.config import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
@@ -57,9 +59,26 @@ def get_tokenizer(
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
     tokenizer_revision: Optional[str] = None,
+    download_dir: Optional[str] = None,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    """Gets a tokenizer for the given model name via Huggingface."""
+    """Gets a tokenizer for the given model name via Huggingface/modelscope."""
+    if VLLM_USE_MODELSCOPE:
+        # download model from ModelScope hub,
+        # lazy import so that modelscope is not required for normal use.
+        # pylint: disable=C.
+        from modelscope.hub.snapshot_download import snapshot_download
+
+        # Only set the tokenizer here, model will be downloaded on the workers.
+        if not os.path.exists(tokenizer_name):
+            tokenizer_path = snapshot_download(
+                model_id=tokenizer_name,
+                cache_dir=download_dir,
+                revision=tokenizer_revision,
+                # Ignore weights - we only need the tokenizer.
+                ignore_file_pattern=["*.pt", "*.safetensors", "*.bin"])
+            tokenizer_name = tokenizer_path
+
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError(

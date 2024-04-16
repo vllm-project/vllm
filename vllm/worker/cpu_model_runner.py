@@ -3,8 +3,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -26,6 +26,7 @@ class CPUModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
@@ -36,6 +37,7 @@ class CPUModelRunner:
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
+        self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
@@ -55,8 +57,10 @@ class CPUModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
-        self.model = get_model(self.model_config,
-                               self.device_config,
+        self.model = get_model(model_config=self.model_config,
+                               load_config=self.load_config,
+                               device_config=self.device_config,
+                               vision_language_config=None,
                                lora_config=self.lora_config,
                                parallel_config=self.parallel_config,
                                scheduler_config=self.scheduler_config)
