@@ -56,10 +56,10 @@ def get_tokenizer(
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
-    tokenizer_revision: Optional[str] = None,
+    revision: Optional[str] = None,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    """Gets a tokenizer for the given model name via Huggingface."""
+    """Gets a tokenizer for the given model name via HuggingFace."""
     if tokenizer_mode == "slow":
         if kwargs.get("use_fast", False):
             raise ValueError(
@@ -71,7 +71,7 @@ def get_tokenizer(
             tokenizer_name,
             *args,
             trust_remote_code=trust_remote_code,
-            tokenizer_revision=tokenizer_revision,
+            revision=revision,
             **kwargs)
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
@@ -95,7 +95,7 @@ def get_tokenizer(
                 tokenizer_name,
                 *args,
                 trust_remote_code=trust_remote_code,
-                tokenizer_revision=tokenizer_revision,
+                revision=revision,
                 **kwargs)
         else:
             raise e
