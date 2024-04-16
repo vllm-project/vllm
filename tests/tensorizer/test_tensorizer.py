@@ -1,15 +1,20 @@
 import gc
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import json
+import openai
 import pytest
+import ray
 import torch
 
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
 from vllm.model_executor.model_loader.tensorizer import (
-    EncryptionParams, TensorizerConfig, TensorSerializer,
+    EncryptionParams, PerformanceWarning, TensorizerConfig, TensorSerializer,
     is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
+from vllm.config import ModelConfig
 
 prompts = [
     "Hello, my name is",
@@ -21,6 +26,8 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 model_ref = "facebook/opt-125m"
+tensorize_model_for_testing_script = os.path.join(
+    os.path.dirname(__file__), "tensorize_vllm_model_for_testing.py")
 
 
 def is_curl_installed():
@@ -222,9 +229,9 @@ def test_load_without_tensorizer_load_format(vllm_runner):
 def test_tensorize_vllm_model(tmp_path):
     # Test serialize command
     serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
-        model_ref, "--dtype", "float16", "serialize", "--serialized-directory",
-        tmp_path, "--suffix", "tests"
+        "python3", tensorize_model_for_testing_script, "--model", model_ref,
+        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
+        "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -236,8 +243,8 @@ def test_tensorize_vllm_model(tmp_path):
 
     # Test deserialize command
     deserialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
-        model_ref, "--dtype", "float16", "deserialize", "--path-to-tensors",
+        "python3", tensorize_model_for_testing_script, "--model", model_ref,
+        "--dtype", "float16", "deserialize", "--path-to-tensors",
         path_to_tensors
     ]
     result = subprocess.run(deserialize_args, capture_output=True, text=True)
@@ -249,9 +256,9 @@ def test_tensorize_vllm_model(tmp_path):
 def test_openai_apiserver_with_tensorizer(tmp_path):
     ## Serialize model
     serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
-        model_ref, "--dtype", "float16", "serialize", "--serialized-directory",
-        tmp_path, "--suffix", "tests"
+        "python3", tensorize_model_for_testing_script, "--model", model_ref,
+        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
+        "--suffix", "tests"
     ]
     result = subprocess.run(serialize_args, capture_output=True, text=True)
     print(result.stdout)  # Print the output of the serialize command
@@ -260,18 +267,39 @@ def test_openai_apiserver_with_tensorizer(tmp_path):
                                     f"\n{result.stdout}\n{result.stderr}")
 
     path_to_tensors = f"{tmp_path}/vllm/{model_ref}/tests/model.tensors"
+    model_loader_extra_config = {
+        "tensorizer_uri": path_to_tensors,
+        "vllm_tensorized": True
+    }
 
     ## Start OpenAI API server
     openai_args = [
         "--model", model_ref, "--dtype", "float16", "--load-format",
-        "tensorizer", "--tensorizer-uri", path_to_tensors, "--vllm-tensorized",
-        "--port", "8000"
+        "tensorizer", "--model-loader-extra-config",
+        json.dumps(model_loader_extra_config), "--port", "8000"
     ]
 
     server = ServerRunner.remote(openai_args)
 
+    assert ray.get(server.ready.remote())
     print("Server ready.")
-    assert server.ready.remote()
+
+    client = openai.OpenAI(
+        base_url="http://localhost:8000/v1",
+        api_key="token-abc123",
+    )
+    completion = client.completions.create(model=model_ref,
+                                           prompt="Hello, my name is",
+                                           max_tokens=5,
+                                           temperature=0.0)
+
+    assert completion.id is not None
+    assert completion.choices is not None and len(completion.choices) == 1
+    assert completion.choices[0].text is not None and len(
+        completion.choices[0].text) >= 5
+    assert completion.choices[0].finish_reason == "length"
+    assert completion.usage == openai.types.CompletionUsage(
+        completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner):
@@ -300,13 +328,14 @@ def test_tensorizer_with_tp(vllm_runner):
         )
 
 
-@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_tensorizer_warn_quant(tmp_path):
-    model_ref = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
-    serialize_args = [
-        "python3", "tensorizer/tensorize_vllm_model_for_testing.py", "--model",
-        model_ref, "--quantization", "gptq", "--tensorizer-uri", "test",
-        "serialize", "--serialized-directory", tmp_path, "--suffix", "tests"
-    ]
-    result = subprocess.run(serialize_args, capture_output=True, text=True)
-    assert 'PerformanceWarning' in result.stderr
+def test_tensorizer_warn_quant():
+    with pytest.warns(PerformanceWarning):
+        model_config = ModelConfig(model_ref,
+                                   model_ref,
+                                   "auto",
+                                   True,
+                                   "float16",
+                                   0,
+                                   quantization="gptq")
+        tensorizer_config = TensorizerConfig("foo", True)
+        tensorizer_config.verify_with_model_config(model_config)

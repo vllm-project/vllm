@@ -82,8 +82,6 @@ class TensorizerConfig:
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if (model_config.quantization is not None
                 and self.tensorizer_uri is not None):
-            from vllm.model_executor.model_loader.tensorizer import (
-                tensorizer_warning)
             tensorizer_warning(
                 "Loading a model using Tensorizer with quantization on vLLM"
                 " is unstable and may lead to errors.")

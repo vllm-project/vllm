@@ -436,9 +436,14 @@ class LoadConfig:
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"]
     download_dir: Optional[str]
-    model_loader_extra_config: dict = field(default_factory=dict)
+    model_loader_extra_config: Optional[Union[str, dict]] = field(
+        default_factory=dict)
 
     def __post_init__(self):
+        model_loader_extra_config = self.model_loader_extra_config or {}
+        if isinstance(model_loader_extra_config, str):
+            self.model_loader_extra_config = json.loads(
+                model_loader_extra_config)
         self._verify_load_format()
 
     def _verify_load_format(self) -> None:

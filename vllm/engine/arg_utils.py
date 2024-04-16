@@ -483,7 +483,7 @@ class EngineArgs:
         load_config = LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
-            model_loader_extra_config=self.model_loader_extra_config or {},
+            model_loader_extra_config=self.model_loader_extra_config,
         )
 
         if self.image_input_type:

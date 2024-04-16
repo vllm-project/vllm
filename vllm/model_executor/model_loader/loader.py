@@ -269,8 +269,10 @@ class TensorizerLoader(BaseModelLoader):
 
     def _verify_config(self, model_config: ModelConfig,
                        parallel_config: ParallelConfig):
+        breakpoint()
         self.tensorizer_config.verify_with_model_config(model_config)
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
+        breakpoint()
 
     def _get_weights_iterator(
             self) -> Generator[Tuple[str, torch.Tensor], None, None]:
