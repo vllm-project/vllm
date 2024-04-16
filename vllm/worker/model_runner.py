@@ -12,7 +12,11 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
 from vllm.config import (DeviceConfig, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, TensorizerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
+from vllm.distributed import (
+    broadcast_tensor_dict,
+    with_pynccl_for_all_reduce,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.distributed.device_communicators import (custom_all_reduce,
                                                    pynccl_utils)
 from vllm.logger import init_logger
@@ -893,7 +897,7 @@ class ModelRunner:
             conv_state, ssm_state, indices = self._prepare_request_mamba_cache(
                 requests_info,
                 input_tokens.shape[0] if 
-                not attn_metadata.is_prompt else len(requests_info)
+                attn_metadata.prefill_metadata is None else len(requests_info)
             )
             execute_model_kwargs = {
                 **execute_model_kwargs,

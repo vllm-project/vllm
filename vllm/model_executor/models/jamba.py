@@ -25,8 +25,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
@@ -35,6 +33,8 @@ from vllm.sequence import SamplerOutput
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -63,7 +63,10 @@ class JambaMambaMixer(nn.Module):
             output_size=self.intermediate_size,
             bias=self.use_conv_bias,
         )
-        # unsqueeze to fit conv1d weights shape into the linear weights shape. Can't do this in `weight_loader` since it already exists in `ColumnParallelLinear` and `set_weight_attrs` doesn't allow to override it
+        # unsqueeze to fit conv1d weights shape into the linear weights shape. 
+        # Can't do this in `weight_loader` since it already exists in 
+        # `ColumnParallelLinear` and `set_weight_attrs` 
+        # doesn't allow to override it
         self.conv1d.weight.data =  self.conv1d.weight.data.unsqueeze(1)
 
         self.in_proj = MergedColumnParallelLinear(
@@ -77,7 +80,9 @@ class JambaMambaMixer(nn.Module):
             self.time_step_rank + self.ssm_state_size * 2,
             bias=False
         )
-        # time step projection (discretization) - In the forward we need to apply dt_proj without the bias, as the bias is added in the selective scan kernel.
+        # time step projection (discretization) - 
+        # In the forward we need to apply dt_proj without the bias, 
+        # as the bias is added in the selective scan kernel.
         self.dt_proj = ColumnParallelLinear(
             self.time_step_rank,
             self.intermediate_size,
@@ -213,16 +218,16 @@ class JambaMambaMixer(nn.Module):
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor
     ):
-        if attn_metadata.is_prompt:
-            max_seq_len = max(attn_metadata.prompt_lens)
-            batch_size = len(attn_metadata.prompt_lens)
+        if attn_metadata.prefill_metadata is not None:
+            max_seq_len = max(attn_metadata.prefill_metadata.prompt_lens)
+            batch_size = len(attn_metadata.prefill_metadata.prompt_lens)
             padded_hidden_states = torch.zeros((
                 batch_size,
                 max_seq_len,
                 hidden_states.shape[-1],
             ), dtype=hidden_states.dtype, device=hidden_states.device)
             offset = 0
-            for i,prompt_len in enumerate(attn_metadata.prompt_lens):
+            for i,prompt_len in enumerate(attn_metadata.prefill_metadata.prompt_lens):
                 padded_hidden_states[i,:prompt_len].copy_(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
             cache = MambaCacheParams(
@@ -232,7 +237,7 @@ class JambaMambaMixer(nn.Module):
             )
             padded_hidden_states = self.mamba_forward(padded_hidden_states, cache_params=cache)
             offset = 0
-            for i,prompt_len in enumerate(attn_metadata.prompt_lens):
+            for i,prompt_len in enumerate(attn_metadata.prefill_metadata.prompt_lens):
                 hidden_states[offset:offset + prompt_len].copy_(padded_hidden_states[i,:prompt_len])
                 offset += prompt_len
         else:
