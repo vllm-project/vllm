@@ -457,7 +457,11 @@ class LLMEngine:
         if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
-            seq_group.prompt_logprobs = prompt_logprobs
+            if not seq_group.prompt_logprobs:
+                # The first prompt token's logprob is None because it doesn't have
+                # tokens that are precedent.
+                seq_group.prompt_logprobs = [None]
+            seq_group.prompt_logprobs.extend(prompt_logprobs)
 
         # Process samples
         samples = outputs.samples

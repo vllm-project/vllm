@@ -557,7 +557,7 @@ def _get_logprobs(
     for performance.
 
     Args:
-        logprobs: (num_query_token_across_batch, num_vocab). Each query token's
+        logprobs: (num_query_tokens_across_batch, num_vocab). Each query token's
             logprob per vocab. Token ID means a ID within a vocab.
         sampling_metadata: The sampling metadata (config) across a batch.
         sample_results: The tuple of (next_token_ids, parent_ids) per each
@@ -582,13 +582,22 @@ def _get_logprobs(
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
-            # SANG-TODO Use a subquery tokens instead of entire prompt tokens.
-            prompt_len = sampling_metadata.prompt_lens[i]
-            prompt_tokens = sampling_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
-            query_indices.extend(query_idx + j for j in range(prompt_len - 1))
-            token_indices.extend(token_id for token_id in prompt_tokens[1:])
-            query_idx += prompt_len - 1
+            seq_data = sampling_metadata.seq_data[seq_ids[0]]
+            subquery_len = sampling_metadata.subquery_lens[i]
+            computed_len = seq_data.get_num_computed_tokens()
+            # The last token is for decoding, so we exclude it for prompt logprob.
+            prompt_tokens = seq_data.prompt_token_ids[:-1]
+            prompt_tokens = prompt_tokens[computed_len:subquery_len]
+            query_indices.extend(query_idx + j for j in range(len(prompt_tokens)))
+            token_indices.extend(token_id for token_id in prompt_tokens)
+            query_idx += len(prompt_tokens)
+            print(f"SANG-TODO {len(seq_data.prompt_token_ids)=}")
+            print(f"SANG-TODO {len(parent_ids)=}")
+            print(f"SANG-TODO {query_idx=}")
+            print(f"SANG-TODO {query_indices=}")
+            print(f"SANG-TODO {len(query_indices)=}")
+            print(f"SANG-TODO {token_indices=}")
+            print(f"SANG-TODO {len(prompt_tokens)=}")
         query_indices.extend(
             [query_idx + parent_id for parent_id in parent_ids])
         token_indices.extend(next_token_ids)
@@ -603,7 +612,6 @@ def _get_logprobs(
     print(f"SANG-TODO {query_indices_gpu=}")
     print(f"SANG-TODO {token_indices_gpu=}")
     print(f"SANG-TODO {logprobs.shape=}")
-
     # logprob for selected tokens across all sequence groups.
     selected_logprobs = logprobs[[
         query_indices_gpu,
@@ -616,7 +624,7 @@ def _get_logprobs(
         token_indices_gpu,
     )
 
-    # Logprobs of topk tokens. It includes a batch of sequence groups.
+    # Logprobs of topk tokens for a batch of sequence groups.
     if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
@@ -646,10 +654,13 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            # SANG-TODO Instead of entire prompt tokens, it should
-            # only contain query tokens.
-            prompt_tokens = sampling_metadata.seq_data[
-                seq_ids[0]].prompt_token_ids
+            seq_data = sampling_metadata.seq_data[seq_ids[0]]
+            subquery_len = sampling_metadata.subquery_lens[i]
+            computed_len = seq_data.get_num_computed_tokens()
+            # The last prompt token is for decoding, so we exclude it for prompt
+            # logprob
+            prompt_tokens = seq_data.prompt_token_ids[:-1]
+            prompt_tokens = prompt_tokens[computed_len:subquery_len]
             prompt_logprobs: PromptLogprobs = []
             for token_id in prompt_tokens:
                 # First, calculate the logprob from the sampled output.

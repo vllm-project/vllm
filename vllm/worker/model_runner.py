@@ -635,6 +635,7 @@ class ModelRunner:
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
             generators=generators,
+            subquery_lens=subquery_lens,
         )
         return sampling_metadata
 

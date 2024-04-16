@@ -81,6 +81,7 @@ def test_get_prompt_logprobs(
     # Test whether prompt logprobs are consistent with HF
     for vllm_result, hf_logprob in zip(vllm_results, hf_logprobs):
         # Check prompt logprobs
+        # The first prompt logprob is always None, so we compare it from 1:.
         vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
         for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
             for token_id, logprob in vllm_prompt_logprob_dict.items():
@@ -104,11 +105,12 @@ def test_get_prompt_logprobs(
     for vllm_result in vllm_results:
         token_ids = vllm_result.prompt_token_ids
         prompt_logprobs = vllm_result.prompt_logprobs
+        breakpoint()
 
         # The first token doesn't have logprob.
         assert prompt_logprobs[0] is None
 
-        for token_id, logprob_dict in zip(token_ids[1:], prompt_logprobs[1:]):
+        for token_id, logprob_dict in zip(token_ids, prompt_logprobs[1:]):
             assert token_id in logprob_dict
 
 
