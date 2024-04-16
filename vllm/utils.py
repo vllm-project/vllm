@@ -275,7 +275,7 @@ def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ:
             logger.warning(f"Overwriting environment variable {k} "
-                           f"from {os.environ[k]} to {v}")
+                           f"from '{os.environ[k]}' to '{v}'")
         os.environ[k] = v
 
 
