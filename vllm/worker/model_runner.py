@@ -810,6 +810,7 @@ class ModelRunner:
             num_prefill_tokens = metadata_dict.pop("num_prefill_tokens")
             num_decode_tokens = metadata_dict.pop("num_decode_tokens")
             batch_type = metadata_dict.pop("batch_type")
+            requests_info = metadata_dict.pop("requests_info")
 
             # Create an attention metadata.
             prefill_attn_metadata = None
@@ -820,7 +821,6 @@ class ModelRunner:
             else:
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
-            requests_info = metadata_dict.pop("requests_info")
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
