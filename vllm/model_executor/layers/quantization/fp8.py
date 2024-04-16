@@ -1,3 +1,5 @@
+import enum
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -41,6 +43,12 @@ class FP8Config(QuantizationConfig):
         return []
 
 
+class Fp8LinearState(Enum):
+
+    UNINITIALIZED = enum.auto()
+    READY = enum.auto()
+
+
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
 
@@ -69,27 +77,38 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def postproc_weights(self, weight: torch.Tensor):
-        qweight, scale = per_tensor_quantize(weight)
-        self.scale = scale
-        return qweight
+        scale = Parameter(
+            torch.empty(1, dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("scale", scale)
+        set_weight_attrs(scale, extra_weight_attrs)
+        layer.fp8_linear_state = Fp8LinearState.UNINITIALIZED
 
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qinput, scale = per_tensor_quantize(x)
+
+        if layer.fp8_linear_state == Fp8LinearState.UNINITIALIZED:
+            qweight, weight_scale = per_tensor_quantize(layer.weight)
+            layer.weight.data = qweight.t()
+            layer.scale.data = weight_scale
+            layer.fp8_linear_state = Fp8LinearState.READY
+
         output, _ = torch._scaled_mm(
             qinput,
-            layer.weight.t(),
+            layer.weight,
             out_dtype=x.dtype,
             scale_a=scale,
-            scale_b=self.scale,
+            scale_b=layer.scale,
             bias=bias,
         )
         return output
 
 
+@torch.compile
 def per_tensor_quantize(
         tensor: torch.Tensor,
         qdtype=torch.float8_e4m3fn) -> tuple[torch.Tensor, float]:
