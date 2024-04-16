@@ -1,5 +1,5 @@
 import pickle
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -46,8 +46,8 @@ except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
                    "For distributed inference, please install Ray with "
                    "`pip install ray`.")
-    ray = None # type: ignore
-    RayWorkerWrapper = None # type: ignore
+    ray = None  # type: ignore
+    RayWorkerWrapper = None  # type: ignore
 
 
 def initialize_ray_cluster(

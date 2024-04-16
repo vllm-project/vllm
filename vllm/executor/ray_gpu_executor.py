@@ -4,9 +4,6 @@ import pickle
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -263,7 +260,7 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
+        driver_args: Optional[Tuple[Any]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         all_args: Optional[List[List[Any]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
@@ -281,10 +278,17 @@ class RayGPUExecutor(ExecutorBase):
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
+        # for mypy type checking
+        assert driver_args is not None
+        assert driver_kwargs is not None
         if all_args is None:
             all_args = [driver_args] + [args] * len(self.workers)
         if all_kwargs is None:
             all_kwargs = [driver_kwargs] + [kwargs] * len(self.workers)
+
+        # for mypy type checking
+        assert all_args is not None
+        assert all_kwargs is not None
 
         if max_concurrent_workers:
             raise NotImplementedError(
