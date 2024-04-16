@@ -269,14 +269,12 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize(
     "output_len",
@@ -338,6 +336,7 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -349,23 +348,28 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        "block_size": 8,
-    },
-    {
-        "block_size": 32,
-    },
-])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize(
-    "test_llm_kwargs",
+    "per_test_common_llm_kwargs",
     [
+        # As of this writing, vLLM only compiles with these 3 block sizes by
+        # default.
         {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
+            "block_size": 8,
+        },
+        {
+            "block_size": 16,
+        },
+        {
+            "block_size": 32,
         },
     ])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
     "output_len",
@@ -374,9 +378,9 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_many_block_size(
-        baseline_llm_generator, test_llm_generator, batch_size: int,
-        output_len: int):
+def test_spec_decode_different_block_size(baseline_llm_generator,
+                                          test_llm_generator, batch_size: int,
+                                          output_len: int):
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
