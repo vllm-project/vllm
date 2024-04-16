@@ -6,24 +6,12 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
-# TODO test preemption
-# TODO test integration (cuda graph, tp)
-# TODO test smoke (sampling params)
-# TODO investigate <unk> token with 68m/68m k=5 temp=1.0
-# TODO test for when sequences skip speculation
-# TODO test different block sizes
-# TODO validate acceptance rate
-
-
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
         # Use a small model for a fast test.
         # Note this is repeated in the test body; to initialize a tokenizer.
         "model": "JackFram/llama-68m",
-
-        ## Skip real loading for fast test.
-        # "load_format": "dummy",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -34,17 +22,6 @@ from vllm import SamplingParams
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
-        #{
-        #    "speculative_model": "JackFram/llama-68m",
-        #    "num_speculative_tokens": 5,
-        #},
-        #{
-        #    "enable_chunked_prefill": True,
-        #    "max_num_batched_tokens": 2,
-        #    "max_num_seqs": 2,
-        #    #"speculative_model": "JackFram/llama-68m",
-        #    #"num_speculative_tokens": 1,
-        #},
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
@@ -115,9 +92,9 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
         {
             "model": "JackFram/llama-68m",
         },
-        #{
-        #    "model": "JackFram/llama-160m",
-        #},
+        {
+            "model": "JackFram/llama-160m",
+        },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize(
@@ -128,10 +105,6 @@ def test_spec_decode_e2e_logical_flow(test_llm_generator, batch_size: int):
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        #{
-        #    "speculative_model": "JackFram/llama-68m",
-        #    "num_speculative_tokens": 1,
-        #}
     ])
 @pytest.mark.parametrize(
     "output_len",
@@ -181,10 +154,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        }
     ])
 @pytest.mark.parametrize(
     "output_len",
@@ -229,15 +198,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
-        # Try two different num spec tokens.
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        }
     ])
 @pytest.mark.parametrize("max_output_len", [
     256,
@@ -271,15 +235,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
-        # Try two different num spec tokens.
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        }
     ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
@@ -321,10 +280,6 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
         },
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
-        }
     ])
 @pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize(
