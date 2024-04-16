@@ -78,11 +78,13 @@ class Sampler(nn.Module):
         # (num_tokens, vocab_size). logprobs on all vocabs per each
         # token. Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
+        print(f"SANG-TODO initial logoprob shape; {logprobs.shape}")
 
         # Sample the next tokens.
         # (next_token_ids, parent_seq_ids) for each seq group.
         sample_results = _sample(probs, logprobs, sampling_metadata,
                                  sampling_tensors)
+        print(f"SANG-TODO logoprob shape after sampling; {logprobs.shape}")
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
@@ -122,7 +124,7 @@ def _apply_min_tokens_penalty(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             assert len(seq_ids) == 1
-            start_idx += sampling_metadata.prompt_lens[i] - 1
+            start_idx += sampling_metadata.subquery_lens[i] - 1
 
         min_tokens = sampling_params.min_tokens
         if min_tokens > 0:
@@ -578,6 +580,7 @@ def _get_logprobs(
         seq_ids, sampling_params = seq_group
         next_token_ids, parent_ids = sample_result
         num_parent_seqs = len(seq_ids)
+        # Find query indices for prompt logprobs.
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
@@ -585,12 +588,17 @@ def _get_logprobs(
             seq_data = sampling_metadata.seq_data[seq_ids[0]]
             subquery_len = sampling_metadata.subquery_lens[i]
             computed_len = seq_data.get_num_computed_tokens()
-            # The last token is for decoding, so we exclude it for prompt logprob.
-            prompt_tokens = seq_data.prompt_token_ids[:-1]
-            prompt_tokens = prompt_tokens[computed_len:subquery_len]
-            query_indices.extend(query_idx + j for j in range(len(prompt_tokens)))
+            # We don't compute the prompt logprob for the first token because
+            # it doesn't have a token that's precedent, so it is meaningless.
+            prompt_tokens = seq_data.prompt_token_ids
+            prompt_tokens = prompt_tokens[
+                computed_len + 1:min(computed_len + subquery_len +
+                                     1, len(prompt_tokens))]
+            query_indices.extend(query_idx + j
+                                 for j in range(len(prompt_tokens)))
             token_indices.extend(token_id for token_id in prompt_tokens)
             query_idx += len(prompt_tokens)
+            print(f"SANG-TODO {computed_len=} {subquery_len=}")
             print(f"SANG-TODO {len(seq_data.prompt_token_ids)=}")
             print(f"SANG-TODO {len(parent_ids)=}")
             print(f"SANG-TODO {query_idx=}")
@@ -598,6 +606,8 @@ def _get_logprobs(
             print(f"SANG-TODO {len(query_indices)=}")
             print(f"SANG-TODO {token_indices=}")
             print(f"SANG-TODO {len(prompt_tokens)=}")
+
+        # Find query indices for sample logprobs.
         query_indices.extend(
             [query_idx + parent_id for parent_id in parent_ids])
         token_indices.extend(next_token_ids)
@@ -657,10 +667,12 @@ def _get_logprobs(
             seq_data = sampling_metadata.seq_data[seq_ids[0]]
             subquery_len = sampling_metadata.subquery_lens[i]
             computed_len = seq_data.get_num_computed_tokens()
-            # The last prompt token is for decoding, so we exclude it for prompt
-            # logprob
-            prompt_tokens = seq_data.prompt_token_ids[:-1]
-            prompt_tokens = prompt_tokens[computed_len:subquery_len]
+            # We don't compute the prompt logprob for the first token because
+            # it doesn't have a token that's precedent, so it is meaningless.
+            prompt_tokens = seq_data.prompt_token_ids
+            prompt_tokens = prompt_tokens[
+                computed_len + 1:min(computed_len + subquery_len +
+                                     1, len(prompt_tokens))]
             prompt_logprobs: PromptLogprobs = []
             for token_id in prompt_tokens:
                 # First, calculate the logprob from the sampled output.

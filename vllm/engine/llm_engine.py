@@ -449,20 +449,21 @@ class LLMEngine:
                         eos_token_id=best_running_seq.eos_token_id))
         return current_worst_score >= highest_attainable_score
 
-    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
-
+    def _process_prompt_logprob(self, seq_group: SequenceGroup,
+                                outputs: SequenceGroupOutput) -> None:
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
         if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             if not seq_group.prompt_logprobs:
-                # The first prompt token's logprob is None because it doesn't have
-                # tokens that are precedent.
+                # The first prompt token's logprob is None because it doesn't
+                # have tokens that are precedent.
                 seq_group.prompt_logprobs = [None]
             seq_group.prompt_logprobs.extend(prompt_logprobs)
 
+    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
+                                        outputs: SequenceGroupOutput) -> None:
         # Process samples
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
@@ -641,6 +642,7 @@ class LLMEngine:
                 scheduled_seq_group.token_chunk_size)
             # If uncomputed tokens > 0, it means prefill is chunked.
             # We don't need to process outputs in that case.
+            self._process_prompt_logprob(seq_group, outputs)
             if seq_group.get_num_uncomputed_tokens() == 0:
                 self._process_sequence_group_outputs(seq_group, outputs)
 

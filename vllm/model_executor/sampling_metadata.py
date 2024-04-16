@@ -149,7 +149,7 @@ class SamplingTensors:
                     and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
-                prompt_len = sampling_metadata.prompt_lens[i]
+                prompt_len = sampling_metadata.subquery_lens[i]
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)
                 top_ks += [top_k] * (prompt_len - 1)
@@ -174,7 +174,7 @@ class SamplingTensors:
             is_prompt = i < sampling_metadata.num_prompts
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
-                prompt_len = sampling_metadata.prompt_lens[i]
+                prompt_len = sampling_metadata.subquery_lens[i]
 
                 if sampling_params.prompt_logprobs is not None:
                     # NOTE: the sampling position is the last token
