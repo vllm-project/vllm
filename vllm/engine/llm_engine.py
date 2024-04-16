@@ -5,8 +5,9 @@ from transformers import PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig)
+                         LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats

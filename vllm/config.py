@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# If true, will load models from ModelScope instead of Hugging Face Hub.
 VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
                                      "False").lower() == "true"
 
@@ -432,10 +433,12 @@ class LoadConfig:
                 a numpy cache to speed up the loading.
             "dummy" will initialize the weights with random values, which is
                 mainly for profiling.
+            "tensorizer" will use CoreWeave's tensorizer library for
+                fast weight loading.
     """
 
-    load_format: Union[str, LoadFormat, "BaseModelLoader"]
-    download_dir: Optional[str]
+    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    download_dir: Optional[str] = None
     model_loader_extra_config: Optional[Union[str, dict]] = field(
         default_factory=dict)
 

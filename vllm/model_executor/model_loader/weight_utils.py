@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Generator, Iterable, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -216,9 +216,10 @@ def filter_files_not_needed_for_inference(
     return hf_weights_files
 
 
-def np_cache_weights_iterator(model_name_or_path: str,
-                              cache_dir: Optional[str], hf_folder: str,
-                              hf_weights_files: List[str]):
+def np_cache_weights_iterator(
+    model_name_or_path: str, cache_dir: Optional[str], hf_folder: str,
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
@@ -253,7 +254,9 @@ def np_cache_weights_iterator(model_name_or_path: str,
         yield name, torch.from_numpy(param)
 
 
-def safetensors_weights_iterator(hf_weights_files: List[str]):
+def safetensors_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
@@ -262,7 +265,9 @@ def safetensors_weights_iterator(hf_weights_files: List[str]):
                 yield name, param
 
 
-def pt_weights_iterator(hf_weights_files: List[str]):
+def pt_weights_iterator(
+    hf_weights_files: List[str]
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model bin/pt files."""
     for bin_file in hf_weights_files:
         state = torch.load(bin_file, map_location="cpu")

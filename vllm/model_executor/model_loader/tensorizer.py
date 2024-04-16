@@ -4,9 +4,8 @@ import io
 import os
 import time
 import typing
-import warnings
 from dataclasses import dataclass
-from typing import Optional, Type, Union
+from typing import Generator, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -54,7 +53,6 @@ class TensorizerConfig:
     dtype: Optional[Union[str, torch.dtype]] = None
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
-        from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
         tensorizer_args = {
             "tensorizer_uri": self.tensorizer_uri,
             "vllm_tensorized": self.vllm_tensorized,
@@ -82,7 +80,7 @@ class TensorizerConfig:
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if (model_config.quantization is not None
                 and self.tensorizer_uri is not None):
-            tensorizer_warning(
+            logger.warning(
                 "Loading a model using Tensorizer with quantization on vLLM"
                 " is unstable and may lead to errors.")
 
@@ -93,27 +91,10 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
     return tensorizer.deserialize()
 
 
-def tensorizer_warning(message: str):
-    return warnings.warn(message, category=PerformanceWarning, stacklevel=2)
-
-
 def is_vllm_serialized_tensorizer(tensorizer_config: TensorizerConfig) -> bool:
     if tensorizer_config is None:
         return False
     return tensorizer_config.vllm_tensorized
-
-
-class PerformanceWarning(UserWarning):
-
-    def __str__(self):
-        return (f"{super().__str__()}"
-                " (set the VLLM_SILENCE_PERFORMANCE_WARNINGS"
-                " environment variable to hide this)")
-
-
-if (os.getenv("VLLM_SILENCE_PERFORMANCE_WARNINGS", "").lower()
-        not in ("", "0", "n", "no", "off", "disable")):
-    warnings.simplefilter("ignore", category=PerformanceWarning)
 
 
 @dataclass
@@ -362,8 +343,10 @@ class TensorizerAgent:
         return self.model.eval()
 
 
-def tensorizer_weights_iterator(tensorizer_args: "TensorizerArgs"):
-    tensorizer_warning(
+def tensorizer_weights_iterator(
+    tensorizer_args: "TensorizerArgs"
+) -> Generator[Tuple[str, torch.Tensor], None, None]:
+    logger.warning(
         "Deserializing HuggingFace models is not optimized for "
         "loading on vLLM, as tensorizer is forced to load to CPU. "
         "Consider deserializing a vLLM model instead for faster "

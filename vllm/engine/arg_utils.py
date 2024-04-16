@@ -3,9 +3,9 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, EngineConfig,
-                         LoadConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
 
