@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -195,14 +196,12 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize("max_output_len", [
     256,
 ])
@@ -232,14 +231,12 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
     "output_len",
@@ -302,10 +299,10 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        #"block_size": 8,
+        "block_size": 8,
         # 2 for small prompt, 256//8 for generated.
-        #"num_gpu_blocks_override": 2 + 256//8,
-        #"max_model_len": (2 + 256//8)*8,
+        "num_gpu_blocks_override": 2 + 256 // 8,
+        "max_model_len": (2 + 256 // 8) * 8,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
@@ -313,14 +310,11 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            #"model": "JackFram/llama-160m",
-            "model": "meta-llama/Llama-2-7b-chat-hf",
-        },
-    ])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "model": "JackFram/llama-160m",
+    },
+])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
@@ -339,9 +333,6 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
-    """
-    NOTE(cade): this test fails, unclear why
-    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
