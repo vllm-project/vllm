@@ -319,8 +319,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # prompt, and they have the same length.
 
             # if self.layer_idx == 0:
-            #     print(attn_metadata.seq_start_loc)
-                # print(f'>>> {query.shape=}, {key.shape=}, {value.shape=}, {attn_metadata.seq_start_loc=}')
+            #     # print(attn_metadata.seq_start_loc)
+            #     print(f'>>> {query.shape=}, {key.shape=}, {value.shape=}, {attn_metadata.seq_start_loc.shape=}')
 
             output = self.bs_attn(
                 q=query,

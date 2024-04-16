@@ -25,7 +25,7 @@ from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import TLGv4Config
 # from .triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op, BlockSparseParams
 from vllm.model_executor.models.tnlgv4_attention import BlockSparseFlashAttention
-
+# from vllm.model_executor.models.tnlgv4_ops import fused_gegelu
 
 '''
 Further optimization TODO:
@@ -195,8 +195,9 @@ class TLGv4SelfAttention(nn.Module):
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        assert not use_dense_attn
+        # assert not use_dense_attn
         # use_dense_attn = True
+        # print(f'>>> {layer_idx=}, {use_dense_attn=}')
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,

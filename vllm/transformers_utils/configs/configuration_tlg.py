@@ -224,6 +224,8 @@ class TLGv4Config(PretrainedConfig):
     
     @property
     def intermediate_size(self) -> int:
+        if getattr(self, 'ff_intermediate_size', None):
+            return self.ff_intermediate_size
         intermediate_size = (self.ff_dim_multiplier) * (self.hidden_size // 3) * 2
         if self.gegelu_pad_to_256:
             intermediate_size = next_mult(intermediate_size, 256)
