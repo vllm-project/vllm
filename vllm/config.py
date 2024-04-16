@@ -636,7 +636,6 @@ class DeviceConfig:
         if self.device_type in ["neuron"]:
             self.device = torch.device("cpu")
         elif self.device_type in ["tpu"]:
-            # Will be set by `xm.xla_device()`
             self.device = None
         else:
             # Set device with device type
