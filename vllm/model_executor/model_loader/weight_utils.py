@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from typing import Any, Iterable, List, Optional, Tuple, Generator
+from typing import Any, Iterable, Generator, List, Optional, Tuple, Generator
 
 import filelock
 import huggingface_hub.constants
@@ -262,7 +262,6 @@ def safetensors_weights_iterator(
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
                 param = f.get_tensor(name)
->>>>>>> main:vllm/model_executor/model_loader/weight_utils.py
                 yield name, param
 
 
