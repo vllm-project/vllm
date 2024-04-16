@@ -38,6 +38,9 @@ class LinearMethodBase(ABC):
         The weights will be set as attributes of the layer."""
         raise NotImplementedError
 
+    def postproc_weights(self, layer: torch.nn.Module):
+        """Postprocess the weights after loading (optional)."""
+
     @abstractmethod
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -209,6 +212,7 @@ class ColumnParallelLinear(torch.nn.Module):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
+        loaded_weight = self.linear_method.postproc_weights(loaded_weight)
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
@@ -328,6 +332,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "MergedColumnParallelLinear, assume the weight is "
                     "the same for all partitions.")
         assert param_data.shape == loaded_weight.shape
+        loaded_weight = self.linear_method.postproc_weights(loaded_weight)
         param_data.copy_(loaded_weight)
 
 
@@ -469,6 +474,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "QKVParallelLinear, assume the weight is the same "
                     "for all partitions.")
         assert param_data.shape == loaded_weight.shape
+        loaded_weight = self.linear_method.postproc_weights(loaded_weight)
         param_data.copy_(loaded_weight)
 
 
@@ -558,6 +564,7 @@ class RowParallelLinear(torch.nn.Module):
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
+        loaded_weight = self.linear_method.postproc_weights(loaded_weight)
         param_data.copy_(loaded_weight)
 
     def forward(self, input_):
