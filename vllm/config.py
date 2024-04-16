@@ -460,7 +460,6 @@ class LoadConfig:
                 f"{rocm_supported_load_format}")
 
 
-
 class ParallelConfig:
     """Configuration for the distributed execution.
 

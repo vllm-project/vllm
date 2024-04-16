@@ -203,13 +203,13 @@ class DefaultModelLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
-                model.load_weights(
-                    self._get_weights_iterator(
-                        model_config.model,
-                        model_config.revision,
-                        fall_back_to_pt=getattr(model,
-                                                "fall_back_to_pt_during_load",
-                                                True)), )
+            model.load_weights(
+                self._get_weights_iterator(model_config.model,
+                                           model_config.revision,
+                                           fall_back_to_pt=getattr(
+                                               model,
+                                               "fall_back_to_pt_during_load",
+                                               True)), )
         return model.eval()
 
 
@@ -231,9 +231,9 @@ class DummyModelLoader(BaseModelLoader):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
-                # NOTE(woosuk): For accurate performance evaluation, we assign
-                # random values to the weights.
-                initialize_dummy_weights(model)
+            # NOTE(woosuk): For accurate performance evaluation, we assign
+            # random values to the weights.
+            initialize_dummy_weights(model)
         return model.eval()
 
 
@@ -266,7 +266,7 @@ class TensorizerLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
 
-                model.load_weights(self._get_weights_iterator())
+            model.load_weights(self._get_weights_iterator())
         return model.eval()
 
     def _load_model_serialized(
