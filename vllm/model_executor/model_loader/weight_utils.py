@@ -157,7 +157,21 @@ def get_quant_config(model_config: ModelConfig,
 def download_weights_from_hf(model_name_or_path: str,
                              cache_dir: Optional[str],
                              allow_patterns: List[str],
-                             revision: Optional[str] = None):
+                             revision: Optional[str] = None) -> str:
+    """Download model weights from Hugging Face Hub.
+    
+    Args:
+        model_name_or_path (str): The model name or path.
+        cache_dir (Optional[str]): The cache directory to store the model
+            weights. If None, will use HF defaults.
+        allow_patterns (List[str]): The allowed patterns for the
+            weight files. Files matched by any of the patterns will be
+            downloaded.
+        revision (Optional[str]): The revision of the model.
+
+    Returns:
+        str: The path to the downloaded model weights.
+    """
     # Before we download we look at that is available:
     fs = HfFileSystem()
     file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -183,8 +197,11 @@ def download_weights_from_hf(model_name_or_path: str,
 
 def filter_files_not_needed_for_inference(
         hf_weights_files: List[str]) -> List[str]:
-    # Exclude files that are not needed for inference.
-    # https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+    """
+    Exclude files that are not needed for inference.
+
+    See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+    """
     blacklist = [
         "training_args.bin",
         "optimizer.bin",
@@ -202,6 +219,10 @@ def filter_files_not_needed_for_inference(
 def np_cache_weights_iterator(model_name_or_path: str,
                               cache_dir: Optional[str], hf_folder: str,
                               hf_weights_files: List[str]):
+    """Iterate over the weights in the model np files.
+
+    Will dump the model weights to numpy files if they are not already dumped.
+    """
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
     np_folder = os.path.join(hf_folder, "np")
@@ -233,6 +254,7 @@ def np_cache_weights_iterator(model_name_or_path: str,
 
 
 def safetensors_weights_iterator(hf_weights_files: List[str]):
+    """Iterate over the weights in the model safetensor files."""
     for st_file in hf_weights_files:
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
@@ -241,6 +263,7 @@ def safetensors_weights_iterator(hf_weights_files: List[str]):
 
 
 def pt_weights_iterator(hf_weights_files: List[str]):
+    """Iterate over the weights in the model bin/pt files."""
     for bin_file in hf_weights_files:
         state = torch.load(bin_file, map_location="cpu")
         for name, param in state.items():
