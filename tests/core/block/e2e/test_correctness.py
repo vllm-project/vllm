@@ -229,27 +229,28 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
 
     assert baseline_token_ids == test_token_ids
 
-@pytest.mark.parametrize("common_llm_kwargs", [
-    {
-        # Use a small model for a fast test.
-        "model": "facebook/opt-125m",
 
-        # skip cuda graph creation for fast test.
-        "enforce_eager": True,
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [
+        {
+            # Use a small model for a fast test.
+            "model": "facebook/opt-125m",
 
-        "enable_chunked_prefill": True,
-        "max_num_batched_tokens": 2,
-        "max_num_seqs": 2,
-    },
-])
-@pytest.mark.parametrize("per_test_common_llm_kwargs",[{}])
+            # skip cuda graph creation for fast test.
+            "enforce_eager": True,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 2,
+            "max_num_seqs": 2,
+        },
+    ])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [
     {
         "use_v2_block_manager": False,
     },
 ])
-@pytest.mark.parametrize(
-    "test_llm_kwargs", [
+@pytest.mark.parametrize("test_llm_kwargs", [
     {
         "use_v2_block_manager": True,
         "num_lookahead_slots": 0,
@@ -261,7 +262,8 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
 ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_chunked_prefill_block_manager_v2(baseline_llm_generator, test_llm_generator, batch_size):
+def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
+                                          test_llm_generator, batch_size):
     output_len = 32
     temperature = 0.0
 

@@ -1,4 +1,4 @@
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 from transformers import PreTrainedTokenizer
 
@@ -19,10 +19,8 @@ class StopChecker:
         self.max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
-    def maybe_stop_sequence(self, seq: Sequence,
-                            new_char_count: int,
+    def maybe_stop_sequence(self, seq: Sequence, new_char_count: int,
                             sampling_params: SamplingParams) -> None:
-
         """Stop the finished sequences.
 
        new_char_count is the number of chars added to the
