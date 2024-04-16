@@ -31,12 +31,19 @@ from vllm import SamplingParams
         #    "num_speculative_tokens": 5,
         #},
         {
-            #"enable_chunked_prefill": True,
-            #"max_num_batched_tokens": 2,
-            #"max_num_seqs": 2,
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 1,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 2,
+            "max_num_seqs": 2,
+            #"speculative_model": "JackFram/llama-68m",
+            #"num_speculative_tokens": 1,
         },
+        #{
+        #    #"enable_chunked_prefill": True,
+        #    #"max_num_batched_tokens": 2,
+        #    #"max_num_seqs": 2,
+        #    "speculative_model": "JackFram/llama-68m",
+        #    "num_speculative_tokens": 1,
+        #},
         #{
         #    # No spec decode.
         #},
