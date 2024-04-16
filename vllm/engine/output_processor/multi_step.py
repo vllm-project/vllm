@@ -101,17 +101,24 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                     valid_samples = valid_samples[:i + 1]
                     break
 
+        # Incrementally append tokens to the sequence, as if we had only one new
+        # token.
         for output_token_id in output_token_ids:
             seq.append_token_id(
                 token_id=output_token_id,
                 # TODO emit logprobs in multi-step decoding.
                 logprobs={output_token_id: Logprob(0.0)},
             )
-            self.detokenizer.decode_sequence_inplace(seq, sampling_params)
 
-        self.stop_checker.maybe_stop_sequence(seq,
-                                              sampling_params,
-                                              new_token_ids=output_token_ids)
+            new_char_count = 0
+            if sampling_params.detokenize:
+                new_char_count = self.detokenizer.decode_sequence_inplace(seq, sampling_params)
+
+            self.stop_checker.maybe_stop_sequence(seq,
+                                                  new_char_count=new_char_count,
+                                                  sampling_params=sampling_params)
+            if seq.is_finished():
+                break
 
         if seq.is_finished():
             self.scheduler.free_seq(seq)
