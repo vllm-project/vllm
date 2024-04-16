@@ -48,6 +48,8 @@ class GPUExecutor(ExecutorBase):
     def _init_spec_worker(self):
         """Initialize a SpecDecodeWorker, using a draft model for proposals.
         """
+        assert self.speculative_config is not None
+
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
         from vllm.worker.worker import Worker

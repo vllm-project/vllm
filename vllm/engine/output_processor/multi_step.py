@@ -112,11 +112,13 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
             new_char_count = 0
             if sampling_params.detokenize:
-                new_char_count = self.detokenizer.decode_sequence_inplace(seq, sampling_params)
+                new_char_count = self.detokenizer.decode_sequence_inplace(
+                    seq, sampling_params)
 
-            self.stop_checker.maybe_stop_sequence(seq,
-                                                  new_char_count=new_char_count,
-                                                  sampling_params=sampling_params)
+            self.stop_checker.maybe_stop_sequence(
+                seq,
+                new_char_count=new_char_count,
+                sampling_params=sampling_params)
             if seq.is_finished():
                 break
 
