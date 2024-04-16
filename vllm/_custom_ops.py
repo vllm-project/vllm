@@ -13,11 +13,11 @@ try:
 except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
-# todo: how to support cpu+ipex?
 from vllm.utils import is_xpu
+
 if is_xpu():
-    from vllm._ipex_ops import ipex_ops as vllm_ops
     from vllm._ipex_ops import ipex_cache_ops as vllm_cache_ops
+    from vllm._ipex_ops import ipex_ops as vllm_ops
 
 with contextlib.suppress(ImportError):
     import vllm._moe_C

@@ -3,11 +3,11 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from vllm.distributed import broadcast_tensor_dict
-from vllm.sequence import SequenceGroupMetadata, SamplerOutput, SequenceData
-from vllm.utils import make_tensor_with_pad, maybe_expand_dim
-from vllm.worker.model_runner import (ModelRunner, AttentionMetadata,
-                                      SamplingMetadata)
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.utils import make_tensor_with_pad, maybe_expand_dim
+from vllm.worker.model_runner import (AttentionMetadata, ModelRunner,
+                                      SamplingMetadata)
 
 _PAD_SLOT_ID = -1
 

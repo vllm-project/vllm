@@ -8,9 +8,8 @@ from vllm import _custom_ops as ops
 from vllm._C import cache_ops
 from vllm.utils import is_hip, is_xpu
 
-COPYING_DIRECTION = [
-    ('xpu', 'cpu'),
-]  # ('xpu', 'xpu'), ('cpu', 'xpu')]
+COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')] \
+    if not is_xpu() else [('xpu', 'cpu'), ('xpu', 'xpu'), ('cpu', 'xpu')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -20,17 +19,16 @@ BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
 # don't make it too large. e.g. [1024, 36000] will OOM
-NUM_BLOCKS = [1024]  #, 10000]
+NUM_BLOCKS = [1024, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-
-SYCL_DEVICES = [f"xpu:0"] if is_xpu() else []
-# We assume fp8 is always enabled for testing.
-KV_CACHE_DTYPE = ["auto"]  #, "fp8"]
+] if torch.cuda.is_available() else []
+SYCL_DEVICES = ["xpu:0"] if is_xpu() else []
+DEVICES = CUDA_DEVICES + SYCL_DEVICES
+KV_CACHE_DTYPE = ["auto", "fp8"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
@@ -384,8 +382,8 @@ def test_swap_blocks(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    src_device = device if direction[0] == "xpu" else 'cpu'
-    dst_device = device if direction[1] == "xpu" else 'cpu'
+    src_device = device if direction[0] != "cpu" else 'cpu'
+    dst_device = device if direction[1] != "cpu" else 'cpu'
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap

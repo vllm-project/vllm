@@ -1,6 +1,7 @@
-import torch
-import intel_extension_for_pytorch as ipex
 from typing import Dict, List, Optional
+
+import intel_extension_for_pytorch as ipex
+import torch
 
 
 class ipex_ops:

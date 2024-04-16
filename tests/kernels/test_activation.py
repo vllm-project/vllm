@@ -15,8 +15,9 @@ D = [512, 4096, 5120, 13824]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-SYCL_DEVICES = [f"xpu:0"] if is_xpu() else []
+] if torch.cuda.is_available() else []
+SYCL_DEVICES = ["xpu:0"] if is_xpu() else []
+DEVICES = CUDA_DEVICES + SYCL_DEVICES
 
 
 @pytest.mark.parametrize("activation", ["silu", "gelu", "gelu_tanh"])
@@ -24,7 +25,7 @@ SYCL_DEVICES = [f"xpu:0"] if is_xpu() else []
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", SYCL_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_act_and_mul(
     activation: str,
@@ -49,7 +50,10 @@ def test_act_and_mul(
     ref_out = layer.forward_native(x)
     # The SiLU and GELU implementations are equivalent to the native PyTorch
     # implementations, so we can do exact comparison.
-    assert torch.allclose(out, ref_out, atol=0.001, rtol=0.01)
+    assert torch.allclose(out,
+                          ref_out,
+                          atol=get_default_atol(out),
+                          rtol=get_default_rtol(out))
 
 
 @pytest.mark.parametrize("activation", [FastGELU, NewGELU])
@@ -57,7 +61,7 @@ def test_act_and_mul(
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", SYCL_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_activation(
     activation: Type[torch.nn.Module],

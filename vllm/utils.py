@@ -24,7 +24,8 @@ import torch
 try:
     import intel_extension_for_pytorch  # noqa: F401
     _import_ipex = True
-except ImportError:
+except ImportError as e:
+    print(f"Import Error for IPEX: {e.msg}")
     _import_ipex = False
 
 import vllm.envs as envs
