@@ -916,8 +916,8 @@ class ModelRunner:
 
         if self.is_mamba:
             for i, offset in enumerate(indices):
-                self.mamba_cache[0][:, offset] = conv_state[:, i]
-                self.mamba_cache[1][:, offset] = ssm_state[:, i]
+                self.mamba_cache[0][:, offset].copy_(conv_state[:, i])
+                self.mamba_cache[1][:, offset].copy_(ssm_state[:, i])
 
         # Sample the next token.
         output = self.model.sample(

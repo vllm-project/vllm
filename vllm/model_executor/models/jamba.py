@@ -241,13 +241,9 @@ class JambaMambaMixer(nn.Module):
             max_seq_len = max(attn_metadata.prefill_metadata.prompt_lens)
             batch_size = len(attn_metadata.prefill_metadata.prompt_lens)
             padded_hidden_states = torch.zeros(
-                (
-                    batch_size,
-                    max_seq_len,
-                    hidden_states.shape[-1],
-                ),
+                (batch_size, max_seq_len, hidden_states.shape[-1]),
                 dtype=hidden_states.dtype,
-                device=hidden_states.device,
+                device=hidden_states.device
             )
             offset = 0
             for i, prompt_len in enumerate(attn_metadata.prefill_metadata.prompt_lens):
@@ -273,12 +269,12 @@ class JambaMambaMixer(nn.Module):
             cache = MambaCacheParams(
                 False,
                 conv_state=conv_state[self.layer_idx],
-                ssm_state=ssm_state[self.layer_idx],
+                ssm_state=ssm_state[self.layer_idx]
             )
             hidden_states = self.mamba_forward(
-                hidden_states.unsqueeze(1).contiguous(), cache_params=cache
+                hidden_states.unsqueeze(1), cache_params=cache
             )
-            hidden_states = hidden_states.squeeze(1).contiguous()
+            hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
 
@@ -489,7 +485,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            linear_method=linear_method,
+            linear_method=linear_method
         )
 
         self.attn = Attention(
@@ -629,6 +625,7 @@ class JambaModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+
         for i in range(len(self.layers)):
             layer = self.layers[i]
             kv_cache = None
