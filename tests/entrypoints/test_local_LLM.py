@@ -2,17 +2,11 @@
 import json
 import os
 import re
-import subprocess
-import sys
-import time
+
 
 import jsonschema
-import openai  # use the official client for correctness check
 import pytest
-# using Ray for overall ease of process management, parallel requests,
-# and debugging.
-import ray
-import requests
+
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 
@@ -155,68 +149,68 @@ def test_guided_json_completion():
 
        
 
-# def test_guided_choice_completion():
-#     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, extra_body=dict(guided_choice=TEST_CHOICE))
-#     outputs = llm.generate(
-#         prompts="The best language for type-safe systems programming is ",
-#         sampling_params= sampling_params,
-#         use_tqdm = True,
-#         )
+def test_guided_choice_completion():
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, extra_body=dict(guided_choice=TEST_CHOICE))
+    outputs = llm.generate(
+        prompts="The best language for type-safe systems programming is ",
+        sampling_params= sampling_params,
+        use_tqdm = True,
+        )
 
-#     assert outputs is not None
-#     for output in outputs:
-#         assert output is not None
-#         assert isinstance(output, RequestOutput)
-#         prompt = output.prompt
-#         generated_text = output.outputs[0].text
-#         assert generated_text is not None 
-#         assert generated_text in TEST_CHOICE
-#         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None 
+        assert generated_text in TEST_CHOICE
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
         
 
-# def test_guided_grammar():
-#     simple_sql_grammar = """
-# start: select_statement
+def test_guided_grammar():
+    simple_sql_grammar = """
+start: select_statement
 
-# select_statement: "SELECT" column "from" table "where" condition
+select_statement: "SELECT" column "from" table "where" condition
 
-# column: "col_1" | "col_2"
-# table: "table_1" | "table_2"
-# condition: column "=" number
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
 
-# number: "1" | "2"
-# """
+number: "1" | "2"
+"""
 
 
-#     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, extra_body=dict(guided_grammar=simple_sql_grammar))
-#     outputs = llm.generate(
-#         prompts=("Generate a sql state that select col_1 from "
-#                 "table_1 where it is equals to 1"),
-#         sampling_params= sampling_params,
-#         use_tqdm = True,
-#         )
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, extra_body=dict(guided_grammar=simple_sql_grammar))
+    outputs = llm.generate(
+        prompts=("Generate a sql state that select col_1 from "
+                "table_1 where it is equals to 1"),
+        sampling_params= sampling_params,
+        use_tqdm = True,
+        )
 
-#     assert outputs is not None
-#     for output in outputs:
-#         assert output is not None
-#         assert isinstance(output, RequestOutput)
-#         prompt = output.prompt
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
         
-#         generated_text = output.outputs[0].text
-#         assert generated_text is not None 
+        generated_text = output.outputs[0].text
+        assert generated_text is not None 
 
-#         # use Lark to parse the output, and make sure it's a valid parse tree
-#         from lark import Lark
-#         parser = Lark(simple_sql_grammar)
-#         parser.parse(generated_text)
+        # use Lark to parse the output, and make sure it's a valid parse tree
+        from lark import Lark
+        parser = Lark(simple_sql_grammar)
+        parser.parse(generated_text)
 
-#         # remove spaces for comparison b/c we removed them in the grammar
-#         ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
+        # remove spaces for comparison b/c we removed them in the grammar
+        ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
-#         assert generated_text.strip() == ground_truth
+        assert generated_text.strip() == ground_truth
         
-#         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
     
