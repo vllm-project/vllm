@@ -81,12 +81,10 @@ def blocksparse_flash_attn_varlen_fwd(
     # split q to blocks
 
     assert isinstance(sparse_layout, (list, tuple))
-    # print(f'>>>-- {q.shape=}, {k.shape=}, {v.shape=}, {sparse_layout[0].shape=}, {sparse_layout[1].shape=}')
+
     _, n_heads, head_size = q.shape
     batch_size = cu_seqlens_k.size(0) - 1
 
-
-    # print(f'> {q.shape=}, {k.shape=}')
     assert q.dim() == k.dim() == v.dim() == 3
     assert q.size(1) % k.size(1) == 0
     assert q.size(2) == k.size(2)
@@ -136,12 +134,6 @@ def blocksparse_flash_attn_varlen_fwd(
 
     decoding_only =  (q_lens == 1).all().item()
     grid = (len(q_start_sids), n_heads, 1)
-
-
-    # if q.shape[0] != 8192:
-    #     import ipdb; ipdb.set_trace()
-    
-    # print(f'===> {q.shape=}, {k.shape=}, {v.shape=}, {cu_seqlens_q=}, {cu_seqlens_k=}', flush=True)
 
     _fwd_kernel_batch_inference[grid](
     q, k, v, out,

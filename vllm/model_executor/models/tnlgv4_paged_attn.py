@@ -78,14 +78,6 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
             start_local_head_idx = n_heads + 1 # is_local will always be false
             grid = (batches, n_heads, 1)
 
-        # is_locals = context_lens.new_zeros((n_heads,))
-        # grid = (batches, n_heads, 1)
-
-    # grid = (1, 1, 1)
-    # print(f'>>> {grid=}, {start_local_head_idx=}')
-
-    # _b()
-
     _fwd_kernel_batch_inference_with_blocktable[grid](
     q, k, v, out, m,
     # qk,
@@ -218,27 +210,6 @@ def _fwd_kernel_inner_with_blocktable(
     if LAST_K_BLOCK:
         qk += tl.where(start_n + offs_n[None, :] <= q_pid, 0, -float('inf'))
 
-    # ## flash-attn1
-    # # -- compute m_ij, p, l_ij
-    # m_ij = tl.max(qk, 1)
-    # p = tl.exp(qk - m_ij[:, None])
-    # l_ij = tl.sum(p, 1)
-    # # -- update m_i and l_i
-    # m_i_new = tl.maximum(m_i, m_ij)
-    # alpha = tl.exp(m_i - m_i_new)
-    # beta = tl.exp(m_ij - m_i_new)
-    # l_i_new = alpha * l_i + beta * l_ij
-    # # -- update output accumulator --
-    # # scale p
-    # p_scale = beta / l_i_new
-    # p = p * p_scale[:, None]
-    # # scale acc
-    # acc_scale = l_i / l_i_new * alpha
-    # acc = acc * acc_scale[:, None]
-    # # update m_i and l_i
-    # l_i = l_i_new
-    # m_i = m_i_new
-
     ### flash-attn2
     m_ij = tl.maximum(m_i, tl.max(qk, 1))
     p = tl.math.exp2(qk - m_ij[:, None])
@@ -248,7 +219,6 @@ def _fwd_kernel_inner_with_blocktable(
     # update m_i
     m_i = m_ij
     l_i = l_i * alpha + l_ij
-
 
     p = p.to(Q.dtype.element_ty)
     # update acc
@@ -511,7 +481,7 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
                 device=None, dtype=torch.bfloat16, homo_head=False,
                 active_head_range=None,
                 vllm_block_size=None,
-                mode='local-only'):
+                mode='split'):
         super().__init__()
         device = device or torch.cuda.current_device()
         self.max_seqlen = max_seqlen
@@ -619,6 +589,124 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
 
 
 if __name__ == '__main__':
+    import torch
+
+    from flash_attn import flash_attn_varlen_func
+    from torch.nn.functional import scaled_dot_product_attention
+    from triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op
+    from tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+
+    q_seqlens = torch.tensor([0, 61, 65, 7193, 118, 1371], dtype=torch.int32, device='cuda')  # first one always 0, not a sample
+    # q_seqlens = torch.tensor([0, 67], dtype=torch.int32, device='cuda')
+
+    BATCH, N_KV_HEADS, MAX_SEQ, D_HEAD = len(q_seqlens) - 1, 32, 8192, 96
+    LOCAL, VERT, BLOCK_SIZE = 16, 8, 64
+    sm_scale = 0.01
+
+    q_k_ratio = 1
+    N_HEADS = N_KV_HEADS * q_k_ratio
+
+    PADDED_D_HEAD = triton.next_power_of_2(D_HEAD)
+
+    torch.manual_seed(124)
+    q = torch.empty((BATCH, MAX_SEQ, N_HEADS, PADDED_D_HEAD), dtype=torch.bfloat16, device='cuda').normal_(mean=0, std=.5) # .requires_grad_()
+    k = torch.empty((BATCH, MAX_SEQ, N_KV_HEADS, PADDED_D_HEAD), dtype=torch.bfloat16, device='cuda').normal_(mean=0, std=.5) # .requires_grad_()
+    v = torch.empty((BATCH, MAX_SEQ, N_KV_HEADS, PADDED_D_HEAD), dtype=torch.bfloat16, device='cuda').normal_(mean=0, std=.5) # .requires_grad_()
+
+    q[..., D_HEAD:] = 0
+    k[..., D_HEAD:] = 0
+    v[..., D_HEAD:] = 0
+
+    cu_seqlens = q_seqlens.cumsum(0).to(torch.int32)
+    total_tokens = cu_seqlens[-1].item()
+
+    # mask_csr, _, mask_dense = get_sparse_attn_mask(q, MAX_SEQ, BLOCK=sparse_block_size,
+    #                         local_blocks=local_blocks, vert_stride=vert_stride, homo_head=homo_head, return_dense=True)
+
+    mask_csr, _, mask_dense =_get_sparse_attn_mask(N_HEADS, MAX_SEQ, MAX_SEQ, q.dtype, q.device, BLOCK=BLOCK_SIZE,
+                                                   local_blocks=LOCAL, vert_stride=VERT,
+                                                   homo_head=False, return_dense=True)
+
+
+    q_packed = q.new_empty((total_tokens, N_HEADS, D_HEAD))
+    k_packed, v_packed = [q.new_empty((total_tokens, N_KV_HEADS, D_HEAD)) for _ in range(2)]
+
+    for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        q_packed[s:e] = q[i, :e - s, :, :D_HEAD]
+        k_packed[s:e] = k[i, :e - s, :, :D_HEAD]
+        v_packed[s:e] = v[i, :e - s, :, :D_HEAD]
+
+    bs_attn = LocalStridedBlockSparseAttnInference(N_HEADS, MAX_SEQ, LOCAL, VERT, BLOCK_SIZE)
+
+    # non-contiguous passed
+    # k_packed = k_packed.transpose(0, 1).contiguous().transpose(0, 1)
+    # q_packed = q_packed.transpose(0, 1).contiguous().transpose(0, 1)
+
+    out_packed = bs_attn(q_packed, k_packed, v_packed, cu_seqlens, sm_scale=sm_scale)
+    # out_packed = blocksparse_flash_attn_varlen_fwd(q_packed, k_packed, v_packed,
+    #                                             cu_seqlens, sm_scale, mask_csr, block_size=BLOCK_SIZE)
+
+
+    sparse_attention_fn = get_local_strided_sparse_attention_op(N_HEADS, MAX_SEQ,
+                                                            sparse_block_size=BLOCK_SIZE,
+                                                            local_blocks=LOCAL,
+                                                            vert_stride=VERT,
+                                                            homo_head=False,
+                                                            device=q.device,
+                                                            dtype=q.dtype,
+                                                            kernel_block_size=BLOCK_SIZE)
+
+
+    max_q_len =  q_seqlens.max()
+    # ref_out_flash = flash_attn_varlen_func(q_packed, k_packed, v_packed,
+                                            # cu_seqlens, cu_seqlens, max_q_len, max_q_len,
+                                            # softmax_scale=sm_scale, causal=True)
+
+    k_expand, v_expand = [x.repeat_interleave(q_k_ratio, dim=2).transpose(1, 2) for x in [k, v]]
+    ref_out = sparse_attention_fn(q.transpose(1, 2), k_expand, v_expand, sm_scale)
+    ref_out = ref_out.transpose(1, 2).contiguous()
+
+    print(f'>> {ref_out.shape=}, {out_packed.shape=}')
+    ref_out_packed = torch.empty_like(out_packed)
+
+    for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        ref_out_packed[s:e] = ref_out[i, :e - s, :, :D_HEAD]
+
+
+    # print(f'--->\n{out_packed=}\n')
+    # print(f'--->\n{ref_out_packed=}\n')
+    assert torch.allclose(out_packed, ref_out_packed, atol=1e-2, rtol=0)
+
+
+    #### test 2: decoding, past_len
+
+    # cu_seqlens_k = cu_seqlens
+    # cu_seqlens_q_dec = torch.cumsum(torch.tensor([0] + [1] * BATCH, dtype=cu_seqlens_k.dtype, device=q.device), dim=0)
+
+    q_packed_dec = q.new_empty((BATCH, N_HEADS, D_HEAD))
+    ref_out_packed_dec = torch.empty_like(q_packed_dec)
+
+    for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+        q_packed_dec[i] = q[i, e - s - 1:e - s, :, :D_HEAD]
+        ref_out_packed_dec[i] = ref_out[i, e - s - 1: e - s, :, :D_HEAD]
+
+    out_packed_dec = bs_attn(q_packed_dec, k_packed, v_packed, cu_seqlens, sm_scale=sm_scale)
+
+    # print(f'> {out_packed_dec=} \n {ref_out_packed_dec=}\n===')
+    # print(f'> {out_packed_dec.shape=}, {ref_out_packed_dec.shape=}')
+    assert torch.allclose(out_packed_dec, ref_out_packed_dec, atol=1e-2, rtol=0)
+
+    print('> decoding phase test passed\n======\n')
+    
+    ### test 3: block table
+
+    NUM_BLOCKS = 12229
+    
+    # (num_blocks, n_heads, head_size / x, vllm_block_size, x)
+    # (num_blocks, n_heads, head_size, vllm_block_size)
+
+
+if __name__ == '__test__':
     d = torch.load('/tmp/vllm.pt')
     # torch.save({'q': query, 'k': key_cache, 'v': value_cache,
     #             'output': output,

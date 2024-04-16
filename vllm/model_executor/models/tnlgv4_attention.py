@@ -272,31 +272,13 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # print(f'>> {self.num_heads=}, {self.num_kv_heads}')
-        # print(f'----> {self.layer_idx=}')
-
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
-
-            # TODO: should this be delayed to only include needed blocks?
-
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-
-
-            # TODO: decde what to write, and what is not
-
-            # if self.layer_idx == 0:
-            #     print(f'>> {attn_metadata=}')
-            #     print(f'>> {attn_metadata.slot_mapping.shape=}\n {key.shape=}, {key_cache.shape=}, {value_cache.shape=}, {kv_cache.shape=}')
-            #     # import ipdb; ipdb.set_trace()
-
-            # # one head per sample
-            # key2 = key.repeat((1, 4, 1)).view(-1, 2, key.size(2))
-            # value2 = value.repeat((1, 4, 1)).view(-1, 2, value.size(2))
 
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
@@ -309,7 +291,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # 'slot_mapping': attn_metadata.slot_mapping,
             # }, '/tmp/vllm_promt.pt')
 
-            # print('\n\n1\n\n')
 
         if attn_metadata.is_prompt:
 
@@ -317,10 +298,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
-
-            # if self.layer_idx == 0:
-            #     # print(attn_metadata.seq_start_loc)
-            #     print(f'>>> {query.shape=}, {key.shape=}, {value.shape=}, {attn_metadata.seq_start_loc.shape=}')
 
             output = self.bs_attn(
                 q=query,
@@ -333,7 +310,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         else:
             # Decoding run.
-            # query2 = query.view(-1, 1, query.size(2))
 
             # output = PagedAttention.forward_decode(
             #     query,
@@ -357,8 +333,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             #             'num_kv_heads':  self.num_kv_heads,
             #             'scale': self.scale,
             #             }, '/tmp/vllm.pt')
-
-            # exit()
 
             # output = query
             output = self.bs_paged_attn(query, key_cache, value_cache,

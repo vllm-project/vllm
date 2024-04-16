@@ -101,21 +101,18 @@ class TLGv4MLP(nn.Module):
         self.gegelu_limit = config.gegelu_limit
         self.intermediate_size = config.intermediate_size
 
-        # self.up_proj = nn.Linear(self.hidden_size, 2 * self.intermediate_size)
         self.up_proj = MergedColumnParallelLinear2(
             self.hidden_size,
             2* [self.intermediate_size],
             bias=True,
             linear_method=linear_method,
         )
-        # self.down_proj = nn.Linear(self.intermediate_size, self.hidden_size)
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
             bias=True,
             linear_method=linear_method,
         )
-        # self.dropout = nn.Dropout(config.ffn_dropout_prob)
 
     def forward(self, x):
         gate_up, _ = self.up_proj(x)
@@ -145,8 +142,8 @@ class TLGv4SelfAttention(nn.Module):
         # Number of total Key Value Heads before tensor parallel
         self.num_key_value_heads = config.num_key_value_heads
         self.num_q_per_kv = self.num_heads // self.num_key_value_heads
-        if self.num_key_value_heads >= self.tp_size:
-            assert self.tp_size % self.num_key_value_heads
+        if self.tp_size > 1:
+            assert self.num_key_value_heads % self.tp_size == 0
         self.num_kv_heads_per_partion = max(1, self.num_key_value_heads // self.tp_size)
         self.num_heads_per_partition = self.num_heads // self.tp_size
 
@@ -195,9 +192,7 @@ class TLGv4SelfAttention(nn.Module):
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        # assert not use_dense_attn
         # use_dense_attn = True
-        # print(f'>>> {layer_idx=}, {use_dense_attn=}')
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,
