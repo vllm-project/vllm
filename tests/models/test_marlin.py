@@ -47,7 +47,7 @@ model_pairs = [
 @pytest.mark.parametrize("model_pair", model_pairs)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [3])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     vllm_runner,
     example_prompts,

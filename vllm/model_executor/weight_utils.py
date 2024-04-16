@@ -5,9 +5,10 @@ import hashlib
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
 
 import filelock
+import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, snapshot_download
@@ -18,6 +19,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
+from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
 
@@ -27,6 +29,21 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = os.environ.get('TMPDIR') or os.environ.get(
     'TEMP') or os.environ.get('TMP') or "/tmp/"
+
+
+def enable_hf_transfer():
+    """automatically activates hf_transfer
+    """
+    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
+        try:
+            # enable hf hub transfer if available
+            import hf_transfer  # type: ignore # noqa
+            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+        except ImportError:
+            pass
+
+
+enable_hf_transfer()
 
 
 class Disabledtqdm(tqdm):
@@ -144,7 +161,8 @@ def prepare_hf_model_weights(
     revision: Optional[str] = None,
 ) -> Tuple[str, List[str], bool]:
     # Download model weights from huggingface.
-    is_local = os.path.isdir(model_name_or_path)
+    is_local = os.path.isdir(model_name_or_path) \
+               and load_format != "tensorizer"
     use_safetensors = False
     # Some quantized models use .pt files for storing the weights.
     if load_format == "auto":
@@ -156,13 +174,15 @@ def prepare_hf_model_weights(
         allow_patterns = ["*.pt"]
     elif load_format == "npcache":
         allow_patterns = ["*.bin"]
+    elif load_format == "tensorizer":
+        allow_patterns = ["*.tensors"]
     else:
         raise ValueError(f"Unknown load_format: {load_format}")
 
     if fall_back_to_pt:
         allow_patterns += ["*.pt"]
 
-    if not is_local:
+    if not is_local and load_format != "tensorizer":
         # Before we download we look at that is available:
         fs = HfFileSystem()
         file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
@@ -207,6 +227,9 @@ def prepare_hf_model_weights(
             if not any(f.endswith(x) for x in blacklist)
         ]
 
+    if load_format == "tensorizer":
+        return hf_folder, hf_weights_files, use_safetensors
+
     if len(hf_weights_files) == 0:
         raise RuntimeError(
             f"Cannot find any model weights with `{model_name_or_path}`")
@@ -217,7 +240,7 @@ def prepare_hf_model_weights(
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    load_format: str = "auto",
+    load_format: Union[Tuple, str] = "auto",
     revision: Optional[str] = None,
     fall_back_to_pt: Optional[bool] = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -260,6 +283,26 @@ def hf_model_weights_iterator(
             with open(param_path, "rb") as f:
                 param = np.load(f)
             yield name, torch.from_numpy(param)
+    elif load_format == "tensorizer":
+        from vllm.model_executor.tensorizer_loader import (TensorDeserializer,
+                                                           open_stream,
+                                                           tensorizer_warning)
+        tensorizer_args = load_format.params
+        tensorizer_warning(
+            "Deserializing HuggingFace models is not optimized for "
+            "loading on vLLM, as tensorizer is forced to load to CPU. "
+            "Consider deserializing a vLLM model instead for faster "
+            "load times. See the examples/tensorize_vllm_model.py example "
+            "script for serializing vLLM models.")
+
+        deserializer_args = tensorizer_args.deserializer_params
+        stream_params = tensorizer_args.stream_params
+        stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
+        with TensorDeserializer(stream, **deserializer_args,
+                                device="cpu") as state:
+            for name, param in state.items():
+                yield name, param
+        del state
     elif use_safetensors:
         for st_file in hf_weights_files:
             with safe_open(st_file, framework="pt") as f:
@@ -273,6 +316,46 @@ def hf_model_weights_iterator(
                 yield name, param
             del state
             torch.cuda.empty_cache()
+
+
+def kv_cache_scales_loader(
+        filename: str, tp_rank: int, tp_size: int, num_hidden_layers: int,
+        model_type: Optional[str]) -> Iterable[Tuple[int, float]]:
+    """
+    A simple utility to read in KV cache scaling factors that have been
+    previously serialized to disk. Used by the model to populate the appropriate
+    KV cache scaling factors. The serialization should represent a dictionary
+    whose keys are the TP ranks and values are another dictionary mapping layers
+    to their KV cache scaling factors.
+    Keep this function in sync with the output of examples/fp8/extract_scales.py
+    """
+    try:
+        with open(filename) as f:
+            context = {
+                "model_type": model_type,
+                "num_hidden_layers": num_hidden_layers,
+                "tp_rank": tp_rank,
+                "tp_size": tp_size,
+            }
+            schema_dct = json.load(f)
+            schema = QuantParamSchema.model_validate(schema_dct,
+                                                     context=context)
+            layer_scales_map = schema.kv_cache.scaling_factor[tp_rank]
+            return layer_scales_map.items()
+
+    except FileNotFoundError:
+        logger.error(f"File or directory '{filename}' not found.")
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding JSON in file '{filename}'.")
+    except Exception as e:
+        logger.error(f"An error occurred while reading '{filename}': {e}")
+    # This section is reached if and only if any of the excepts are hit
+    # Return an empty iterable (list) => no KV cache scales are loaded
+    # which ultimately defaults to 1.0 scales
+    logger.warning("Defaulting to KV cache scaling factors = 1.0 "
+                   f"for all layers in TP rank {tp_rank} "
+                   "as an error occurred during loading.")
+    return []
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
