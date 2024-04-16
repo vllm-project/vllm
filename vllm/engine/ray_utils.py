@@ -4,7 +4,6 @@ from typing import Callable, List, Optional, Tuple
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
-from vllm.worker.worker import Worker
 
 logger = init_logger(__name__)
 
@@ -26,11 +25,11 @@ try:
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-        def init_worker(self, worker_init_fn: Callable[[], Worker]):
+        def init_worker(self, worker_init_fn):
             self._worker = worker_init_fn()
 
         @property
-        def worker(self) -> Worker:
+        def worker(self):
             assert self._worker is not None
             return self._worker
 
