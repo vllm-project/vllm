@@ -24,6 +24,9 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
+
 
 def _get_alibi_slopes(
     total_num_heads: int,
@@ -37,6 +40,15 @@ def _get_alibi_slopes(
         slopes = torch.concat([slopes[1::2], slopes[::2]])[:total_num_heads]
     return slopes
 
+def _get_norm_class(config):
+
+    if config.norm_type.lower() not in NORM_CLASS_REGISTRY.keys():
+        norm_options = " | ".join(NORM_CLASS_REGISTRY.keys())
+        raise NotImplementedError(
+            f"Requested norm type ({config.norm_type}) is not implemented within this repo (Options: {norm_options})."
+        )
+    norm_class = NORM_CLASS_REGISTRY[config.norm_type.lower()]
+    return norm_class
 
 class MPTAttention(nn.Module):
 
@@ -57,7 +69,6 @@ class MPTAttention(nn.Module):
         else:
             self.total_num_kv_heads = self.total_num_heads
         assert not config.attn_config["prefix_lm"]
-        assert config.attn_config["alibi"]
 
         # pylint: disable=invalid-name
         self.Wqkv = QKVParallelLinear(
@@ -69,8 +80,9 @@ class MPTAttention(nn.Module):
             linear_method=linear_method,
         )
         if self.qk_ln:
-            self.q_ln = nn.LayerNorm(self.d_model)
-            self.k_ln = nn.LayerNorm(self.d_model)
+            norm_class = _get_norm_class(config)
+            self.q_ln = norm_class(self.d_model)
+            self.k_ln = norm_class(self.d_model)
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
@@ -97,9 +109,20 @@ class MPTAttention(nn.Module):
         tp_rank = get_tensor_model_parallel_rank()
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
-        alibi_slopes = _get_alibi_slopes(self.total_num_heads,
-                                         self.alibi_bias_max)
-        alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        # Select alibi or rope
+        alibi_slopes = None
+        self.rotary_emb = None
+        if config.attn_config["alibi"]:
+            alibi_slopes = _get_alibi_slopes(self.total_num_heads,
+                                             self.alibi_bias_max)
+            alibi_slopes = alibi_slopes[head_start:head_end].tolist()
+        elif config.attn_config["rope"]:
+            self.rotary_emb = get_rope(
+                config.d_model // config.n_heads,
+                rotary_dim=config.d_model // config.n_heads,
+                max_position=config.max_seq_len,
+                base=config.attn_config["rope_theta"],
+            )
 
         self.head_dim = self.d_model // self.total_num_heads
         scaling = self.head_dim**-0.5
@@ -116,7 +139,6 @@ class MPTAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        del position_ids  # unused.
         qkv, _ = self.Wqkv(hidden_states)
         if self.clip_qkv is not None:
             qkv.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
@@ -124,6 +146,8 @@ class MPTAttention(nn.Module):
         if self.qk_ln:
             q = self.q_ln(q)
             k = self.k_ln(k)
+        if self.rotary_emb:
+            q, k = self.rotary_emb(position_ids, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.out_proj(attn_output)
         return output
@@ -139,7 +163,7 @@ class MPTMLP(nn.Module):
         super().__init__()
         hidden_size = config.d_model
         expansion_ratio = config.expansion_ratio
-        intermediate_size = expansion_ratio * hidden_size
+        intermediate_size = int(expansion_ratio * hidden_size)
         self.up_proj = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
@@ -162,6 +186,38 @@ class MPTMLP(nn.Module):
         return x
 
 
+class MPTGLU(MPTMLP):
+
+    def __init__(
+        self,
+        config: MPTConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
+        super().__init__(config=config, linear_method=linear_method)
+        hidden_size = config.d_model
+        expansion_ratio = config.expansion_ratio
+        intermediate_size = int(expansion_ratio * hidden_size)
+
+        self.gate_proj = ColumnParallelLinear(
+            hidden_size,
+            intermediate_size,
+            bias=not config.no_bias,
+            linear_method=linear_method,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        gate, _ = self.gate_proj(x)
+        x, _ = self.up_proj(x)
+        x = self.act(gate) * x
+        x, _ = self.down_proj(x)
+        return x
+
+
+FFN_CLASS_REGISTRY = {
+    'mptmlp': MPTMLP,
+    'mptglu': MPTGLU,
+}
+
 class MPTBlock(nn.Module):
 
     def __init__(
@@ -171,10 +227,11 @@ class MPTBlock(nn.Module):
     ):
         super().__init__()
         hidden_size = config.d_model
-        self.norm_1 = nn.LayerNorm(hidden_size)
+        norm_class = _get_norm_class(config)
+        self.norm_1 = norm_class(hidden_size)
         self.attn = MPTAttention(config, linear_method)
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MPTMLP(config, linear_method)
+        self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](config, linear_method)
 
     def forward(
         self,
@@ -206,7 +263,6 @@ class MPTModel(nn.Module):
     ):
         super().__init__()
         assert config.embedding_fraction == 1.0
-        assert config.norm_type == "low_precision_layernorm"
 
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
@@ -214,7 +270,8 @@ class MPTModel(nn.Module):
         )
         self.blocks = nn.ModuleList(
             [MPTBlock(config, linear_method) for _ in range(config.n_layers)])
-        self.norm_f = nn.LayerNorm(config.d_model)
+        norm_class = _get_norm_class(config)
+        self.norm_f = norm_class(config.d_model)
         if config.no_bias:
             for module in self.modules():
                 if hasattr(module, "bias") and isinstance(
