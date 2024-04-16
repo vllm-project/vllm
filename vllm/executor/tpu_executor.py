@@ -27,6 +27,8 @@ class TPUExecutor(ExecutorBase):
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
+            self.cache_config,
+            self.vision_language_config,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
