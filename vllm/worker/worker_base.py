@@ -114,6 +114,7 @@ class WorkerWrapperBase:
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
+        # actual initialization of the worker class
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
         self.worker = worker_class(*args, **kwargs)
