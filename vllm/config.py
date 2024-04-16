@@ -714,8 +714,8 @@ class SpeculativeConfig:
         )
 
         # TODO docs
-        #draft_model_config.max_model_len = min(target_model_config.max_model_len,
-        # draft_model_config.max_model_len)
+        #draft_model_config.max_model_len = min(
+        # target_model_config.max_model_len, draft_model_config.max_model_len)
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(
