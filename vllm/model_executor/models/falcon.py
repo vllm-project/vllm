@@ -19,7 +19,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import List, Optional, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -40,15 +40,32 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
 
+def absmeanitem(t):
+    return
+    return t.to(torch.float32).abs().mean().item()
+
+def absmaxitem(t):
+    return
+    return t.abs().float().max().item()
+
+def tensor_summary(tensor_name, tensor):
+    return
+    mn = absmeanitem(tensor)
+    absmax =absmaxitem(tensor)
+    flat = torch.flatten(tensor)
+    elt = flat[0].item()
+    last_elt = flat[-1].item()
+    print(
+        f"DH: {tensor_name} shape: {tuple(tensor.size())} mn: {mn: .6f}  mx: {absmax:.6f} flat[0]:{elt:.4f} flat[-1]:{last_elt:.4f}"
+    )
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
     closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
     base = torch.tensor(2**(-(2**-(math.log2(closest_power_of_2) - 3))),
@@ -77,11 +94,14 @@ class FalconAttention(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
+        layer_num: int,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
 
         self.hidden_size = config.hidden_size
+        self.layer_num = layer_num
+        
         tp_size = get_tensor_model_parallel_world_size()
 
         self.total_num_heads = config.num_attention_heads
@@ -89,9 +109,11 @@ class FalconAttention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
         self.head_dim = self.hidden_size // self.total_num_heads
         assert self.head_dim * self.total_num_heads == self.hidden_size
-
         self.new_decoder_architecture = config.new_decoder_architecture
+        assert not self.new_decoder_architecture # WHIPPET
+        assert not config.parallel_attn # WHIPPET
         self.multi_query = config.multi_query
+        assert self.multi_query # WHIPPET
 
         if self.new_decoder_architecture:
             self.total_num_kv_heads = config.num_kv_heads
@@ -108,6 +130,7 @@ class FalconAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        assert self.num_kv_heads == 1 # WHIPPET
 
         self.query_key_value = QKVParallelLinear(
             self.hidden_size,
@@ -135,6 +158,7 @@ class FalconAttention(nn.Module):
 
         self.use_rotary = config.rotary
         self.use_alibi = config.alibi
+
         assert not (self.use_rotary and self.use_alibi), (
             "Rotary and alibi are mutually exclusive.")
 
@@ -152,6 +176,7 @@ class FalconAttention(nn.Module):
                                   self.head_dim,
                                   self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads)
+
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -170,6 +195,10 @@ class FalconAttention(nn.Module):
                                   scale=self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads)
 
+    def logt(self, msg, t):
+        if self.layer_num==0:
+            tensor_summary(f'L0:{msg}', t)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -177,14 +206,31 @@ class FalconAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
+
+        self.logt('normalized_Aad', hidden_states)
+        self.logt('w_in_ID', self.query_key_value.weight)
         qkv, bias = self.query_key_value(hidden_states)
         if bias is not None:
             qkv += bias
+        qkv = torch.clamp(qkv, -4., 4.) # WHIPPET
+        self.logt(f'middle_in', qkv)
+
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        self.logt(f'q_BHLK', q)
+        self.logt(f'k_BHLK', k)
+        self.logt(f'v_BHLK', v)
+
         if self.use_rotary:
             q, k = self.rotary_emb(positions, q, k)
+            self.logt(f'qroped_BHLK', q)
+
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = torch.clamp(attn_output, -4., 4.) # WHIPPET
+        self.logt(f'middle_out', attn_output)
+
         attn_output, bias = self.dense(attn_output)
+        self.logt(f'layer_out', attn_output)
+
         return attn_output, bias
 
 
@@ -193,34 +239,48 @@ class FalconMLP(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
+        layer_num: int,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
+        self.layer_num = layer_num
 
         self.dense_h_to_4h = ColumnParallelLinear(hidden_size,
-                                                  4 * hidden_size,
+                                                  config.ffn_hidden_size,
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   linear_method=linear_method)
         quant_config = getattr(linear_method, "quant_config", None)
-        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        # self.act = get_act_fn("gelu", quant_config, config.ffn_hidden_size)
+        self.act = get_act_fn("relu2", None, config.ffn_hidden_size) # WHIPPET
+
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
-            4 * hidden_size,
+            config.ffn_hidden_size,
             hidden_size,
             bias=config.bias,
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
             linear_method=linear_method)
+        
+    def logt(self, msg, t):
+        if self.layer_num == 0:
+            tensor_summary(f'L1: {msg}', t)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE(zhuohan): Following huggingface, we do not fuse bias add here.
         x, bias = self.dense_h_to_4h(x)
         if bias is not None:
             x += bias
+        x = torch.clamp(x, -4, 4.)
+        self.logt('middle_in/clamped_middle_in', x)
+
         x = self.act(x)
+        x = torch.clamp(x, -16., 16.)
+        self.logt('middle_out/clamped_middle_out', x)
+
         x, bias = self.dense_4h_to_h(x)
         return x, bias
 
@@ -230,13 +290,15 @@ class FalconDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
+        layer_num: int,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
+        self.layer_num = layer_num
         self.num_heads = config.num_attention_heads
-        self.self_attention = FalconAttention(config, linear_method)
-        self.mlp = FalconMLP(config, linear_method)
+        self.self_attention = FalconAttention(config, layer_num, linear_method)
+        self.mlp = FalconMLP(config, layer_num, linear_method)
         self.config = config
 
         if config.new_decoder_architecture:
@@ -254,6 +316,9 @@ class FalconDecoderLayer(nn.Module):
 
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
+    def logt(self, msg, t):
+        if self.layer_num == 0:
+            tensor_summary(f'L{self.layer_num+1}: {msg}', t)
 
     def forward(
         self,
@@ -269,6 +334,7 @@ class FalconDecoderLayer(nn.Module):
             mlp_layernorm_out = self.ln_mlp(hidden_states)
         else:
             attention_layernorm_out = self.input_layernorm(hidden_states)
+        attention_layernorm_out = torch.clamp(attention_layernorm_out, -4., 4.)
 
         # Self attention.
         attention_output, attention_bias = self.self_attention(
@@ -279,16 +345,27 @@ class FalconDecoderLayer(nn.Module):
         )
         if self.reduce_row_parallel_results and attention_bias is not None:
             attention_output += attention_bias
+        self.logt('layer_out/attention_output', attention_output) # OK here
 
         if not self.config.new_decoder_architecture:
             if self.config.parallel_attn:
                 mlp_layernorm_out = attention_layernorm_out
             else:
                 residual += attention_output
-                mlp_layernorm_out = self.post_attention_layernorm(residual)
+                # mlp_layernorm_out = self.post_attention_layernorm(residual) # WHIPPET uncomment
 
         # MLP.
-        mlp_output, mlp_bias = self.mlp(mlp_layernorm_out)
+        mlp_input = self.input_layernorm(residual) # WHIPPET
+        self.logt('layer_input_1/normed_residual', mlp_input)
+
+        mlp_input = torch.clamp(mlp_input, -4., 4.) # WHIPPET
+        self.logt('normalized_AaD', mlp_input)
+
+        mlp_output, mlp_bias = self.mlp(mlp_input) # WHIPPET
+        self.logt('layer_out/mlp_output', mlp_output)
+
+        # mlp_output, mlp_bias = self.mlp(mlp_layernorm_out) # WHIPPET uncomment
+
         if self.reduce_row_parallel_results and mlp_bias is not None:
             mlp_output += mlp_bias
 
@@ -307,7 +384,11 @@ class FalconDecoderLayer(nn.Module):
         return output
 
 
+MUP_EMB_INPUT_SCALE = 10.667 # WHIPPET
+MUP_LOGITS_SCALE = 0.125 # WHIPPET
+
 class FalconModel(nn.Module):
+
 
     def __init__(
         self,
@@ -319,17 +400,17 @@ class FalconModel(nn.Module):
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.use_alibi = config.alibi
+        assert not self.use_alibi # WHIPPET
 
         # Embedding + LN Embedding
         self.word_embeddings = VocabParallelEmbedding(
             config.vocab_size,
             self.embed_dim,
         )
-
         # Transformer blocks
         self.h = nn.ModuleList([
-            FalconDecoderLayer(config, linear_method)
-            for _ in range(config.num_hidden_layers)
+            FalconDecoderLayer(config, li, linear_method)
+            for li in range(config.num_hidden_layers)
         ])
 
         # Final Layer Norm
@@ -343,6 +424,10 @@ class FalconModel(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.word_embeddings(input_ids)
+        hidden_states = hidden_states * MUP_EMB_INPUT_SCALE # WHIPPET
+        tensor_summary('emb_out', hidden_states)
+
+
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -367,7 +452,7 @@ class FalconForCausalLM(nn.Module):
         self.linear_method = linear_method
         self.transformer = FalconModel(config, linear_method)
         self.lm_head_weight = self.transformer.word_embeddings.weight
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=MUP_LOGITS_SCALE) # WHIPPET
         self.sampler = Sampler()
 
     def forward(
@@ -387,8 +472,12 @@ class FalconForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        hidden_states = torch.clamp(hidden_states, -4., 4.) # WHIPPET
+
         logits = self.logits_processor(self.lm_head_weight, hidden_states,
                                        sampling_metadata)
+        tensor_summary(f"DH.logits", logits)
+
         return logits
 
     def sample(
@@ -399,11 +488,7 @@ class FalconForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -413,8 +498,7 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if name == "lm_head.weight":
                 # Falcon uses tied embeddings.
                 continue

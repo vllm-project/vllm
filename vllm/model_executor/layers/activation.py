@@ -137,12 +137,23 @@ class ScaledActivation(nn.Module):
         param_data.copy_(loaded_weight)
 
 
+class ReLUSquaredActivation(nn.Module):
+    """
+    Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
+    """
+
+    def forward(self, input):
+        relu_applied = nn.functional.relu(input)
+        squared = torch.square(relu_applied)
+        return squared
+    
 _ACTIVATION_REGISTRY = {
     "gelu": nn.GELU(),
     "gelu_fast": FastGELU(),
     "gelu_new": NewGELU(),
     "gelu_pytorch_tanh": nn.GELU(approximate="tanh"),
     "relu": nn.ReLU(),
+    "relu2": ReLUSquaredActivation(),
 }
 
 
