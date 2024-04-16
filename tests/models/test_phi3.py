@@ -27,8 +27,8 @@ William was the only child of William II, Prince of Orange, and Mary, Princess R
 # prompts = [prompts[1]]
 
 # model_path="/data/users/yunanzhang/hf/checkpoints/TLG4.7.3/iter_0078678_hf/"
-# model_path='/mnt/std-cache/users/xihlin/checkpoints/tlgv4.7-phase2/tlgv4-copy'
-model_path="/data/data/users/bapatra/cache/post-training/phi_7B_phase2_iter_165462_for_inference_20240411"
+model_path='/mnt/std-cache/users/xihlin/checkpoints/tlgv4.7-phase2/tlgv4-copy'
+# model_path="/data/data/users/bapatra/cache/post-training/phi_7B_phase2_iter_165462_for_inference_20240411"
 
 sampling_params = SamplingParams(temperature=0)
 llm = LLM(model=model_path, tokenizer=model_path, enforce_eager=False,
