@@ -247,6 +247,7 @@ class ModelRunner:
                     "now.")
 
             token_chunk_size = seq_group_metadata.token_chunk_size
+            # print(f"SANG-TODO {token_chunk_size=}")
             seq_data = seq_group_metadata.seq_data[seq_id]
             computed_len = seq_data.get_num_computed_tokens()
             # We should use get_len here because in case of preemption

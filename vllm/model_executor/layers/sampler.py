@@ -78,13 +78,13 @@ class Sampler(nn.Module):
         # (num_tokens, vocab_size). logprobs on all vocabs per each
         # token. Use log_softmax to ensure numerical stability.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
-        print(f"SANG-TODO initial logoprob shape; {logprobs.shape}")
+        # print(f"SANG-TODO initial logoprob shape; {logprobs.shape}")
 
         # Sample the next tokens.
         # (next_token_ids, parent_seq_ids) for each seq group.
         sample_results = _sample(probs, logprobs, sampling_metadata,
                                  sampling_tensors)
-        print(f"SANG-TODO logoprob shape after sampling; {logprobs.shape}")
+        # print(f"SANG-TODO logoprob shape after sampling; {logprobs.shape}")
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
@@ -580,14 +580,20 @@ def _get_logprobs(
         seq_ids, sampling_params = seq_group
         next_token_ids, parent_ids = sample_result
         num_parent_seqs = len(seq_ids)
+        seq_data = sampling_metadata.seq_data[seq_ids[0]]
+        do_sample = True
+        if i < sampling_metadata.num_prompts:
+            # It means this iteration only computes prefill. No need to sample.
+            subquery_len = sampling_metadata.subquery_lens[i]
+            computed_len = seq_data.get_num_computed_tokens()
+            # print(f"SANG-TODO {seq_data.get_len()=} {seq_data.get_num_computed_tokens()=}")
+            do_sample = seq_data.get_len() - computed_len - subquery_len <= 0
+
         # Find query indices for prompt logprobs.
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
-            seq_data = sampling_metadata.seq_data[seq_ids[0]]
-            subquery_len = sampling_metadata.subquery_lens[i]
-            computed_len = seq_data.get_num_computed_tokens()
             # We don't compute the prompt logprob for the first token because
             # it doesn't have a token that's precedent, so it is meaningless.
             prompt_tokens = seq_data.prompt_token_ids
@@ -598,30 +604,31 @@ def _get_logprobs(
                                  for j in range(len(prompt_tokens)))
             token_indices.extend(token_id for token_id in prompt_tokens)
             query_idx += len(prompt_tokens)
-            print(f"SANG-TODO {computed_len=} {subquery_len=}")
-            print(f"SANG-TODO {len(seq_data.prompt_token_ids)=}")
-            print(f"SANG-TODO {len(parent_ids)=}")
-            print(f"SANG-TODO {query_idx=}")
-            print(f"SANG-TODO {query_indices=}")
-            print(f"SANG-TODO {len(query_indices)=}")
-            print(f"SANG-TODO {token_indices=}")
-            print(f"SANG-TODO {len(prompt_tokens)=}")
+            # print(f"SANG-TODO {computed_len=} {subquery_len=}")
+            # print(f"SANG-TODO {len(seq_data.prompt_token_ids)=}")
+            # print(f"SANG-TODO {len(parent_ids)=}")
+            # print(f"SANG-TODO {query_idx=}")
+            # print(f"SANG-TODO {query_indices=}")
+            # print(f"SANG-TODO {len(query_indices)=}")
+            # print(f"SANG-TODO {token_indices=}")
+            # print(f"SANG-TODO {len(prompt_tokens)=}")
 
         # Find query indices for sample logprobs.
-        query_indices.extend(
-            [query_idx + parent_id for parent_id in parent_ids])
-        token_indices.extend(next_token_ids)
-        if sampling_params.logprobs is not None:
-            largest_num_logprobs = max(largest_num_logprobs,
-                                       sampling_params.logprobs)
-        query_idx += num_parent_seqs
-    assert query_idx == logprobs.size(0)
+        if do_sample:
+            query_indices.extend(
+                [query_idx + parent_id for parent_id in parent_ids])
+            token_indices.extend(next_token_ids)
+            if sampling_params.logprobs is not None:
+                largest_num_logprobs = max(largest_num_logprobs,
+                                        sampling_params.logprobs)
+            query_idx += num_parent_seqs
+    assert query_idx == logprobs.size(0), (f"{query_idx=} {logprobs.shape}")
 
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     token_indices_gpu = torch.tensor(token_indices, device=logprobs.device)
-    print(f"SANG-TODO {query_indices_gpu=}")
-    print(f"SANG-TODO {token_indices_gpu=}")
-    print(f"SANG-TODO {logprobs.shape=}")
+    # print(f"SANG-TODO {query_indices_gpu=}")
+    # print(f"SANG-TODO {token_indices_gpu=}")
+    # print(f"SANG-TODO {logprobs.shape=}")
     # logprob for selected tokens across all sequence groups.
     selected_logprobs = logprobs[[
         query_indices_gpu,
@@ -657,6 +664,13 @@ def _get_logprobs(
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
         seq_ids, sampling_params = seq_group
+        seq_data = sampling_metadata.seq_data[seq_ids[0]]
+        do_sample = True
+        if i < sampling_metadata.num_prompts:
+            subquery_len = sampling_metadata.subquery_lens[i]
+            computed_len = seq_data.get_num_computed_tokens()
+            # It means this iteration only computes prefill. No need to sample.
+            do_sample = seq_data.get_len() - computed_len - subquery_len <= 0
 
         # Find prompt logprobs
         # NOTE: It assumes sampleing_metadata.seq_groups are sorted by prefill
@@ -664,9 +678,6 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            seq_data = sampling_metadata.seq_data[seq_ids[0]]
-            subquery_len = sampling_metadata.subquery_lens[i]
-            computed_len = seq_data.get_num_computed_tokens()
             # We don't compute the prompt logprob for the first token because
             # it doesn't have a token that's precedent, so it is meaningless.
             prompt_tokens = seq_data.prompt_token_ids
@@ -706,34 +717,35 @@ def _get_logprobs(
             num_logprobs = 0
         sampled_logprobs: SampleLogprobs = []
 
-        # Next sampled token id per each parent sequence.
-        # Parent sequence > 1 if it uses beam search.
-        next_token_ids, parent_seq_ids = sample_result
-        # Each sample can contain multiple tokens if beam search is enabled.
-        for next_token_id, parent_seq_id in zip(next_token_ids,
-                                                parent_seq_ids):
-            # First, calculate the logprob from the sampled output.
-            sampled_logprobs_dict = {
-                next_token_id:
-                (selected_logprobs[query_idx].item(), ranks[query_idx].item())
-            }
-            query_idx += 1
+        if do_sample:
+            # Next sampled token id per each parent sequence.
+            # Parent sequence > 1 if it uses beam search.
+            next_token_ids, parent_seq_ids = sample_result
+            # Each sample can contain multiple tokens if beam search is enabled.
+            for next_token_id, parent_seq_id in zip(next_token_ids,
+                                                    parent_seq_ids):
+                # First, calculate the logprob from the sampled output.
+                sampled_logprobs_dict = {
+                    next_token_id:
+                    (selected_logprobs[query_idx].item(), ranks[query_idx].item())
+                }
+                query_idx += 1
 
-            # Second, add top logprobs if required.
-            if num_logprobs >= 0:
-                sampled_logprobs_dict.update(
-                    zip(
-                        top_token_ids[top_logprob_idx +
-                                      parent_seq_id, :num_logprobs].tolist(),
+                # Second, add top logprobs if required.
+                if num_logprobs >= 0:
+                    sampled_logprobs_dict.update(
                         zip(
-                            top_logprobs[
-                                top_logprob_idx +
-                                parent_seq_id, :num_logprobs].tolist(),
-                            range(1, num_logprobs + 1))))
-            sampled_logprobs.append({
-                token_id: Logprob(*logprob_rank)
-                for token_id, logprob_rank in sampled_logprobs_dict.items()
-            })
+                            top_token_ids[top_logprob_idx +
+                                        parent_seq_id, :num_logprobs].tolist(),
+                            zip(
+                                top_logprobs[
+                                    top_logprob_idx +
+                                    parent_seq_id, :num_logprobs].tolist(),
+                                range(1, num_logprobs + 1))))
+                sampled_logprobs.append({
+                    token_id: Logprob(*logprob_rank)
+                    for token_id, logprob_rank in sampled_logprobs_dict.items()
+                })
         result_sample_logprobs.append(sampled_logprobs)
         top_logprob_idx += len(seq_ids)
 
