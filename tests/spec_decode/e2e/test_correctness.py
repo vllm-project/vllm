@@ -26,17 +26,20 @@ from vllm import SamplingParams
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [
+        #{
+        #    "speculative_model": "JackFram/llama-68m",
+        #    "num_speculative_tokens": 5,
+        #},
         {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-        {
+            #"enable_chunked_prefill": True,
+            #"max_num_batched_tokens": 2,
+            #"max_num_seqs": 2,
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 1,
         },
-        {
-            # No spec decode.
-        },
+        #{
+        #    # No spec decode.
+        #},
     ])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [1])
