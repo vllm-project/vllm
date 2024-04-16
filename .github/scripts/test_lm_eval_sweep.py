@@ -183,7 +183,7 @@ def test_lm_eval_correctness(model_id, eval_def):
         "--model",
         model_id,
         "--disable-log-requests",
-        "--max_model_len",
+        "--max-model-len",
         str(4096),
     ]
 
