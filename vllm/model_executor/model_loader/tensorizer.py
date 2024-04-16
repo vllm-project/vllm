@@ -167,8 +167,9 @@ class TensorizerArgs:
                 decryption_params = DecryptionParams.from_key(key)
                 self.deserializer_params['encryption'] = decryption_params
 
+    @staticmethod
     def add_cli_args(
-            self, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+            parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         """Tensorizer CLI arguments"""
 
         # Tensorizer options arg group
