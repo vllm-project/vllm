@@ -33,50 +33,6 @@ class BaseLogitsProcessor:
         # Child class should use initialize in their init.
         self.fsm: FSM
 
-    def adapt_tokenizer(self, tokenizer: PreTrainedTokenizerBase):
-        """Adapt vLLM's tokenizer to use to compile the FSM.
-
-        The API of Outlines tokenizers is slightly different to that of
-        `transformers`. The decoder of outlines, returns a list whereas
-        the decode of vLLM returns an str. To sync the vLLM decoder with
-        outlines internal api, the decoder should be adapted. In addition
-        we need to handle the missing spaces to Llama's tokenizer to be
-        able to compile FSMs for this model.
-
-        """
-        if getattr(tokenizer, "_outlines_adapted", False):
-            return tokenizer
-
-        tokenizer.vocabulary = tokenizer.get_vocab()
-        tokenizer.special_tokens = set(tokenizer.all_special_tokens)
-
-        def convert_token_to_string(token: str) -> str:
-            from transformers.file_utils import SPIECE_UNDERLINE
-
-            string = tokenizer.convert_tokens_to_string([token])
-
-            # A hack to handle missing spaces to HF's Llama tokenizers
-            if token.startswith(SPIECE_UNDERLINE) or token == "<0x20>":
-                return " " + string
-
-            return string
-
-        def change_decoder(
-            decoder: Callable[[List[int]], str]
-        ) -> Callable[[List[int]], List[str]]:
-            """Sync vLLM's decoder with the outlines by returning list."""
-
-            def new_decoder(inp_tokens: List[int]) -> List[str]:
-                return [decoder(inp_tokens)]
-
-            return new_decoder
-
-        tokenizer.convert_token_to_string = convert_token_to_string
-        tokenizer.decode = change_decoder(tokenizer.decode)
-        setattr(tokenizer, "_outlines_adapted", True)  # noqa: B010
-
-        return tokenizer
-
     def init_state(self):
         """Initialize the FSM states."""
         self.fsm_state: DefaultDict[int, int] = defaultdict(int)

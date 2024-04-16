@@ -6,10 +6,10 @@ import torch
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
-from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
-                                   sampler_output_to_torch,
+from vllm.spec_decode.util import (get_all_seq_ids, maybe_mock_device_tensors,
+                                   nvtx_range, sampler_output_to_torch,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import WorkerBase
 
 SeqId = int
 TargetSeqId = int
@@ -31,7 +31,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     of topk/tree.
     """
 
-    def __init__(self, scorer_worker: Worker, device: str, vocab_size: int):
+    def __init__(self, scorer_worker: WorkerBase, device: str,
+                 vocab_size: int):
         self._scorer_worker = scorer_worker
         self._device = device
         self._vocab_size = vocab_size
@@ -83,7 +84,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            return_python_output=False)
+        )
+        assert len(target_sampler_output) == 1, "expected single-step output"
+        target_sampler_output = target_sampler_output[0]
 
         all_tokens, all_probs = self._contract_batch(
             original_bs=len(seq_group_metadata_list),
@@ -142,6 +145,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         This maps the scores of speculative tokens back to their original
         sequences.
         """
+
+        # We mock the device tensors until PR 7/9 is merged (e2e correctness).
+        # https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
+        maybe_mock_device_tensors(
+            sampler_output=target_sampler_output,
+            batch_size=len(non_spec_indices) + num_scoring_tokens,
+            vocab_size=self._vocab_size,
+            device=self._device,
+        )
+
         (target_token_ids, target_probs, non_spec_target_token_ids,
          non_spec_target_probs) = self._split_scoring_output(
              target_sampler_output, num_scoring_tokens)
