@@ -154,10 +154,9 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     get_model_old = get_model
 
     def get_model_patched(*, model_config, device_config, **kwargs):
+        kwargs["lora_config"] = LoRAConfig(max_loras=4, max_lora_rank=8)
         return get_model_old(model_config=model_config,
                              device_config=device_config,
-                             lora_config=LoRAConfig(max_loras=4,
-                                                    max_lora_rank=8),
                              **kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):

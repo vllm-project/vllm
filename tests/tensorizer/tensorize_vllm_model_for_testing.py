@@ -74,7 +74,7 @@ def parse_args():
                     "extremely quickly. Tensor encryption and decryption is "
                     "also supported, although libsodium must be installed to "
                     "use it.")
-    parser = EngineArgs.add_cli_args(parser)
+    parser = TensorizerArgs.add_cli_args(EngineArgs.add_cli_args(parser))
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(
