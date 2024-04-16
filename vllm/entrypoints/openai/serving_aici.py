@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from fastapi import Request
 from pyaici.comms import AiciRunner
@@ -22,21 +22,25 @@ class AiciRunnerCompletion(OpenAIServing):
         # TODO: this is a hack:
         engine.engine.scheduler.aici_runner = aici_runner
 
-    async def create_completion(self, request: RunRequest,
-                                raw_request: Request):
+    # this is separate from create_completion() so fastapi exceptions
+    # from .instantiate_async() are properly sent to the user
+    async def prep_completion(self, request: RunRequest):
+        request_id = f"run-{random_uuid()}"
+        prompt = request.prompt
+        inst_res = await self.aici_runner.instantiate_async(
+            request_id, prompt, request.controller, request.controller_arg)
+        return request_id, inst_res
+
+    async def create_completion(self, request_id: str, inst_res: Optional[dict],
+                                request: RunRequest, raw_request: Request):
         """Completion API for AICI controllers.
 
         See https://github.com/microsoft/aici/blob/main/docs/REST.md
         """
-        request_id = f"run-{random_uuid()}"
-
         runner = self.aici_runner
+        prompt = request.prompt
         yield runner.data_line(
             runner.initial_json(request_id, self.served_model))
-
-        prompt = request.prompt
-        inst_res = await self.aici_runner.instantiate_async(
-            request_id, prompt, request.controller, request.controller_arg)
 
         if inst_res is not None:
             # error case

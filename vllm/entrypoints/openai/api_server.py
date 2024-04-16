@@ -137,8 +137,9 @@ async def upload_aici_module(request: Request):
 async def aici_run(request: RunRequest, raw_request: Request):
     if not pyaici_runner_completion:
         return _no_aici()
-    # TODO: await not needed?
-    generator = pyaici_runner_completion.create_completion(
+    request_id, inst_res = \
+        await pyaici_runner_completion.prep_completion(request)
+    generator = pyaici_runner_completion.create_completion(request_id, inst_res,
         request, raw_request)
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
