@@ -1,5 +1,5 @@
 import pickle
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -18,7 +18,7 @@ try:
             if init_cached_hf_modules:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
-            self._worker: Optional[Worker] = None
+            self._worker = None
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
