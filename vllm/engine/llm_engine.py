@@ -651,7 +651,19 @@ class LLMEngine:
                 self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
+        finished_seq_groups_req_ids = [
+            seq_group.request_id
+            for seq_group in self.scheduler.running
+            if seq_group.is_finished()
+        ]
+
+        if len(finished_seq_groups_req_ids) > 0:
+            self._run_workers(
+                    "release_mamba_cache",
+                    finished_seq_groups_req_ids= finished_seq_groups_req_ids,
+                    use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
         self.scheduler.free_finished_seq_groups()
+
 
         # Create the outputs.
         request_outputs: List[RequestOutput] = []

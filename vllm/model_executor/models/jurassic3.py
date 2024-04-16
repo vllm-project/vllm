@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+import os
 
 from vllm.transformers_utils.configs.jurassic3 import Jurassic3Config
 from vllm.config import LoRAConfig
@@ -29,6 +30,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from mamba_ssm.modules.mamba_simple import Mamba
+from mamba_ssm.utils.generation import InferenceParams
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -130,17 +133,32 @@ class Jurassic3MoE(nn.Module):
                                         hidden_size)
 
 
-class Jurassic3Attention(nn.Module):
+class Jurassic3Mamba(nn.Module):
+    def __init__(self, hidden_size: int, layer_idx: int) -> None:
+        super().__init__()
+        self.layer_idx = layer_idx
+        self.mamba = Mamba(d_model=hidden_size, layer_idx=layer_idx)
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 use_positional_embeddings: bool = False,
-                 max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
-                 linear_method: Optional[LinearMethodBase] = None,
-                 sliding_window: Optional[int] = None) -> None:
+    def forward(self, hidden_states: torch.Tensor, cache = None):
+        max_seqlen = int(os.environ.get("MAMBA_MAX_SEQLEN", "2048"))
+        inference_params = InferenceParams(max_seqlen=max_seqlen, max_batch_size=hidden_states.shape[0])
+        if cache is not None:
+            inference_params.key_value_memory_dict[self.layer_idx] = cache
+        res = self.mamba(hidden_states, inference_params=inference_params)
+        return res, inference_params.key_value_memory_dict
+
+class Jurassic3Attention(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        use_positional_embeddings: bool = False,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        linear_method: Optional[LinearMethodBase] = None,
+        sliding_window: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -217,18 +235,19 @@ class Jurassic3Attention(nn.Module):
 
 
 class Jurassic3DecoderLayer(nn.Module):
-
     def __init__(
-            self,
-            config: Jurassic3Config,
-            is_attn_layer: bool,
-            is_expert_layer: bool,
-            linear_method: Optional[LinearMethodBase] = None,
+        self,
+        config: Jurassic3Config,
+        is_attn_layer: bool,
+        is_expert_layer: bool,
+        layer_idx: int,
+        linear_method: Optional[LinearMethodBase] = None
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        self.layer_idx = layer_idx
 
         self.is_attn_layer = is_attn_layer
         self.is_expert_layer = is_expert_layer
@@ -241,10 +260,10 @@ class Jurassic3DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 rope_theta=rope_theta,
                 sliding_window=config.sliding_window,
-                linear_method=linear_method)
+                linear_method=linear_method,
+            )
         else:
-            #   TODO - Mor - add mamba implementation here
-            raise NotImplementedError
+            self.mamba = Jurassic3Mamba(hidden_size=self.hidden_size,layer_idx=layer_idx)
 
         actual_num_experts = config.num_experts if self.is_expert_layer else 1
         actual_num_experts_per_tok = config.num_experts_per_tok if self.is_expert_layer else 1
@@ -272,14 +291,40 @@ class Jurassic3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            input_metadata=input_metadata,
-        )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        if self.is_attn_layer:
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                kv_cache=kv_cache,
+                input_metadata=input_metadata,
+            )
+        else:
+            cache = None
+            if not input_metadata.is_prompt:
+                for mamba_metadata in input_metadata.mamba_metadata:
+                    # check if batch size of cache fits "n"
+                    if mamba_metadata["cache"][self.layer_idx][0].shape[0] < mamba_metadata["n"]:
+                        k_cache = mamba_metadata["cache"][self.layer_idx][0].repeat_interleave(mamba_metadata["n"],dim=0)
+                        v_cache = mamba_metadata["cache"][self.layer_idx][1].repeat_interleave(mamba_metadata["n"],dim=0)
+                        mamba_metadata["cache"][self.layer_idx] = (k_cache,v_cache)
+
+                # mamba requires concatenated cache
+                if len(input_metadata.mamba_metadata) > 1:
+                    k_cache = torch.concat([req["cache"][self.layer_idx][0] for req in input_metadata.mamba_metadata],dim=0)
+                    v_cache = torch.concat([req["cache"][self.layer_idx][1] for req in input_metadata.mamba_metadata],dim=0)
+                    cache = (k_cache,v_cache)
+
+            hidden_states ,cache = self.mamba(hidden_states, cache=cache)
+
+            sample_id = 0
+            # split cache back to individual requests
+            for req_mamba_metadata in input_metadata.mamba_metadata:
+                n = req_mamba_metadata["n"] if not input_metadata.is_prompt else 1
+                req_mamba_metadata["cache"][self.layer_idx] = (cache[self.layer_idx][0][sample_id:sample_id+n]
+                                                                ,cache[self.layer_idx][1][sample_id:sample_id+n])
+                sample_id += n
+
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -289,7 +334,6 @@ class Jurassic3DecoderLayer(nn.Module):
 
 
 class Jurassic3Model(nn.Module):
-
     def __init__(
             self,
             config: Jurassic3Config,
@@ -322,7 +366,8 @@ class Jurassic3Model(nn.Module):
                     config,
                     is_attn_layer=is_attn,
                     is_expert_layer=is_expert,
-                    linear_method=linear_method
+                    layer_idx=i,
+                    linear_method=linear_method,
                 )
             )
 

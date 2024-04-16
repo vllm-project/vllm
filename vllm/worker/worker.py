@@ -203,6 +203,13 @@ class Worker(WorkerBase):
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
 
+
+    def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
+        for req_id in finished_seq_groups_req_ids:
+            if req_id in self.model_runner.mamba_cache:
+                del self.model_runner.mamba_cache[req_id]
+
+
     @torch.inference_mode()
     def execute_model(
         self,

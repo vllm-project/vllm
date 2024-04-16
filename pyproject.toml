@@ -7,6 +7,8 @@ requires = [
     "setuptools >= 49.4.0",
     "torch == 2.2.1",
     "wheel",
+    "mamba-ssm",
+    "causal-conv1d"
 ]
 build-backend = "setuptools.build_meta"
 

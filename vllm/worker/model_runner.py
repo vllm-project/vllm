@@ -6,6 +6,7 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+from collections import defaultdict 
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
@@ -149,6 +150,7 @@ class ModelRunner:
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
+        self.mamba_cache = defaultdict(lambda: {})
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
@@ -811,7 +813,7 @@ class ModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[torch.Tensor],
+        kv_caches: List[torch.Tensor]
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
@@ -845,12 +847,38 @@ class ModelRunner:
         if not sampling_metadata.perform_sampling:
             return None
 
+        mamba_metadata = self._get_mamba_caches_by_seq_group(seq_group_metadata_list)
+        input_metadata.mamba_metadata = mamba_metadata # list of caches
+
+        hidden_states = model_executable(
+            input_ids=input_tokens,
+            positions=input_positions,
+            kv_caches=kv_caches,
+            input_metadata=input_metadata
+        )
+
+        if self.is_driver_worker:
+            for idx, seq_group_metadata in enumerate(seq_group_metadata_list):
+                request_id = seq_group_metadata.request_id
+                self.mamba_cache[request_id] = input_metadata.mamba_metadata[idx]["cache"]
+
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
         return output
+
+    def _get_mamba_caches_by_seq_group(
+        self,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]
+    ):
+        if seq_group_metadata_list is None:
+            return []
+        return [{
+            "cache":self.mamba_cache[seq.request_id],
+            "n":seq.sampling_params.n,
+        } for seq in seq_group_metadata_list]
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -917,6 +945,7 @@ class ModelRunner:
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
+        self.mamba_cache = defaultdict(lambda: {})
         return
 
     def remove_all_loras(self) -> bool:
