@@ -92,7 +92,7 @@ steps:
   parallelism: 4
 
 - label: Tensorizer Test
-  command: apt-get install curl libsodium23 && pytest -v -s tensorizer
+  command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
 
 - label: Metrics Test
   command: pytest -v -s metrics
