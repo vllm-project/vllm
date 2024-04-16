@@ -10,8 +10,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
-from vllm.model_executor.layers.quantization import (
-    _QUANTIZATION_CONFIG_REGISTRY)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
 def sample_requests(
@@ -270,7 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=[*_QUANTIZATION_CONFIG_REGISTRY, None],
+                        choices=[*QUANTIZATION_METHODS, None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
