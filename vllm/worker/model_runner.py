@@ -129,6 +129,9 @@ class ModelRunner:
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
+        # Set after load_model.
+        self.lora_manager: LRUCacheWorkerLoRAManager = None
+
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
@@ -147,7 +150,6 @@ class ModelRunner:
         # Lazy initialization
         self.model: torch.nn.Module  # Set after load_model
         self.block_size: int  # Set after initial profiling.
-        self.lora_manager: LRUCacheWorkerLoRAManager  # Set after load_model.
         # When using CUDA graph, the input block tables must be padded to
         # max_context_len_to_capture. However, creating the block table in
         # Python can be expensive. To optimize this, we cache the block table

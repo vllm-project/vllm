@@ -63,7 +63,7 @@ class EngineArgs:
 
     # Tensorizer configuration parameters
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
-                          bytes, os.PathLike, int] = None
+                          bytes, os.PathLike, int, None] = None
     vllm_tensorized: bool = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = 1

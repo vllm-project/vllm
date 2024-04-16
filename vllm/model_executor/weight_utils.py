@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 from collections import defaultdict
-from typing import Any, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Iterable, Iterator, List, Optional, Tuple
 
 import filelock
 import huggingface_hub.constants
@@ -240,7 +240,7 @@ def prepare_hf_model_weights(
 def hf_model_weights_iterator(
     model_name_or_path: str,
     cache_dir: Optional[str] = None,
-    load_format: Union[Tuple, str] = "auto",
+    load_format: str = "auto",
     revision: Optional[str] = None,
     fall_back_to_pt: bool = True,
 ) -> Iterator[Tuple[str, torch.Tensor]]:
@@ -287,7 +287,7 @@ def hf_model_weights_iterator(
         from vllm.model_executor.tensorizer_loader import (TensorDeserializer,
                                                            open_stream,
                                                            tensorizer_warning)
-        tensorizer_args = load_format.params
+        tensorizer_args = load_format.params  # type: ignore
         tensorizer_warning(
             "Deserializing HuggingFace models is not optimized for "
             "loading on vLLM, as tensorizer is forced to load to CPU. "

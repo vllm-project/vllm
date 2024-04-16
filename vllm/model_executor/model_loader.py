@@ -116,7 +116,7 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
                 # to retain tensorizer args from CLI.
                 model_config.load_format = ParameterizedLoadFormat(
                     model_config.load_format)
-                model_config.load_format.params = (
+                model_config.load_format.params = (  # type: ignore
                     tensorizer_config._construct_tensorizer_args())
 
             model.load_weights(
