@@ -436,43 +436,70 @@ class ModelRunner:
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
+            use_captured_graph = (
+                not self.model_config.enforce_eager
+                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                and max_context_len <= self.max_context_len_to_capture)
 
-            for seq_id in seq_ids:
-                seq_data = seq_group_metadata.seq_data[seq_id]
-                generation_token = seq_data.get_last_token_id()
-                input_tokens.append(generation_token)
-
-                seq_len = seq_data.get_len()
-                position = seq_len - 1
-                input_positions.append(position)
-
-                context_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
+            # Parallel decoding with tree attention
+            if len(seq_ids)>1 and seq_group_metadata.sampling_params.sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph:
+                tree_width = seq_group_metadata.sampling_params.best_of
+                assert len(seq_ids) == tree_width, "The best_of arg in sampling_params should be same with sequence number of group."
+                root_seq = seq_group_metadata.seq_data[seq_group_metadata.root_seq_id]
+                prompt_len = root_seq.get_prompt_len()
+                # In Parallel Decoding with tree attention, sequences will stop when every sequence in the group has stopped.
+                seq_len = (root_seq.get_len() - prompt_len) * tree_width + prompt_len
+                position = [seq_len - x for x in range(tree_width, 0, -1)]
+                # Don't support sliding_widonw currently
+                context_len = seq_len
+                block_table = seq_group_metadata.block_tables[seq_group_metadata.root_seq_id]
+                block_tables.append(block_table)
                 context_lens.append(context_len)
-
-                block_table = seq_group_metadata.block_tables[seq_id]
-                block_number = block_table[position // self.block_size]
-                block_offset = position % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                # I don't know what this variable is used for, so let's set it like this for now.
+                input_positions.extend(position)
+                input_tokens.extend([seq.get_last_token_id() for seq in seq_group_metadata.seq_data.values()])
+                for pos in position:
+                    block_number = block_table[pos // self.block_size]
+                    block_offset = pos % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
+                    
                 lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
+                
+            else:
+                for seq_id in seq_ids:
+                    seq_data = seq_group_metadata.seq_data[seq_id]
+                    generation_token = seq_data.get_last_token_id()
+                    input_tokens.append(generation_token)
 
-                if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
-                    block_table = block_table[-sliding_window_blocks:]
-                block_tables.append(block_table)
+                    seq_len = seq_data.get_len()
+                    position = seq_len - 1
+                    input_positions.append(position)
+
+                    context_len = seq_len if self.sliding_window is None else min(
+                        seq_len, self.sliding_window)
+                    context_lens.append(context_len)
+
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                    block_number = block_table[position // self.block_size]
+                    block_offset = position % self.block_size
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
+                    lora_index_mapping.append(lora_id)
+                    lora_prompt_mapping.append(lora_id)
+
+                    if self.sliding_window is not None:
+                        sliding_window_blocks = (self.sliding_window //
+                                                self.block_size)
+                        block_table = block_table[-sliding_window_blocks:]
+                    block_tables.append(block_table)
 
         # vLLM uses cuda graph only for decoding requests.
         # See `capture_model` API for more details.
         # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
-        use_captured_graph = (
-            not self.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_context_len <= self.max_context_len_to_capture)
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -527,6 +554,9 @@ class ModelRunner:
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
+        print("+"*100)
+        print(input_tokens)
+        print(slot_mapping)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

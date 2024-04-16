@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, SamplingType
 
 if TYPE_CHECKING:
     import torch
@@ -230,6 +230,7 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+        self.seq_group: Optional[SequenceGroup] = None
 
     @property
     def lora_int_id(self) -> int:
@@ -281,7 +282,13 @@ class Sequence:
         logprobs: Dict[int, Logprob],
     ) -> None:
         assert token_id in logprobs
-        self._append_tokens_to_blocks([token_id])
+        seq_group = self.seq_group
+        # allocate block for root seq if sampling type is RANDOM_SEED and generate multiple sequence per prompt
+        if self.seq_id != seq_group.root_seq_id and seq_group.sampling_params.sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+            buffer_seq = seq_group.find(self.seq_group.root_seq_id)
+        else:
+            buffer_seq = self
+        buffer_seq._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
 
@@ -332,7 +339,11 @@ class Sequence:
         return SequenceStatus.is_finished(self.status)
 
     def fork(self, new_seq_id: int) -> "Sequence":
+        seq_group = self.seq_group
+        self.seq_group = None
         new_seq = copy.deepcopy(self)
+        self.seq_group = seq_group
+        new_seq.seq_group = seq_group
         new_seq.seq_id = new_seq_id
         return new_seq
 
@@ -419,6 +430,9 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.multi_modal_data = multi_modal_data
+        # Sequence group should have only one sequence when init.
+        seqs[0].seq_group = self
+        self.root_seq_id = seqs[0].seq_id
 
     @property
     def prompt(self) -> str:
@@ -521,6 +535,7 @@ class SequenceGroup:
     def add(self, seq: Sequence) -> None:
         if seq.seq_id in self.seqs_dict:
             raise ValueError(f"Sequence {seq.seq_id} already exists.")
+        seq.seq_group = self
         self.seqs_dict[seq.seq_id] = seq
 
     def remove(self, seq_id: int) -> None:
@@ -534,6 +549,9 @@ class SequenceGroup:
     def is_prefill(self) -> bool:
         # Every sequences should be in the same stage.
         return self.get_seqs()[0].is_prefill()
+    
+    def get_root(self) -> Sequence:
+        return self.find(self.root_seq_id)
 
     def __repr__(self) -> str:
         return (f"SequenceGroup(request_id={self.request_id}, "
@@ -570,6 +588,7 @@ class SequenceGroupMetadata:
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        root_seq_id: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -581,6 +600,7 @@ class SequenceGroupMetadata:
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
+        self.root_seq_id = root_seq_id
 
         if self._token_chunk_size is None:
             if is_prompt:
