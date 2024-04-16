@@ -148,7 +148,7 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
         config.dtype = torch.float16
     if not config.enforce_eager:
         logger.warning(
-            "CUDA graph is not supported on CPU, fallback to the eager "
+            "CUDA graph is not supported on XPU, fallback to the eager "
             "mode.")
         config.enforce_eager = True
     return config
