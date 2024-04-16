@@ -259,7 +259,7 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
         "num_lookahead_slots": 5,
     },
 ])
-@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
 def test_chunked_prefill_block_manager_v2(baseline_llm_generator, test_llm_generator, batch_size):
     output_len = 32

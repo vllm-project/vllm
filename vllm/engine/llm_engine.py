@@ -463,7 +463,15 @@ class LLMEngine:
             #
             # So, the problem is likely that the scheduler updates token_chunk_size
             # to num_lookahead_slots. Let's confirm.
+            
+            from vllm.sequence import SequenceStage
 
+            stages = [seq.data._stage for seq in seq_group.get_unfinished_seqs()]
+            equal_decode = [stage == SequenceStage.DECODE for stage in stages]
+
+            print(f'before {stages=}')
+            
+            #breakpoint()
             # These are only prefill computed tokens.
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
@@ -472,9 +480,15 @@ class LLMEngine:
 
             print(f'after {seq_group.get_num_uncomputed_tokens()=}')
 
+            stages = [seq.data._stage for seq in seq_group.get_unfinished_seqs()]
+            equal_decode = [stage == SequenceStage.DECODE for stage in stages]
+            print(f'after {stages=}')
+
             # If uncomputed tokens > 0, it means prefill is chunked and prefill is not complete.
             # We don't need to process outputs in that case.
-            if seq_group.get_num_uncomputed_tokens() == 0:
+            #if seq_group.get_num_uncomputed_tokens() == 0:
+
+            if all(equal_decode):
                 self.output_processor.process_outputs(seq_group, outputs)
 
             # s/token_chunk_size/prefill_chunk_size/g

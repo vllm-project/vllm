@@ -97,7 +97,7 @@ class ScheduledSequenceGroup:
     # The total chunk size (number of tokens) to process for next iteration.
     # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
     # chunked, it can be smaller than that.
-    token_chunk_size: int
+    token_chunk_size: int # TODO docs
 
 
     """
@@ -458,7 +458,7 @@ class Scheduler:
                 else:
                     decode_seq_groups.append(
                         ScheduledSequenceGroup(seq_group=seq_group,
-                                                token_chunk_size=1))
+                                                token_chunk_size=0))
                                                #token_chunk_size=self._get_num_lookahead_slots(is_prefill=False)))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
@@ -562,7 +562,7 @@ class Scheduler:
             else:
                 assert num_new_tokens == 1
                 decode_seq_groups.append(
-                    ScheduledSequenceGroup(seq_group, token_chunk_size=1))
+                    ScheduledSequenceGroup(seq_group, token_chunk_size=0))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 

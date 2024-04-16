@@ -591,7 +591,12 @@ class SequenceGroupMetadata:
             if is_prompt:
                 self._token_chunk_size = list(seq_data.values())[0].get_len()
             else:
-                self._token_chunk_size = 1
+                self._token_chunk_size = 0
+
+        if is_prompt:
+            assert self._token_chunk_size >= 1
+        else:
+            assert self._token_chunk_size == 0
 
     @property
     def lora_int_id(self) -> int:
