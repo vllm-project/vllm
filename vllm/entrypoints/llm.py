@@ -13,6 +13,8 @@ from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
+from vllm.model_executor.guided_decoding import get_local_guided_decoding_logits_processor
+
 
 class LLM:
     """An LLM for generating texts from given prompts and sampling parameters.
@@ -176,10 +178,17 @@ class LLM:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
 
+        guided_decode_logits_processor = get_local_guided_decoding_logits_processor(sampling_params, self.get_tokenizer())
+        if guided_decode_logits_processor:
+            if sampling_params.logits_processors is None:
+                sampling_params.logits_processors = []
+            sampling_params.logits_processors.append(
+                guided_decode_logits_processor)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[
                 i]
+
             self._add_request(
                 prompt,
                 sampling_params,

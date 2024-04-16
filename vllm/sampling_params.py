@@ -2,11 +2,13 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional, Union, Dict
 
 import torch
-from pydantic import Field
+from pydantic import Field, BaseModel
 from typing_extensions import Annotated
+
+from json import dumps as json_dumps
 
 _SAMPLING_EPS = 1e-5
 
@@ -129,6 +131,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        extra_body: Optional[Dict[str, Union[list, str, dict]]] = None
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -174,6 +177,18 @@ class SamplingParams:
         else:
             self.output_text_buffer_length = 0
 
+        guide_count = sum([
+            extra_body is not None and extra_body.get("guided_json") is not None,
+            extra_body is not None and extra_body.get("guided_regex") is not None,
+            extra_body is not None and extra_body.get("guided_choice") is not None
+        ])
+        if guide_count > 1:
+            raise ValueError(
+                "You can only use one kind of guided decoding "
+                "('guided_json', 'guided_regex' or 'guided_choice').")
+
+        self.extra_body = extra_body
+
         self._verify_args()
         if self.use_beam_search:
             self._verify_beam_search()
@@ -187,6 +202,8 @@ class SamplingParams:
                 self._verify_greedy_sampling()
         # injected by the engine
         self.eos_token_id = None
+
+    
 
     def _verify_args(self) -> None:
         if self.n < 1:

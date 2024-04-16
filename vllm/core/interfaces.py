@@ -1,7 +1,8 @@
+from __future__ import annotations
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Sequence as GenericSequence
 from typing import Dict, List
+from typing import Sequence as GenericSequence
 
 from vllm.sequence import Sequence, SequenceGroup
 

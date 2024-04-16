@@ -608,6 +608,7 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
         max_tokens=20,
         extra_body=dict(guided_regex=TEST_REGEX))
     ip2 = chat_completion.choices[0].message.content
+    print(ip2)
     assert ip2 is not None
     assert re.fullmatch(TEST_REGEX, ip2) is not None
     assert ip1 != ip2

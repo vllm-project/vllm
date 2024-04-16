@@ -5,7 +5,7 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
@@ -16,6 +16,7 @@ from vllm.model_executor.guided_logits_processors import (CFGLogitsProcessor,
                                                           JSONLogitsProcessor,
                                                           RegexLogitsProcessor)
 
+from vllm.sampling_params import SamplingParams
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
@@ -82,6 +83,60 @@ async def get_guided_decoding_logits_processor(
     logits_processor.init_state()
     return logits_processor
 
+def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
+    """
+    Given an OpenAI-compatible request, check for guided decoding parameters
+    and get the necessary logits processor for the given guide.
+    We cache logit processors by (guide, tokenizer), and on cache hit
+    we make a shallow copy to reuse the same underlying FSM.
+    """
+    # global global_thread_pool
+    
+    guide, mode = _get_guide_and_mode_from_sampling_params(sampling_params.extra_body)
+    if not guide:
+        return None
+
+    # if global_thread_pool is None:
+    #     global_thread_pool = concurrent.futures.ThreadPoolExecutor(
+    #         max_workers=2)
+
+    result = _get_cached_logits_processor(guide, tokenizer, mode)
+
+    logits_processor = copy(result)
+    # reset logits processor's internal state
+    logits_processor.init_state()
+    return logits_processor
+            
+
+def _get_guide_and_mode_from_sampling_params(
+    extra_body: Dict[str, str]
+) -> Tuple[str, GuidedDecodingMode]:
+    if not extra_body:
+        return None, None
+
+    if "guided_json" in extra_body:
+        json = extra_body["guided_json"]
+        if isinstance(json, dict):
+            # turn dict into hashable string
+            json = json_dumps(json)
+        elif isinstance(json, BaseModel):
+            # use pydantic signature so that different model classes
+            # with the same fields will get hashed the same
+            json = str(json.__signature__)
+        return json, GuidedDecodingMode.JSON
+    elif "guided_regex" in extra_body:
+        return extra_body["guided_regex"], GuidedDecodingMode.REGEX
+    elif "guided_choice" in extra_body:
+        # choice just uses regex
+        choices = [
+            regex_escape(str(choice)) for choice in extra_body["guided_choice"]
+        ]
+        choices_regex = "(" + "|".join(choices) + ")"
+        return choices_regex, GuidedDecodingMode.CHOICE
+    elif "guided_grammar" in extra_body:
+        return extra_body["guided_grammar"], GuidedDecodingMode.GRAMMAR
+    else:
+        return None, None
 
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
