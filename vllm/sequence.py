@@ -144,11 +144,14 @@ class SequenceData:
 
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
+        print(f'seq_data.update_num_computed_tokens({num_new_computed_tokens=})')
         self._num_computed_tokens += num_new_computed_tokens
         assert self._num_computed_tokens <= self.get_len(), (
             self._num_computed_tokens, self.get_len())
+
         # If all tokens are computed, it means it is in decoding phase.
         if self.get_num_uncomputed_tokens() == 0:
+            # define a property _stage; return DECODE if num_uncomputed == 0; else PREFILL.
             self._stage = SequenceStage.DECODE
 
     def reset_state_for_recompute(self) -> None:
@@ -494,13 +497,16 @@ class SequenceGroup:
     def update_num_computed_tokens(self, num_new_computed_tokens: int):
         """Update number of tokens computed so far."""
         for seq in self.seqs_dict.values():
+            # TODO does this not handle swapped seqs? --> we swap out/in sequences
+            # by group, so it's fine..
             if not seq.is_finished():
                 seq.data.update_num_computed_tokens(num_new_computed_tokens)
 
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
         for seq in self.get_seqs():
-            num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+            if not seq.is_finished():
+                num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
         return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
@@ -585,7 +591,12 @@ class SequenceGroupMetadata:
             if is_prompt:
                 self._token_chunk_size = list(seq_data.values())[0].get_len()
             else:
-                self._token_chunk_size = 1
+                self._token_chunk_size = 0
+
+        if is_prompt:
+            assert self._token_chunk_size >= 1
+        else:
+            assert self._token_chunk_size == 0
 
     @property
     def lora_int_id(self) -> int:

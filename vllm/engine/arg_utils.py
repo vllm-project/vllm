@@ -386,9 +386,8 @@ class EngineArgs:
             'prompt latency) before scheduling next prompt.')
         parser.add_argument(
             '--enable-chunked-prefill',
-            type=bool,
-            default=False,
-            help='If True, the prefill requests can be chunked based on the '
+            action='store_true',
+            help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens')
 
         parser.add_argument(

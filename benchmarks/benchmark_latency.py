@@ -169,16 +169,15 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda"],
-        help='device type for vLLM execution, supporting CUDA only currently.')
+        choices=["cuda", "cpu"],
+        help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,
                         help='block size of key/value cache')
     parser.add_argument(
         '--enable-chunked-prefill',
-        type=bool,
-        default=False,
+        action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
     parser.add_argument(

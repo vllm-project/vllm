@@ -97,7 +97,28 @@ class ScheduledSequenceGroup:
     # The total chunk size (number of tokens) to process for next iteration.
     # 1 for decoding. Same as prompt tokens for prefill, but if prefill is
     # chunked, it can be smaller than that.
-    token_chunk_size: int
+    token_chunk_size: int # TODO docs
+
+
+    """
+    What should happen here?
+    - each sequence in a sequence group can produce one output token, or multiple.
+    - the "role" of the output token could be prefill, or decode.
+    - even with one output token, it could be prefill or decode.
+    - with >1 output token, it could be prefill or decode.
+    - technically, it could even be a mix of both prefill and decode -- first N are ignored, latter M are sent to user.
+
+    so we need to track how many of the tokens have been computed
+    we need to track how many new tokens have been computed
+    we need to track num decode tokens
+
+    why can't token_chunk_size just be num_prefill_tokens? then any output after
+    token_chunk_size is a decode token
+
+    - s/token_chunk_size/prefill_chunk_size/g
+    - make optional (None during decode)
+    - how to handle the last chunk, where a token is emitted?
+    """
 
 
 @dataclass
@@ -140,7 +161,11 @@ class SchedulerOutputs:
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:
-        return {g.seq_group.lora_request for g in self.scheduled_seq_groups}
+        return {
+            g.seq_group.lora_request
+            for g in self.scheduled_seq_groups
+            if g.seq_group.lora_request is not None
+        }
 
 
 @dataclass
@@ -433,7 +458,8 @@ class Scheduler:
                 else:
                     decode_seq_groups.append(
                         ScheduledSequenceGroup(seq_group=seq_group,
-                                               token_chunk_size=1))
+                                                token_chunk_size=0))
+                                               #token_chunk_size=self._get_num_lookahead_slots(is_prefill=False)))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
                 budget.add_num_seqs(seq_group.request_id, num_running_seqs)
@@ -536,7 +562,7 @@ class Scheduler:
             else:
                 assert num_new_tokens == 1
                 decode_seq_groups.append(
-                    ScheduledSequenceGroup(seq_group, token_chunk_size=1))
+                    ScheduledSequenceGroup(seq_group, token_chunk_size=0))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
@@ -650,7 +676,7 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group, num_new_tokens)
+            self._allocate_and_set_running(seq_group, num_new_tokens) # num_new_tokens not required here
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -824,13 +850,12 @@ class Scheduler:
         # Update swapped requests.
         self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
-
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.decode_seq_groups +
                                   running_scheduled.prefill_seq_groups +
-                                  swapped_in.decode_seq_groups +
-                                  swapped_in.prefill_seq_groups),
+                                  swapped_in.prefill_seq_groups +
+                                  running_scheduled.decode_seq_groups +
+                                  swapped_in.decode_seq_groups),
             num_prefill_groups=(len(prefills.seq_groups) +
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),
@@ -903,7 +928,7 @@ class Scheduler:
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
-            is_prompt = i < scheduler_outputs.num_prefill_groups
+            is_prompt = seq_group.is_prefill()
             seq_group_metadata = SequenceGroupMetadata(
                 request_id=seq_group.request_id,
                 is_prompt=is_prompt,
@@ -1093,10 +1118,30 @@ class Scheduler:
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
+            # + self._get_num_lookahead_slots(is_prefill=seq_group.is_prefill())
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
+        
+
         return num_new_tokens
+
+"""
+1 Generalize get_num_new_tokens to distinguish between prefill, decode.
+    essentially, the number of query tokens, _not_ the number of output tokens.
+
+    token_chunk_size --> rename to prefill only (None for decode)
+    token budget distinguishes between prefill and decode (_computed_ tokens, not "new" output tokens)
+
+    currently we assume 1:1 map between new tokens and computed tokens; we need to break this 1:1 mapping
+
+2 Set num_new_tokens to num_lookahead_tokens in spec decode
+    will break when budget is exhausted
+    breaks for some other reason?
+
+3 Fork chunked prefill vs spec decode budget calculations
+
+"""
