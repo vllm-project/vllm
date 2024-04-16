@@ -3,11 +3,8 @@ import copy
 import os
 import pickle
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -32,25 +29,8 @@ USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 class RayGPUExecutor(ExecutorBase):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
-        speculative_config: Optional[SpeculativeConfig],
-    ) -> None:
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.vision_language_config = vision_language_config
-        assert (not speculative_config
+    def _init_executor(self) -> None:
+        assert (not self.speculative_config
                 ), "Speculative decoding not yet supported for RayGPU backend."
 
         assert self.parallel_config.worker_use_ray
@@ -68,6 +48,21 @@ class RayGPUExecutor(ExecutorBase):
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
 
+    def _configure_ray_workers_use_nsight(self,
+                                          ray_remote_kwargs) -> Dict[str, Any]:
+        # If nsight profiling is enabled, we need to set the profiling
+        # configuration for the ray workers as runtime env.
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        runtime_env.update({
+            "nsight": {
+                "t": "cuda,cudnn,cublas",
+                "o": "'worker_process_%p'",
+                "cuda-graph-trace": "node",
+            }
+        })
+
+        return ray_remote_kwargs
+
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
         if self.parallel_config.tensor_parallel_size == 1:
@@ -82,6 +77,10 @@ class RayGPUExecutor(ExecutorBase):
         self.driver_dummy_worker: RayWorkerVllm = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerVllm] = []
+
+        if self.parallel_config.ray_workers_use_nsight:
+            ray_remote_kwargs = self._configure_ray_workers_use_nsight(
+                ray_remote_kwargs)
 
         # Create the workers.
         driver_ip = get_ip()
@@ -171,6 +170,7 @@ class RayGPUExecutor(ExecutorBase):
                     distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
                     vision_language_config=vision_language_config,
+                    tensorizer_config=self.tensorizer_config,
                 ))
 
         # Initialize the driver worker with the Worker class.
@@ -187,6 +187,7 @@ class RayGPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
+            tensorizer_config=self.tensorizer_config,
             is_driver_worker=True,
         )
 
@@ -269,7 +270,7 @@ class RayGPUExecutor(ExecutorBase):
             lora_id=lora_id,
         )
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 
     def _run_workers(
@@ -412,7 +413,3 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         # Only the driver worker returns the sampling results.
         output = all_outputs[0]
         return output
-
-    async def check_health_async(self) -> None:
-        """Raises an error if engine is unhealthy."""
-        self._check_if_any_actor_is_dead()

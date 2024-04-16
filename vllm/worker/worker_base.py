@@ -25,7 +25,7 @@ class WorkerBase(ABC):
         The implementation may run profiling or other heuristics to determine
         the size of caches.
 
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.

@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import torch
 import torch.distributed

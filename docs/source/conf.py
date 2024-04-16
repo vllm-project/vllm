@@ -83,6 +83,7 @@ autodoc_mock_imports = [
     "vllm._C",
     "numpy",
     "tqdm",
+    "tensorizer",
 ]
 
 for mock_target in autodoc_mock_imports:
