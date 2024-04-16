@@ -1,9 +1,9 @@
 import gc
+import json
 import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import json
 import openai
 import pytest
 import ray
@@ -11,10 +11,10 @@ import torch
 
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
+from vllm.config import ModelConfig
 from vllm.model_executor.model_loader.tensorizer import (
     EncryptionParams, PerformanceWarning, TensorizerConfig, TensorSerializer,
     is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
-from vllm.config import ModelConfig
 
 prompts = [
     "Hello, my name is",
