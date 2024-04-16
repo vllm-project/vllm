@@ -227,7 +227,3 @@ async def test_max_queue_length(server, client: openai.AsyncOpenAI,
                 assert response.status_code == 503
 
     await main()
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
