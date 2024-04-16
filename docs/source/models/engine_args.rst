@@ -45,7 +45,7 @@ Below, you can find an explanation of every engine argument for vLLM:
     * "safetensors" will load the weights in the safetensors format.
     * "npcache" will load the weights in pytorch format and store a numpy cache to speed up the loading.
     * "dummy" will initialize the weights with random values, mainly for profiling.
-    * "tensorizer" will load serialized weights using `CoreWeave's Tensorizer model deserializer. <https://github.com/coreweave/tensorizer>`_. See `tensorized_vllm_model.py` in the examples folder to serialize a vLLM model, and for more information. Tensorizer support for vLLM can be installed with `pip install vllm[tensorizer]`.
+    * "tensorizer" will load serialized weights using `CoreWeave's Tensorizer model deserializer. <https://github.com/coreweave/tensorizer>`_ See `examples/tensorize_vllm_model.py <https://github.com/vllm-project/vllm/blob/main/examples/tensorize_vllm_model.py>`_ to serialize a vLLM model, and for more information.
 
 .. option:: --dtype {auto,half,float16,bfloat16,float,float32}
 

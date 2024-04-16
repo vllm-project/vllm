@@ -133,6 +133,12 @@ class ChatCompletionRequest(BaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default guided decoding backend "
+            "of the server for this specific request. If set, must be either "
+            "'outlines' / 'lm-format-enforcer'"))
 
     # doc: end-chat-completion-extra-params
 
@@ -265,6 +271,12 @@ class CompletionRequest(BaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default guided decoding backend "
+            "of the server for this specific request. If set, must be one of "
+            "'outlines' / 'lm-format-enforcer'"))
 
     # doc: end-completion-extra-params
 
