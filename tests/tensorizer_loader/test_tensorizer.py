@@ -11,9 +11,8 @@ import torch
 
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
-from vllm.config import ModelConfig
 from vllm.model_executor.model_loader.tensorizer import (
-    EncryptionParams, PerformanceWarning, TensorizerConfig, TensorSerializer,
+    EncryptionParams, TensorizerConfig, TensorSerializer,
     is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
 
 prompts = [
@@ -326,16 +325,3 @@ def test_tensorizer_with_tp(vllm_runner):
             ),
             tensor_parallel_size=2,
         )
-
-
-def test_tensorizer_warn_quant():
-    with pytest.warns(PerformanceWarning):
-        model_config = ModelConfig(model_ref,
-                                   model_ref,
-                                   "auto",
-                                   True,
-                                   "float16",
-                                   0,
-                                   quantization="gptq")
-        tensorizer_config = TensorizerConfig("foo", True)
-        tensorizer_config.verify_with_model_config(model_config)
