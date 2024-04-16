@@ -6,8 +6,7 @@ import torch
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
-from vllm.spec_decode.util import (maybe_mock_device_tensors,
-                                   sampler_output_to_torch)
+from vllm.spec_decode.util import sampler_output_to_torch
 from vllm.worker.worker import Worker
 
 
