@@ -186,11 +186,18 @@ class ModelRunner:
         )
         if self.mamba_cache is None:
             self.mamba_cache = {}
-        self.mamba_cache = (torch.empty(size=conv_state_shape, dtype=dtype, device="cuda"),
-                            torch.empty(size=ssm_state_shape, dtype=dtype, device="cuda"))
-        self.mamba_cache4gc = (torch.empty(size=conv_state_shape, dtype=dtype, device="cuda"),
-                               torch.empty(size=ssm_state_shape, dtype=dtype, device="cuda"))
-        
+        self.mamba_cache = (torch.empty(size=conv_state_shape,
+                                        dtype=dtype,
+                                        device="cuda"),
+                            torch.empty(size=ssm_state_shape,
+                                        dtype=dtype,
+                                        device="cuda"))
+        self.mamba_cache4gc = (torch.empty(size=conv_state_shape,
+                                           dtype=dtype,
+                                           device="cuda"),
+                               torch.empty(size=ssm_state_shape,
+                                           dtype=dtype,
+                                           device="cuda"))
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -763,10 +770,11 @@ class ModelRunner:
                 batch_type = BatchType.PREFILL
             else:
                 batch_type = BatchType.DECODE
-            requests_info = [ RequestInfo(
-                    request_id=req.request_id,
-                    seqs_id=list(req.seq_data.keys())
-                ) for req in seq_group_metadata_list]
+            requests_info = [
+                RequestInfo(request_id=req.request_id,
+                            seqs_id=list(req.seq_data.keys()))
+                for req in seq_group_metadata_list
+            ]
 
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -856,8 +864,9 @@ class ModelRunner:
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.request2i:
                 indices = self.request2i.pop(req_id)
-                logger.debug(f"Deleted { req_id } from mamba_cache with indices = {indices}")
-
+                logger.debug(
+                    f"Deleted { req_id } from mamba_cache with indices = {indices}"
+                )
 
     @torch.inference_mode()
     def execute_model(
@@ -866,8 +875,8 @@ class ModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input, requests_info
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+         lora_requests, lora_mapping, multi_modal_input,
+         requests_info) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -895,14 +904,12 @@ class ModelRunner:
             if self.mamba_cache is None:
                 self.prepare_contiguous_mamba_cache(self.model_config.dtype)
             conv_state, ssm_state, indices = self._prepare_request_mamba_cache(
-                requests_info,
-                input_tokens.shape[0] if 
-                attn_metadata.prefill_metadata is None else len(requests_info)
-            )
+                requests_info, input_tokens.shape[0] if
+                attn_metadata.prefill_metadata is None else len(requests_info))
             execute_model_kwargs = {
                 **execute_model_kwargs,
-                "conv_state":conv_state,
-                "ssm_state":ssm_state,
+                "conv_state": conv_state,
+                "ssm_state": ssm_state,
             }
 
         hidden_states = model_executable(**execute_model_kwargs)
@@ -929,22 +936,15 @@ class ModelRunner:
     def _get_first_free_mamba_cache_index(self):
         max_possible_bs = self.mamba_cache[0].shape[1]
         occupied = [
-            id
-            for seq_ids in self.request2i.values()
+            id for seq_ids in self.request2i.values()
             for id in seq_ids.values()
         ]
-        first_free_index = [
-            i not in occupied
-            for i in range(max_possible_bs)
-        ].index(True)
+        first_free_index = [i not in occupied
+                            for i in range(max_possible_bs)].index(True)
         return first_free_index
 
-
-    def _prepare_request_mamba_cache(
-        self,
-        requests_info: List[RequestInfo],
-        batch_size: int
-    ):
+    def _prepare_request_mamba_cache(self, requests_info: List[RequestInfo],
+                                     batch_size: int):
         indices = []
         max_possible_bs = self.mamba_cache[0].shape[1]
         for request_info in requests_info:
@@ -961,26 +961,26 @@ class ModelRunner:
                         f_free_index = self._get_first_free_mamba_cache_index()
                         ## case of decoding n>1
                         i_exist = list(self.request2i[cur_rid].values())[0]
-                        self.mamba_cache[0][:,f_free_index].copy_(
-                            self.mamba_cache[0][:,i_exist]
-                        )
-                        self.mamba_cache[1][:,f_free_index].copy_(
-                            self.mamba_cache[1][:,i_exist]
-                        )
+                        self.mamba_cache[0][:, f_free_index].copy_(
+                            self.mamba_cache[0][:, i_exist])
+                        self.mamba_cache[1][:, f_free_index].copy_(
+                            self.mamba_cache[1][:, i_exist])
                         self.request2i[cur_rid][seq_id] = f_free_index
                     indices.append(self.request2i[cur_rid][seq_id])
         ## Pad the batch incase of running batch that was not captured via CG
         padded_indices = indices
         for _ in range(batch_size - len(indices)):
-            occu = [i for s_ids in self.request2i.values() for i in s_ids.values()]
+            occu = [
+                i for s_ids in self.request2i.values() for i in s_ids.values()
+            ]
             padded_indices += [[
                 i not in set(occu).union(padded_indices)
                 for i in range(max_possible_bs)
             ].index(True)]
 
-        conv_state = self.mamba_cache[0][:,padded_indices]
-        ssm_state = self.mamba_cache[1][:,padded_indices]
-        return conv_state,ssm_state,indices
+        conv_state = self.mamba_cache[0][:, padded_indices]
+        ssm_state = self.mamba_cache[1][:, padded_indices]
+        return conv_state, ssm_state, indices
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -1162,17 +1162,19 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model,self.is_mamba)
+                graph_runner = CUDAGraphRunner(self.model, self.is_mamba)
                 capture_inputs = {
-                    "input_ids" : input_tokens[:batch_size],
-                    "positions" :input_positions[:batch_size],
+                    "input_ids": input_tokens[:batch_size],
+                    "positions": input_positions[:batch_size],
                     "kv_caches": kv_caches,
                     "attn_metadata": attn_metadata,
-                    "memory_pool":self.graph_memory_pool,
+                    "memory_pool": self.graph_memory_pool,
                 }
                 if self.is_mamba:
-                    capture_inputs["conv_state"]=self.mamba_cache4gc[0][:, :batch_size]
-                    capture_inputs["ssm_state"]=self.mamba_cache4gc[1][:, :batch_size]
+                    capture_inputs["conv_state"] = self.mamba_cache4gc[
+                        0][:, :batch_size]
+                    capture_inputs["ssm_state"] = self.mamba_cache4gc[
+                        1][:, :batch_size]
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -1222,17 +1224,17 @@ class CUDAGraphRunner:
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         model_inputs = {
-            "input_ids":input_ids,
-            "positions":positions,
-            "kv_caches":kv_caches,
-            "attn_metadata":attn_metadata,
+            "input_ids": input_ids,
+            "positions": positions,
+            "kv_caches": kv_caches,
+            "attn_metadata": attn_metadata,
             **kwargs
         }
         if self.is_mamba:
             model_inputs = {
                 **model_inputs,
-                "conv_state":conv_state,
-                "ssm_state":ssm_state,
+                "conv_state": conv_state,
+                "ssm_state": ssm_state,
             }
 
         with _maybe_pynccl():
@@ -1275,8 +1277,8 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        conv_state:Optional[torch.Tensor] = None,
-        ssm_state:Optional[torch.Tensor] = None,
+        conv_state: Optional[torch.Tensor] = None,
+        ssm_state: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
@@ -1293,9 +1295,8 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         if self.is_mamba:
             self.input_buffers["conv_state"].copy_(conv_state,
-                                                non_blocking=True)
-            self.input_buffers["ssm_state"].copy_(ssm_state,
-                                                non_blocking=True)
+                                                   non_blocking=True)
+            self.input_buffers["ssm_state"].copy_(ssm_state, non_blocking=True)
 
         # Run the graph.
         self.graph.replay()

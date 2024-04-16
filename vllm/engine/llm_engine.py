@@ -652,13 +652,13 @@ class LLMEngine:
 
         # Free the finished sequence groups.
         finished_seq_groups_req_ids = [
-            seq_group.request_id
-            for seq_group in self.scheduler.running
+            seq_group.request_id for seq_group in self.scheduler.running
             if seq_group.is_finished()
         ]
 
         if len(finished_seq_groups_req_ids) > 0:
-            self.model_executor.release_mamba_cache(finished_seq_groups_req_ids)
+            self.model_executor.release_mamba_cache(
+                finished_seq_groups_req_ids)
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.

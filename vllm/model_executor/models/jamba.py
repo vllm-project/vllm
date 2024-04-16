@@ -1,5 +1,4 @@
 # coding=utf-8
-
 """Inference-only Jurassic model."""
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -80,9 +79,9 @@ class JambaMambaMixer(nn.Module):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        self.in_proj = MergedColumnParallelLinear(
-            self.hidden_size, [self.intermediate_size] * 2, bias=self.use_bias
-        )
+        self.in_proj = MergedColumnParallelLinear(self.hidden_size,
+                                                  [self.intermediate_size] * 2,
+                                                  bias=self.use_bias)
         # selective projection used to make dt, B and C input dependant
         self.x_proj = RowParallelLinear(
             self.intermediate_size,
@@ -92,18 +91,17 @@ class JambaMambaMixer(nn.Module):
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
         # as the bias is added in the selective scan kernel.
-        self.dt_proj = ColumnParallelLinear(
-            self.time_step_rank, self.intermediate_size, bias=True, skip_bias_add=True
-        )
+        self.dt_proj = ColumnParallelLinear(self.time_step_rank,
+                                            self.intermediate_size,
+                                            bias=True,
+                                            skip_bias_add=True)
 
         def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
             param.data.copy_(
-                loaded_weight.data.split(loaded_weight.shape[0] // tp_size, dim=0)[
-                    tp_rank
-                ]
-            )
+                loaded_weight.data.split(loaded_weight.shape[0] // tp_size,
+                                         dim=0)[tp_rank])
 
         def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
             weight_loader(param, -torch.exp(loaded_weight.float()))
@@ -114,8 +112,7 @@ class JambaMambaMixer(nn.Module):
                 self.intermediate_size // tp_size,
                 self.ssm_state_size,
                 dtype=torch.float32,
-            )
-        )
+            ))
         self.D = nn.Parameter(torch.ones(self.intermediate_size // tp_size))
 
         set_weight_attrs(self.D, {"weight_loader": weight_loader})
@@ -131,9 +128,12 @@ class JambaMambaMixer(nn.Module):
         self.apply_inner_layernorms = config.mamba_inner_layernorms
 
         if self.apply_inner_layernorms:
-            self.dt_layernorm = RMSNorm(self.time_step_rank, eps=config.rms_norm_eps)
-            self.B_layernorm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
-            self.C_layernorm = RMSNorm(self.ssm_state_size, eps=config.rms_norm_eps)
+            self.dt_layernorm = RMSNorm(self.time_step_rank,
+                                        eps=config.rms_norm_eps)
+            self.B_layernorm = RMSNorm(self.ssm_state_size,
+                                       eps=config.rms_norm_eps)
+            self.C_layernorm = RMSNorm(self.ssm_state_size,
+                                       eps=config.rms_norm_eps)
         else:
             self.dt_layernorm = None
             self.B_layernorm = None
@@ -148,17 +148,16 @@ class JambaMambaMixer(nn.Module):
             C = self.C_layernorm.forward(C.contiguous())
         return dt, B, C
 
-    def mamba_forward(
-        self, hidden_states: torch.Tensor, cache_params: MambaCacheParams = None
-    ):
+    def mamba_forward(self,
+                      hidden_states: torch.Tensor,
+                      cache_params: MambaCacheParams = None):
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(1, 2)
         hidden_states, gate = projected_states.chunk(2, dim=1)
 
         # 2. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
+                                               self.conv1d.weight.size(2))
         if cache_params is not None and not cache_params.is_prompt:
             hidden_states = causal_conv1d_update(
                 hidden_states.squeeze(-1),
@@ -171,8 +170,8 @@ class JambaMambaMixer(nn.Module):
         else:
             if cache_params is not None:
                 conv_states = nn.functional.pad(
-                    hidden_states, (self.conv_kernel_size - hidden_states.shape[-1], 0)
-                )
+                    hidden_states,
+                    (self.conv_kernel_size - hidden_states.shape[-1], 0))
                 cache_params.conv_state.copy_(conv_states)
             hidden_states = causal_conv1d_fn(
                 hidden_states,
@@ -194,9 +193,8 @@ class JambaMambaMixer(nn.Module):
 
         discrete_time_step = self.dt_proj(time_step)[0].transpose(1, 2)
         # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-        time_proj_bias = (
-            self.dt_proj.bias.float() if hasattr(self.dt_proj, "bias") else None
-        )
+        time_proj_bias = (self.dt_proj.bias.float() if hasattr(
+            self.dt_proj, "bias") else None)
         if cache_params is not None and not cache_params.is_prompt:
             scan_outputs = selective_state_update(
                 cache_params.ssm_state,
@@ -243,37 +241,32 @@ class JambaMambaMixer(nn.Module):
             padded_hidden_states = torch.zeros(
                 (batch_size, max_seq_len, hidden_states.shape[-1]),
                 dtype=hidden_states.dtype,
-                device=hidden_states.device
-            )
+                device=hidden_states.device)
             offset = 0
-            for i, prompt_len in enumerate(attn_metadata.prefill_metadata.prompt_lens):
+            for i, prompt_len in enumerate(
+                    attn_metadata.prefill_metadata.prompt_lens):
                 padded_hidden_states[i, :prompt_len].copy_(
-                    hidden_states[offset : offset + prompt_len]
-                )
+                    hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
             cache = MambaCacheParams(
                 True,
                 conv_state=conv_state[self.layer_idx],
                 ssm_state=ssm_state[self.layer_idx],
             )
-            padded_hidden_states = self.mamba_forward(
-                padded_hidden_states, cache_params=cache
-            )
+            padded_hidden_states = self.mamba_forward(padded_hidden_states,
+                                                      cache_params=cache)
             offset = 0
-            for i, prompt_len in enumerate(attn_metadata.prefill_metadata.prompt_lens):
-                hidden_states[offset : offset + prompt_len].copy_(
-                    padded_hidden_states[i, :prompt_len]
-                )
+            for i, prompt_len in enumerate(
+                    attn_metadata.prefill_metadata.prompt_lens):
+                hidden_states[offset:offset + prompt_len].copy_(
+                    padded_hidden_states[i, :prompt_len])
                 offset += prompt_len
         else:
-            cache = MambaCacheParams(
-                False,
-                conv_state=conv_state[self.layer_idx],
-                ssm_state=ssm_state[self.layer_idx]
-            )
-            hidden_states = self.mamba_forward(
-                hidden_states.unsqueeze(1), cache_params=cache
-            )
+            cache = MambaCacheParams(False,
+                                     conv_state=conv_state[self.layer_idx],
+                                     ssm_state=ssm_state[self.layer_idx])
+            hidden_states = self.mamba_forward(hidden_states.unsqueeze(1),
+                                               cache_params=cache)
             hidden_states = hidden_states.squeeze(1)
 
         return hidden_states
@@ -325,8 +318,7 @@ class JambaMoE(nn.Module):
                 self.hidden_size,
                 device="cuda",
                 dtype=self.params_dtype,
-            )
-        )
+            ))
         self.w2s = nn.Parameter(
             torch.empty(
                 self.num_total_experts,
@@ -334,8 +326,7 @@ class JambaMoE(nn.Module):
                 self.intermediate_size,
                 device="cuda",
                 dtype=self.params_dtype,
-            )
-        )
+            ))
 
         set_weight_attrs(
             self.ws,
@@ -364,9 +355,8 @@ class JambaMoE(nn.Module):
         if weight_name.endswith("gate_proj.weight"):
             param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("up_proj.weight"):
-            param_data[expert_id, shard_size : 2 * shard_size, :] = loaded_weight[
-                shard, :
-            ]
+            param_data[expert_id,
+                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("down_proj.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
@@ -389,17 +379,20 @@ class JambaMoE(nn.Module):
             self.w2s,
             router_logits,
             self.top_k,
-            renormalize=False,  # Mixtral normalize the expert probs to 1. We don't!
+            renormalize=
+            False,  # Mixtral normalize the expert probs to 1. We don't!
             inplace=True,
         )
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
 class JambaMambaDecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: JambaConfig,
@@ -417,8 +410,10 @@ class JambaMambaDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_moe_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_moe_layernorm = RMSNorm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -433,16 +428,20 @@ class JambaMambaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
 
-        hidden_states = self.mamba(hidden_states, attn_metadata, conv_state, ssm_state)
+        hidden_states = self.mamba(hidden_states, attn_metadata, conv_state,
+                                   ssm_state)
         # Fully Connected
-        hidden_states, residual = self.pre_moe_layernorm(hidden_states, residual)
+        hidden_states, residual = self.pre_moe_layernorm(
+            hidden_states, residual)
         hidden_states = self.moe(hidden_states)
         return hidden_states, residual
 
 
 class JambaAttentionDecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: JambaConfig,
@@ -481,12 +480,10 @@ class JambaAttentionDecoderLayer(nn.Module):
             bias=False,
             linear_method=linear_method,
         )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            config.hidden_size,
-            bias=False,
-            linear_method=linear_method
-        )
+        self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
+                                        config.hidden_size,
+                                        bias=False,
+                                        linear_method=linear_method)
 
         self.attn = Attention(
             self.num_heads,
@@ -502,8 +499,10 @@ class JambaAttentionDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_moe_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.pre_moe_layernorm = RMSNorm(config.hidden_size,
+                                         eps=config.rms_norm_eps)
 
     def self_attention(
         self,
@@ -532,7 +531,8 @@ class JambaAttentionDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
 
         hidden_states = self.self_attention(
             positions=positions,
@@ -541,12 +541,14 @@ class JambaAttentionDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
         # Fully Connected
-        hidden_states, residual = self.pre_moe_layernorm(hidden_states, residual)
+        hidden_states, residual = self.pre_moe_layernorm(
+            hidden_states, residual)
         hidden_states = self.moe(hidden_states)
         return hidden_states, residual
 
 
 class JambaModel(nn.Module):
+
     def __init__(
         self,
         config: JambaConfig,
@@ -556,11 +558,8 @@ class JambaModel(nn.Module):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
+        lora_vocab = ((lora_config.lora_extra_vocab_size *
+                       (lora_config.max_loras or 1)) if lora_config else 0)
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
 
@@ -574,19 +573,10 @@ class JambaModel(nn.Module):
 
         module_list = []
         for i in range(config.num_hidden_layers):
-            is_attn = (
-                True
-                if (i - self.config.attn_layer_offset) % self.config.attn_layer_period
-                == 0
-                else False
-            )
-            is_expert = (
-                True
-                if (i - self.config.expert_layer_offset)
-                % self.config.expert_layer_period
-                == 0
-                else False
-            )
+            is_attn = (True if (i - self.config.attn_layer_offset) %
+                       self.config.attn_layer_period == 0 else False)
+            is_expert = (True if (i - self.config.expert_layer_offset) %
+                         self.config.expert_layer_period == 0 else False)
 
             actual_num_experts = config.num_experts if is_expert else 1
             actual_num_experts_per_tok = config.num_experts_per_tok if is_expert else 1
@@ -599,8 +589,7 @@ class JambaModel(nn.Module):
                         actual_num_experts_per_tok=actual_num_experts_per_tok,
                         layer_idx=i,
                         linear_method=linear_method,
-                    )
-                )
+                    ))
             else:
                 module_list.append(
                     JambaMambaDecoderLayer(
@@ -608,11 +597,11 @@ class JambaModel(nn.Module):
                         actual_num_experts=actual_num_experts,
                         actual_num_experts_per_tok=actual_num_experts_per_tok,
                         layer_idx=i,
-                    )
-                )
+                    ))
 
         self.layers = nn.ModuleList(module_list)
-        self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.final_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -630,9 +619,8 @@ class JambaModel(nn.Module):
             layer = self.layers[i]
             kv_cache = None
             if isinstance(layer, JambaAttentionDecoderLayer):
-                kv_cache = kv_caches[
-                    (i - self.config.attn_layer_offset) // self.config.attn_layer_period
-                ]
+                kv_cache = kv_caches[(i - self.config.attn_layer_offset) //
+                                     self.config.attn_layer_period]
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -690,9 +678,8 @@ class JambaForCausalLM(nn.Module):
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
@@ -704,17 +691,14 @@ class JambaForCausalLM(nn.Module):
         conv_state: torch.Tensor,
         ssm_state: torch.Tensor,
     ):
-        hidden_states = self.model(
-            input_ids, positions, kv_caches, attn_metadata, conv_state, ssm_state
-        )
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, conv_state, ssm_state)
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
-        logits = self.logits_processor(
-            self.lm_head.weight, hidden_states, sampling_metadata
-        )
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -745,14 +729,17 @@ class JambaForCausalLM(nn.Module):
                 "ws" if weight_name in ["gate_proj", "up_proj"] else "w2s",
                 f"experts.{expert_id}.{weight_name}.weight",
                 expert_id,
-            )
-            for expert_id in range(self.config.num_experts)
+            ) for expert_id in range(self.config.num_experts)
             for weight_name in ["down_proj", "up_proj", "gate_proj"]
         ]
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in hf_model_weights_iterator(
-            model_name_or_path, cache_dir, load_format, revision, fall_back_to_pt=True
+                model_name_or_path,
+                cache_dir,
+                load_format,
+                revision,
+                fall_back_to_pt=True
         ):  # erez - might need to change later to False
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -783,9 +770,10 @@ class JambaForCausalLM(nn.Module):
                     if name in params_dict:
                         param = params_dict[name]
                         weight_loader = param.weight_loader
-                        weight_loader(
-                            param, loaded_weight, weight_name, expert_id=expert_id
-                        )
+                        weight_loader(param,
+                                      loaded_weight,
+                                      weight_name,
+                                      expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -794,7 +782,6 @@ class JambaForCausalLM(nn.Module):
 
                     if name in params_dict:
                         param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
                         weight_loader(param, loaded_weight)

@@ -92,9 +92,8 @@ class GPUExecutor(ExecutorBase):
         # it's running.
         return
 
-    def release_mamba_cache(self, requests_id:List[str]) -> None:
+    def release_mamba_cache(self, requests_id: List[str]) -> None:
         self.driver_worker.release_mamba_cache(requests_id)
-
 
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):

@@ -15,5 +15,3 @@ class MambaCacheParams:
 class RequestInfo:
     request_id: str = ''
     seqs_id: List[int] = field(default_factory=list)
-
-

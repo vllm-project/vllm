@@ -68,40 +68,40 @@ class JambaConfig(PretrainedConfig):
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
-            self,
-            vocab_size=65536,
-            tie_word_embeddings=False,
-            hidden_size=4096,
-            intermediate_size=14336,
-            num_hidden_layers=32,
-            num_attention_heads=32,
-            num_key_value_heads=8,
-            hidden_act="silu",
-            initializer_range=0.02,
-            rms_norm_eps=1e-6,
-            use_cache=True,
-            output_router_logits=False,
-            router_aux_loss_coef=0.001,
-            pad_token_id=0,
-            bos_token_id=1,
-            eos_token_id=2,
-            sliding_window=None,
-            attention_dropout=0.0,
-            num_experts_per_tok=2,
-            num_experts=16,
-            expert_layer_offset=1,
-            expert_layer_period=2,
-            attn_layer_period=8,
-            attn_layer_offset=4,
-            use_mamba_kernels=True,
-            mamba_d_state=16,
-            mamba_d_conv=4,
-            mamba_expand=2,
-            mamba_dt_rank="auto",
-            mamba_conv_bias=True,
-            mamba_proj_bias=False,
-            mamba_inner_layernorms=True,
-            **kwargs,
+        self,
+        vocab_size=65536,
+        tie_word_embeddings=False,
+        hidden_size=4096,
+        intermediate_size=14336,
+        num_hidden_layers=32,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        hidden_act="silu",
+        initializer_range=0.02,
+        rms_norm_eps=1e-6,
+        use_cache=True,
+        output_router_logits=False,
+        router_aux_loss_coef=0.001,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+        sliding_window=None,
+        attention_dropout=0.0,
+        num_experts_per_tok=2,
+        num_experts=16,
+        expert_layer_offset=1,
+        expert_layer_period=2,
+        attn_layer_period=8,
+        attn_layer_offset=4,
+        use_mamba_kernels=True,
+        mamba_d_state=16,
+        mamba_d_conv=4,
+        mamba_expand=2,
+        mamba_dt_rank="auto",
+        mamba_conv_bias=True,
+        mamba_proj_bias=False,
+        mamba_inner_layernorms=True,
+        **kwargs,
     ):
         self.vocab_size = vocab_size
         self.tie_word_embeddings = tie_word_embeddings
@@ -136,7 +136,9 @@ class JambaConfig(PretrainedConfig):
         self.mamba_d_state = mamba_d_state
         self.mamba_d_conv = mamba_d_conv
         self.mamba_expand = mamba_expand
-        self.mamba_dt_rank = math.ceil(self.hidden_size / 16) if mamba_dt_rank == "auto" else mamba_dt_rank
+        self.mamba_dt_rank = math.ceil(
+            self.hidden_size /
+            16) if mamba_dt_rank == "auto" else mamba_dt_rank
         self.mamba_conv_bias = mamba_conv_bias
         self.mamba_proj_bias = mamba_proj_bias
         self.mamba_inner_layernorms = mamba_inner_layernorms

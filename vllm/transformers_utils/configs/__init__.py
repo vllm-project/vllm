@@ -10,10 +10,6 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.jamba import JambaConfig
 
 __all__ = [
-    "ChatGLMConfig",
-    "DbrxConfig",
-    "MPTConfig",
-    "RWConfig",
-    "JAISConfig",
+    "ChatGLMConfig", "DbrxConfig", "MPTConfig", "RWConfig", "JAISConfig",
     "JambaConfig"
 ]
