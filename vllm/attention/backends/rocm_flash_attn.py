@@ -164,13 +164,19 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
         else:
-            # if flash-attn is installed, use flash-attn, else use naive-attn
-            try:
-                from flash_attn import flash_attn_varlen_func  # noqa: F401
-                self.attn_func = flash_attn_varlen_func
-                logger.debug("Using CK FA in ROCmBackend")
-            except ModuleNotFoundError:
+            # if not using triton, navi3x not use flash-attn either
+            if torch.cuda.get_device_capability()[0] == 11:
                 self.use_naive_attn = True
+            else:
+                try:
+                    # if flash-attn is installed, use flash-attn, else use naive-attn
+                    from flash_attn import flash_attn_varlen_func  # noqa: F401
+                    self.attn_func = flash_attn_varlen_func
+                    logger.debug("Using CK FA in ROCmBackend")
+                except ModuleNotFoundError:
+                    self.use_naive_attn = True
+        
+            if self.use_naive_attn:
                 self.attn_func = _naive_attention
                 logger.debug("Using naive attention in ROCmBackend")
 
