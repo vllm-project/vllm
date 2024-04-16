@@ -236,8 +236,8 @@ class JambaMambaMixer(nn.Module):
         ssm_state: torch.Tensor,
     ):
         if attn_metadata.prefill_metadata is not None:
-            # Mamba doesn't support chunked prefill, 
-            # We pad the hidden_states before the forward pass and 
+            # Mamba doesn't support chunked prefill,
+            # We pad the hidden_states before the forward pass and
             # unpad it again afterwards.
             max_seq_len = max(attn_metadata.prefill_metadata.prompt_lens)
             batch_size = len(attn_metadata.prefill_metadata.prompt_lens)
