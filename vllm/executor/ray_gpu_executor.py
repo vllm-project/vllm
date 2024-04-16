@@ -97,7 +97,6 @@ class RayGPUExecutor(ExecutorBase):
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(
-                init_cached_hf_modules=self.model_config.trust_remote_code,
                 worker_module_name="vllm.worker.worker",
                 worker_class_name="Worker",
             )
@@ -108,7 +107,6 @@ class RayGPUExecutor(ExecutorBase):
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
                 self.driver_worker = RayWorkerWrapper(
-                    init_cached_hf_modules=self.model_config.trust_remote_code,
                     worker_module_name="vllm.worker.worker",
                     worker_class_name="Worker",
                 )

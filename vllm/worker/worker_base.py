@@ -99,12 +99,10 @@ class WorkerWrapperBase:
     """
 
     def __init__(self,
-                 init_cached_hf_modules=False,
                  worker_module_name=None,
                  worker_class_name=None) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
-        self.init_cached_hf_modules = init_cached_hf_modules
         self.worker = None
 
     def update_environment_variables(self, envs: Dict[str, str]) -> None:
@@ -116,9 +114,6 @@ class WorkerWrapperBase:
         update_environment_variables(envs)
 
     def init_worker(self, *args, **kwargs):
-        if self.init_cached_hf_modules:
-            from transformers.dynamic_module_utils import init_hf_modules
-            init_hf_modules()
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
         self.worker = worker_class(*args, **kwargs)

@@ -60,6 +60,11 @@ class Worker(WorkerBase):
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
+        init_cached_hf_modules = self.model_config.trust_remote_code
+        if init_cached_hf_modules:
+            from transformers.dynamic_module_utils import init_hf_modules
+            init_hf_modules()
+
         self.vision_language_config = vision_language_config
         if self.vision_language_config:
             assert not self.lora_config, (
