@@ -1,2 +1,5 @@
 # Common dependencies
 -r requirements-common.txt
+
+jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+flax >= 0.8
