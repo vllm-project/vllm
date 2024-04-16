@@ -20,13 +20,14 @@ class FP8Config(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [
-            torch.bfloat16, torch.half, torch.float8_e4m3fn, torch.float8_e5m2
-        ]
+        return [torch.bfloat16, torch.half]
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 90
+        # PyTorch 2.3.0+ is required to run FP8 on SM 89 (e.g. Ada) GPUs.
+        # Specifially, this PR has to be included:
+        # https://github.com/pytorch/pytorch/pull/118881/files
+        return 89
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -77,6 +78,14 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+        qweight = Parameter(torch.empty(input_size_per_partition,
+                                       output_size_per_partition,
+                                       dtype=torch.float8_e4m3fn),
+                           requires_grad=False)
+        set_weight_attrs(qweight, {"input_dim": 1, "output_dim": 0})
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+
         scale = Parameter(
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
@@ -92,14 +101,15 @@ class Fp8LinearMethod(LinearMethodBase):
         qinput, scale = per_tensor_quantize(x)
 
         if layer.fp8_linear_state == Fp8LinearState.UNINITIALIZED:
-            qweight, weight_scale = per_tensor_quantize(layer.weight)
-            layer.weight.data = qweight.t()
+            qweight, weight_scale = per_tensor_quantize(layer.weight.data)
+            layer.weight.data = torch.empty_like(layer.weight.data)
+            layer.qweight.data = qweight.t()
             layer.scale.data = weight_scale
             layer.fp8_linear_state = Fp8LinearState.READY
 
         output, _ = torch._scaled_mm(
             qinput,
-            layer.weight,
+            layer.qweight,
             out_dtype=x.dtype,
             scale_a=scale,
             scale_b=layer.scale,
@@ -120,7 +130,9 @@ def per_tensor_quantize(
     """
     finfo = torch.finfo(qdtype)
     # Calculate the scale as dtype max divided by absmax
-    scale = finfo.max / tensor.abs().max().clamp(min=1e-12)
+    min_val, max_val = tensor.aminmax()
+    amax = max(-min_val, max_val)
+    scale = finfo.max / amax.clamp(min=1e-12)
     # scale and clamp the tensor to bring it to
     # the representative range of float8 data type
     # (as default cast is unsaturated)
