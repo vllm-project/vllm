@@ -264,6 +264,9 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
                                           test_llm_generator, batch_size):
+    """Verify that chunked prefill works with BlockManagerV2, with and without
+    lookahead scheduling.
+    """
     output_len = 32
     temperature = 0.0
 

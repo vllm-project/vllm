@@ -13,6 +13,11 @@ logger = init_logger(__name__)
 class GPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
+        """Initialize the worker and load the model.
+
+        If speculative decoding is enabled, we instead create the speculative
+        worker.
+        """
         if self.speculative_config is None:
             self._init_non_spec_worker()
         else:
