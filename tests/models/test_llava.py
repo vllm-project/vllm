@@ -9,23 +9,25 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
+
+def iter_llava_configs(model_name: str):
+    for input_type, input_shape in [
+        (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, 336, 336)),
+        (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, 576, 1024)),
+    ]:
+        yield (model_name,
+               VisionLanguageConfig(image_input_type=input_type,
+                                    image_feature_size=576,
+                                    image_token_id=32000,
+                                    image_input_shape=input_shape,
+                                    image_processor=None,
+                                    image_processor_revision=None))
+
+
 model_and_vl_config = [
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 3, 336, 336),
-         image_processor=None,
-         image_processor_revision=None)),
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 576, 1024),
-         image_processor=None,
-         image_processor_revision=None))
+    *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
+    *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
+    *iter_llava_configs("llava-hf/bakLlava-v1-hf"),
 ]
 
 

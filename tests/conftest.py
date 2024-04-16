@@ -129,6 +129,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 _VISION_LANGUAGE_MODELS = {
     "llava-hf/llava-1.5-7b-hf": LlavaForConditionalGeneration,
+    "llava-hf/llava-1.5-13b-hf": LlavaForConditionalGeneration,
+    "llava-hf/bakLlava-v1-hf": LlavaForConditionalGeneration,
 }
 
 
