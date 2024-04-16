@@ -16,9 +16,6 @@ def get_image_processor(
     **kwargs,
 ) -> BaseImageProcessor:
     """Gets an image processor for the given model name via HuggingFace."""
-    if revision is None:
-        revision = "main"
-
     try:
         processor: BaseImageProcessor = AutoImageProcessor.from_pretrained(
             processor_name,
