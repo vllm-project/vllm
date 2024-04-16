@@ -16,8 +16,8 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -74,7 +74,7 @@ def parse_args():
                     "extremely quickly. Tensor encryption and decryption is "
                     "also supported, although libsodium must be installed to "
                     "use it.")
-    parser = EngineArgs.add_cli_args(parser)
+    parser = TensorizerArgs.add_cli_args(EngineArgs.add_cli_args(parser))
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(

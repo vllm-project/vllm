@@ -1,5 +1,5 @@
 import time
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -31,13 +31,16 @@ def create_dummy_prompt(
 
 
 def create_seq_group(
-    seq_prompt_len=1024,
-    seq_output_lens=(128, ),
-    request_id='0',
-    seq_id_start=0,
-) -> SequenceGroup:
+        seq_prompt_len: int = 1024,
+        seq_output_lens: Iterable[int] = (128, ),
+        request_id: str = '0',
+        seq_id_start: int = 0,
+        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
 
     assert len(seq_output_lens) > 0
+
+    if sampling_params is None:
+        sampling_params = SamplingParams()
 
     prompt_token_ids = [0] * seq_prompt_len
 
@@ -60,7 +63,7 @@ def create_seq_group(
     seq_group = SequenceGroup(
         request_id=request_id,
         seqs=seqs,
-        sampling_params=SamplingParams(),
+        sampling_params=sampling_params,
         arrival_time=time.time(),
     )
 

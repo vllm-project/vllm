@@ -40,12 +40,13 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        """Executes one model step on the given sequences."""
+    def execute_model(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
+                                                                        int],
+            blocks_to_copy: Dict[int, List[int]]) -> List[SamplerOutput]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
         raise NotImplementedError
 
     @abstractmethod
