@@ -46,7 +46,7 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
 
 @pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
 @pytest.mark.parametrize("worker_use_ray", [False, True])
-@pytest.mark.parametrize("engine_use_ray", [True])
+@pytest.mark.parametrize("engine_use_ray", [False, True])
 def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
                     engine_use_ray: bool):
     """
