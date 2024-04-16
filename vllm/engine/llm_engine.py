@@ -661,7 +661,6 @@ class LLMEngine:
             self.model_executor.release_mamba_cache(finished_seq_groups_req_ids)
         self.scheduler.free_finished_seq_groups()
 
-
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for scheduled_seq_group in scheduled_seq_groups:

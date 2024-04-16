@@ -21,9 +21,6 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
-from vllm.lora.request import LoRARequest
-from vllm.utils import is_hip
-from vllm.logger import init_logger
 
 
 class Worker(WorkerBase):
@@ -208,7 +205,6 @@ class Worker(WorkerBase):
             self.cache_engine.swap_out(blocks_to_swap_out)
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
-
 
     @torch.inference_mode()
     def execute_model(

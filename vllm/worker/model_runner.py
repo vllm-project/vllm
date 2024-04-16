@@ -6,7 +6,6 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from collections import defaultdict 
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
@@ -23,12 +22,6 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.mamba_metadata import RequestInfo
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils import custom_all_reduce, pynccl_utils
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    with_pynccl_for_all_reduce,
-    get_tensor_model_parallel_world_size)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -443,7 +436,6 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         return PreparePromptMetadata(
@@ -574,7 +566,6 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
@@ -826,7 +817,6 @@ class ModelRunner:
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
             requests_info = metadata_dict.pop("requests_info")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
@@ -869,7 +859,7 @@ class ModelRunner:
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[torch.Tensor]
+        kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input, requests_info
