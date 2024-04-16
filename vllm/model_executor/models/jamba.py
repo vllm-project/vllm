@@ -769,9 +769,9 @@ class JambaForCausalLM(nn.Module):
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(param,
-                                    loaded_weight,
-                                    weight_name,
-                                    expert_id=expert_id)
+                                  loaded_weight,
+                                  weight_name,
+                                  expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
