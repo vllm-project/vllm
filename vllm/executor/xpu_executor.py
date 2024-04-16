@@ -45,7 +45,17 @@ class XPUExecutor(ExecutorBase):
         self.tensorizer_config = tensorizer_config
 
         # Instantiate the worker and load the model to GPU.
+        self._init_executor()
+
+    def _init_executor(self) -> None:
+        assert (self.lora_config is
+                None), "LoRA is not supported for XPU backend."
+        assert (not self.speculative_config
+                ), "Speculative decoding not yet supported for XPU backend."
+
+        # Instantiate the worker and load the model to the device.
         self._init_worker()
+
 
     def _init_worker(self):
         from vllm.worker.xpu_worker import XPUWorker
