@@ -762,9 +762,7 @@ class Scheduler:
             blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
-            num_lookahead_slots=(prefills.num_lookahead_slots +
-                                 running_scheduled.num_lookahead_slots +
-                                 swapped_in.num_lookahead_slots),
+            num_lookahead_slots=running_scheduled.num_lookahead_slots,
         )
 
     def _schedule_chunked_prefill(self):
@@ -850,9 +848,7 @@ class Scheduler:
             blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
-            num_lookahead_slots=(prefills.num_lookahead_slots +
-                                 running_scheduled.num_lookahead_slots +
-                                 swapped_in.num_lookahead_slots),
+            num_lookahead_slots=running_scheduled.num_lookahead_slots,
         )
 
     def _schedule(self) -> SchedulerOutputs:

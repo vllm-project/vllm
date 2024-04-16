@@ -212,7 +212,7 @@ def create_sampler_output_list(
                     SequenceOutput(
                         output_token=token_id,
                         parent_seq_id=seq_ids[seq_index],
-                        logprobs={token_id: 0},
+                        logprobs={token_id: Logprob(0)},
                     )
                 ],
                 prompt_logprobs=None,
