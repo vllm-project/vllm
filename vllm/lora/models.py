@@ -13,11 +13,10 @@ from torch import nn
 from vllm.config import LoRAConfig
 from vllm.utils import LRUCache, in_wsl
 
-from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping,
-                              from_layer_sampler)
+from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (parse_fine_tuned_lora_name, replace_submodule,
-                             from_layer)
+                             from_layer, from_layer_sampler)
 
 logger = logging.getLogger(__name__)
 

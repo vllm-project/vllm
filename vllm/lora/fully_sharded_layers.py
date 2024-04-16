@@ -1,5 +1,5 @@
 # pylint: disable=unused-argument
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List
 
 import torch
 
@@ -8,7 +8,8 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank)
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLora,
@@ -19,6 +20,18 @@ if TYPE_CHECKING:
 
 
 class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
+    """
+    Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.lora_a_stacked.shape[2]
+        start_idx = tp_rank * shard_size
+        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        return lora_a
 
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
@@ -43,7 +56,16 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         return output
 
 
-def mcp_apply_weights(x, bias, layer):
+def _mcp_apply_weights(x, bias, layer):
+    """
+    MergedColumnParallelLinearWithShardedLoRA and 
+    QKVParallelLinearWithShardedLora share the same 
+    LoRa weight application method.
+    
+    The main difference is the step by shard_size for lora_b which can
+    vary for QKVParallelLinearWithShardedLora but is constant for 
+    MergedColumnParallelLinearWithShardedLoRA.
+    """
     n = len(
         layer.lora_a_stacked)  # expecting 2 for column parallel and 3 for qkv
     output = layer.base_layer.linear_method.apply_weights(
@@ -75,20 +97,66 @@ def mcp_apply_weights(x, bias, layer):
 
 class MergedColumnParallelLinearWithShardedLoRA(
         MergedColumnParallelLinearWithLoRA):
+    """
+    Differs from MergedColumnParallelLinearWithLoRA by slicing the 
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(self, lora_a: List[torch.Tensor]) -> List[torch.Tensor]:
+        output_shard_size = self.lora_a_stacked[0].shape[2]
+        output_start_idx = self.tp_rank * output_shard_size
+        lora_a = [
+            lora_a[i][:, output_start_idx:output_start_idx + output_shard_size]
+            for i in range(2)
+        ]
+        return lora_a
 
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
-        return mcp_apply_weights(x, bias, self)
+        return _mcp_apply_weights(x, bias, self)
 
 
 class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
+    """
+    Differs from QKVParallelLinearWithLora by slicing the 
+    LoRA A's also.
+
+    Based on S-LoRA, slicing happens along the rank dim.
+    """
+
+    def slice_lora_a(self, lora_a: List[torch.Tensor]) -> List[torch.Tensor]:
+        shard_size = [self.lora_a_stacked[i].shape[2] for i in range(3)]
+        start_idx = [self.tp_rank * shard_size[i] for i in range(3)]
+        lora_a = [
+            lora_a[i][:, start_idx[i]:start_idx[i] +
+                      shard_size[i]] if lora_a[i] is not None else None
+            for i in range(3)
+        ]
+        return lora_a
 
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
-        return mcp_apply_weights(x, bias, self)
+        return _mcp_apply_weights(x, bias, self)
 
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
+    """
+    Differs from RowParallelLinearWithLoRA by slicing the 
+    LoRA B's also.
+
+    Based on S-LoRA, slicing happens along the output dim.
+    This yields a combined partial sum from the row parallel base 
+    layer and column partitioned output from the LoRA.
+    """
+
+    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+        shard_size = self.lora_b_stacked.shape[2]
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+        lora_b = lora_b[:, start_idx:end_idx]
+        return lora_b
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(

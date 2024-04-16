@@ -8,16 +8,18 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear,
                                                MergedColumnParallelLinear)
-from vllm.lora.layers import (BaseLayerWithLoRA,
-                              VocabParallelEmbeddingWithLoRA,
-                              ColumnParallelLinearWithLoRA,
-                              RowParallelLinearWithLoRA,
-                              QKVParallelLinearWithLora,
-                              MergedColumnParallelLinearWithLoRA)
+from vllm.lora.layers import (
+    BaseLayerWithLoRA, VocabParallelEmbeddingWithLoRA,
+    ColumnParallelLinearWithLoRA, RowParallelLinearWithLoRA,
+    QKVParallelLinearWithLora, MergedColumnParallelLinearWithLoRA,
+    SamplerWithLoRA)
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLora,
     MergedColumnParallelLinearWithShardedLoRA)
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (ParallelLMHead
+                                                                 )
 
 from torch import nn
 
@@ -52,6 +54,19 @@ def from_layer(
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
     return layer
+
+
+def from_layer_sampler(
+    layer: Sampler,
+    lm_head: ParallelLMHead,
+    max_loras: int,
+    lora_config: LoRAConfig,
+    model_config: Optional[PretrainedConfig] = None,
+) -> SamplerWithLoRA:
+    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
+                          lm_head.weight.device)
+    ret.create_lora_weights(max_loras, lora_config, model_config)
+    return ret
 
 
 def replace_submodule(model: nn.Module, module_name: str,

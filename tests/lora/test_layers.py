@@ -527,13 +527,14 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         if orientation == "row":
             linear = RowParallelLinear(4096, 4096, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = RowParallelLinearWithLoRA(linear) if not \
-                fully_shard else RowParallelLinearWithShardedLoRA(linear)
+            lora_linear = (RowParallelLinearWithLoRA(linear) if not fully_shard
+                           else RowParallelLinearWithShardedLoRA(linear))
         else:
             linear = ColumnParallelLinear(4096, 4096, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = ColumnParallelLinearWithLoRA(linear) if not \
-                fully_shard else ColumnParallelLinearWithShardedLoRA(linear)
+            lora_linear = (ColumnParallelLinearWithLoRA(linear)
+                           if not fully_shard else
+                           ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
 
         return linear, lora_linear
@@ -632,14 +633,14 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
             linear = MergedColumnParallelLinear(4096, [4096] * repeats,
                                                 bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = MergedColumnParallelLinearWithLoRA(linear) if not \
-                fully_shard else \
-                MergedColumnParallelLinearWithShardedLoRA(linear)
+            lora_linear = (MergedColumnParallelLinearWithLoRA(linear)
+                           if not fully_shard else
+                           MergedColumnParallelLinearWithShardedLoRA(linear))
         else:
             linear = QKVParallelLinear(4096, 64, 32, bias=False)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = QKVParallelLinearWithLora(linear) if not \
-                fully_shard else QKVParallelLinearWithShardedLora(linear)
+            lora_linear = (QKVParallelLinearWithLora(linear) if not fully_shard
+                           else QKVParallelLinearWithShardedLora(linear))
 
         @dataclass
         class FakeConfig:
