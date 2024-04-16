@@ -125,7 +125,7 @@ def test_same_output_for_single_step():
     zero_kv_cache(worker.cache_engine)
     set_random_seed(seed)
     expected_output = worker.execute_model(
-        **single_step_execute_model_data.to_dict(), )
+        **single_step_execute_model_data.to_dict(), )[0]
 
     actual_token_ids = [
         output.samples[0].output_token for output in actual_output
@@ -219,7 +219,7 @@ def test_same_output_for_multi_step():
                 continuations=continuations,
                 final_seq_lens=final_seq_lens))
 
-        single_step_output.append(
+        single_step_output.extend(
             worker.execute_model(**execute_model_data.to_dict(), ))
 
         # Append output tokens to new sequence data.

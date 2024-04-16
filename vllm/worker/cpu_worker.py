@@ -251,7 +251,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> Optional[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
@@ -274,11 +274,13 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.cpu_cache)
-        return output
+
+        # CPU worker only supports single-step execution.
+        return [output]
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

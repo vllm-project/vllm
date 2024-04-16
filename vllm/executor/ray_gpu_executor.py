@@ -242,7 +242,8 @@ class RayGPUExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int = 0) -> SamplerOutput:
         all_outputs = self._run_workers(
             "execute_model",
             driver_kwargs={
