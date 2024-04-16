@@ -74,7 +74,8 @@ class CPUExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int) -> List[SamplerOutput]:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,

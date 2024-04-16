@@ -72,8 +72,9 @@ class ExecutorBase(ABC):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        """Executes one model step on the given sequences."""
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int) -> List[SamplerOutput]:
+        """Executes at least one model step on the given sequences."""
         raise NotImplementedError
 
     @abstractmethod

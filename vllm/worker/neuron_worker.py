@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import torch
 import torch.distributed
@@ -73,15 +73,18 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Optional[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         num_seq_groups = len(seq_group_metadata_list)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list)
-        return output
+
+        # Neuron worker only supports single-step output. Wrap the output in a
+        # list to conform to interface.
+        return [output]
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.
