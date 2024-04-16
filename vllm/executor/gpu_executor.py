@@ -13,13 +13,6 @@ logger = init_logger(__name__)
 class GPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
-        assert (not self.speculative_config
-                ), "Speculative decoding not yet supported for GPU backend"
-
-        # Instantiate the worker and load the model to GPU.
-        self._init_worker()
-
-    def _init_worker(self):
         if self.speculative_config is None:
             self._init_non_spec_worker()
         else:
