@@ -106,11 +106,11 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize:
-                self.detokenizer.decode_sequence_inplace(
+                new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
-            self.stop_checker.maybe_stop_sequence(seq,
-                                                  seq_group.sampling_params,
-                                                  [seq.get_last_token_id()])
+            else:
+                new_char_count = 0
+            self.stop_checker.maybe_stop_sequence(seq, new_char_count, seq_group.sampling_params)
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

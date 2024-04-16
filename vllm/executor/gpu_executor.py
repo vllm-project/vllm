@@ -1,8 +1,5 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -15,30 +12,7 @@ logger = init_logger(__name__)
 
 class GPUExecutor(ExecutorBase):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        vision_language_config: Optional[VisionLanguageConfig],
-        speculative_config: Optional[SpeculativeConfig],
-    ) -> None:
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.vision_language_config = vision_language_config
-        self.speculative_config = speculative_config
-
-        # Instantiate the worker and load the model to GPU.
-        self._init_worker()
-
-    def _init_worker(self):
+    def _init_executor(self) -> None:
         if self.speculative_config is None:
             self._init_non_spec_worker()
         else:
@@ -65,6 +39,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
+            tensorizer_config=self.tensorizer_config,
             is_driver_worker=True,
         )
         self.driver_worker.init_device()
@@ -119,7 +94,7 @@ class GPUExecutor(ExecutorBase):
         # Load model handled in spec decode worker.
         self.driver_worker.init_device()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
@@ -161,7 +136,7 @@ class GPUExecutor(ExecutorBase):
         assert lora_id > 0, "lora_id must be greater than 0."
         return self.driver_worker.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
@@ -185,8 +160,3 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy)
         return output
-
-    async def check_health_async(self) -> None:
-        # GPUExecutor will always be healthy as long as
-        # it's running.
-        return
