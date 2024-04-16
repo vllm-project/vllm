@@ -15,5 +15,5 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_samplers \
-	rocm python3 -m pytest -v -s vllm/tests/samplers
+	-e HF_TOKEN rocm python3 -m pytest -v -s vllm/tests/samplers
 

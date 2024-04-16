@@ -18,5 +18,5 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_basic_correctness \
-       	rocm /bin/bash -c "export HF_TOKEN=$$HF_TOKEN; python3 -m pytest -v -s vllm/tests/basic_correctness"
+       	-e HF_TOKEN rocm python3 -m pytest -v -s vllm/tests/basic_correctness
 

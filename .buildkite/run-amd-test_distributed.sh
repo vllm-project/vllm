@@ -24,6 +24,6 @@ docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_b
 		-v -s vllm/tests/distributed/test_basic_distributed_correctness.py"
 
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_basic_distributed_correctness_llama \
-	        rocm  /bin/bash -c "TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf python3 -m pytest \
+	        -e HF_TOKEN rocm  /bin/bash -c "TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf python3 -m pytest \
 		-v -s vllm/tests/distributed/test_basic_distributed_correctness.py"
 

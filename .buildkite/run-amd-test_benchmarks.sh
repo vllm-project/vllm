@@ -15,5 +15,5 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_benchmarks \
-	rocm /bin/bash -c "/bin/bash vllm/.buildkite/run-benchmarks.sh"
+	-e HF_TOKEN rocm /bin/bash -c "/bin/bash vllm/.buildkite/run-benchmarks.sh"
 

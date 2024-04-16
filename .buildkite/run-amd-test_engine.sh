@@ -20,7 +20,7 @@ remove_docker_container
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_engine \
         rocm python3 -m pytest -v -s vllm/tests/engine
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_tokenization \
-        rocm python3 -m pytest -v -s vllm/tests/tokenization
+        -e HF_TOKEN rocm python3 -m pytest -v -s vllm/tests/tokenization
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_sequence \
         rocm python3 -m pytest -v -s vllm/tests/test_sequence.py
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_config \
