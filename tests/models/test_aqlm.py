@@ -90,5 +90,7 @@ def test_models(
         vllm_output_ids, vllm_output_str, vllm_logprobs = vllm_outputs[
             prompt_idx]
 
-        print("Output generation:", repr(vllm_output_str))
+        print("Prompt:          ", repr(example_prompts[prompt_idx]))
+        print("Reference output:", repr(ground_truth_generations[prompt_idx]))
+        print("Output output:   ", repr(vllm_output_str))
         assert vllm_output_str == ground_truth_generations[prompt_idx]
