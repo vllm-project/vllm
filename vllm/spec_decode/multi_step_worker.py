@@ -255,6 +255,11 @@ class DraftModelTop1Proposer(SpeculativeProposer):
          nonzero_proposal_len_indices) = self._split_by_max_model_len(
              seq_group_metadata_list, max_proposal_len)
 
+        print(f'{proposal_lens=}')
+        if 0 in proposal_lens:
+            pass
+            #breakpoint()
+
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
             # sequences.
@@ -268,6 +273,10 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
+
+        if 0 in proposal_lens:
+            pass
+            #breakpoint()
 
         # Combine speculative- and non-speculative sequences into the same
         # representation.
@@ -328,11 +337,20 @@ class DraftModelTop1Proposer(SpeculativeProposer):
         if maybe_sampler_output is None:
             # If no speculative tokens, the sampler output will be None.
             # In this case we return empty tensors.
-            proposal_tokens = torch.zeros(0,
-                                          max_proposal_len,
+            #proposal_tokens = torch.zeros(0,
+            #                              max_proposal_len,
+            #                              dtype=torch.long,
+            #                              device=self._device)
+            proposal_tokens = torch.full(size=(batch_size, max_proposal_len,),
+                                          fill_value=-1,
                                           dtype=torch.long,
                                           device=self._device)
-            proposal_probs = torch.zeros(0,
+            #proposal_probs = torch.zeros(0,
+            #                             max_proposal_len,
+            #                             self._vocab_size,
+            #                             dtype=torch.float32,
+            #                             device=self._device)
+            proposal_probs = torch.zeros(batch_size,
                                          max_proposal_len,
                                          self._vocab_size,
                                          dtype=torch.float32,

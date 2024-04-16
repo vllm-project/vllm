@@ -266,6 +266,9 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        #print(f'get_input_embeddings {input_ids.shape=} {input_ids=}')
+        #if input_ids.shape[0] == 43:
+        #    breakpoint()
         return self.embed_tokens(input_ids)
 
     def forward(

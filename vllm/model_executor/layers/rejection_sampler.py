@@ -335,16 +335,20 @@ class RejectionSampler(nn.Module):
         draft_batch_size, num_draft_probs, draft_vocab_size = draft_probs.shape
         draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
 
-        assert draft_batch_size == target_batch_size
-        assert num_draft_probs == num_target_probs
-        assert (draft_vocab_size == target_vocab_size
-                ), f"{draft_vocab_size=} {target_vocab_size=}"
+        try:
+            assert draft_batch_size == target_batch_size
+            assert num_draft_probs == num_target_probs
+            assert (draft_vocab_size == target_vocab_size
+                    ), f"{draft_vocab_size=} {target_vocab_size=}"
 
-        assert draft_token_ids_batch_size == draft_batch_size
-        assert num_draft_token_ids == num_draft_probs
+            assert draft_token_ids_batch_size == draft_batch_size
+            assert num_draft_token_ids == num_draft_probs
 
-        assert bonus_batch_size == target_batch_size
-        assert num_bonus_tokens == self._num_bonus_tokens
+            assert bonus_batch_size == target_batch_size
+            assert num_bonus_tokens == self._num_bonus_tokens
+        except:
+            breakpoint()
+            raise
 
     def _raise_if_incorrect_dtype(
         self,

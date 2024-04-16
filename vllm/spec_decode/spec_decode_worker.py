@@ -156,7 +156,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        #logger.info(f"spec_decode_worker.execute_model {num_lookahead_slots=}")
+        logger.info(f"spec_decode_worker.execute_model {num_lookahead_slots=}")
 
         # If no spec tokens, call the proposer and scorer workers normally.
         # Used for prefill.
@@ -188,7 +188,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer and scorer model so that the KV cache is consistent between the
         two.
         """
-        #logger.info("run proposer worker no spec")
+        logger.info("run proposer worker no spec")
 
         self.proposer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
@@ -197,7 +197,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_copy=blocks_to_copy,
         )
 
-        #logger.info("run target worker no spec")
+        logger.info("run target worker no spec")
         sampler_output = self.scorer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -231,13 +231,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sequence.
         """
 
-        #logger.info("get spec proposals")
+        logger.info("get spec proposals")
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
 
-        #logger.info("score proposals")
+        logger.info("score proposals")
+        print(f'{proposals=}')
         proposal_scores = self.scorer.score_proposals(
             seq_group_metadata_list,
             blocks_to_swap_in,
@@ -247,11 +248,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposals,
         )
 
-        #logger.info("verify proposals")
+        logger.info("verify proposals")
         accepted_token_ids = self._verify_tokens(seq_group_metadata_list,
                                                  proposal_scores, proposals, k)
 
-        #logger.info("create output list")
+        logger.info("create output list")
         return self._create_output_sampler_list(seq_group_metadata_list,
                                                 accepted_token_ids, k)
 
@@ -282,15 +283,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             select_proposal_len_zero=True)
         original_indices = spec_indices + non_spec_indices
 
-        proposal_probs = proposal_scores.probs[spec_indices, :-1]
+        proposal_verifier_probs = proposal_scores.probs[spec_indices, :-1]
         bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+        proposal_probs = proposals.proposal_probs[spec_indices]
+        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
+        #if -1 in proposals.proposal_token_ids:
+        #    breakpoint()
+
         accepted_token_ids = self.rejection_sampler(
-            proposal_probs,
-            bonus_token_ids,
-            proposals.proposal_probs,
-            proposals.proposal_token_ids,
+            target_probs=proposal_verifier_probs,
+            bonus_token_ids=bonus_token_ids,
+            draft_probs=proposal_probs,
+            draft_token_ids=proposal_token_ids,
         )
 
         # Append output tokens from non-speculative sequences to

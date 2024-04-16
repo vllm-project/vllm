@@ -713,6 +713,8 @@ class SpeculativeConfig:
             target_model_config.max_model_len,
             draft_model_config.max_model_len)
 
+        draft_model_config.max_model_len = 32
+
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(
                 target_parallel_config))

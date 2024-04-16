@@ -127,8 +127,24 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             proposal_lens_list,
             select_proposal_len_zero=True)
 
+        # TODO clean up
+        filtered = []
+        for p in proposal_token_ids_list:
+            if -1 in p:
+                assert all([x == -1 for x in p])
+                continue
+            filtered.append(p)
+
+
         target_seq_group_metadata_list = self._create_scoring_model_input(
-            spec_seqs, proposal_token_ids_list)
+            seq_group_metadata_list=spec_seqs,
+            #proposal_token_ids=proposal_token_ids_list,
+            proposal_token_ids=filtered,
+            target_seq_ids_iter=self._create_target_seq_id_iterator(
+                seq_ids=get_all_seq_ids(seq_group_metadata_list)
+            ),
+        )
+
         num_scoring_tokens = len(target_seq_group_metadata_list)
         target_seq_group_metadata_list.extend(non_spec_seqs)
 
@@ -161,12 +177,20 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         # Map distinct sequences used to score each token
         # of shape [batch_size * k + 1] back to [batch_size, k + 1].
-        batch_size, k = proposals.proposal_token_ids.shape
-
-        target_token_ids = target_token_ids.squeeze().reshape(
-            batch_size, k + 1)
-        target_probs = target_probs.squeeze().reshape(batch_size, k + 1,
-                                                      self._vocab_size)
+        full_batch_size, k = proposals.proposal_token_ids.shape
+        non_spec_batch_size, _ = non_spec_target_token_ids.shape
+        speculated_batch_size = full_batch_size - non_spec_batch_size
+        # TODO clean up
+        
+        try:
+            target_token_ids = target_token_ids.squeeze().reshape(
+                speculated_batch_size, k + 1)
+            target_probs = target_probs.squeeze().reshape(speculated_batch_size, k + 1,
+                                                          self._vocab_size)
+        except Exception as e:
+            print(e)
+            breakpoint()
+            raise
 
         all_tokens = torch.full(size=(original_bs, k + 1),
                                 fill_value=-1,
@@ -179,8 +203,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                                 dtype=torch.float32)
 
         if non_spec_indices:
-            all_tokens[non_spec_indices, 0] = non_spec_target_token_ids
-            all_probs[non_spec_indices, :1, :] = non_spec_target_probs
+            try:
+                all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
+                all_probs[non_spec_indices, :1, :] = non_spec_target_probs
+            except:
+                breakpoint()
+                raise
 
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
@@ -192,16 +220,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             self,
             seq_group_metadata_list: List[SequenceGroupMetadata],
             proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
+            target_seq_ids_iter: Iterator[TargetSeqId],
     ) -> List[SequenceGroupMetadata]:
         """Given the original input sequences and proposed tokens from the draft
         model, create a list of target sequences that can be used for scoring.
+
+        TODO docs on target_seq_ids_iter
         """
 
         if not seq_group_metadata_list:
             return []
-
-        target_seq_ids_iter = self._create_target_seq_id_iterator(
-            get_all_seq_ids(seq_group_metadata_list))
 
         target_seq_group_metadata = list(
             chain.from_iterable(
