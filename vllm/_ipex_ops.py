@@ -188,7 +188,7 @@ class ipex_cache_ops:
         kv_scale: float,
     ) -> None:
         assert kv_cache_dtype == "auto"
-        ipex.llm.modules.PageAttention.reshape_and_cache(
+        ipex.llm.modules.PagedAttention.reshape_and_cache(
             key, value, key_cache, value_cache, slot_mapping)
 
     @staticmethod
