@@ -208,6 +208,7 @@ if __name__ == "__main__":
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     if args.aici_rt:
         pyaici_runner = pyaici.runner_from_cli(args)
+        pyaici_runner.fast_api()
         pyaici_runner_completion = AiciRunnerCompletion(
             pyaici_runner, engine, served_model)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
