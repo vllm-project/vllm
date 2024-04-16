@@ -586,8 +586,9 @@ def _get_logprobs(
             # It means this iteration only computes prefill. No need to sample.
             subquery_len = sampling_metadata.subquery_lens[i]
             computed_len = seq_data.get_num_computed_tokens()
-            # print(f"SANG-TODO {seq_data.get_len()=} {seq_data.get_num_computed_tokens()=}")
+            # print(f"SANG-TODO {seq_data.get_len()=} {seq_data.get_num_computed_tokens()=} {subquery_len=}")
             do_sample = seq_data.get_len() - computed_len - subquery_len <= 0
+            # print(f"SANG-TODO {do_sample=}")
 
         # Find query indices for prompt logprobs.
         if (i < sampling_metadata.num_prompts
@@ -746,8 +747,8 @@ def _get_logprobs(
                     token_id: Logprob(*logprob_rank)
                     for token_id, logprob_rank in sampled_logprobs_dict.items()
                 })
+            top_logprob_idx += len(seq_ids)
         result_sample_logprobs.append(sampled_logprobs)
-        top_logprob_idx += len(seq_ids)
 
     return result_prompt_logprobs, result_sample_logprobs
 
