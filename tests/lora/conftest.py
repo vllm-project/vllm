@@ -12,6 +12,7 @@ from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
+from vllm.distributed import destroy_model_parallel, initialize_model_parallel
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -19,8 +20,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel, initialize_model_parallel)
 
 
 def cleanup():
@@ -142,6 +141,11 @@ def chatglm3_lora_files():
 @pytest.fixture(scope="session")
 def baichuan_lora_files():
     return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def tinyllama_lora_files():
+    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
 @pytest.fixture

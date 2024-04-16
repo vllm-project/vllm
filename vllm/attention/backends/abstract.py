@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Generic, List, Optional, Tuple, Type, TypeVar
 
 import torch
 
@@ -47,7 +47,8 @@ class AttentionBackend(ABC):
 
 
 @dataclass
-class AttentionMetadata:
+class AttentionMetadataPerStage:
+    """Attention metadata for a specific stage. I.e., prefill or decode."""
 
     def asdict_zerocopy(self) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
@@ -57,6 +58,41 @@ class AttentionMetadata:
             field.name: getattr(self, field.name)
             for field in fields(self)
         }
+
+
+T = TypeVar("T", bound=AttentionMetadataPerStage)
+
+
+@dataclass
+class AttentionMetadata(Generic[T]):
+    """Attention metadata for prefill and decode batched together."""
+    # Total number of prefill requests.
+    num_prefills: int
+    # Number of prefill tokens.
+    num_prefill_tokens: int
+    # Number of decode tokens. Note that it is equivalent to the number of
+    # decode requests.
+    num_decode_tokens: int
+    # The attention metadata for prefill requests in a batch.
+    # None if there's no prefill requests in a batch.
+    prefill_metadata: Optional[T]
+    # The attention metadata for decode requests in a batch.
+    # None if there's no decode requests in a batch.
+    decode_metadata: Optional[T]
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+    # The kv cache's data type.
+    kv_cache_dtype: str
+
+    def __post_init__(self):
+        if self.num_prefill_tokens > 0:
+            assert self.num_prefills > 0
+            assert self.prefill_metadata is not None
+        if self.num_decode_tokens > 0:
+            assert self.decode_metadata is not None
 
 
 class AttentionImpl(ABC):
@@ -80,7 +116,7 @@ class AttentionImpl(ABC):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        attn_metadata: AttentionMetadata[AttentionMetadataPerStage],
         kv_scale: float,
     ) -> torch.Tensor:
         raise NotImplementedError

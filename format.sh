@@ -93,9 +93,23 @@ fi
 echo 'vLLM yapf: Done'
 
 # Run mypy
-# TODO(zhuohan): Enable mypy
-# echo 'vLLM mypy:'
-# mypy
+echo 'vLLM mypy:'
+mypy vllm/attention/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/distributed/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/entrypoints/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/executor/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/usage/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/transformers_utils/*.py --follow-imports=skip --config-file pyproject.toml
+
+# TODO(sang): Follow up
+# mypy vllm/engine/*.py --follow-imports=skip --config-file pyproject.toml
+# mypy vllm/worker/*.py --follow-imports=skip --config-file pyproject.toml
+# mypy vllm/spec_decoding/*.py --follow-imports=skip --config-file pyproject.toml
+# mypy vllm/model_executor/*.py --follow-imports=skip --config-file pyproject.toml
+# mypy vllm/lora/*.py --follow-imports=skip --config-file pyproject.toml
+
 
 CODESPELL_EXCLUDES=(
     '--skip' '*docs/source/_build/**'
@@ -228,5 +242,3 @@ if ! git diff --quiet &>/dev/null; then
 
     exit 1
 fi
-
-
