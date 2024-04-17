@@ -1,4 +1,3 @@
-import argparse
 import os
 import subprocess
 
@@ -11,7 +10,7 @@ from vllm.sequence import MultiModalData
 
 
 def run_fuyu_pixel_values():
-    llm = LLM(model="/data/LLM-model/fuyu-8b")
+    llm = LLM(model="adept/fuyu-8b")
 
     # load and create image prompt
     images = torch.load("images/cherry_blossom_pixel_values.pt")
@@ -36,7 +35,6 @@ def run_fuyu_pixel_values():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Demo on Llava")
     # Download from s3
     s3_bucket_path = "s3://air-example-data-2/vllm_opensource_llava/"
     local_directory = "images"
