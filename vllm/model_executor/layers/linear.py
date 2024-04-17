@@ -558,7 +558,7 @@ class RowParallelLinear(torch.nn.Module):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
-        
+
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

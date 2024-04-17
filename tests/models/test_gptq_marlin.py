@@ -34,14 +34,14 @@ gptq_marlin_not_supported = (
 MODELS = [
     # act_order==False, group_size=channelwise
     ("robertgshaw2/zephyr-7b-beta-channelwise-gptq", "main"),
-    # # act_order==False, group_size=128
+    # act_order==False, group_size=128
     ("TheBloke/Llama-2-7B-GPTQ", "main"),
-    
-    # # act_order==True, group_size=128
+
+    # act_order==True, group_size=128
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
     # act_order==True, group_size=64
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-64g-actorder_True"),
-    # # act_order==True, group_size=32
+    # act_order==True, group_size=32
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-32g-actorder_True"),
 ]
 

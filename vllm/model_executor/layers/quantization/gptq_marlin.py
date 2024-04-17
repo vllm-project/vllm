@@ -88,7 +88,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                  is_sym: bool) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
-            # (since we have only one group per output channel, so nothing to re-order)
+            # (since we have only one group per output channel)
             desc_act = False
 
         self.weight_bits = weight_bits
