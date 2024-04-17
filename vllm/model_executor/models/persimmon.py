@@ -28,6 +28,7 @@ from transformers import PersimmonConfig
 from transformers.activations import ReLUSquaredActivation
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
@@ -37,9 +38,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
 
@@ -293,9 +293,7 @@ class PersimmonForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:

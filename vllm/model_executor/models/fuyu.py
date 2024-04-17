@@ -25,9 +25,9 @@ from transformers import FuyuConfig
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 
 
@@ -157,9 +157,7 @@ class FuyuForCausalLM(nn.Module):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self, weights: Iterable[Tuple[str, torch.Tensor]]
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
