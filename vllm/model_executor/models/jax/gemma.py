@@ -190,6 +190,7 @@ class Attention(nn.Module):
           query_proj,
           cache[0],
           cache[1],
+          self.sm_scale,
           block_tables,
           context_lens,
       )
