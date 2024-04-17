@@ -394,8 +394,12 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
             driver_kwargs = kwargs
 
         # Run the driver worker asynchronously.
-        driver_executor = make_async(getattr(self.driver_worker, method))
-        coros.append(driver_executor(*driver_args, **driver_kwargs))
+        def helper():
+            return self.driver_worker.execute_method(method, *driver_args,
+                                                     **driver_kwargs)
+
+        driver_executor = make_async(helper)
+        coros.append(driver_executor())
 
         # Run the ray workers asynchronously.
         for worker in self.workers:
