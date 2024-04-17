@@ -18,7 +18,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
+                           SequenceStatus, SequenceGroupMetadata)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -631,19 +631,24 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        self,
+        output: SamplerOutput,
+        scheduler_outputs: SchedulerOutputs,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> List[RequestOutput]:
         now = time.time()
+        # breakpoint()
         # Update the scheduled sequence groups with the model outputs.
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
+        for scheduled_seq_group, outputs, seq_group_metadata in zip(
+                scheduled_seq_groups, output, seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
+            # breakpoint()
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            # If uncomputed tokens > 0, it means prefill is chunked.
-            # We don't need to process outputs in that case.
             self._process_prompt_logprob(seq_group, outputs)
-            if seq_group.get_num_uncomputed_tokens() == 0:
+            # If sampling is not required, we don't need to process the model output.
+            if seq_group_metadata.do_sample:
                 self._process_sequence_group_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -726,7 +731,8 @@ class LLMEngine:
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(output, scheduler_outputs,
+                                           seq_group_metadata_list)
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""

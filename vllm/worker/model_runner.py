@@ -547,8 +547,8 @@ class ModelRunner:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
         generators: List[torch.Generator] = []
-        # Token chunk sizes per seq group metadata
-        token_chunk_sizes: List[int] = []
+        # Whether or not a seq_group at each index should do sampling.
+        do_samples: List[bool] = []
         selected_token_start_idx = 0
         categorized_sample_indices = {t: [] for t in SamplingType}
         categorized_sample_indices_start_idx = 0
@@ -558,7 +558,7 @@ class ModelRunner:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             sampling_params = seq_group_metadata.sampling_params
             seq_groups.append((seq_ids, sampling_params))
-            token_chunk_sizes.append(seq_group_metadata.token_chunk_size)
+            do_samples.append(seq_group_metadata.do_sample)
 
             if seq_group_metadata.is_prompt:
                 assert len(seq_ids) == 1
@@ -635,6 +635,7 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
+            do_samples=do_samples,
             generators=generators,
             subquery_lens=subquery_lens,
         )
@@ -782,6 +783,7 @@ class ModelRunner:
                 prompt_lens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
+                do_samples=[],
                 generators=None,
                 perform_sampling=False,
             )
