@@ -589,18 +589,22 @@ def _get_logprobs(
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample lobprobs and prompt logprobs.
 
-    All metadata here has flattened data structure that includes all query tokens
-    in a batch. There could be one or more query tokens per each request
-    (seq_group).
+    All metadata here has flattened query tokens in a batch. There could be one
+    or more query tokens per each request (seq_group).
 
     Args:
         logprobs: (num_query_tokens_across_batch, num_vocab). Each query token's
             logprob per vocab.
-        sampling_metadata: The sampling metadata (config) across the batch.
-        sample_results: The tuple of (next_token_ids, parent_ids) per each
-            query token.
+        sampling_metadata: The sampling metadata.
+        sample_results: (num_seq_groups) The tuple of (next_token_ids,
+            parent_ids) for each sequence group.
+
     Returns:
         A tuple of prompt and sample logprobs per sequence group in a batch.
+        If a seq_group doesn't require sample (e.g.,
+        sampling_metadata.do_samples[i] is False), the sampled logprobs can be
+        an empty string. If a seq group doesn't require prompt logprobs (e.g.,
+        if prompt_logprobs is None), the prompt logprobs may be None.
     """
     # The index of query token we care.
     query_indices: List[int] = []
@@ -612,7 +616,6 @@ def _get_logprobs(
     # We iterate a batch. Each request (seq_group) in a batch can contain one
     # or more query tokens. It is used to track the index.
     query_idx = 0
-    num_skip_sample = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
         # There could be more than 1 seq_id if uses beam search.
@@ -620,7 +623,6 @@ def _get_logprobs(
         next_token_ids, parent_ids = sample_result
         num_parent_seqs = len(seq_ids)
         do_sample = sampling_metadata.do_samples[i]
-        num_skip_sample += do_sample is False
 
         # Find query indices for prompt logprobs.
         if i < sampling_metadata.num_prompts and sampling_params.prompt_logprobs is not None:
@@ -629,9 +631,9 @@ def _get_logprobs(
             computed_len = seq_data.get_num_computed_tokens()
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
-            # Look at the logprob of next prompt token to compute prompt
-            # logprob.
             prompt_tokens = seq_data.prompt_token_ids
+            # Look at the logprob of next prompt token to compute prompt
+            # logprob of a current prefill token.
             next_token_index_start = computed_len + 1
             next_token_index_end = min(computed_len + subquery_len + 1,
                                        len(prompt_tokens))
@@ -655,7 +657,7 @@ def _get_logprobs(
 
     # No need to calculate logprobs if no query tokens are chosen.
     if len(query_indices) == 0:
-        empty_sampled_logprob: SampleLogprobs = []
+        empty_sampled_logprob = []
         empty_prompt_logprob = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
@@ -697,7 +699,6 @@ def _get_logprobs(
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
         seq_ids, sampling_params = seq_group
-        seq_data = sampling_metadata.seq_data[seq_ids[0]]
         do_sample = sampling_metadata.do_samples[i]
 
         # Find prompt logprobs
@@ -706,9 +707,12 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            # Look at the logprob of next prompt token to compute prompt
-            # logprob.
+            subquery_len = sampling_metadata.subquery_lens[i]
+            seq_data = sampling_metadata.seq_data[seq_ids[0]]
+            computed_len = seq_data.get_num_computed_tokens()
             prompt_tokens = seq_data.prompt_token_ids
+            # Look at the logprob of next prompt token to compute prompt
+            # logprob of a current prefill token.
             next_token_index_start = computed_len + 1
             next_token_index_end = min(computed_len + subquery_len + 1,
                                        len(prompt_tokens))
@@ -745,8 +749,8 @@ def _get_logprobs(
         num_logprobs = sampling_params.logprobs
         if num_logprobs is None:
             num_logprobs = 0
-        sampled_logprobs: SampleLogprobs = []
 
+        sampled_logprobs: SampleLogprobs = []
         # Compute logprob only when we do sampling.
         if do_sample:
             # Next sampled token id per each parent sequence.
