@@ -1,17 +1,14 @@
 from typing import Optional
 
-import ray
-
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerVllm
 from vllm.executor.ray_executor_base import (RayExecutorAsyncBase,
                                              RayExecutorBase)
-from vllm.utils import set_cuda_visible_devices
 
 
-class RayGPUExecutor(RayExecutorBase):
+class RayCPUExecutor(RayExecutorBase):
 
     def _init_worker_ray(
         self,
@@ -28,15 +25,9 @@ class RayGPUExecutor(RayExecutorBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
     ) -> None:
-        worker_gpu_ids = ray_worker.get_gpu_ids.remote()
-        worker_gpu_ids = sorted(worker_gpu_ids)
-        ray_worker.set_cuda_visible_devices.remote(worker_gpu_ids)
+        from vllm.worker.cpu_worker import CPUWorker
 
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
-        ray_worker.init_worker.remote(lambda: Worker(
+        ray_worker.init_worker.remote(lambda: CPUWorker(
             model_config=model_config,
             parallel_config=parallel_config,
             scheduler_config=scheduler_config,
@@ -47,21 +38,13 @@ class RayGPUExecutor(RayExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=lora_config,
-            vision_language_config=vision_language_config,
         ))
 
     def _create_driver_worker(self, ray_driver: RayWorkerVllm,
                               distributed_init_method: str,
                               driver_local_rank: int, driver_rank: int):
-        driver_node_id, driver_gpu_ids = ray.get(
-            ray_driver.get_node_and_gpu_ids.remote())
-        driver_gpu_ids = sorted(driver_gpu_ids)
-        set_cuda_visible_devices(driver_gpu_ids)
-
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-        return Worker(
+        from vllm.worker.cpu_worker import CPUWorker
+        return CPUWorker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
@@ -72,10 +55,9 @@ class RayGPUExecutor(RayExecutorBase):
             rank=driver_rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
             is_driver_worker=True,
         )
 
 
-class RayGPUExecutorAsync(RayGPUExecutor, RayExecutorAsyncBase):
+class RayCPUExecutorAsync(RayCPUExecutor, RayExecutorAsyncBase):
     pass

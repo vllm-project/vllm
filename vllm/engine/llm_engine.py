@@ -236,16 +236,20 @@ class LLMEngine:
         engine_config = engine_args.create_engine_config()
 
         # Initialize the cluster and specify the executor class.
-        if engine_config.device_config.device_type == "neuron":
+        if engine_config.parallel_config.worker_use_ray:
+            initialize_ray_cluster(engine_config.parallel_config)
+            if engine_config.device_config.device_type == "cpu":
+                from vllm.executor.ray_cpu_executor import RayCPUExecutor
+                executor_class = RayCPUExecutor
+            else:
+                from vllm.executor.ray_gpu_executor import RayGPUExecutor
+                executor_class = RayGPUExecutor
+        elif engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
-        elif engine_config.parallel_config.worker_use_ray:
-            initialize_ray_cluster(engine_config.parallel_config)
-            from vllm.executor.ray_gpu_executor import RayGPUExecutor
-            executor_class = RayGPUExecutor
         else:
             assert engine_config.parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")

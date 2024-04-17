@@ -4,7 +4,7 @@ from typing import Callable, List, Optional, Tuple
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
-from vllm.worker.worker import Worker
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -19,18 +19,18 @@ try:
             if init_cached_hf_modules:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
-            self._worker: Optional[Worker] = None
+            self._worker: Optional[WorkerBase] = None
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-        def init_worker(self, worker_init_fn: Callable[[], Worker]):
+        def init_worker(self, worker_init_fn: Callable[[], WorkerBase]):
             self._worker = worker_init_fn()
 
         @property
-        def worker(self) -> Worker:
+        def worker(self) -> WorkerBase:
             assert self._worker is not None
             return self._worker
 
@@ -52,6 +52,12 @@ try:
 
         def get_node_ip(self) -> str:
             return get_ip()
+
+        def get_node_id(self) -> str:
+            return ray.get_runtime_context().get_node_id()
+
+        def get_gpu_ids(self) -> List[int]:
+            return ray.get_gpu_ids()
 
         def get_node_and_gpu_ids(self) -> Tuple[str, List[int]]:
             node_id = ray.get_runtime_context().get_node_id()
