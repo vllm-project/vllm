@@ -6,7 +6,7 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig)
+                         ModelConfig, ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -147,6 +147,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            device_config,
                                            load_config=self.load_config,
                                            lora_config=self.lora_config,
+                                           vision_language_config=self.vision_language_config,
                                            kv_cache_dtype=kv_cache_dtype,
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
