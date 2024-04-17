@@ -6,11 +6,12 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, Tuple, TypeVar, Union)
+                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Union)
 
 import psutil
 import torch
@@ -51,7 +52,7 @@ class Counter:
 class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
-        self.cache = OrderedDict[Hashable, T]()
+        self.cache: OrderedDict[Hashable, T] = OrderedDict()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -270,8 +271,12 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def set_cuda_visible_devices(device_ids: List[int]) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
+def update_environment_variables(envs: Dict[str, str]):
+    for k, v in envs.items():
+        if k in os.environ:
+            logger.warning(f"Overwriting environment variable {k} "
+                           f"from '{os.environ[k]}' to '{v}'")
+        os.environ[k] = v
 
 
 def chunk_list(lst, chunk_size):
@@ -504,3 +509,11 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+def init_cached_hf_modules():
+    """
+    Lazy initialization of the Hugging Face modules.
+    """
+    from transformers.dynamic_module_utils import init_hf_modules
+    init_hf_modules()
