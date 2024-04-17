@@ -512,5 +512,8 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
 
 
 def init_cached_hf_modules():
+    """
+    Lazy initialization of the Hugging Face modules.
+    """
     from transformers.dynamic_module_utils import init_hf_modules
     init_hf_modules()
