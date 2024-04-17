@@ -31,6 +31,7 @@ import torch.distributed as dist
 from torch.distributed import ReduceOp
 
 from vllm.logger import init_logger
+from vllm.utils import nccl_integrity_check
 
 logger = init_logger(__name__)
 
@@ -58,28 +59,10 @@ else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.info(f"Loading nccl from library {so_file}")
 
-
-def nccl_integrity_check(filepath):
-    import ctypes
-
-    import torch  # noqa
-    nccl = ctypes.CDLL(filepath)
-    version = ctypes.c_int()
-    nccl.ncclGetVersion.restype = ctypes.c_int
-    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    result = nccl.ncclGetVersion(ctypes.byref(version))
-    assert result == 0
-    return version.value
-
-
 try:
     # load the library in another process.
     # if it core dumps, it will not crash the current process
-    from multiprocessing import Process
-    p = Process(target=nccl_integrity_check, args=(so_file, ))
-    p.start()
-    p.join()
-    assert p.exitcode == 0
+    nccl_integrity_check(so_file)
     nccl = ctypes.CDLL(so_file)
 except Exception as e:
     logger.error(

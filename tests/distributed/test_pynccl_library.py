@@ -1,17 +1,12 @@
 import multiprocessing
 import tempfile
 
-from vllm.utils import update_environment_variables
-
 
 def target_fn(env, filepath):
+    from vllm.utils import update_environment_variables
     update_environment_variables(env)
-    import os
-    exit_code = os.system(f"ldd {filepath}")
-    if exit_code != 0:
-        exit(-1)
-    from vllm.distributed.device_communicators.pynccl import ncclGetVersion
-    ncclGetVersion()
+    from vllm.utils import nccl_integrity_check
+    nccl_integrity_check(filepath)
 
 
 def test_library_file():
