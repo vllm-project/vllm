@@ -97,6 +97,9 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
+        blocksparse_local_blocks: int,
+        blocksparse_vert_stride: int,
+        blocksparse_block_size: int,
         kv_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
@@ -129,6 +132,9 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                blocksparse_local_blocks,
+                blocksparse_vert_stride,
+                blocksparse_block_size,
                 kv_scale,
             )
         else:
@@ -161,6 +167,9 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                blocksparse_local_blocks,
+                blocksparse_vert_stride,
+                blocksparse_block_size,
                 kv_scale,
             )
         return output

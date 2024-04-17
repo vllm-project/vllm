@@ -186,7 +186,7 @@ class TLGv4SelfAttention(nn.Module):
         #blocksparse params
         self.blocksparse_block_size = config.blocksparse_block_size
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
-        self.sliding_window = self.blocksparse_block_size * self.blocksparse_num_local_blocks
+        self.blocksparse_vert_stride = config.blocksparse_vert_stride
 
         # TLGv4.8
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
@@ -197,7 +197,10 @@ class TLGv4SelfAttention(nn.Module):
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,
                                 self.scale,
-                                num_kv_heads=self.num_kv_heads_per_partion)
+                                num_kv_heads=self.num_kv_heads_per_partion,
+                                blocksparse_local_blocks=self.blocksparse_num_local_blocks,
+                                blocksparse_vert_stride=self.blocksparse_vert_stride,
+                                blocksparse_block_size=self.blocksparse_block_size)
         else:
             self.attn = BlockSparseFlashAttention(
                                   self.lcoal_blocks,
