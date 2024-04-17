@@ -9,8 +9,7 @@ MODELS = ["facebook/opt-125m"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-# @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
-@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16, -1])
 @pytest.mark.parametrize("num_top_logprobs", [6])  # 32000 == vocab_size
 def test_get_prompt_logprobs(
     hf_runner,
@@ -84,7 +83,6 @@ def test_get_prompt_logprobs(
         # Check prompt logprobs
         # The first prompt logprob is always None, so we compare it from 1:.
         vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
-        breakpoint()
         for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
             for token_id, logprob in vllm_prompt_logprob_dict.items():
                 torch.testing.assert_close(logprob.logprob,

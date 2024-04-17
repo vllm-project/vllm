@@ -643,7 +643,6 @@ class LLMEngine:
         for scheduled_seq_group, outputs, seq_group_metadata in zip(
                 scheduled_seq_groups, output, seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
-            # breakpoint()
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             self._process_prompt_logprob(seq_group, outputs)

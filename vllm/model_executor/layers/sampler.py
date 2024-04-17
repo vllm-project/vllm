@@ -81,12 +81,10 @@ class Sampler(nn.Module):
         probs = torch.softmax(logits, dim=-1, dtype=torch.float)
         # Compute the log probabilities.
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
-        # print(f"SANG-TODO initial logoprob shape; {logprobs.shape}")
 
         # Sample the next tokens.
         sample_results = _sample(probs, logprobs, sampling_metadata,
                                  sampling_tensors)
-        # print(f"SANG-TODO logoprob shape after sampling; {logprobs.shape}")
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
@@ -618,13 +616,10 @@ def _get_logprobs(
         do_sample = sampling_metadata.do_samples[i]
 
         # Find query indices for prompt logprobs.
-        print(f"SANG-TODO {sampling_metadata.num_prompts=}")
-        print(f"SANG-TODO {sampling_params.prompt_logprobs=}")
         if i < sampling_metadata.num_prompts and sampling_params.prompt_logprobs is not None:
             subquery_len = sampling_metadata.subquery_lens[i]
             seq_data = sampling_metadata.seq_data[seq_ids[0]]
             computed_len = seq_data.get_num_computed_tokens()
-            # print(f"SANG-TODO {seq_data.get_len()=} {seq_data.get_num_computed_tokens()=} {subquery_len=}")
             largest_num_logprobs = max(largest_num_logprobs,
                                         sampling_params.prompt_logprobs)
             # Look at the logprob of next prompt token to compute prompt
@@ -638,16 +633,6 @@ def _get_logprobs(
             next_token_indices.extend(token_id
                                     for token_id in next_prompt_tokens)
             query_idx += len(next_prompt_tokens)
-            print(f"SANG-TODO {next_token_index_start=} {next_token_index_end=}")
-            print(f"SANG-TODO {computed_len=} {subquery_len=}")
-            print(f"SANG-TODO {len(seq_data.prompt_token_ids)=}")
-            print(f"SANG-TODO {len(parent_ids)=}")
-            print(f"SANG-TODO {query_idx=}")
-            print(f"SANG-TODO {query_indices=}")
-            print(f"SANG-TODO {len(query_indices)=}")
-            print(f"SANG-TODO {next_token_indices=}")
-            print(f"SANG-TODO {len(prompt_tokens)=}")
-            print(f"SANG-TODO {prompt_tokens=}")
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         if do_sample:
@@ -669,9 +654,6 @@ def _get_logprobs(
 
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_indices_gpu = torch.tensor(next_token_indices, device=logprobs.device)
-    # print(f"SANG-TODO {query_indices_gpu=}")
-    # print(f"SANG-TODO {token_indices_gpu=}")
-    # print(f"SANG-TODO {logprobs.shape=}")
     # logprob for selected tokens across all sequence groups.
     selected_logprobs = logprobs[[
         query_indices_gpu,
@@ -799,7 +781,6 @@ def _build_sampler_output(
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
 ) -> SamplerOutput:
-    # breakpoint()
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
@@ -813,9 +794,5 @@ def _build_sampler_output(
                                                       group_sample_logprobs):
             seq_outputs.append(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
-        if len(seq_outputs) > 0:
-            seq_group_output = SequenceGroupOutput(seq_outputs, group_prompt_logprobs)
-        else:
-            seq_group_output = SequenceGroupOutput.create_empty()
-        sampler_output.append(seq_group_output)
+        sampler_output.append(SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
     return SamplerOutput(outputs=sampler_output)

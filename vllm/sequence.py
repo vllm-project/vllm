@@ -658,10 +658,6 @@ class SequenceGroupOutput:
         # Prompt logprob for each prompt query token.
         self.prompt_logprobs = prompt_logprobs
 
-    @staticmethod
-    def create_empty():
-        return SequenceGroupOutput([], None)
-
     def __repr__(self) -> str:
         return (f"SequenceGroupOutput(samples={self.samples}, "
                 f"prompt_logprobs={self.prompt_logprobs})")
