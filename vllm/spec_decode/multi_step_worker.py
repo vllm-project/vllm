@@ -341,10 +341,13 @@ class DraftModelTop1Proposer(SpeculativeProposer):
             #                              max_proposal_len,
             #                              dtype=torch.long,
             #                              device=self._device)
-            proposal_tokens = torch.full(size=(batch_size, max_proposal_len,),
-                                          fill_value=-1,
-                                          dtype=torch.long,
-                                          device=self._device)
+            proposal_tokens = torch.full(size=(
+                batch_size,
+                max_proposal_len,
+            ),
+                                         fill_value=-1,
+                                         dtype=torch.long,
+                                         device=self._device)
             #proposal_probs = torch.zeros(0,
             #                             max_proposal_len,
             #                             self._vocab_size,

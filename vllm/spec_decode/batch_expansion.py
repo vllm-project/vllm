@@ -135,14 +135,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 continue
             filtered.append(p)
 
-
         target_seq_group_metadata_list = self._create_scoring_model_input(
             seq_group_metadata_list=spec_seqs,
             #proposal_token_ids=proposal_token_ids_list,
             proposal_token_ids=filtered,
             target_seq_ids_iter=self._create_target_seq_id_iterator(
-                seq_ids=get_all_seq_ids(seq_group_metadata_list)
-            ),
+                seq_ids=get_all_seq_ids(seq_group_metadata_list)),
         )
 
         num_scoring_tokens = len(target_seq_group_metadata_list)
@@ -181,12 +179,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         non_spec_batch_size, _ = non_spec_target_token_ids.shape
         speculated_batch_size = full_batch_size - non_spec_batch_size
         # TODO clean up
-        
+
         try:
             target_token_ids = target_token_ids.squeeze().reshape(
                 speculated_batch_size, k + 1)
-            target_probs = target_probs.squeeze().reshape(speculated_batch_size, k + 1,
-                                                          self._vocab_size)
+            target_probs = target_probs.squeeze().reshape(
+                speculated_batch_size, k + 1, self._vocab_size)
         except Exception as e:
             print(e)
             breakpoint()
@@ -217,10 +215,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return all_tokens, all_probs
 
     def _create_scoring_model_input(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
-            target_seq_ids_iter: Iterator[TargetSeqId],
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        proposal_token_ids: List[List[TokenId]],  # shape: [batch_size, k]
+        target_seq_ids_iter: Iterator[TargetSeqId],
     ) -> List[SequenceGroupMetadata]:
         """Given the original input sequences and proposed tokens from the draft
         model, create a list of target sequences that can be used for scoring.

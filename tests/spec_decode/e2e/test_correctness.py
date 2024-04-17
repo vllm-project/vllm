@@ -387,6 +387,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -398,25 +399,25 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize("per_test_common_llm_kwargs",[{}])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_max_model_len": 32,
+        "speculative_max_model_len": 32, # TODO expect fail ?
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])
-@pytest.mark.parametrize("output_len",
+@pytest.mark.parametrize(
+    "output_len",
     [
         # Use smaller output len for fast test.
         512,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_skip_speculation(baseline_llm_generator,
-                                          test_llm_generator, batch_size: int,
-                                          output_len: int):
+def test_skip_speculation(baseline_llm_generator, test_llm_generator,
+                          batch_size: int, output_len: int):
     """Verify correct output when we skip speculation.
     Test skip 1, skip >1, skip all.
     """
@@ -438,7 +439,6 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-
         "Mark Zuckerberg loves to dance, and",
         "Ray is a framework for",
         "Chevelle is a heavy-metal band that",
