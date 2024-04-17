@@ -6,8 +6,8 @@ from typing import Dict, List, Optional, Set, Tuple
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, TensorizerConfig,
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
@@ -38,12 +38,12 @@ class Worker(WorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
-        tensorizer_config: Optional[TensorizerConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -55,7 +55,7 @@ class Worker(WorkerBase):
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.tensorizer_config = tensorizer_config
+        self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -70,11 +70,11 @@ class Worker(WorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            tensorizer_config=tensorizer_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -210,7 +210,9 @@ class Worker(WorkerBase):
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> Optional[SamplerOutput]:
+        num_lookahead_slots: int = 0,
+    ) -> List[SamplerOutput]:
+
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
@@ -235,11 +237,14 @@ class Worker(WorkerBase):
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.gpu_cache)
-        return output
+
+        # Worker only supports single-step execution. Wrap the output in a list
+        # to conform to interface.
+        return [output]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

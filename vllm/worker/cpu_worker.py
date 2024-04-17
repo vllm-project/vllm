@@ -5,8 +5,8 @@ import torch
 import torch.distributed
 
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -117,6 +117,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -129,6 +130,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.load_config = load_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -141,6 +143,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            parallel_config,
                                            scheduler_config,
                                            device_config,
+                                           load_config=self.load_config,
                                            lora_config=self.lora_config,
                                            kv_cache_dtype=kv_cache_dtype,
                                            is_driver_worker=is_driver_worker)
@@ -248,7 +251,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> Optional[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
@@ -271,11 +274,13 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.cpu_cache)
-        return output
+
+        # CPU worker only supports single-step execution.
+        return [output]
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
