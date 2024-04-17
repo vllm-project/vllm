@@ -543,12 +543,13 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='disable logging requests')
-        parser.add_argument('--max-log-len',
-                            type=int,
-                            default=None,
-                            help='maximum character length to log for either '
-                            'the input prompt or list of prompt token ids '
-                            'for each request. Only applies if '
-                            '--disable-log-requests is not set.'
-                            'Default: unlimited.')
+        parser.add_argument(
+            '--max-log-len',
+            type=int,
+            default=None,
+            help='Limits the input text prompt to max_log_len '
+            'characters and limits the input token ids to '
+            'max_log_len / 6 tokens in the per-request logs. '
+            'Only applies if --disable-log-requests is not set.'
+            'Default: unlimited.')
         return parser

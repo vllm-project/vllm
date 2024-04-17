@@ -499,13 +499,18 @@ class AsyncLLMEngine:
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncStream:
         if self.log_requests:
-            shortened_prompt, shortened_token_ids = self._shorten_for_logging(
-                prompt, prompt_token_ids)
-            logger.info(f"Received request {request_id}: "
-                        f"prompt: {shortened_prompt!r}, "
-                        f"sampling_params: {sampling_params}, "
-                        f"prompt_token_ids: {shortened_token_ids}, "
-                        f"lora_request: {lora_request}.")
+            if self.max_log_len > 0:
+                shortened_prompt, shortened_token_ids = (
+                    self._shorten_for_logging(prompt, prompt_token_ids))
+                logger.info(f"Received request {request_id}: "
+                            f"prompt: {shortened_prompt!r}, "
+                            f"sampling_params: {sampling_params}, "
+                            f"prompt_token_ids: {shortened_token_ids}, "
+                            f"lora_request: {lora_request}.")
+            else:
+                logger.info(f"Received request {request_id}: "
+                            f"sampling_params: {sampling_params}, "
+                            f"lora_request: {lora_request}.")
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -699,20 +704,20 @@ class AsyncLLMEngine:
         logger.debug(f"Health check took {time.perf_counter()-t}s")
 
     def _shorten_for_logging(self, prompt: str,
-                             prompt_token_ids: List[int]) -> Tuple[str, str]:
+                             prompt_token_ids: List[int]) \
+            -> Tuple[str, List[int]]:
         """Truncates the input prompt text and token ids for logging.
-        The string representations of both are truncated to a maximum length
-        of self.max_log_len, and then ellipses (...) are added to indicate
-        that the values were truncated.
+        The list of token IDs is shortened to max_log_len / 6 so that it takes
+        a similar amount of visual space as the text prompt in the log output.
+        Ellipses are added to indicate that truncation happened, when either
+        value is truncated.
         """
         if self.max_log_len is not None:
             if prompt is not None and len(prompt) > self.max_log_len:
                 prompt = f"{prompt:.{self.max_log_len}}..."
-            if prompt_token_ids is not None:
-                # This regex removes the last value in the list after the
-                # string representation is truncated, to avoid logging an
-                # incorrect token id.
-                prompt_token_ids = re.sub(
-                    self.list_truncation_regex, ', ...]',
-                    f"{prompt_token_ids!s:.{self.max_log_len}}")
+            max_tokens = self.max_log_len / 6
+            if prompt_token_ids is not None and len(
+                    prompt_token_ids) > max_tokens:
+                prompt_token_ids = prompt_token_ids[0:max_tokens]
+                prompt_token_ids[-1] = "..."
         return prompt, prompt_token_ids
