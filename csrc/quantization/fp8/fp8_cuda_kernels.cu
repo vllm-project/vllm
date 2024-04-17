@@ -59,7 +59,7 @@ void scaled_fp8_quant(
   dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES_FP8(
+  VLLM_DISPATCH_FLOATING_TYPES(
     input.scalar_type(),
     "scaled_fp8_quant_kernel",
     [&] {
