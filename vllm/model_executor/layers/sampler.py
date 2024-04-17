@@ -642,9 +642,6 @@ def _get_logprobs(
             next_token_indices.extend(token_id
                                       for token_id in next_prompt_tokens)
             query_idx += len(next_prompt_tokens)
-            print(f"SANG-TODO {next_prompt_tokens=}")
-            print(f"SANG-TODO {query_idx=}")
-            print(f"SANG-TODO {do_sample=}")
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         if do_sample:
@@ -661,11 +658,6 @@ def _get_logprobs(
         empty_sampled_logprob: SampleLogprobs = []
         empty_prompt_logprob = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
-
-    # if query_idx != logprobs.size(0):
-    # breakpoint()
-    assert query_idx == logprobs.size(0) - num_skip_sample, (
-        f"{query_idx=} {logprobs.shape=} {num_skip_sample=}")
 
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_indices_gpu = torch.tensor(next_token_indices,
