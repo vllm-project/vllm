@@ -152,6 +152,9 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
     return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                 size_n, size_k)
 
+# fp8
+def scaled_fp8_quant(out: torch.Tensor, input: torch.Tensor, scale: torch.Tensor):
+    return vllm_ops.scaled_fp8_quant(out, input, scale)
 
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
