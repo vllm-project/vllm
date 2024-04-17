@@ -7,6 +7,7 @@ from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.core.block import DEFAULT_LAST_ACCESSED_TIME
 
 PrefixHash = int
 BlockId = int
@@ -17,7 +18,7 @@ class BlockMetaData:
     def __init__(
         self,
         computed: bool = False,
-        last_accessed: float = 0,
+        last_accessed: float = DEFAULT_LAST_ACCESSED_TIME,
         token_ids_len: int = 0,
     ):
         self.computed: bool = computed
