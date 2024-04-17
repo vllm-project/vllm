@@ -1,14 +1,13 @@
+import os
 import random
 
-import os
 import pytest
 import ray
 import torch
 import torch.distributed as dist
 
-from vllm.model_executor.parallel_utils import custom_all_reduce as custom_ar
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_all_reduce)
+from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
@@ -26,10 +25,10 @@ def graph_allreduce(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
 
-    custom_ar.init_custom_ar()
+    custom_all_reduce.init_custom_all_reduce()
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with custom_ar.capture():
+            with custom_all_reduce.capture():
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -62,8 +61,8 @@ def eager_allreduce(world_size, rank, distributed_init_port):
                                       distributed_init_port)
 
     sz = 1024
-    custom_ar.init_custom_ar()
-    fa = custom_ar.get_handle()
+    custom_all_reduce.init_custom_all_reduce()
+    fa = custom_all_reduce.get_handle()
     inp = torch.ones(sz, dtype=torch.float32, device=device)
     out = fa.all_reduce_unreg(inp)
     assert torch.allclose(out, inp * world_size)

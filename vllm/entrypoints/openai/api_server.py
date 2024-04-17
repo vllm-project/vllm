@@ -1,30 +1,28 @@
-import argparse
 import asyncio
-import json
-from contextlib import asynccontextmanager
-import os
 import importlib
 import inspect
+import os
+from contextlib import asynccontextmanager
+from http import HTTPStatus
 
-from prometheus_client import make_asgi_app
 import fastapi
 import uvicorn
-from http import HTTPStatus
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from prometheus_client import make_asgi_app
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest,
-                                              ErrorResponse)
-from vllm.logger import init_logger
+from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import LoRA
+from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -50,99 +48,8 @@ async def lifespan(app: fastapi.FastAPI):
 app = fastapi.FastAPI(lifespan=lifespan)
 
 
-class LoRAParserAction(argparse.Action):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        lora_list = []
-        for item in values:
-            name, path = item.split('=')
-            lora_list.append(LoRA(name, path))
-        setattr(namespace, self.dest, lora_list)
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--host", type=str, default=None, help="host name")
-    parser.add_argument("--port", type=int, default=8000, help="port number")
-    parser.add_argument(
-        "--uvicorn-log-level",
-        type=str,
-        default="info",
-        choices=['debug', 'info', 'warning', 'error', 'critical', 'trace'],
-        help="log level for uvicorn")
-    parser.add_argument("--allow-credentials",
-                        action="store_true",
-                        help="allow credentials")
-    parser.add_argument("--allowed-origins",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed origins")
-    parser.add_argument("--allowed-methods",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed methods")
-    parser.add_argument("--allowed-headers",
-                        type=json.loads,
-                        default=["*"],
-                        help="allowed headers")
-    parser.add_argument("--api-key",
-                        type=str,
-                        default=None,
-                        help="If provided, the server will require this key "
-                        "to be presented in the header.")
-    parser.add_argument("--served-model-name",
-                        type=str,
-                        default=None,
-                        help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
-    parser.add_argument(
-        "--lora-modules",
-        type=str,
-        default=None,
-        nargs='+',
-        action=LoRAParserAction,
-        help="LoRA module configurations in the format name=path. "
-        "Multiple modules can be specified.")
-    parser.add_argument("--chat-template",
-                        type=str,
-                        default=None,
-                        help="The file path to the chat template, "
-                        "or the template in single-line form "
-                        "for the specified model")
-    parser.add_argument("--response-role",
-                        type=str,
-                        default="assistant",
-                        help="The role name to return if "
-                        "`request.add_generation_prompt=true`.")
-    parser.add_argument("--ssl-keyfile",
-                        type=str,
-                        default=None,
-                        help="The file path to the SSL key file")
-    parser.add_argument("--ssl-certfile",
-                        type=str,
-                        default=None,
-                        help="The file path to the SSL cert file")
-    parser.add_argument(
-        "--root-path",
-        type=str,
-        default=None,
-        help="FastAPI root_path when app is behind a path based routing proxy")
-    parser.add_argument(
-        "--middleware",
-        type=str,
-        action="append",
-        default=[],
-        help="Additional ASGI middleware to apply to the app. "
-        "We accept multiple --middleware arguments. "
-        "The value should be an import path. "
-        "If a function is provided, vLLM will add it to the server "
-        "using @app.middleware('http'). "
-        "If a class is provided, vLLM will add it to the server "
-        "using app.add_middleware(). ")
-
-    parser = AsyncEngineArgs.add_cli_args(parser)
+    parser = make_arg_parser()
     return parser.parse_args()
 
 
@@ -220,7 +127,8 @@ if __name__ == "__main__":
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
-            if not request.url.path.startswith("/v1"):
+            root_path = "" if args.root_path is None else args.root_path
+            if not request.url.path.startswith(f"{root_path}/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
                 return JSONResponse(content={"error": "Unauthorized"},
@@ -245,9 +153,9 @@ if __name__ == "__main__":
         served_model = args.served_model_name
     else:
         served_model = args.model
-
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     openai_serving_chat = OpenAIServingChat(engine, served_model,
                                             args.response_role,
                                             args.lora_modules,
@@ -262,4 +170,6 @@ if __name__ == "__main__":
                 log_level=args.uvicorn_log_level,
                 timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
                 ssl_keyfile=args.ssl_keyfile,
-                ssl_certfile=args.ssl_certfile)
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs)

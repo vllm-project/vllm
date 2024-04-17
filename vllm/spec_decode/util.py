@@ -1,8 +1,10 @@
-import torch
-from typing import List, Tuple
-from vllm.sequence import SequenceGroupMetadata, SamplerOutput
 from contextlib import contextmanager
 from itertools import chain
+from typing import List, Tuple
+
+import torch
+
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
 SeqId = int
 
@@ -78,6 +80,32 @@ def sampler_output_to_torch(
     ).transpose(0, 1)
 
     return sampled_token_ids, sampled_token_probs
+
+
+def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,
+                              vocab_size: int, device: str) -> None:
+    """Helper method which mocks out the GPU tensors in SamplerOutput with dummy
+    values. This will be removed in PR 7/9.
+    https://docs.google.com/document/d/1rE4pr3IdspRw97XbImY4fS9IWYuJJ3HGtL7AdIKGrw8/edit#heading=h.qijw1sdidrer
+    """
+    values = [
+        sampler_output.sampled_token_probs, sampler_output.sampled_token_ids
+    ]
+    assert all(v is None for v in values) or not any(v is None for v in values)
+    if not any(v is None for v in values):
+        # Do nothing if the tensors are already created (usually in unit tests).
+        return
+
+    # Softmax to ensure valid probs.
+    sampler_output.sampled_token_probs = torch.nn.functional.softmax(
+        torch.rand(batch_size, vocab_size, dtype=torch.float32, device=device),
+        dim=-1)
+
+    sampler_output.sampled_token_ids = torch.randint(low=10,
+                                                     high=100,
+                                                     size=(batch_size, ),
+                                                     dtype=torch.long,
+                                                     device=device)
 
 
 @contextmanager

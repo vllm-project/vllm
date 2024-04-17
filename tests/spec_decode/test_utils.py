@@ -1,9 +1,9 @@
-from vllm.spec_decode.util import get_all_seq_ids
-from vllm.sequence import SequenceGroupMetadata
-from vllm.spec_decode.util import split_batch_by_proposal_len
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import MagicMock
+
+from vllm.sequence import SequenceGroupMetadata
+from vllm.spec_decode.util import get_all_seq_ids, split_batch_by_proposal_len
 
 
 def test_get_all_seq_ids():

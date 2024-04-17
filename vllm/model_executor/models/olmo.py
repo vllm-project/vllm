@@ -36,48 +36,29 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """Inference-only OLMo model compatible with HuggingFace weights."""
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
+# this model must need this dependency
+from hf_olmo import OLMoConfig
 from torch import nn
 
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    LinearMethodBase,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.attention import Attention, AttentionMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size, )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
 from vllm.sequence import SamplerOutput
-
-# this model must need this dependency
-from hf_olmo import OLMoConfig
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-class SwiGLU(nn.Module):
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gate = x.chunk(2, dim=-1)
-        return F.silu(gate) * x
-
-    @property
-    def output_multiplier(self) -> float:
-        return 0.5
 
 
 class OlmoAttention(nn.Module):
@@ -145,16 +126,15 @@ class OlmoAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.attn_norm(hidden_states)
         qkv, _ = self.att_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         if self.config.rope:
             q, k = self.rotary_emb(positions, q, k)
-        k_cache, v_cache = kv_cache
-        attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.attn_out(attn_output)
         return output
 
@@ -182,17 +162,16 @@ class OlmoMLP(nn.Module):
                                     bias=False)
 
         # Feed-forward input projection.
-        self.ff_proj = ColumnParallelLinear(
+        self.ff_proj = MergedColumnParallelLinear(
             config.d_model,
-            self.hidden_size,
+            [self.hidden_size // 2] * 2,
             bias=config.include_bias,
             linear_method=linear_method,
         )
 
         # Activation function.
-        # self.act = SiluAndMul()
-        # self.act.output_multiplier = 0.5
-        self.act = SwiGLU()
+        self.act = SiluAndMul()
+        self.act.output_multiplier = 0.5
         assert (self.act.output_multiplier * self.hidden_size) % 1 == 0
 
         # Feed-forward output projection.
@@ -240,12 +219,12 @@ class OlmoBlock(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         # Attention block.
         og_x = hidden_states
-        x = self.attn(positions, hidden_states, kv_cache, input_metadata)
+        x = self.attn(positions, hidden_states, kv_cache, attn_metadata)
         x = x + og_x
 
         # MLP block.
@@ -295,8 +274,8 @@ class OlmoModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         """
         :param input_ids: A tensor of shape `(batch_size, seq_len)`.
@@ -312,7 +291,7 @@ class OlmoModel(nn.Module):
                 positions,
                 x,
                 kv_caches[block_idx],
-                input_metadata,
+                attn_metadata,
             )
 
         # Apply final layer norm.
@@ -336,48 +315,51 @@ class OLMoForCausalLM(nn.Module):
         self.lm_head_weight = (self.model.transformer.wte.weight
                                if config.weight_tying else
                                self.model.transformer.ff_out.weight)
-        self.sampler = Sampler(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         return hidden_states
 
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+                                       sampling_metadata)
+        return logits
+
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             # attention
             if ".att" in name:
                 name = name.replace(".att", ".attn.att")
             # mlp
-            if ".ff" in name and "transformer.ff_out" not in name:
-                name = name.replace(".ff", ".mlp.ff")
+            if ".ff_proj" in name:
+                name = name.replace(".ff_proj", ".mlp.ff_proj")
+                # Reverse the weight for the MergeColumnParallelLinear
+                loaded_weight = torch.concat(loaded_weight.chunk(2)[::-1])
+            if ".ff_out" in name and "transformer.ff_out" not in name:
+                name = name.replace(".ff_out", ".mlp.ff_out")
             # there is no bias in olmo
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

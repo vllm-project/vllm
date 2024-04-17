@@ -1,24 +1,22 @@
-import asyncio
 import time
+from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
+                    Optional, Tuple)
+
 from fastapi import Request
-from typing import (AsyncGenerator, AsyncIterator, Callable, List, Optional,
-                    Dict, Tuple)
-from vllm.logger import init_logger
-from vllm.utils import random_uuid
+
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (
-    CompletionRequest,
-    CompletionResponse,
-    CompletionResponseChoice,
-    CompletionResponseStreamChoice,
-    CompletionStreamResponse,
-    LogProbs,
-    UsageInfo,
-)
-from vllm.outputs import RequestOutput
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, LoRA
+from vllm.entrypoints.openai.protocol import (CompletionRequest,
+                                              CompletionResponse,
+                                              CompletionResponseChoice,
+                                              CompletionResponseStreamChoice,
+                                              CompletionStreamResponse,
+                                              LogProbs, UsageInfo)
+from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
+from vllm.outputs import RequestOutput
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -49,41 +47,6 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
             raise ValueError("prompt must be a string, array of strings, "
                              "array of tokens, or array of token arrays")
     return prompt_is_tokens, prompts
-
-
-def merge_async_iterators(*iterators):
-    """Merge multiple asynchronous iterators into a single iterator.
-
-    This method handle the case where some iterators finish before others.
-    When it yields, it yields a tuple (i, item) where i is the index of the
-    iterator that yields the item.
-    """
-    queue = asyncio.Queue()
-
-    finished = [False] * len(iterators)
-
-    async def producer(i, iterator):
-        try:
-            async for item in iterator:
-                await queue.put((i, item))
-        except Exception as e:
-            await queue.put(e)
-        finished[i] = True
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            if isinstance(item, Exception):
-                raise item
-            yield item
-        await asyncio.gather(*_tasks)
-
-    return consumer()
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -118,16 +81,20 @@ class OpenAIServingCompletion(OpenAIServing):
 
         model_name = request.model
         request_id = f"cmpl-{random_uuid()}"
-        created_time = int(time.monotonic())
+        created_time = int(time.time())
 
         # Schedule the request and get the result generator.
         generators = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
+            decoding_config = self.engine.engine.decoding_config
+            guided_decoding_backend = request.guided_decoding_backend \
+                or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
                 await get_guided_decoding_logits_processor(
-                    request, await self.engine.get_tokenizer()))
+                    guided_decoding_backend, request, await
+                    self.engine.get_tokenizer()))
             if guided_decode_logit_processor is not None:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []
@@ -137,17 +104,24 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for i, prompt in enumerate(prompts):
                 if prompt_is_tokens:
-                    input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt_ids=prompt)
+                    prompt_formats = self._validate_prompt_and_tokenize(
+                        request,
+                        prompt_ids=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
                 else:
-                    input_ids = self._validate_prompt_and_tokenize(
-                        request, prompt=prompt)
+                    prompt_formats = self._validate_prompt_and_tokenize(
+                        request,
+                        prompt=prompt,
+                        truncate_prompt_tokens=sampling_params.
+                        truncate_prompt_tokens)
+                prompt_ids, prompt_text = prompt_formats
 
                 generators.append(
-                    self.engine.generate(prompt,
+                    self.engine.generate(prompt_text,
                                          sampling_params,
                                          f"{request_id}-{i}",
-                                         prompt_token_ids=input_ids,
+                                         prompt_token_ids=prompt_ids,
                                          lora_request=lora_request))
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
@@ -252,9 +226,6 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        assert top_logprobs is not None, (
-                            "top_logprobs must be provided when logprobs "
-                            "is requested")
                         logprobs = self._create_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
@@ -267,6 +238,17 @@ class OpenAIServingCompletion(OpenAIServing):
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
                     finish_reason = output.finish_reason
+                    stop_reason = output.stop_reason
+                    if output.finish_reason is not None:  # return final usage
+                        prompt_tokens = len(res.prompt_token_ids)
+                        completion_tokens = len(output.token_ids)
+                        final_usage = UsageInfo(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=prompt_tokens + completion_tokens,
+                        )
+                    else:
+                        final_usage = None
                     response_json = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -277,42 +259,16 @@ class OpenAIServingCompletion(OpenAIServing):
                                 text=delta_text,
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
+                                stop_reason=stop_reason,
                             )
-                        ]).model_dump_json()
+                        ],
+                        usage=final_usage,
+                    ).model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
-
-                    if output.finish_reason is not None:  # return final usage
-                        logprobs = LogProbs(
-                        ) if request.logprobs is not None else None
-                        prompt_tokens = len(res.prompt_token_ids)
-                        completion_tokens = len(output.token_ids)
-                        final_usage = UsageInfo(
-                            prompt_tokens=prompt_tokens,
-                            completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
-                        )
-                        response_json = CompletionStreamResponse(
-                            id=request_id,
-                            created=created_time,
-                            model=model_name,
-                            choices=[
-                                CompletionResponseStreamChoice(
-                                    index=i,
-                                    text="",
-                                    logprobs=logprobs,
-                                    finish_reason=output.finish_reason,
-                                )
-                            ],
-                            usage=final_usage,
-                        ).model_dump_json()
-                        yield f"data: {response_json}\n\n"
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             data = self.create_streaming_error_response(str(e))
-            print("yield", f"data: {data}\n\n")
             yield f"data: {data}\n\n"
-
-        print("yield", "data: [DONE]\n\n")
         yield "data: [DONE]\n\n"
 
     def request_output_to_completion_response(
@@ -339,7 +295,8 @@ class OpenAIServingCompletion(OpenAIServing):
                     output_text = prompt_text
                 elif request.echo and request.max_tokens > 0:
                     token_ids = prompt_token_ids + output.token_ids
-                    top_logprobs = prompt_logprobs + output.logprobs
+                    top_logprobs = (prompt_logprobs + output.logprobs
+                                    if request.logprobs else None)
                     output_text = prompt_text + output.text
                 else:
                     token_ids = output.token_ids
@@ -347,6 +304,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     output_text = output.text
 
                 if request.logprobs is not None:
+                    assert top_logprobs is not None, (
+                        "top_logprobs must be provided when logprobs "
+                        "is requested")
                     logprobs = self._create_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,
@@ -360,6 +320,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     text=output_text,
                     logprobs=logprobs,
                     finish_reason=output.finish_reason,
+                    stop_reason=output.stop_reason,
                 )
                 choices.append(choice_data)
 
