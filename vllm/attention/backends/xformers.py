@@ -267,9 +267,9 @@ class XFormersImpl(AttentionImpl):
             )
 
             # attention sinks: revert key in cache to pre-rotated state
-            use_attn_sinks = True
+            use_attn_sinks = False
             if use_attn_sinks:
-                if key_cache is not None and value_cache is not None:
+                if kv_cache is not None:
                     key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
                     PagedAttention.write_to_paged_cache(
                         key_original,

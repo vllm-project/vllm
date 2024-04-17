@@ -48,7 +48,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator,
                                               kv_cache_scales_loader)
 from vllm.sequence import SamplerOutput
-from vllm.utils import is_hip
+from vllm.utils import is_hip, make_tensor_with_pad
 from vllm.attention.ops.paged_attn import PagedAttention
 
 
@@ -170,7 +170,7 @@ class LlamaAttention(nn.Module):
         use_attn_sinks = True
         llama_context_len = 4096
         if use_attn_sinks and attn_metadata.decode_metadata is not None:
-            k_original = k.clone().detach()
+            k_original = k.clone()
             # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q = self.rotary_emb._forward_single(positions, q)
@@ -181,20 +181,22 @@ class LlamaAttention(nn.Module):
             key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads * self.head_dim, -1)
             block_size = key_cache.shape[-1]
 
-            original_block_tables = deepcopy(attn_metadata.decode_metadata.block_tables)
-            block_tables = attn_metadata.decode_metadata.block_tables
+            original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
+            block_tables_tensor = attn_metadata.decode_metadata.block_tables
+            block_tables: List[List[int]] = []
+            context_lens = attn_metadata.decode_metadata.context_lens.tolist()
             
             # batch size = num sequences
-            batch_size = block_tables.shape[0]
+            batch_size = block_tables_tensor.shape[0]
             original_keys: List[dict] = []
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
-                num_past_tokens = attn_metadata.decode_metadata.context_lens[i] - 1
+                num_past_tokens = context_lens[i] - 1
                 assert num_past_tokens == positions[i], f"{num_past_tokens} != {positions[i]}"
                 if num_past_tokens < llama_context_len: continue
                 
                 past_keys = {}
-                block_table = block_tables[i]
+                block_table = block_tables_tensor[i]
                 start = num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
                 # loop should have 4096 - 1 iterations
@@ -214,15 +216,25 @@ class LlamaAttention(nn.Module):
                 
                 blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
                 # block_table[0] is attention sink
-                capped_block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:]
-                block_tables[i] = capped_block_table
+                capped_block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:].tolist()
+                block_tables.append(capped_block_table)
 
+            if block_tables:
+                attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
+                    block_tables,
+                    max_len=max(len(block_table) for block_table in block_tables),
+                    pad=0,
+                    dtype=torch.int,
+                    device=original_block_tables.device
+                )
+
+            # compute attention in kernel
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                             self.kv_scale, k_original)
             
             # put original keys back in cache
             for i in range(batch_size):
-                num_past_tokens = attn_metadata.decode_metadata.context_lens[i] - 1
+                num_past_tokens = context_lens[i] - 1
                 if num_past_tokens < llama_context_len: continue
 
                 past_keys = original_keys[i]
