@@ -107,7 +107,7 @@ class OpenAIServingChat(OpenAIServing):
                 if image_url.get("detail", "auto") != "auto":
                     logger.info("content[%s].image_url.detail is ignored", i)
 
-                text = config.image_openai.value.get_image_token_text(
+                text = config.get_image_token_text(
                     config, tokenizer, image_idx=len(image_futures))
                 image_future = get_and_parse_image(image_url["url"], config)
 

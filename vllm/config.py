@@ -2,7 +2,8 @@ import enum
 import json
 import os
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Protocol, Union
+from typing import (TYPE_CHECKING, ClassVar, Dict, List, Optional, Protocol,
+                    Union)
 
 import torch
 from packaging.version import Version
@@ -903,9 +904,9 @@ class VisionLanguageConfig:
         """Specifies how the model implements
         `OpenAI's GPT-4 with Vision API <https://platform.openai.com/docs/guides/vision>`_.
         """
-        UNSUPPORTED = OpenAIVisionAdapterForNoImage()
-        SINGLE_IMAGE = OpenAIVisionAdapterForSingleImage()
-        MULTI_IMAGE = OpenAIVisionAdapterForMultiImage()
+        UNSUPPORTED = enum.auto()
+        SINGLE_IMAGE = enum.auto()
+        MULTI_IMAGE = enum.auto()
 
     image_input_type: ImageInputType
     # The input id corresponding to image token.
@@ -920,6 +921,12 @@ class VisionLanguageConfig:
     image_processor_revision: Optional[str]
 
     image_openai: ImageOpenAI = ImageOpenAI.SINGLE_IMAGE
+    _image_openai_processors: ClassVar[Dict[
+        ImageOpenAI, OpenAIVisionAdapter]] = {
+            ImageOpenAI.UNSUPPORTED: OpenAIVisionAdapterForNoImage(),
+            ImageOpenAI.SINGLE_IMAGE: OpenAIVisionAdapterForSingleImage(),
+            ImageOpenAI.MULTI_IMAGE: OpenAIVisionAdapterForMultiImage(),
+        }
 
     @classmethod
     def get_image_input_enum_type(cls, value: str) -> ImageInputType:
@@ -940,6 +947,12 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageOpenAI]}.") from e
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        return self._image_openai_processors[self.image_openai] \
+            .get_image_token_text(config, tokenizer, image_idx)
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
