@@ -71,7 +71,7 @@ __global__ void scaled_fp8_quant_kernel(
 void scaled_fp8_quant(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input,    // [..., d]
-  torch::Tensor& scales)   // [d]
+  torch::Tensor& scale)   // [d]
 {
   int64_t num_tokens = input.numel() / input.size(-1);
   int64_t num_elems = input.numel();
