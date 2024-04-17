@@ -84,13 +84,13 @@ void scaled_fp8_quant(
     "scaled_fp8_quant_kernel",
     [&] {
       vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
-        scales.data_ptr<float>(),
+        scale.data_ptr<float>(),
         input.data_ptr<scalar_t>(),
         num_elems);
       vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
         out.data_ptr<c10::Float8_e4m3fn>(),
         input.data_ptr<scalar_t>(),
-        scales.data_ptr<float>(),
+        scale.data_ptr<float>(),
         num_elems);
       });
 }
