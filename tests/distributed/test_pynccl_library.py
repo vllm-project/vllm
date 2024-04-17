@@ -10,7 +10,8 @@ def target_fn(env, filepath):
 
 
 def test_library_file():
-    from vllm.distributed.device_communicators.pynccl import so_file
+    from vllm.utils import find_nccl_library
+    so_file = find_nccl_library()
     with open(so_file, 'rb') as f:
         content = f.read()
     try:
