@@ -1,15 +1,13 @@
 from collections import namedtuple
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
 
-from vllm.model_executor.parallel_utils import pynccl_utils
-from vllm.model_executor.parallel_utils.custom_all_reduce import (
-    custom_all_reduce)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size, is_pynccl_enabled_for_all_reduce)
+from .parallel_state import (get_tensor_model_parallel_group,
+                             get_tensor_model_parallel_rank,
+                             get_tensor_model_parallel_world_size,
+                             is_pynccl_enabled_for_all_reduce)
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -24,6 +22,10 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
+    from vllm.distributed.device_communicators import pynccl_utils
+    from vllm.distributed.device_communicators.custom_all_reduce import (
+        custom_all_reduce)
+
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
@@ -142,7 +144,7 @@ def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
-) -> Dict[Any, Union[torch.Tensor, Any]]:
+) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """Broadcast the input tensor dictionary."""
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
@@ -155,10 +157,10 @@ def broadcast_tensor_dict(
 
     rank = torch.distributed.get_rank()
     if rank == src:
+        metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
-        metadata_list = []
         for key, value in tensor_dict.items():
             if isinstance(value, torch.Tensor):
                 assert value.is_cuda, (
@@ -171,19 +173,27 @@ def broadcast_tensor_dict(
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=group)
+        async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = tensor_dict[key]
-                torch.distributed.broadcast(tensor, src=src, group=group)
+                async_handles.append(
+                    torch.distributed.broadcast(tensor,
+                                                src=src,
+                                                group=group,
+                                                async_op=True))
+        for async_handle in async_handles:
+            async_handle.wait()
+
     else:
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
                                                 group=group)
-        metadata_list = recv_metadata_list[0]
+        assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
-        for key, value in metadata_list:
+        for key, value in recv_metadata_list[0]:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,

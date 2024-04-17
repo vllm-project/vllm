@@ -6,11 +6,12 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
-from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
-                    Optional, Tuple, TypeVar, Union)
+from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
+                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Union)
 
 import psutil
 import torch
@@ -51,7 +52,7 @@ class Counter:
 class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
-        self.cache = OrderedDict[Hashable, T]()
+        self.cache: OrderedDict[Hashable, T] = OrderedDict()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -60,7 +61,7 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> T:
+    def __getitem__(self, key: Hashable) -> Optional[T]:
         return self.get(key)
 
     def __setitem__(self, key: Hashable, value: T) -> None:
@@ -76,7 +77,7 @@ class LRUCache(Generic[T]):
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
         if key in self.cache:
-            value = self.cache[key]
+            value: Optional[T] = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -87,7 +88,7 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def _on_remove(self, key: Hashable, value: T):
+    def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
     def remove_oldest(self):
@@ -100,9 +101,11 @@ class LRUCache(Generic[T]):
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self, key: Hashable, default_value: Optional[Any] = None) -> T:
+    def pop(self,
+            key: Hashable,
+            default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
-        value = self.cache.pop(key, default_value)
+        value: Optional[T] = self.cache.pop(key, default_value)
         if run_on_remove:
             self._on_remove(key, value)
         return value
@@ -179,6 +182,42 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
         return loop.run_in_executor(executor=None, func=p_func)
 
     return _async_wrapper
+
+
+def merge_async_iterators(
+        *iterators: AsyncIterator[T]) -> AsyncIterator[Tuple[int, T]]:
+    """Merge multiple asynchronous iterators into a single iterator.
+
+    This method handle the case where some iterators finish before others.
+    When it yields, it yields a tuple (i, item) where i is the index of the
+    iterator that yields the item.
+    """
+    queue: asyncio.Queue[Union[Tuple[int, T], Exception]] = asyncio.Queue()
+
+    finished = [False] * len(iterators)
+
+    async def producer(i: int, iterator: AsyncIterator[T]):
+        try:
+            async for item in iterator:
+                await queue.put((i, item))
+        except Exception as e:
+            await queue.put(e)
+        finished[i] = True
+
+    _tasks = [
+        asyncio.create_task(producer(i, iterator))
+        for i, iterator in enumerate(iterators)
+    ]
+
+    async def consumer():
+        while not all(finished) or not queue.empty():
+            item = await queue.get()
+            if isinstance(item, Exception):
+                raise item
+            yield item
+        await asyncio.gather(*_tasks)
+
+    return consumer()
 
 
 def get_ip() -> str:
@@ -279,10 +318,10 @@ def _generate_random_fp8(
     #-----|-------------|-------------------
     # Inf | N/A         | s.11111.00
     # NaN | s.1111.111  | s.11111.{01,10,11}
-    from vllm._C import cache_ops
+    from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    cache_ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor_tmp, tensor)
     del tensor_tmp
 
 
@@ -294,7 +333,7 @@ def create_kv_caches_with_random(
     head_size: int,
     cache_dtype: Optional[Union[str, torch.dtype]],
     model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: Optional[int] = 0,
+    seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
     torch.random.manual_seed(seed)
@@ -372,7 +411,6 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
     elif is_cpu():
-        print_warning_once("Pin memory is not supported on CPU.")
         return False
     return True
 
@@ -401,7 +439,7 @@ class CudaMemoryProfiler:
         gc.collect()
 
 
-def str_to_int_tuple(s: str) -> Tuple[int]:
+def str_to_int_tuple(s: str) -> Tuple[int, ...]:
     """Convert a string to a tuple of integers."""
     try:
         return tuple(map(int, s.split(",")))
@@ -452,8 +490,8 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: dict[Any, list[Any]],
-                dict2: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
+def merge_dicts(dict1: Dict[Any, List[Any]],
+                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
     
     When a key conflicts, the values in dict1 is prioritized.

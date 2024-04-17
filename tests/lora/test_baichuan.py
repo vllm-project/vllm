@@ -62,7 +62,7 @@ def test_baichuan_lora(baichuan_lora_files):
 
 
 @pytest.mark.skip("Requires multiple GPUs")
-def test_llama_tensor_parallel_equality(baichuan_lora_files):
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files):
     # Cannot use as it will initialize torch.cuda too early...
     # if torch.cuda.device_count() < 4:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
