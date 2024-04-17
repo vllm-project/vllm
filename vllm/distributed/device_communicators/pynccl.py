@@ -23,6 +23,7 @@ import ctypes
 import datetime
 import glob
 import os
+import platform
 
 # ===================== import region =====================
 import torch
@@ -57,13 +58,39 @@ else:
         raise ValueError("NCCL only supports CUDA and ROCm backends.")
     logger.info(f"Loading nccl from library {so_file}")
 
+
+def nccl_integrity_check(filepath):
+    import ctypes
+
+    import torch  # noqa
+    nccl = ctypes.CDLL(filepath)
+    version = ctypes.c_int()
+    nccl.ncclGetVersion.restype = ctypes.c_int
+    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    result = nccl.ncclGetVersion(ctypes.byref(version))
+    assert result == 0
+    return version.value
+
+
 try:
+    # load the library in another process.
+    # if it core dumps, it will not crash the current process
+    from multiprocessing import Process
+    p = Process(target=nccl_integrity_check, args=(so_file, ))
+    p.start()
+    p.join()
+    assert p.exitcode == 0
     nccl = ctypes.CDLL(so_file)
 except Exception as e:
     logger.error(
         f"Failed to load NCCL library from {so_file} ."
         "It is expected if you are not running on NVIDIA/AMD GPUs."
-        "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
+        "Otherwise, the nccl library might not exist, be corrupted "
+        f"or it does not support the current platform {platform.platform()}."
+        f"One solution is to download libnccl2 version 2.18 from "
+        f"https://developer.download.nvidia.com/compute/cuda/repos/ "
+        f"and extract the libnccl.so.2 file. If you already have the "
+        f"library, please set the environment variable VLLM_NCCL_SO_PATH"
         " to point to the correct nccl library path.")
     raise e
 
