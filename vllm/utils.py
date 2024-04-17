@@ -527,7 +527,7 @@ def nccl_integrity_check(filepath):
     if the library is corrupted. if not, we will return
     the version of the library.
     """
-    exit_code = os.system(f"ldd {filepath}")
+    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
     if exit_code != 0:
         raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
     import ctypes
