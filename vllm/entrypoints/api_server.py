@@ -47,6 +47,7 @@ async def generate(request: Request) -> Response:
     sampling_params = SamplingParams(**request_dict)
     request_id = random_uuid()
 
+    assert engine is not None
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case

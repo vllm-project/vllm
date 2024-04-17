@@ -217,7 +217,9 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        return self._process_model_outputs(
+            output, scheduler_outputs.scheduled_seq_groups,
+            scheduler_outputs.ignored_seq_groups)
 
     async def encode_request_async(
         self,
@@ -333,8 +335,7 @@ class AsyncLLMEngine:
         if engine_config.device_config.device_type == "neuron":
             raise NotImplementedError("Neuron is not supported for "
                                       "async engine yet.")
-        elif (engine_config.parallel_config.worker_use_ray
-              or engine_args.engine_use_ray):
+        elif engine_config.parallel_config.worker_use_ray:
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
@@ -410,8 +411,8 @@ class AsyncLLMEngine:
         else:
             # FIXME(woosuk): This is a bit hacky. Be careful when changing the
             # order of the arguments.
-            cache_config = args[1]
-            parallel_config = args[2]
+            cache_config = kwargs["cache_config"]
+            parallel_config = kwargs["parallel_config"]
             if parallel_config.tensor_parallel_size == 1:
                 num_gpus = cache_config.gpu_memory_utilization
             else:

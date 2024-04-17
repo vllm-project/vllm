@@ -415,7 +415,11 @@ def attn_fwd(
             return
 
     is_mqa = hq != hk
-    off_h_k = off_h_q % hk if is_mqa else off_h_q
+    if is_mqa:  # noqa: SIM108
+        off_h_k = off_h_q % hk
+    else:
+        off_h_k = off_h_q
+
     n_extra_tokens = 0
     if seqlen_k < BLOCK_N:
         n_extra_tokens = BLOCK_N - seqlen_k
@@ -677,8 +681,7 @@ def check_args(
     assert q.shape[-1] == k.shape[-1] and q.shape[-1] == v.shape[-1]
     # TODO: Change assert if we support qkl f8 and v f16
     assert q.dtype == k.dtype and q.dtype == v.dtype
-    # TODO: Fix assert to check head size <=256 once supported
-    assert head_size <= 128
+    assert head_size <= 256
     assert o.shape == q.shape
     assert (nheads_q % nheads_k) == 0
 
@@ -729,7 +732,7 @@ class _attention(torch.autograd.Function):
             o_strides = (o.stride(0), o.stride(2), o.stride(1), o.stride(3))
 
         # Get closest power of 2 over or equal to 32.
-        unpadded_head_dims = {32, 64, 128}
+        unpadded_head_dims = {32, 64, 128, 256}
         if head_size not in unpadded_head_dims:
             padded_d_model = None
             for i in unpadded_head_dims:
