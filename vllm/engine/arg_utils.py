@@ -3,11 +3,11 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
-from vllm.logger import init_logger
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
+from vllm.logger import init_logger
 from vllm.utils import str_to_int_tuple
 
 logger = init_logger(__name__)
