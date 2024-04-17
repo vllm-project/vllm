@@ -504,7 +504,8 @@ class EngineArgs:
                                "`image_feature_size` are not specified"
                                "together with `image_input_type`.")
             if self.image_input_shape:
-                self.image_input_shape = str_to_int_tuple(self.image_input_shape)
+                self.image_input_shape = str_to_int_tuple(
+                    self.image_input_shape)
             vision_language_config = VisionLanguageConfig(
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),
