@@ -19,8 +19,8 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 
 template<typename scalar_t>
 __global__ void segmented_max_reduction(
+  float* __restrict__ scale,
   const scalar_t* __restrict__ input,
-  const float* __restrict__ scale,
   int64_t num_elems) {
   __shared__ float cache[1024];
   int i = blockDim.x * blockIdx.x + threadIdx.x;
@@ -84,8 +84,8 @@ void scaled_fp8_quant(
     "scaled_fp8_quant_kernel",
     [&] {
       vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
-        input.data_ptr<scalar_t>(),
         scales.data_ptr<float>(),
+        input.data_ptr<scalar_t>(),
         num_elems);
       vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
         out.data_ptr<c10::Float8_e4m3fn>(),
