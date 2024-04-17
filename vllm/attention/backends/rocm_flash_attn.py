@@ -169,17 +169,15 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.use_naive_attn = True
             else:
                 try:
-                    # if flash-attn is installed, use flash-attn, else use naive-attn
                     from flash_attn import flash_attn_varlen_func  # noqa: F401
                     self.attn_func = flash_attn_varlen_func
                     logger.debug("Using CK FA in ROCmBackend")
                 except ModuleNotFoundError:
                     self.use_naive_attn = True
-        
+
             if self.use_naive_attn:
                 self.attn_func = _naive_attention
                 logger.debug("Using naive attention in ROCmBackend")
-
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
         """torch.repeat_interleave(x, dim=1, repeats=n_rep)"""
