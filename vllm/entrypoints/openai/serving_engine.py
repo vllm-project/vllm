@@ -115,7 +115,7 @@ class OpenAIServing:
 
                 if num_output_top_logprobs:
                     logprobs.top_logprobs.append({
-                        p.decoded_token: p.logprob
+                        p.decoded_token: max(p.logprob, -9999.0)
                         for i, p in step_top_logprobs.items()
                     } if step_top_logprobs else None)
 
