@@ -311,7 +311,7 @@ class Transformer(nn.Module):
       )
       kv_caches[i] = layer_cache
     x = self.final_norm(x)
-
+    x = x.reshape(-1, x.shape[-1])
     hidden_states = x[logits_indices]
     logits = self.embedder.decode(hidden_states)
     return logits, kv_caches
