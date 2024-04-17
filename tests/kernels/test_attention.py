@@ -33,7 +33,7 @@ HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
 BLOCK_SIZES = [16, 32]
-USE_ALIBI = [False, True] if not is_xpu() else [True]
+USE_ALIBI = [False, True] if not is_xpu() else [False]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
