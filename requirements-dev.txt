@@ -13,6 +13,7 @@ types-requests
 types-setuptools
 
 # testing
+datasets
 pytest
 pytest-forked
 pytest-asyncio
