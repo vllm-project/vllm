@@ -509,3 +509,8 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+def init_cached_hf_modules():
+    from transformers.dynamic_module_utils import init_hf_modules
+    init_hf_modules()
