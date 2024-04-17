@@ -19,7 +19,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import List, Optional, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
@@ -40,9 +40,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import RWConfig
 
@@ -399,11 +398,7 @@ class FalconForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -413,8 +408,7 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if name == "lm_head.weight":
                 # Falcon uses tied embeddings.
                 continue
