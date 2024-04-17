@@ -552,8 +552,6 @@ class TunableOpConfig:
 
     @property
     def base_filename(self):
-        if not os.path.isfile(self.filename):
-            return self.filename
         idx = self.filename.rfind("0.")
         if idx != -1:
             return self.filename[:idx] + self.filename[idx + 1:]
@@ -600,8 +598,9 @@ class TunableOpConfig:
         return tunable_op.is_tuning_enabled()
 
     def cleanup(self, is_driver_worker: bool):
-        if is_driver_worker and os.path.isdir(self.tmp_dir):
-            shutil.rmtree(self.tmp_dir)
+        if is_driver_worker and tunable_op.is_enabled():
+            if os.path.isdir(self.tmp_dir):
+                shutil.rmtree(self.tmp_dir)
             tunable_op.set_filename(self.base_filename)
 
     def _verify_args(self):
@@ -615,14 +614,12 @@ class TunableOpConfig:
                 if key in self.numerical_env_vars and val < 0:
                     raise ValueError("Invalid Tunable Op config specified: "
                                      f"{key}={val}")
-
-            if os.path.isfile(self.filename):
-                assert "%d" not in self.filename
-                idx = self.filename.rfind(".")
-                if idx != -1:
-                    assert idx >= 1 and self.filename[idx - 1] == "0"
-                else:
-                    assert self.filename[-1] == "0"
+            assert "%d" not in self.filename
+            idx = self.filename.rfind(".")
+            if idx == -1 and self.filename[-1] != "0":
+                self.filename += "0"
+            elif idx == 0 or self.filename[idx - 1] != "0":
+                self.filename = self.filename[:idx] + "0" + self.filename[idx:]
 
 
 class ParallelConfig:

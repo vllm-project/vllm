@@ -1,5 +1,5 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_staging_base"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 FROM $BASE_IMAGE
 USER root
@@ -24,71 +24,7 @@ VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
 
-ARG BUILD_ROCBLAS="1"
-ARG ROCBLAS_BRANCH="aa5b5a5"
-
-RUN if [ "$BUILD_ROCBLAS" = "1" ]; then \
-    echo "ROCBLAS_BRANCH is $ROCBLAS_BRANCH"; \
-    fi
-# Build rocBLAS
-RUN if [ "$BUILD_ROCBLAS" = "1" ] ; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/rocBLAS \
-    && cd rocBLAS \
-    && git checkout ${ROCBLAS_BRANCH} \
-    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
-    && cd .. && rm -rf rocBLAS \
-    && sed -i 's/, rocblas-dev \(.*\), rocfft-dev/, rocfft-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/, rocblas \(.*\), rocfft/, rocfft/g' /var/lib/dpkg/status \
-    && cd ..; \
-    fi
-
-
-ARG BUILD_ROCSOLVER=$BUILD_ROCBLAS
-ARG ROCSOLVER_BRANCH="6bcc458"
-
-RUN if [ "$BUILD_ROCSOLVER" = "1" ]; then \
-    echo "ROCSOLVER_RBANCH is $ROCSOLVER_BRANCH"; \
-    fi
-RUN if [ "$BUILD_ROCSOLVER" = "1" ] ; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/rocSOLVER \
-    && cd rocSOLVER \
-    && git checkout ${ROCSOLVER_BRANCH} \
-    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
-    && cd .. && rm -rf rocSOLVER \
-    && sed -i 's/, rocsolver-dev \(.*\), rocsparse-dev/, rocsparse-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/, rocsolver \(.*\), rocsparse/, rocsparse/g' /var/lib/dpkg/status \
-    && cd ..; \
-    fi
-
-
-ARG BUILD_HIPBLAS="1"
-ARG HIPBLAS_BRANCH="75ce021"
-
-RUN if [ "$BUILD_HIPBLAS" = "1" ]; then \
-    echo "HIPBLAS_BRANCH is $HIPBLAS_BRANCH"; \
-    fi
-RUN if [ "$BUILD_HIPBLAS" = "1" ] ; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/hipBLAS \
-    && cd hipBLAS \
-    && git checkout ${HIPBLAS_BRANCH} \
-    && ./install.sh -i \
-    && cd .. && rm -rf hipBLAS \
-    && sed -i 's/hipblas-dev \(.*\), hipblaslt-dev/hipblaslt-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/hipblas \(.*\), hipblaslt/hipblaslt/g' /var/lib/dpkg/status \
-    && sed -i 's/hipblas-dev \(.*\), hipcub-dev/hipcub-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/hipblas \(.*\), hipfft/hipfft/g' /var/lib/dpkg/status \
-    && cd ..; \
-    fi
-
-
-# whether to build hipBLASLt
-ARG BUILD_HIPBLASLT="1"
+ARG BUILD_HIPBLASLT="0"
 ARG HIPBLASLT_BRANCH="c8c3cac"
 
 RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
@@ -107,34 +43,14 @@ RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
     && cd ..; \
-    fi
-
-
-ARG BUILD_HIPSOLVER="1"
-ARG HIPSOLVER_BRANCH="3d28b8b"
-RUN if [ "$BUILD_HIPSOLVER" = "1" ]; then \
-    echo "HIPSOLVER_BRANCH is $HIPSOLVER_BRANCH"; \
-    fi
-RUN if [ "$BUILD_HIPSOLVER" = "1" ] ; then \
-    mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/hipSOLVER \
-    && cd hipSOLVER \
-    && git checkout ${HIPSOLVER_BRANCH} \
-    && ./install.sh -i \
-    && cd .. && rm -rf hipSOLVER \
-    && sed -i 's/hipsolver-dev \(.*\), hipsparse-dev/hipsparse-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/hipsolver \(.*\), hipsparse/hipsparse/g' /var/lib/dpkg/status \
-    && cd ..; \
-    fi
+    fi 
 
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
 
-# whether to build RCCL
-ARG BUILD_RCCL="0"
-ARG RCCL_BRANCH="9398253"
+ARG BUILD_RCCL="1"
+ARG RCCL_BRANCH="549a863"
 
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     echo "RCCL_BRANCH is $RCCL_BRANCH"; \
@@ -143,29 +59,26 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && git clone https://github.com/ROCm/rccl \
+    && git clone https://github.com/akolliasAMD/rccl \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
-    && mkdir build && cd build \
-    && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ -DAMDGPU_TARGETS=${PYTORCH_ROCM_ARCH} .. \
-    && SCCACHE_IDLE_TIMEOUT=1800 make -j 32 \
-    && make package \
-    && dpkg -i *.deb \
-    && cd ../.. \
+    && ./install.sh -i --amdgpu_targets ${PYTORCH_ROCM_ARCH} \
+    && cd .. \
     && rm -r rccl \
-    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
     && cd ..; \
     fi
 
 
-# We always build Pytorch
+# We always build Pytorch for now because source code needs fixing for Tunable Op for now
+# This will not be necessary once https://github.com/pytorch/pytorch/pull/124362 merges
 ARG BUILD_PYTORCH="1"
-ARG PYTORCH_BRANCH="a6feb59"
+ARG PYTORCH_BRANCH="a6feb59" #scaled_mm_tunable is "648fe2c7"
 RUN echo "PYTORCH_BRANCH is ${PYTORCH_BRANCH}"
 
 # Install PyTorch
 RUN if [ "$BUILD_PYTORCH" = "1" ]; then \
-    mkdir -p libs \
+    pip uninstall -y torch \
+    && mkdir -p libs \
     && cd libs \
     && git clone --recursive https://github.com/ROCm/pytorch \
     && cd pytorch \
@@ -203,7 +116,7 @@ ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/opt/conda/envs/py_3.9/lib/python3.9/
 # this is useful for gfx target where flash-attention is not supported
 # In that case, we need to use the python reference attention implementation in vllm
 ARG BUILD_FA="1"
-ARG FA_BRANCH="3d2b6f5"
+ARG FA_BRANCH="ae7928c"
 
 RUN if [ "$BUILD_FA" = "1" ]; then \
     echo "FA_BRANCH is $FA_BRANCH"; \
@@ -224,11 +137,11 @@ RUN if [ "$BUILD_FA" = "1" ]; then \
 
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
 
-# Whether to build CuPy. vLLM < 0.4.0 needs it for HIPgraph.
+# Whether to build CuPy. 0.3.3 <= vLLM < 0.4.0 might need it for HIPgraph.
 ARG BUILD_CUPY="0"
 ARG CUPY_BRANCH="hipgraph_enablement"
 
@@ -274,11 +187,14 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
 
 
 COPY ./ /app/vllm
+# Fix HIP runtime on ROCm 6.1
+RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
+    cp /app/vllm/rocm_patch/libamdhip64.so.6 /opt/rocm-6.1.0/lib/libamdhip64.so.6; fi
 
 RUN python3 -m pip install --upgrade pip numba
 RUN python3 -m pip install xformers==0.0.23 --no-deps
 
-# Install Flash-Attn
+# Install vLLM
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
@@ -286,15 +202,12 @@ RUN cd /app \
     bash patch_xformers.rocm.sh; fi \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_staging_base" ]; then \
     patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
-    && sed -i -e "s/foreach (_ARCH \${CMAKE_HIP_ARCHITECTURES})/foreach (_ARCH \${PYTORCH_ROCM_ARCH})/g" cmake/utils.cmake \
     && python3 setup.py clean --all && python3 setup.py develop \
     && cd ..
 
 
 # Install gradlib
-RUN cd /app/vllm \
-    && git clone https://github.com/ROCm/gradlib \
-    && cd gradlib \
+RUN cd /app/vllm/gradlib \
     && pip install . \
     && cd ../..
 

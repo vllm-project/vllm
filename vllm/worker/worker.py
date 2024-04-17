@@ -20,6 +20,7 @@ from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+from vllm.utils import is_hip
 
 
 class Worker(WorkerBase):
@@ -178,10 +179,8 @@ class Worker(WorkerBase):
 
     def _warm_up_model(self) -> None:
         tunable_config = self.parallel_config.tunable_op_config
-        if tunable_config.to_be_enabled and tunable_config.apply():
+        if tunable_config.to_be_enabled and tunable_config.apply() and not self.model_config.enforce_eager:
             self.model_runner.tune_model(self.gpu_cache)
-            #TODO(mattwong) uncomment line below once testing is finished
-            #tunable_op.disable_tuning()
 
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
@@ -288,7 +287,7 @@ def init_worker_distributed_environment(
                 "pynccl is already initialized but the pynccl world "
                 "size does not match parallel_config.world_size "
                 f"({pynccl_world_size} vs. {parallel_config.world_size}).")
-    elif parallel_config.world_size > 1:
+    elif parallel_config.world_size > 1 and not is_hip():
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
         pynccl_utils.init_process_group(
