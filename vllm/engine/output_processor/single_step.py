@@ -54,10 +54,12 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 ), f"{type(self)} does not support multiple outputs per step"
         return self._process_sequence_group_outputs(sequence_group, outputs[0])
 
-   def process_prompt_logprob(self, seq_group: SequenceGroup,
-                                outputs: SequenceGroupOutput) -> None:
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
         # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
+        assert len(outputs) == 1
+        output = outputs[0]
+        prompt_logprobs = output.prompt_logprobs
         if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)

@@ -919,6 +919,7 @@ class Scheduler:
                 if (token_chunk_size + seqs[0].data.get_num_computed_tokens() <
                         seqs[0].data.get_prompt_len()):
                     do_sample = False
+            print(f"SANG-TODO scheduler {do_sample=}")
 
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.

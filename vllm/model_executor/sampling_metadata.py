@@ -28,6 +28,9 @@ class SamplingMetadata:
         perform_sampling: Whether to perform sampling. This option is used to
             make the sampling only happens in the driver worker, and disable
             sampling in other worker processes.
+        subquery_lens: Length of query tokens. It only exists for seq groups
+            in a prefill stage (same length as prompt_lens). It could be
+            shorter than prompt_lens when prefill is chunked.
     """
 
     def __init__(

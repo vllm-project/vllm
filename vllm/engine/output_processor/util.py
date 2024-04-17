@@ -1,10 +1,11 @@
 from typing import List
 
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SamplerOutput, SequenceGroupOutput
 
 
-def create_output_by_sequence_group(sampler_outputs: List[SamplerOutput],
-                                    num_seq_groups: int):
+def create_output_by_sequence_group(
+        sampler_outputs: List[SamplerOutput],
+        num_seq_groups: int) -> List[List[SequenceGroupOutput]]:
     """Helper method which transforms a 2d list organized by
     [step][sequence group] into [sequence group][step].
     """

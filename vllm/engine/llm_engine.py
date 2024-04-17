@@ -11,8 +11,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.output_processor.interfaces import (
-    SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.engine.ray_utils import initialize_ray_cluster
@@ -22,7 +21,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput, SequenceGroupMetadata)
+                           SequenceGroup, SequenceGroupOutput,
+                           SequenceGroupMetadata)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -431,10 +431,12 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _process_model_outputs(
-            self, output: List[SamplerOutput],
-            scheduled_seq_groups: List[SequenceGroup],
-            ignored_seq_groups: List[SequenceGroup],
-            seq_group_metadata_list: List[SequenceGroupMetadata],) -> List[RequestOutput]:
+        self,
+        output: List[SamplerOutput],
+        scheduled_seq_groups: List[SequenceGroup],
+        ignored_seq_groups: List[SequenceGroup],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> List[RequestOutput]:
         """Apply the model output to the sequences in the scheduled seq groups.
         
         Returns RequestOutputs that can be returned to the client.
@@ -448,9 +450,9 @@ class LLMEngine:
             sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs, seq_group_meta in zip(scheduled_seq_groups,
-                                                output_by_sequence_group.
-                                                seq_group_metadata_list):
+        for scheduled_seq_group, outputs, seq_group_meta in zip(
+                scheduled_seq_groups, output_by_sequence_group,
+                seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
@@ -539,8 +541,7 @@ class LLMEngine:
 
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups,
-            seq_group_metadata_list)
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
         if self.log_stats:

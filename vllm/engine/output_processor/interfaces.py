@@ -69,7 +69,7 @@ class SequenceGroupOutputProcessor(ABC):
         pass
 
     @abstractmethod
-   def process_prompt_logprob(self, seq_group: SequenceGroup,
-                                outputs: SequenceGroupOutput) -> None:
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
         """Update prompt logprobs received from outputs to seq_group."""
         pass

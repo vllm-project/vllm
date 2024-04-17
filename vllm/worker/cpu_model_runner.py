@@ -36,6 +36,8 @@ class CPUModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        # Currently, CPU worker doesn't support chunked prefill.
+        assert self.scheduler_config.chunked_prefill_enabled is False
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
@@ -326,6 +328,9 @@ class CPUModelRunner:
             categorized_sample_indices=categorized_sample_indices,
             do_samples=do_samples,
             generators=generators,
+            # Since CPU worker doesn't support chunked prefill subquery_lens is
+            # always equivalent to prompt_lens.
+            subquery_lens=prompt_lens,
         )
         return sampling_metadata
 

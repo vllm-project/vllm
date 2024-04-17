@@ -642,6 +642,9 @@ def _get_logprobs(
             next_token_indices.extend(token_id
                                       for token_id in next_prompt_tokens)
             query_idx += len(next_prompt_tokens)
+            print(f"SANG-TODO {next_prompt_tokens=}")
+            print(f"SANG-TODO {query_idx=}")
+            print(f"SANG-TODO {do_sample=}")
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         if do_sample:
@@ -653,7 +656,7 @@ def _get_logprobs(
                                            sampling_params.logprobs)
             query_idx += num_parent_seqs
 
-    # No need to calculate logprobs
+    # No need to calculate logprobs if no query tokens are chosen.
     if len(query_indices) == 0:
         empty_sampled_logprob: SampleLogprobs = []
         empty_prompt_logprob = None

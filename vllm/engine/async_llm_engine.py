@@ -219,8 +219,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         return self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups,
-            seq_group_metadata_list)
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
     async def encode_request_async(
         self,
