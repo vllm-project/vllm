@@ -56,7 +56,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
-        # Process prompt logprobs
+        # Single step worker only has 1 SequenceGroupOutput. But it can contain
+        # multiple samples if beam search is used.
         assert len(outputs) == 1
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs

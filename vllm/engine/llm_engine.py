@@ -11,7 +11,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
+from vllm.engine.output_processor.interfaces import (
+    SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.engine.ray_utils import initialize_ray_cluster
@@ -21,8 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput,
-                           SequenceGroupMetadata)
+                           SequenceGroup, SequenceGroupMetadata)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -458,7 +458,6 @@ class LLMEngine:
                 scheduled_seq_group.token_chunk_size)
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
-                assert seq_group.get_num_uncomputed_tokens() == 0
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.

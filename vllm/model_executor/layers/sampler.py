@@ -433,8 +433,8 @@ def _sample_with_torch(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        seq_group_ids, seq_groups, is_prompts, sample_indices, do_samples = sample_metadata[
-            sampling_type]
+        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+         do_samples) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples,
                                             do_samples)
@@ -553,6 +553,7 @@ def _sample(
         logprobs: (num_query_tokens_in_batch, num_vocab)
         sampling_metadata: The metadata for a batch for sampling.
         sampling_tensors: Tensors that include sampling related metadata.
+
     Returns:
         (next_token_ids, parent_seq_ids) for each seq group in a batch.
     """
@@ -625,7 +626,8 @@ def _get_logprobs(
         do_sample = sampling_metadata.do_samples[i]
 
         # Find query indices for prompt logprobs.
-        if i < sampling_metadata.num_prompts and sampling_params.prompt_logprobs is not None:
+        if (i < sampling_metadata.num_prompts
+                and sampling_params.prompt_logprobs is not None):
             subquery_len = sampling_metadata.subquery_lens[i]
             seq_data = sampling_metadata.seq_data[seq_ids[0]]
             computed_len = seq_data.get_num_computed_tokens()
