@@ -1,6 +1,7 @@
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
+from typing import Sequence as GenericSequence
 
 from vllm.sequence import Sequence, SequenceGroup
 
@@ -44,14 +45,16 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def can_append_slot(self, seq_group: SequenceGroup) -> bool:
+    def can_append_slots(self, seq_group: SequenceGroup,
+                         num_lookahead_slots: int) -> bool:
         pass
 
     @abstractmethod
-    def append_slot(
+    def append_slots(
         self,
         seq: Sequence,
-    ) -> Optional[Tuple[int, int]]:
+        num_lookahead_slots: int,
+    ) -> Dict[int, List[int]]:
         pass
 
     @abstractmethod
@@ -59,11 +62,13 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def can_swap_in(self, seq_group: SequenceGroup) -> bool:
+    def can_swap_in(self, seq_group: SequenceGroup,
+                    num_lookahead_slots: int) -> bool:
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_in(self, seq_group: SequenceGroup,
+                num_lookahead_slots: int) -> Dict[int, int]:
         pass
 
     @abstractmethod
@@ -99,7 +104,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         pass
 
     @abstractmethod

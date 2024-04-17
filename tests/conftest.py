@@ -11,8 +11,7 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
-from vllm.model_executor.parallel_utils.parallel_state import (
-    destroy_model_parallel)
+from vllm.distributed import destroy_model_parallel
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -55,10 +54,24 @@ def cleanup():
     torch.cuda.empty_cache()
 
 
+@pytest.fixture()
+def should_do_global_cleanup_after_test(request) -> bool:
+    """Allow subdirectories to skip global cleanup by overriding this fixture.
+    This can provide a ~10x speedup for non-GPU unit tests since they don't need
+    to initialize torch.
+    """
+
+    if request.node.get_closest_marker("skip_global_cleanup"):
+        return False
+
+    return True
+
+
 @pytest.fixture(autouse=True)
-def cleanup_fixture():
+def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
-    cleanup()
+    if should_do_global_cleanup_after_test:
+        cleanup()
 
 
 @pytest.fixture(scope="session")
@@ -388,7 +401,7 @@ class VllmRunner:
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
 

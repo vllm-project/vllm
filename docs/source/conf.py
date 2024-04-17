@@ -11,12 +11,10 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import logging
-import os
 import sys
+from typing import List
 
 from sphinx.ext import autodoc
-
-sys.path.insert(0, os.path.abspath(os.path.join('..', '..')))
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +46,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = []
+exclude_patterns: List[str] = []
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -75,6 +73,7 @@ html_theme_options = {
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [
+    "cpuinfo",
     "torch",
     "transformers",
     "psutil",
@@ -84,6 +83,7 @@ autodoc_mock_imports = [
     "vllm._C",
     "numpy",
     "tqdm",
+    "tensorizer",
 ]
 
 for mock_target in autodoc_mock_imports:

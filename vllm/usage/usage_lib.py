@@ -7,7 +7,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from threading import Thread
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from uuid import uuid4
 
 import cpuinfo
@@ -124,7 +124,7 @@ class UsageMessage:
     def report_usage(self,
                      model_architecture: str,
                      usage_context: UsageContext,
-                     extra_kvs: Dict[str, any] = None) -> None:
+                     extra_kvs: Optional[Dict[str, Any]] = None) -> None:
         t = Thread(target=self._report_usage_worker,
                    args=(model_architecture, usage_context, extra_kvs or {}),
                    daemon=True)
@@ -132,13 +132,13 @@ class UsageMessage:
 
     def _report_usage_worker(self, model_architecture: str,
                              usage_context: UsageContext,
-                             extra_kvs: Dict[str, any]) -> None:
+                             extra_kvs: Dict[str, Any]) -> None:
         self._report_usage_once(model_architecture, usage_context, extra_kvs)
         self._report_continous_usage()
 
     def _report_usage_once(self, model_architecture: str,
                            usage_context: UsageContext,
-                           extra_kvs: Dict[str, any]) -> None:
+                           extra_kvs: Dict[str, Any]) -> None:
         # Platform information
         if torch.cuda.is_available():
             device_property = torch.cuda.get_device_properties(0)
