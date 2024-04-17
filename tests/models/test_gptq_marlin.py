@@ -33,11 +33,12 @@ gptq_marlin_not_supported = (
 
 MODELS = [
     # act_order==False, group_size=channelwise
-    # ("robertgshaw2/zephyr-7b-beta-channelwise-gptq", "main"),
+    ("robertgshaw2/zephyr-7b-beta-channelwise-gptq", "main"),
     # # act_order==False, group_size=128
-    # ("TheBloke/Llama-2-7B-GPTQ", "main"),
+    ("TheBloke/Llama-2-7B-GPTQ", "main"),
+    
     # # act_order==True, group_size=128
-    # ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
+    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
     # act_order==True, group_size=64
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-64g-actorder_True"),
     # # act_order==True, group_size=32
@@ -45,7 +46,7 @@ MODELS = [
 ]
 
 
-# @pytest.mark.flaky(reruns=2)
+@pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)

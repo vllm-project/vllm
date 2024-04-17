@@ -20,7 +20,6 @@ GPTQ_MARLIN_MAX_PARALLEL = 16
 GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4]
 GPTQ_MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 GPTQ_MARLIN_SUPPORTED_SYM = [True]
-GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT = [-1]
 
 
 # Precompute permutations for Marlin weight and scale shuffling
@@ -87,6 +86,11 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
                  is_sym: bool) -> None:
+        if desc_act and group_size == -1:
+            # In this case, act_order == True is the same as act_order == False
+            # (since we have only one group per output channel, so nothing to re-order)
+            desc_act = False
+
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
@@ -107,10 +111,6 @@ class GPTQMarlinConfig(QuantizationConfig):
             raise ValueError(
                 f"Marlin does not support is_sym = {self.is_sym}. "
                 f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
-        if self.desc_act and self.group_size in GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT:
-            raise ValueError(
-                f"Marlin does not support group_size = {self.group_size} "
-                f"with activation reordering (desc_act = True). ")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -163,17 +163,14 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act = quant_config.get("desc_act", None)
 
         # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or sym is None or desc_act is None:
+        if (num_bits is None or group_size is None or sym is None
+                or desc_act is None):
             return False
 
         # If the capability of the device is too low, cannot convert.
         major, minor = torch.cuda.get_device_capability()
         device_capability = major * 10 + minor
         if device_capability < cls.get_min_capability():
-            return False
-        
-        # If act_order x Channelwise, cannot do Marlin
-        if desc_act and group_size in GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT:
             return False
 
         # Otherwise, can convert if model satisfies marlin constraints.
@@ -207,8 +204,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> Dict[str, Any]:
-        del output_size # Unused.
-
         # Normalize group_size
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
@@ -243,7 +238,6 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Detect sharding of scales/zp
 
         # By default, no sharding over "input dim"
-        print(f"GROUP SIZE {group_size}")
         scales_and_zp_size = input_size // group_size
         scales_and_zp_input_dim = None
 
@@ -395,8 +389,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             # Process act_order
             if self.quant_config.desc_act:
                 # Get sorting based on g_idx
-                g_idx_sort_indices = torch.argsort(layer.g_idx).to(
-                    torch.int)
+                g_idx_sort_indices = torch.argsort(layer.g_idx).to(torch.int)
 
                 sorted_g_idx = layer.g_idx[g_idx_sort_indices]
 
@@ -409,10 +402,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                                                     dtype=torch.int,
                                                     device=cur_device),
                                         requires_grad=False)
-                layer.g_idx_sort_indices = Parameter(torch.empty(0,
-                                                                 dtype=torch.int,
-                                                                 device=cur_device),
-                                                    requires_grad=False)
+                layer.g_idx_sort_indices = Parameter(torch.empty(
+                    0, dtype=torch.int, device=cur_device),
+                                                     requires_grad=False)
 
             # Repack weights
             marlin_qweight = ops.gptq_marlin_repack(
@@ -429,17 +421,15 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             if self.quant_config.desc_act:
                 scales_size_k = full_size_k
 
-            marlin_scales = marlin_permute_scales(layer.scales,
-                                                  scales_size_k, scales_size_n,
+            marlin_scales = marlin_permute_scales(layer.scales, scales_size_k,
+                                                  scales_size_n,
                                                   self.quant_config.group_size)
             replace_tensor("scales", marlin_scales)
 
-        output = ops.gptq_marlin_gemm(reshaped_x, layer.qweight,
-                                      layer.scales, layer.g_idx,
-                                      layer.g_idx_sort_indices,
-                                      layer.workspace, size_m,
-                                      part_size_n, part_size_k,
-                                      layer.is_k_full)
+        output = ops.gptq_marlin_gemm(reshaped_x, layer.qweight, layer.scales,
+                                      layer.g_idx, layer.g_idx_sort_indices,
+                                      layer.workspace, size_m, part_size_n,
+                                      part_size_k, layer.is_k_full)
 
         if bias is not None:
             output.add_(bias)  # In-place add
