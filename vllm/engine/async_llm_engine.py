@@ -217,7 +217,8 @@ class _AsyncLLMEngine(LLMEngine):
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs, seq_group_metadata_list)
+        return self._process_model_outputs(output, scheduler_outputs,
+                                           seq_group_metadata_list)
 
     async def encode_request_async(
         self,
