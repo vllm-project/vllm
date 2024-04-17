@@ -92,7 +92,7 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     """
     # global global_thread_pool
     
-    guide, mode = _get_guide_and_mode_from_sampling_params(sampling_params.extra_body)
+    guide, mode = _get_guide_and_mode_from_sampling_params(sampling_params.guided_options)
     if not guide:
         return None
 
@@ -109,13 +109,13 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
             
 
 def _get_guide_and_mode_from_sampling_params(
-    extra_body: Dict[str, str]
+    guided_options: Dict[str, str]
 ) -> Tuple[str, GuidedDecodingMode]:
-    if not extra_body:
+    if not guided_options:
         return None, None
 
-    if "guided_json" in extra_body:
-        json = extra_body["guided_json"]
+    if "guided_json" in guided_options:
+        json = guided_options["guided_json"]
         if isinstance(json, dict):
             # turn dict into hashable string
             json = json_dumps(json)
@@ -124,17 +124,17 @@ def _get_guide_and_mode_from_sampling_params(
             # with the same fields will get hashed the same
             json = str(json.__signature__)
         return json, GuidedDecodingMode.JSON
-    elif "guided_regex" in extra_body:
-        return extra_body["guided_regex"], GuidedDecodingMode.REGEX
-    elif "guided_choice" in extra_body:
+    elif "guided_regex" in guided_options:
+        return guided_options["guided_regex"], GuidedDecodingMode.REGEX
+    elif "guided_choice" in guided_options:
         # choice just uses regex
         choices = [
-            regex_escape(str(choice)) for choice in extra_body["guided_choice"]
+            regex_escape(str(choice)) for choice in guided_options["guided_choice"]
         ]
         choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
-    elif "guided_grammar" in extra_body:
-        return extra_body["guided_grammar"], GuidedDecodingMode.GRAMMAR
+    elif "guided_grammar" in guided_options:
+        return guided_options["guided_grammar"], GuidedDecodingMode.GRAMMAR
     else:
         return None, None
 

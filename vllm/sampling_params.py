@@ -131,7 +131,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-        extra_body: Optional[Dict[str, Union[list, str, dict]]] = None
+        guided_options: Optional[Dict[str, Union[list, str, dict]]] = None
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -178,16 +178,16 @@ class SamplingParams:
             self.output_text_buffer_length = 0
 
         guide_count = sum([
-            extra_body is not None and extra_body.get("guided_json") is not None,
-            extra_body is not None and extra_body.get("guided_regex") is not None,
-            extra_body is not None and extra_body.get("guided_choice") is not None
+            guided_options is not None and guided_options.get("guided_json") is not None,
+            guided_options is not None and guided_options.get("guided_regex") is not None,
+            guided_options is not None and guided_options.get("guided_choice") is not None
         ])
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
 
-        self.extra_body = extra_body
+        self.guided_options = guided_options
 
         self._verify_args()
         if self.use_beam_search:

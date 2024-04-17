@@ -15,6 +15,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.outputs import RequestOutput
 
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+
 TEST_SCHEMA = {
     "type": "object",
     "properties": {
@@ -72,7 +74,7 @@ prompts = [
 
 @pytest.fixture(scope="session")
 def llm():
-    return LLM(model="facebook/opt-125m")
+    return LLM(model=MODEL_NAME, max_model_len=15000)
 
 
 @pytest.mark.skip_global_cleanup
@@ -98,7 +100,7 @@ def test_simple_prompts(llm):
 def test_guided_regex_(llm):
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     extra_body=dict(guided_regex=TEST_REGEX))
+                                     guided_options=dict(guided_regex=TEST_REGEX))
     outputs = llm.generate(
         prompts=[
             f"Give an example IPv4 address with this regex: {TEST_REGEX}"
@@ -122,7 +124,8 @@ def test_guided_regex_(llm):
 def test_guided_json_completion(llm):
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     extra_body=dict(guided_json=TEST_SCHEMA))
+                                     guided_options=dict(guided_json=TEST_SCHEMA),
+                                     max_tokens=1000)
     outputs = llm.generate(
         prompts=[
             f"Give an example JSON for an employee profile "
@@ -133,23 +136,24 @@ def test_guided_json_completion(llm):
     )
 
     assert outputs is not None
+    print(outputs)
     for output in outputs:
         assert output is not None
         assert isinstance(output, RequestOutput)
         prompt = output.prompt
+        
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
-
 @pytest.mark.skip_global_cleanup
 def test_guided_choice_completion(llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        extra_body=dict(guided_choice=TEST_CHOICE))
+        guided_options=dict(guided_choice=TEST_CHOICE))
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
@@ -184,7 +188,7 @@ number: "1" | "2"
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        extra_body=dict(guided_grammar=simple_sql_grammar))
+        guided_options=dict(guided_grammar=simple_sql_grammar))
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
                  "table_1 where it is equals to 1"),
