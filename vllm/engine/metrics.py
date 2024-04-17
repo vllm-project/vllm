@@ -1,7 +1,7 @@
 import time
 from dataclasses import dataclass
 from typing import Counter as CollectionsCounter
-from typing import Dict, List
+from typing import Dict, List, Protocol
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
@@ -179,13 +179,19 @@ class Stats:
     time_e2e_requests: List[float]
 
 
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
+
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
     def __init__(self, local_interval: float, labels: Dict[str, str],
                  max_model_len: int) -> None:
         # Metadata for logging locally.
-        self.last_local_log = time.monotonic()
+        self.last_local_log = time.time()
         self.local_interval = local_interval
 
         # Tracked stats over current local logging interval.
@@ -197,7 +203,7 @@ class StatLogger:
         self.metrics = Metrics(labelnames=list(labels.keys()),
                                max_model_len=max_model_len)
 
-    def info(self, type: str, obj: object) -> None:
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
             self.metrics.info_cache_config.info(obj.metrics_info())
 

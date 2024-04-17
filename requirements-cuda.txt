@@ -1,0 +1,9 @@
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for NVIDIA GPUs
+ray >= 2.9
+pynvml == 11.5.0
+vllm-nccl-cu12>=2.18,<2.19  # for downloading nccl library
+torch == 2.2.1
+xformers == 0.0.25  # Requires PyTorch 2.2.1
