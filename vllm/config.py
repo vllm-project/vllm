@@ -1,7 +1,7 @@
 import enum
 import json
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
 import torch
@@ -16,7 +16,13 @@ from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.model_executor.model_loader.loader import BaseModelLoader
+
 logger = init_logger(__name__)
+
+# If true, will load models from ModelScope instead of Hugging Face Hub.
+VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
+                                     "False").lower() == "true"
 
 _GB = 1 << 30
 
@@ -31,18 +37,6 @@ class ModelConfig:
             available, and "slow" will always use the slow tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
@@ -62,8 +56,8 @@ class ModelConfig:
             weights. If None, we assume the model weights are not quantized.
         quantization_param_path: Path to JSON file containing scaling factors.
             Used to load KV cache scaling factors into the model when KV cache
-            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also 
-            be used to load activation and weight scaling factors when the 
+            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also
+            be used to load activation and weight scaling factors when the
             model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
@@ -81,8 +75,6 @@ class ModelConfig:
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
-        download_dir: Optional[str],
-        load_format: str,
         dtype: Union[str, torch.dtype],
         seed: int,
         revision: Optional[str] = None,
@@ -100,8 +92,6 @@ class ModelConfig:
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
-        self.download_dir = download_dir
-        self.load_format = load_format
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -113,63 +103,16 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
 
-        if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
-            # download model from ModelScope hub,
-            # lazy import so that modelscope is not required for normal use.
-            # pylint: disable=C.
-            from modelscope.hub.snapshot_download import snapshot_download
-
-            if not os.path.exists(model):
-                model_path = snapshot_download(model_id=model,
-                                               cache_dir=download_dir,
-                                               revision=revision)
-            else:
-                model_path = model
-            self.model = model_path
-            self.download_dir = model_path
-            self.tokenizer = model_path
-
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
-        self._verify_load_format()
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
-
-    def _verify_load_format(self) -> None:
-        load_format = self.load_format.lower()
-        supported_load_format = [
-            "auto", "pt", "safetensors", "npcache", "dummy"
-        ]
-        rocm_not_supported_load_format: List[str] = []
-        if load_format not in supported_load_format:
-            raise ValueError(
-                f"Unknown load format: {self.load_format}. Must be one of "
-                "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
-        if is_hip() and load_format in rocm_not_supported_load_format:
-            rocm_supported_load_format = [
-                f for f in supported_load_format
-                if (f not in rocm_not_supported_load_format)
-            ]
-            raise ValueError(
-                f"load format '{load_format}' is not supported in ROCm. "
-                f"Supported load format are "
-                f"{rocm_supported_load_format}")
-
-        # TODO: Remove this check once HF updates the pt weights of Mixtral.
-        architectures = getattr(self.hf_config, "architectures", [])
-        # architectures can be None instead of []
-        if architectures and "MixtralForCausalLM" in architectures \
-            and load_format == "pt":
-            raise ValueError(
-                "Currently, the 'pt' format is not supported for Mixtral. "
-                "Please use the 'safetensors' format instead. ")
-        self.load_format = load_format
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -422,7 +365,7 @@ class CacheConfig:
 @dataclass
 class TokenizerPoolConfig:
     """Configuration for the tokenizer pool.
-    
+
     Args:
         pool_size: Number of tokenizer workers in the pool.
         pool_type: Type of the pool.
@@ -446,9 +389,9 @@ class TokenizerPoolConfig:
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
-        
+
         If tokenizer_pool_size is 0, return None.
-        
+
         Args:
             tokenizer_pool_size: Number of tokenizer workers in the pool.
             tokenizer_pool_type: Type of the pool.
@@ -469,6 +412,65 @@ class TokenizerPoolConfig:
         else:
             tokenizer_pool_config = None
         return tokenizer_pool_config
+
+
+class LoadFormat(str, enum.Enum):
+    AUTO = "auto"
+    PT = "pt"
+    SAFETENSORS = "safetensors"
+    NPCACHE = "npcache"
+    DUMMY = "dummy"
+    TENSORIZER = "tensorizer"
+
+
+@dataclass
+class LoadConfig:
+    """
+        download_dir: Directory to download and load the weights, default to the
+            default cache directory of huggingface.
+        load_format: The format of the model weights to load:
+            "auto" will try to load the weights in the safetensors format and
+                fall back to the pytorch bin format if safetensors format is
+                not available.
+            "pt" will load the weights in the pytorch bin format.
+            "safetensors" will load the weights in the safetensors format.
+            "npcache" will load the weights in pytorch format and store
+                a numpy cache to speed up the loading.
+            "dummy" will initialize the weights with random values, which is
+                mainly for profiling.
+            "tensorizer" will use CoreWeave's tensorizer library for
+                fast weight loading.
+    """
+
+    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    download_dir: Optional[str] = None
+    model_loader_extra_config: Optional[Union[str, dict]] = field(
+        default_factory=dict)
+
+    def __post_init__(self):
+        model_loader_extra_config = self.model_loader_extra_config or {}
+        if isinstance(model_loader_extra_config, str):
+            self.model_loader_extra_config = json.loads(
+                model_loader_extra_config)
+        self._verify_load_format()
+
+    def _verify_load_format(self) -> None:
+        if not isinstance(self.load_format, str):
+            return
+
+        load_format = self.load_format.lower()
+        self.load_format = LoadFormat(load_format)
+
+        rocm_not_supported_load_format: List[str] = []
+        if is_hip() and load_format in rocm_not_supported_load_format:
+            rocm_supported_load_format = [
+                f for f in LoadFormat.__members__
+                if (f not in rocm_not_supported_load_format)
+            ]
+            raise ValueError(
+                f"load format '{load_format}' is not supported in ROCm. "
+                f"Supported load formats are "
+                f"{rocm_supported_load_format}")
 
 
 class ParallelConfig:
@@ -699,8 +701,6 @@ class SpeculativeConfig:
             tokenizer=target_model_config.tokenizer,
             tokenizer_mode=target_model_config.tokenizer_mode,
             trust_remote_code=target_model_config.trust_remote_code,
-            download_dir=target_model_config.download_dir,
-            load_format=target_model_config.load_format,
             dtype=target_model_config.dtype,
             seed=target_model_config.seed,
             revision=draft_revision,
@@ -1020,6 +1020,21 @@ def _get_and_verify_max_len(
     return int(max_model_len)
 
 
+@dataclass
+class DecodingConfig:
+    """Dataclass which contains the decoding strategy of the engine"""
+
+    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
+    guided_decoding_backend: str = 'outlines'
+
+    def __post_init__(self):
+        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        backend = self.guided_decoding_backend
+        if backend not in valid_guided_backends:
+            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+                             f"must be one of {valid_guided_backends}")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1031,9 +1046,11 @@ class EngineConfig:
     parallel_config: ParallelConfig
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
+    load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
+    decoding_config: Optional[DecodingConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

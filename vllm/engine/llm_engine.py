@@ -1,15 +1,20 @@
 import time
-from typing import Iterable, List, Optional, Tuple, Type, Union
+from typing import Iterable, List, Optional, Type, Union
 
 from transformers import PreTrainedTokenizer
 
 import vllm
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
+from vllm.engine.output_processor.interfaces import (
+    SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
@@ -17,8 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
+                           SequenceGroup)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -71,9 +75,11 @@ class LLMEngine:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
+        decoding_config: Optional[DecodingConfig],
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -90,8 +96,8 @@ class LLMEngine:
             f"trust_remote_code={model_config.trust_remote_code}, "
             f"dtype={model_config.dtype}, "
             f"max_seq_len={model_config.max_model_len}, "
-            f"download_dir={model_config.download_dir!r}, "
-            f"load_format={model_config.load_format}, "
+            f"download_dir={load_config.download_dir!r}, "
+            f"load_format={load_config.load_format}, "
             f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
             f"disable_custom_all_reduce="
             f"{parallel_config.disable_custom_all_reduce}, "
@@ -100,6 +106,7 @@ class LLMEngine:
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"quantization_param_path={model_config.quantization_param_path}, "
             f"device_config={device_config.device}, "
+            f"decoding_config={decoding_config!r}, "
             f"seed={model_config.seed})")
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -111,6 +118,8 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.speculative_config = speculative_config
+        self.load_config = load_config
+        self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
@@ -131,6 +140,7 @@ class LLMEngine:
             lora_config=lora_config,
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
+            load_config=load_config,
         )
 
         self._initialize_kv_caches()
@@ -186,6 +196,21 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
+
+        # Create sequence output processor, e.g. for beam search or
+        # speculative decoding.
+        self.output_processor = (
+            SequenceGroupOutputProcessor.create_output_processor(
+                self.scheduler_config,
+                self.detokenizer,
+                self.scheduler,
+                self.seq_counter,
+                self.get_tokenizer_for_seq,
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    self.get_tokenizer_for_seq,
+                ),
+            ))
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -414,50 +439,6 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
-    def _check_beam_search_early_stopping(
-        self,
-        early_stopping: Union[bool, str],
-        sampling_params: SamplingParams,
-        best_running_seq: Sequence,
-        current_worst_seq: Sequence,
-    ) -> bool:
-        assert sampling_params.use_beam_search
-        length_penalty = sampling_params.length_penalty
-        if early_stopping is True:
-            return True
-
-        current_worst_score = current_worst_seq.get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=current_worst_seq.eos_token_id)
-        if early_stopping is False:
-            highest_attainable_score = best_running_seq.get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=best_running_seq.eos_token_id)
-        else:
-            assert early_stopping == "never"
-            if length_penalty > 0.0:
-                # If length_penalty > 0.0, beam search will prefer longer
-                # sequences. The highest attainable score calculation is
-                # based on the longest possible sequence length in this case.
-                max_possible_length = max(
-                    best_running_seq.get_prompt_len() +
-                    sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len)
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id,
-                        seq_len=max_possible_length))
-            else:
-                # Otherwise, beam search will prefer shorter sequences. The
-                # highest attainable score calculation is based on the current
-                # sequence length.
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=best_running_seq.eos_token_id))
-        return current_worst_score >= highest_attainable_score
-
     def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
                                         outputs: SequenceGroupOutput) -> None:
 
@@ -637,19 +618,31 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+            self, output: List[SamplerOutput],
+            scheduled_seq_groups: List[SequenceGroup],
+            ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
+        """Apply the model output to the sequences in the scheduled seq groups.
+        
+        Returns RequestOutputs that can be returned to the client.
+        """
+
         now = time.time()
+
+        # Organize outputs by [sequence group][step] instead of
+        # [step][sequence group].
+        output_by_sequence_group = create_output_by_sequence_group(
+            sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
+
         # Update the scheduled sequence groups with the model outputs.
-        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups, output):
+        for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
+                                                output_by_sequence_group):
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
             # If uncomputed tokens > 0, it means prefill is chunked.
             # We don't need to process outputs in that case.
             if seq_group.get_num_uncomputed_tokens() == 0:
-                self._process_sequence_group_outputs(seq_group, outputs)
+                self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
@@ -661,13 +654,9 @@ class LLMEngine:
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-        for seq_group in scheduler_outputs.ignored_seq_groups:
+        for seq_group in ignored_seq_groups:
             request_output = RequestOutput.from_seq_group(seq_group)
             request_outputs.append(request_output)
-
-        # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
         return request_outputs
 
     def step(self) -> List[RequestOutput]:
@@ -725,13 +714,23 @@ class LLMEngine:
 
         if not scheduler_outputs.is_empty():
             output = self.model_executor.execute_model(
-                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
-                scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy)
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots)
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        request_outputs = self._process_model_outputs(
+            output, scheduler_outputs.scheduled_seq_groups,
+            scheduler_outputs.ignored_seq_groups)
+
+        # Log stats.
+        if self.log_stats:
+            self.stat_logger.log(self._get_stats(scheduler_outputs))
+
+        return request_outputs
 
     def do_log_stats(self) -> None:
         """Forced log when no requests active."""
@@ -810,87 +809,6 @@ class LLMEngine:
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,
         )
-
-    def _check_stop(self, seq: Sequence, new_char_count: int,
-                    sampling_params: SamplingParams) -> None:
-        """Stop the finished sequences.
-
-       new_char_count is the number of chars added to the
-           sequence's output text for the newly generated token
-        """
-
-        # Check if the minimum number of tokens has been generated yet;
-        # skip the stop string/token checks if not
-        if seq.get_output_len() < sampling_params.min_tokens:
-            return
-
-        # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == seq.eos_token_id):
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
-        # Check if a stop token was encountered.
-        # This assumes a single token produced per step.
-        last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
-            if new_char_count and (
-                    not sampling_params.include_stop_str_in_output):
-                # Remove last token
-                seq.output_text = seq.output_text[:-new_char_count]
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = last_token_id
-            return
-
-        # Check if any stop strings are matched.
-        stop_str = self._check_stop_strings(seq, new_char_count,
-                                            sampling_params)
-        if stop_str is not None:
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            seq.stop_reason = stop_str
-            return
-
-        # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-    @staticmethod
-    def _check_stop_strings(seq: Sequence, new_char_count: int,
-                            sampling_params: SamplingParams) -> Optional[str]:
-        """Check if any stop strings are matched and truncate sequence
-        output text accordingly.
-
-        Returns the stop string if matched or else None.
-        """
-        if not new_char_count:
-            return None
-
-        for stop_str in sampling_params.stop:
-            stop_string_len = len(stop_str)
-            # Avoid searching already-searched text.
-            stop_index = seq.output_text.find(
-                stop_str, -new_char_count - stop_string_len)
-            if stop_index == -1:
-                continue
-
-            if sampling_params.include_stop_str_in_output:
-                # Truncate to end of stop string.
-                stop_index += stop_string_len
-                if stop_index >= len(seq.output_text):
-                    # No truncation required.
-                    return stop_str
-
-            # Truncate the output text to either the beginning
-            # or end of the stop string.
-            seq.output_text = seq.output_text[:stop_index]
-            return stop_str
-        return None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
