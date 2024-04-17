@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -37,7 +36,8 @@ class EETQConfig(QuantizationConfig):
                 f"EETQ, but got {self.weight_bits} bits.")
 
     def __repr__(self) -> str:
-        return (f"EETQConfig(weight_bits={self.weight_bits}, zero_point={self.zero_point})")
+        return (f"EETQConfig(weight_bits={self.weight_bits}, \
+            zero_point={self.zero_point})")
 
     def get_name(self) -> str:
         return "eetq"
@@ -114,5 +114,7 @@ class EETQLinearMethod(LinearMethodBase):
             output = w8_a16_gemm(x, qweight, weight_scales)
         else:
             raise ImportError("You have not installed EETQ. Please refer to https://github.com/NetEase-FuXi/EETQ/tree/main")
-            
+
+        if bias is not None:
+            output = output + bias
         return output
