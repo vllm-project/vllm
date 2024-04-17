@@ -130,7 +130,7 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         blocksparse_local_blocks: int = 16,
-        blocksparse_vert_stride: int = 8,
+        blocksparse_vert_stride: int = 1,
         blocksparse_block_size: int = 64,
     ) -> None:
         self.num_heads = num_heads

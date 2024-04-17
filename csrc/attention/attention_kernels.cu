@@ -207,7 +207,7 @@ __device__ void paged_attention_kernel(
   // dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
   const int num_blocksparse_blocks = DIVIDE_ROUND_UP(num_context_blocks, 4);
-  const bool is_sparse =  (num_blocksparse_blocks > blocksparse_local_blocks);
+  const bool is_sparse =  (blocksparse_vert_stride != 1);
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
