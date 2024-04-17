@@ -20,6 +20,7 @@ GPTQ_MARLIN_MAX_PARALLEL = 16
 GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4]
 GPTQ_MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 GPTQ_MARLIN_SUPPORTED_SYM = [True]
+GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT = [-1]
 
 
 # Precompute permutations for Marlin weight and scale shuffling
@@ -106,6 +107,10 @@ class GPTQMarlinConfig(QuantizationConfig):
             raise ValueError(
                 f"Marlin does not support is_sym = {self.is_sym}. "
                 f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
+        if self.desc_act and self.group_size in GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT:
+            raise ValueError(
+                f"Marlin does not support group_size = {self.group_size} "
+                f"with activation reordering (desc_act = True). ")
 
         # Init
         self.pack_factor = get_pack_factor(weight_bits)
@@ -155,15 +160,20 @@ class GPTQMarlinConfig(QuantizationConfig):
         num_bits = quant_config.get("bits", None)
         group_size = quant_config.get("group_size", None)
         sym = quant_config.get("sym", None)
+        desc_act = quant_config.get("desc_act", None)
 
         # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or sym is None:
+        if num_bits is None or group_size is None or sym is None or desc_act is None:
             return False
 
         # If the capability of the device is too low, cannot convert.
         major, minor = torch.cuda.get_device_capability()
         device_capability = major * 10 + minor
         if device_capability < cls.get_min_capability():
+            return False
+        
+        # If act_order x Channelwise, cannot do Marlin
+        if desc_act and group_size in GPTQ_DISALLOWED_GROUP_SIZES_DESC_ACT:
             return False
 
         # Otherwise, can convert if model satisfies marlin constraints.
@@ -233,6 +243,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Detect sharding of scales/zp
 
         # By default, no sharding over "input dim"
+        print(f"GROUP SIZE {group_size}")
         scales_and_zp_size = input_size // group_size
         scales_and_zp_input_dim = None
 
