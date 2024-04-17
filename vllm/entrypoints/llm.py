@@ -10,6 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
 
@@ -85,7 +86,7 @@ class LLM:
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: int = 8192,
-        disable_custom_all_reduce: bool = True,
+        disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
         if "disable_log_stats" not in kwargs:
@@ -108,7 +109,8 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(engine_args)
+        self.llm_engine = LLMEngine.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
     def get_tokenizer(
@@ -168,8 +170,12 @@ class LLM:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
-        num_requests = len(prompts) if prompts is not None else len(
-            prompt_token_ids)
+        if prompts is not None:
+            num_requests = len(prompts)
+        else:
+            assert prompt_token_ids is not None
+            num_requests = len(prompt_token_ids)
+
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[

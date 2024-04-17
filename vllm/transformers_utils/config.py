@@ -1,11 +1,13 @@
-from typing import Optional
+from typing import Dict, Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import *
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             JAISConfig, MPTConfig, RWConfig)
 
-_CONFIG_REGISTRY = {
+_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,
+    "dbrx": DbrxConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
