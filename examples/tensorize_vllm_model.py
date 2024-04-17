@@ -16,8 +16,14 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
+from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
+                                                         TensorizerConfig,
+                                                         TensorizerAgent,
+                                                         serialize_vllm_model)
 from vllm.model_executor.models import ModelRegistry
+
+# TODO: Update this to account for new changes with model_loader_extra_config
+#       and the vLLM type reader when applicable
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -178,30 +184,6 @@ def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
         f"Supported architectures: {ModelRegistry.get_supported_archs()}")
 
 
-def serialize():
-
-    eng_args_dict = {f.name: getattr(args, f.name) for f in
-                     dataclasses.fields(EngineArgs)}
-    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
-    engine = LLMEngine.from_engine_args(engine_args)
-
-    model = (engine.model_executor.driver_worker.
-             model_runner.model)
-
-    encryption_params = EncryptionParams.random() if keyfile else None
-    if keyfile:
-        with _write_stream(keyfile) as stream:
-            stream.write(encryption_params.key)
-
-    with _write_stream(model_path) as stream:
-        serializer = TensorSerializer(stream, encryption=encryption_params)
-        serializer.write_module(model)
-        serializer.close()
-
-    print("Serialization complete. Model tensors saved to", model_path)
-    if keyfile:
-        print("Key saved to", keyfile)
-
 
 def deserialize():
     config = AutoConfig.from_pretrained(model_ref)
@@ -241,12 +223,21 @@ def deserialize():
 
 args = parse_args()
 
-s3_access_key_id = (args.s3_access_key_id or os.environ.get("S3_ACCESS_KEY_ID")
-                    or None)
-s3_secret_access_key = (args.s3_secret_access_key
-                        or os.environ.get("S3_SECRET_ACCESS_KEY") or None)
+model_extra_config = args.model_loader_extra_config or {}
 
-s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL") or None)
+tensorizer_args = TensorizerArgs(model_extra_config) \
+    if model_extra_config else None
+
+# TODO: Fix this, especially in the case of model_extra_config not being passed
+
+s3_access_key_id = tensorizer_args.s3_access_key_id if tensorizer_args \
+    else os.environ.get("S3_ACCESS_KEY_ID", None)
+
+s3_secret_access_key = tensorizer_args.s3_secret_access_key if tensorizer_args \
+    else os.environ.get("S3_SECRET_ACCESS_KEY", None)
+
+s3_endpoint = tensorizer_args.s3_endpoint if tensorizer_args \
+    else os.environ.get("S3_ENDPOINT", None)
 
 _read_stream, _write_stream = (partial(
     stream_io.open_stream,
@@ -268,12 +259,27 @@ initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
 
+eng_args_dict = {f.name: getattr(args, f.name) for f in
+                 dataclasses.fields(EngineArgs)}
+
+tensorizer_args = args - eng_args_dict
+
+## TODO: There's clearly too much needless stuff going on to instantiate the agent
+config = TensorizerConfig(tensorizer_args)
+tensorizer_args = TensorizerConfig._construct_tensorizer_args()
+tensorizer_agent = TensorizerAgent(tensorizer_args)
+
+eng_args_dict = {f.name: getattr(args, f.name) for f in
+                 dataclasses.fields(EngineArgs)}
+engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
+engine = LLMEngine.from_engine_args(engine_args)
+
 if args.command == "serialize":
     input_dir = args.serialized_directory.rstrip('/')
     suffix = args.suffix if args.suffix else uuid.uuid4().hex
     base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
     model_path = f"{base_path}/model.tensors"
-    serialize()
+    serialize_vllm_model(tensorizer_agent, engine, keyfile)
 elif args.command == "deserialize":
     tensorizer_args = TensorizerArgs.from_cli_args(args)
     model_path = args.path_to_tensors

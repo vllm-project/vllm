@@ -39,7 +39,7 @@ def is_curl_installed():
 
 @pytest.fixture(autouse=True)
 def tensorizer_config():
-    config = TensorizerConfig(tensorizer_uri="vllm", vllm_tensorized=True)
+    config = TensorizerConfig(tensorizer_uri="vllm")
     return config
 
 
@@ -90,8 +90,7 @@ def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
         model_ref,
         load_format="tensorizer",
         model_loader_extra_config=TensorizerConfig(tensorizer_uri=model_path,
-                                                   num_readers=1,
-                                                   vllm_tensorized=True),
+                                                   num_readers=1)
     )
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
@@ -109,7 +108,6 @@ def test_can_deserialize_s3(vllm_runner):
                                   model_loader_extra_config=TensorizerConfig(
                                       tensorizer_uri=tensorized_path,
                                       num_readers=1,
-                                      vllm_tensorized=False,
                                       s3_endpoint="object.ord1.coreweave.com",
                                   ))
 
@@ -143,7 +141,7 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
                                         tensorizer_uri=model_path,
                                         encryption_keyfile=key_path,
                                         num_readers=1,
-                                        vllm_tensorized=True))
+                                        ))
 
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
@@ -168,7 +166,7 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
                                   model_loader_extra_config=TensorizerConfig(
                                       tensorizer_uri=model_path,
                                       num_readers=1,
-                                      vllm_tensorized=False))
+                                      ))
 
     deserialized_outputs = loaded_hf_model.generate_greedy(
         prompts, max_tokens=max_tokens)
@@ -203,7 +201,6 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
         model_loader_extra_config=TensorizerConfig(
             tensorizer_uri=model_path,
             num_readers=1,
-            vllm_tensorized=True,
         ),
         enable_lora=True,
         max_loras=1,
@@ -221,7 +218,7 @@ def test_load_without_tensorizer_load_format(vllm_runner):
     with pytest.raises(ValueError):
         vllm_runner(model_ref,
                     model_loader_extra_config=TensorizerConfig(
-                        tensorizer_uri="test", vllm_tensorized=False))
+                        tensorizer_uri="test"))
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
@@ -306,7 +303,7 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
         vllm_runner(model_ref,
                     load_format="safetensors",
                     model_loader_extra_config=TensorizerConfig(
-                        tensorizer_uri="test", vllm_tensorized=False))
+                        tensorizer_uri="test"))
 
 
 def test_tensorizer_with_tp(vllm_runner):
@@ -320,8 +317,9 @@ def test_tensorizer_with_tp(vllm_runner):
             model_loader_extra_config=TensorizerConfig(
                 tensorizer_uri=tensorized_path,
                 num_readers=1,
-                vllm_tensorized=False,
                 s3_endpoint="object.ord1.coreweave.com",
             ),
             tensor_parallel_size=2,
         )
+
+def test_vllm_tensorized_model_has_same_outputs(tmp_path):
