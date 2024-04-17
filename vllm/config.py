@@ -649,6 +649,7 @@ class SpeculativeConfig:
         target_dtype: str,
         speculative_model: Optional[str],
         num_speculative_tokens: Optional[int],
+        speculative_max_model_len: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -666,6 +667,7 @@ class SpeculativeConfig:
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided.
+            TODO speculative_max_model_len
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -709,11 +711,12 @@ class SpeculativeConfig:
         )
 
         # TODO docs
-        draft_model_config.max_model_len = min(
-            target_model_config.max_model_len,
-            draft_model_config.max_model_len)
+        #draft_model_config.max_model_len = min(
+        #    target_model_config.max_model_len,
+        #    draft_model_config.max_model_len)
 
-        draft_model_config.max_model_len = 32
+        if speculative_max_model_len is not None:
+            draft_model_config.max_model_len = speculative_max_model_len
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(

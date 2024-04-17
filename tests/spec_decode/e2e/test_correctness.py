@@ -404,6 +404,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "speculative_max_model_len": 32,
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])

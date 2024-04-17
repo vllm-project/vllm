@@ -838,18 +838,10 @@ class ModelRunner:
             execute_model_kwargs.update({"image_input": multi_modal_input})
         hidden_states = model_executable(**execute_model_kwargs)
 
-        # When 4 speculations x 6 speculated tokens + 4 non speculations.
-        if len(seq_group_metadata_list) == 28:
-            print('after model execute')
-            breakpoint()
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        # When 4 speculations x 6 speculated tokens + 4 non speculations.
-        if len(seq_group_metadata_list) == 28:
-            print('after compute logits')
-            breakpoint()
 
         # Only perform sampling in the driver worker.
         if not sampling_metadata.perform_sampling:
@@ -861,10 +853,6 @@ class ModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # When 4 speculations x 6 speculated tokens + 4 non speculations.
-        if len(seq_group_metadata_list) == 28:
-            print('after sampling')
-            breakpoint()
 
         return output
 
