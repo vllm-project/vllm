@@ -121,8 +121,9 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         if num_seq_groups == 0:
             return {}
 
-        output = self.model_runner.execute_model(seq_group_metadata_list,
+        output, kv_caches = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.tpu_cache)
+        self.tpu_cache = kv_caches
         return output
 
 

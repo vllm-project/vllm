@@ -154,10 +154,8 @@ class Attention(nn.Module):
     )
 
     # Write the incoming keys and values to KV cache.
-    key_cache = cache[0]
-    value_cache = cache[1]
-    key_cache = write_to_cache(key_proj, key_cache, slot_mapping)
-    value_cache = write_to_cache(value_proj, value_cache, slot_mapping)
+    key_cache = write_to_cache(key_proj, cache[0], slot_mapping)
+    value_cache = write_to_cache(value_proj, cache[1], slot_mapping)
     cache = jnp.stack([key_cache, value_cache])
 
     if block_tables is None:
@@ -308,19 +306,20 @@ class Transformer(nn.Module):
       logits_indices: jax.Array,
   ) -> tuple[jax.Array, list[jax.Array]]:
     x = self.embedder.encode(token_ids)
+    new_caches = []
     for i, block in enumerate(self.blocks):
-      layer_cache = kv_caches[i]
-      x, layer_cache = block(
+      x, new_cache = block(
           x,
           positions,
           slot_mapping,
           block_tables,
           context_lens,
-          layer_cache,
+          kv_caches[i],
       )
-      kv_caches[i] = layer_cache
+      new_caches.append(new_cache)
+
     x = self.final_norm(x)
     x = x.reshape(-1, x.shape[-1])
     hidden_states = x[logits_indices]
     logits = self.embedder.decode(hidden_states)
-    return logits, kv_caches
+    return logits, new_caches

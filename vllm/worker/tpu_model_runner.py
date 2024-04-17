@@ -168,7 +168,7 @@ class TPUModelRunner:
         base_indicies = jnp.arange(batch_size, dtype=jnp.int32) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
-        logits, kv_caches = self.model.apply(
+        logits, new_kv_caches = self.model.apply(
             {"params": self.params["transformer"]},
             token_ids,
             position_ids,
@@ -178,17 +178,17 @@ class TPUModelRunner:
             kv_caches,
             logits_indices,
         )
-        return logits, kv_caches
+        return logits, new_kv_caches
 
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[jax.Array],
-    ) -> Optional[SamplerOutput]:
+    ) -> Tuple[Optional[SamplerOutput], List[jax.Array]]:
         from vllm.sequence import SequenceOutput, SequenceGroupOutput, Logprob
 
         inputs = self.prepare_input_arrays(seq_group_metadata_list)
-        logits, _ = self.compiled_fn(*inputs, kv_caches)
+        logits, new_kv_caches = self.compiled_fn(*inputs, kv_caches)
         next_token_ids = jnp.argmax(logits, axis=-1)
         next_token_ids = jax.device_put(next_token_ids, jax.devices("cpu")[0])
         next_token_ids = next_token_ids.tolist()
@@ -205,7 +205,7 @@ class TPUModelRunner:
                 i += 1
 
             sampler_outputs.append(SequenceGroupOutput(seq_outputs, None))
-        return SamplerOutput(sampler_outputs)
+        return SamplerOutput(sampler_outputs), new_kv_caches
 
 
 def _make_array_with_pad(
