@@ -20,8 +20,8 @@ namespace vec_op {
 #define CPU_KERNEL_GUARD_OUT(NAME)
 #else
 #define CPU_KERNEL_GUARD_IN(NAME)                                              \
-  std::cout << #NAME << " invoked." << std::endl;
-#define CPU_KERNEL_GUARD_OUT(NAME) std::cout << #NAME << " exit." << std::endl;
+  RECORD_FUNCTION(#NAME, c10::ArrayRef<c10::IValue>({}));
+#define CPU_KERNEL_GUARD_OUT(NAME)
 #endif
 
 #define FORCE_INLINE __attribute__((always_inline)) inline
@@ -175,7 +175,8 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     AliasReg ar;
     ar.reg = reg;
     float result = 0;
-    unroll_loop<int, VEC_ELEM_NUM>([&result, &ar](int i) { result += ar.values[i]; });
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&result, &ar](int i) { result += ar.values[i]; });
 
     return result;
   }
@@ -347,6 +348,17 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16 &v)
 
 inline void prefetch(const void *addr) { _mm_prefetch(addr, _MM_HINT_T1); }
 
+inline void non_temporal_save(BF16Vec32 &vec, void *ptr) {
+  _mm512_stream_si512((__m512i *)ptr, vec.reg);
+}
+
+inline void non_temporal_save(BF16Vec16 &vec, void *ptr) {
+  _mm256_stream_si256((__m256i *)ptr, vec.reg);
+}
+
+inline void non_temporal_save(FP32Vec16 &vec, void *ptr) {
+  _mm512_stream_ps((float *)ptr, vec.reg);
+}
 }; // namespace vec_op
 
 #endif

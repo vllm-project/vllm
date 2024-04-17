@@ -1,6 +1,9 @@
-from typing import List, Set, Tuple
+import os
+import copy
+from typing import Dict, List, Optional, Tuple, Set
 
 import torch
+import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
@@ -10,6 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
+from vllm.worker.cpu_worker import CPUWorker
 
 logger = init_logger(__name__)
 
@@ -24,17 +28,20 @@ class CPUExecutor(ExecutorBase):
         self.scheduler_config = _verify_and_get_scheduler_config(
             self.scheduler_config)
 
+        self.children_workers : List[CPUWorker] = []
+        self.children_loops = []
+
         # Instantiate the worker and load the model to CPU.
-        self._init_worker()
-
+        ip = get_ip()
+        port = get_open_port()
+        self.ip_port = ip + "_" + str(port)
+        self.distributed_init_method = get_distributed_init_method(ip, port)
+        if self.parallel_config.tensor_parallel_size > 1:
+            self._init_ray_workers()
+        else:
+            self._init_worker()
+    
     def _init_worker(self):
-        from vllm.worker.cpu_worker import CPUWorker
-
-        assert self.parallel_config.world_size == 1, (
-            "CPUExecutor only supports single CPU socket currently.")
-
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
         self.driver_worker = CPUWorker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
@@ -44,7 +51,8 @@ class CPUExecutor(ExecutorBase):
             load_config=self.load_config,
             local_rank=0,
             rank=0,
-            distributed_init_method=distributed_init_method,
+            distributed_init_method=self.distributed_init_method,
+            ip_port=self.ip_port,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
@@ -52,6 +60,88 @@ class CPUExecutor(ExecutorBase):
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
+
+    def _init_ray_workers(self):
+        assert self.parallel_config.tensor_parallel_size > 1
+        
+        import ray
+        from ray.util.scheduling_strategies import (
+            PlacementGroupSchedulingStrategy
+        )
+
+        #FIXME: Specify cluster addr explicitly.
+        ray.init(address="auto")
+        threads_num_per_node = torch.get_num_threads()
+        nodes = ray.nodes()
+
+        for node in nodes:
+            node_thread_num = node["Resources"]["CPU"]
+            if threads_num_per_node != node_thread_num:
+                raise RuntimeError(
+                    f"Number of OMP threads {node_thread_num} in child node "
+                    f"doesn't match with the number {threads_num_per_node} in "
+                    "driver worker.") 
+        
+        placement_group_specs = (
+            [{"CPU": threads_num_per_node}] * \
+            (self.parallel_config.world_size - 1))
+        placement_group = ray.util.placement_group(
+            placement_group_specs)
+        ray.get(placement_group.ready(), timeout=1800)
+        self.parallel_config.placement_group = placement_group
+        
+        model_config = copy.deepcopy(self.model_config)
+        parallel_config = copy.deepcopy(self.parallel_config)
+        scheduler_config = copy.deepcopy(self.scheduler_config)
+        device_config = copy.deepcopy(self.device_config)
+        lora_config = copy.deepcopy(self.lora_config)
+        cache_config = copy.deepcopy(self.cache_config)
+        load_config = copy.deepcopy(self.load_config)
+        distributed_init_method = copy.deepcopy(self.distributed_init_method)
+        for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+            scheduling_strategy = PlacementGroupSchedulingStrategy(
+                placement_group=placement_group,
+                placement_group_capture_child_tasks=True,
+                placement_group_bundle_index=bundle_id,
+            )
+
+            child_worker = ray.remote(
+                num_cpus=threads_num_per_node,
+                scheduling_strategy=scheduling_strategy
+            )(CPUWorker).remote(
+                model_config=model_config,
+                parallel_config=parallel_config,
+                scheduler_config=scheduler_config,
+                device_config=device_config,
+                cache_config=cache_config,
+                load_config=load_config,
+                local_rank=bundle_id + 1,
+                rank=bundle_id + 1,
+                distributed_init_method=distributed_init_method,
+                ip_port = self.ip_port,
+                lora_config=lora_config,
+                kv_cache_dtype=self.cache_config.cache_dtype,
+                is_driver_worker=False, 
+            ) # type: ignore
+            self.children_workers.append(child_worker)
+
+        task_handlers = []
+        for child in self.children_workers:
+            task_handlers.append(child.init_device.remote())
+            task_handlers.append(child.load_model.remote())
+
+        self._init_worker()
+
+        # Initialize SHM CCL
+        for child in self.children_workers:
+            task_handlers.append(child.init_shm_manager.remote())
+        ray.get(task_handlers)
+        self.driver_worker.init_shm_manager()
+
+        for child in self.children_workers:
+            task_handlers.append(child.join_shm_manager.remote())
+        ray.get(task_handlers)
+        self.driver_worker.join_shm_manager()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
@@ -70,7 +160,25 @@ class CPUExecutor(ExecutorBase):
         # referred as `gpu block`. Because we want to reuse the existing block
         # management procedure.
         logger.info("# CPU blocks: %d", num_gpu_blocks)
+
+        if self.parallel_config.tensor_parallel_size > 1:
+            task_handlers = []
+            for child in self.children_workers:
+                task_handlers.append(
+                    child.initialize_cache.remote(num_gpu_blocks, num_cpu_blocks)
+                )
+
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+        if self.parallel_config.tensor_parallel_size > 1:
+            import ray
+            ray.get(task_handlers)
+
+            # FIXME: For now, we suppose workers are ready after the 
+            # cache initialization.
+            self.children_loops = []
+            for worker in self.children_workers:
+                self.children_loops.append(worker.child_loop.remote())
 
     def execute_model(
             self,

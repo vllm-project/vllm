@@ -14,6 +14,7 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 list(APPEND CXX_COMPILE_FLAGS 
     "-fopenmp"
+    "-DCPU_OP_GUARD"
     "-DVLLM_CPU_EXTENSION")
 
 execute_process(COMMAND cat /proc/cpuinfo
@@ -73,6 +74,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cache.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/pos_encoding.cpp"
+    "csrc/cpu/shm_ccl.cpp"
     "csrc/cpu/pybind.cpp")
 
 define_gpu_extension_target(
