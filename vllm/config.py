@@ -867,8 +867,8 @@ class VisionLanguageConfig:
     # Used for running `run_prefill_max_token`.
     # For models that support varying resolution, this corresponds to
     # worst case scenario (biggest supported resolution).
-    image_input_shape: tuple
-    image_feature_size: int
+    image_input_shape: Optional[tuple]
+    image_feature_size: Optional[int]
 
     @classmethod
     def get_image_input_enum_type(

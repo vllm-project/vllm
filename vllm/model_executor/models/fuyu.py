@@ -23,6 +23,7 @@ from torch import nn
 from transformers import FuyuConfig
 
 from vllm.attention import AttentionMetadata
+from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -80,13 +81,15 @@ class FuyuForCausalLM(nn.Module):
     def __init__(
         self,
         config: FuyuConfig,
+        vision_language_config: VisionLanguageConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.image_token_id = 71011
+        self.vision_language_config = vision_language_config
+        self.image_token_id = self.vision_language_config.image_token_id
 
         self.processor = FuyuInputProcessor()
         self.vision_embed_tokens = RowParallelLinear(

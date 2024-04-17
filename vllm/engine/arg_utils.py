@@ -3,11 +3,14 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
+from vllm.logger import init_logger
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.utils import str_to_int_tuple
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -497,14 +500,16 @@ class EngineArgs:
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):
-                raise ValueError(
-                    'Specify `image_token_id`, `image_input_shape` and '
-                    '`image_feature_size` together with `image_input_type`.')
+                logger.warning("`image_token_id`, `image_input_shape` and"
+                               "`image_feature_size` are not specified"
+                               "together with `image_input_type`.")
+            if self.image_input_shape:
+                self.image_input_shape = str_to_int_tuple(self.image_input_shape)
             vision_language_config = VisionLanguageConfig(
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
-                image_input_shape=str_to_int_tuple(self.image_input_shape),
+                image_input_shape=self.image_input_shape,
                 image_feature_size=self.image_feature_size,
             )
         else:

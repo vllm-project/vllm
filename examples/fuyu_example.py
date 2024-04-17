@@ -10,7 +10,11 @@ from vllm.sequence import MultiModalData
 
 
 def run_fuyu_pixel_values():
-    llm = LLM(model="adept/fuyu-8b")
+    llm = LLM(
+        model="adept/fuyu-8b",
+        image_input_type="pixel_values",
+        image_token_id=71011,
+    )
 
     # load and create image prompt
     images = torch.load("images/cherry_blossom_pixel_values.pt")
