@@ -155,6 +155,12 @@ class RotaryEmbedding(nn.Module):
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
 
+    def extra_repr(self) -> str:
+        s = "head_size={head_size}, rotary_dim={rotary_dim}"
+        s += ", max_position_embeddings={max_position_embeddings}"
+        s += ", base={base}, is_neox_style={is_neox_style}"
+        return s.format(**self.__dict__)
+
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.

@@ -70,6 +70,11 @@ class LogitsProcessor(nn.Module):
             logits = logits[:, :self.org_vocab_size]
         return logits
 
+    def extra_repr(self) -> str:
+        s = "vocab_size={vocab_size}, org_vocab_size={org_vocab_size}"
+        s += ", scale={scale}, logits_as_input={logits_as_input}"
+        return s.format(**self.__dict__)
+
 
 def _prune_hidden_states(
     hidden_states: torch.Tensor,
