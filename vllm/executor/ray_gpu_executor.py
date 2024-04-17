@@ -28,7 +28,7 @@ class RayGPUExecutor(RayExecutorBase):
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
     ) -> None:
-        worker_gpu_ids = ray_worker.get_gpu_ids.remote()
+        worker_gpu_ids = ray.get(ray_worker.get_gpu_ids.remote())
         worker_gpu_ids = sorted(worker_gpu_ids)
         ray_worker.set_cuda_visible_devices.remote(worker_gpu_ids)
 
