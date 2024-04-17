@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -18,14 +18,14 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
         The implementation may run profiling or other heuristics to determine
         the size of caches.
 
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
@@ -40,12 +40,13 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        """Executes one model step on the given sequences."""
+    def execute_model(
+            self, seq_group_metadata_list: List[SequenceGroupMetadata],
+            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
+                                                                        int],
+            blocks_to_copy: Dict[int, List[int]]) -> List[SamplerOutput]:
+        """Executes at least one model step on the given sequences, unless no
+        sequences are provided."""
         raise NotImplementedError
 
     @abstractmethod
