@@ -29,6 +29,10 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
         self.model_runner = NeuronModelRunner(model_config, parallel_config,
                                               scheduler_config, device_config)
