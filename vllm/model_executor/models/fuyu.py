@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Fuyu model."""
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.utils.checkpoint
@@ -23,13 +23,11 @@ from torch import nn
 from transformers import FuyuConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 
 
@@ -82,15 +80,13 @@ class FuyuForCausalLM(nn.Module):
     def __init__(
         self,
         config: FuyuConfig,
-        vision_language_config: VisionLanguageConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-
-        self.vision_language_config = vision_language_config
+        self.image_token_id = 71011
 
         self.processor = FuyuInputProcessor()
         self.vision_embed_tokens = RowParallelLinear(
@@ -131,7 +127,7 @@ class FuyuForCausalLM(nn.Module):
                 input_ids,
                 inputs_embeds,
                 vision_embeddings,
-                image_token_id=self.vision_language_config.image_token_id,
+                image_token_id=self.image_token_id,
             )
 
         else:
@@ -162,15 +158,10 @@ class FuyuForCausalLM(nn.Module):
         return next_tokens
 
     def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
+        self, weights: Iterable[Tuple[str, torch.Tensor]]
     ):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name

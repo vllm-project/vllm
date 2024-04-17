@@ -11,14 +11,7 @@ from vllm.sequence import MultiModalData
 
 
 def run_fuyu_pixel_values():
-    llm = LLM(
-        model="/data/LLM-model/fuyu-8b",
-        image_input_type="pixel_values",
-        image_token_id=71011,
-        # below makes no sense to fuyu, just make model_executor happy
-        image_input_shape="1,576,1024",
-        image_feature_size=2700,
-    )
+    llm = LLM(model="/data/LLM-model/fuyu-8b")
 
     # load and create image prompt
     images = torch.load("images/cherry_blossom_pixel_values.pt")
