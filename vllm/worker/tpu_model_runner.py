@@ -81,6 +81,10 @@ class TPUModelRunner:
 
         max_prompt_len = max(prompt_lens)
         assert max_prompt_len > 0
+        # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence
+        # length to be a multiple of 16. We pad the prompt length to the nearest
+        # multiple of 16. This is also good for performance.
+        max_prompt_len = (max_prompt_len + 15) // 16 * 16
 
         input_tokens = _make_array_with_pad(input_tokens,
                                             max_prompt_len,

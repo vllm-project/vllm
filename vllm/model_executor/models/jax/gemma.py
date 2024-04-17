@@ -165,8 +165,8 @@ class Attention(nn.Module):
         value_proj = jnp.repeat(value_proj, self.num_heads, axis=-2)
         key_proj = jnp.repeat(key_proj, self.num_heads, axis=-2)
 
-      if False:
-        # FIXME(woosuk)
+      if True:
+        # FlashAttention.
         output = flash_attn(
             query_proj,
             key_proj,
@@ -174,6 +174,7 @@ class Attention(nn.Module):
             self.sm_scale,
         )
       else:
+        # Naive attention with masking.
         seq_len = query_proj.shape[1]
         attn_mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
 
