@@ -48,8 +48,8 @@ if triton.__version__ >= "2.1.0":
         num_queries_per_kv: int,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
+        BLOCK_DMODEL_PADDED: tl.constexpr,
         BLOCK_N: tl.constexpr,
-        BLOCK_DMODEL_USED: tl.constexpr,
     ):
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
@@ -66,14 +66,14 @@ if triton.__version__ >= "2.1.0":
 
         # initialize offsets
         offs_n = tl.arange(0, BLOCK_N)
-        offs_d = tl.arange(0, BLOCK_DMODEL)
+        offs_d = tl.arange(0, BLOCK_DMODEL_PADDED)
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         off_q = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
             cur_head * stride_qh + offs_d[None, :] * stride_qd)
 
         dim_mask = tl.where(
-            tl.arange(0, BLOCK_DMODEL) < BLOCK_DMODEL_USED, 1, 0).to(tl.int1)
+            tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(tl.int1)
 
         q = tl.load(Q + off_q,
                     mask=dim_mask[None, :] &
@@ -83,7 +83,7 @@ if triton.__version__ >= "2.1.0":
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)
 
         for start_n in range(0, cur_batch_ctx_len, BLOCK_N):
             start_n = tl.multiple_of(start_n, BLOCK_N)
@@ -644,7 +644,7 @@ if triton.__version__ >= "2.1.0":
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
         # round up Lk to power of two
-        Lk2 = 2**((Lk - 1).bit_length())
+        Lk_padded = 2**((Lk - 1).bit_length())
 
         sm_scale = 1.0 / (Lq**0.5)
         batch, head = b_seq_len.shape[0], q.shape[1]
@@ -654,7 +654,7 @@ if triton.__version__ >= "2.1.0":
 
         num_warps = 8 if Lk <= 64 else 8
         if alibi_slopes is not None:
-            assert Lk == Lk2
+            assert Lk == Lk_padded
             _fwd_kernel_alibi[grid](
                 q,
                 k,
@@ -746,10 +746,10 @@ if triton.__version__ >= "2.1.0":
                 3),  #[num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
             BLOCK_M=BLOCK,
-            BLOCK_DMODEL=Lk2,
+            BLOCK_DMODEL=Lk,
+            BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             num_warps=num_warps,
             num_stages=1,
-            BLOCK_DMODEL_USED=Lk,
         )
         return
