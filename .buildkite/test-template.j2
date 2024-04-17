@@ -2,7 +2,19 @@
 {% set default_num_gpu = 1 %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
-steps:
+ steps:
+ - label: ":docker: build image"
+    commands:
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
+      - "docker push {{ docker_image }}"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+  - wait
+
   - label: "AMD Default Test"
     agents:
       queue: amd
@@ -110,18 +122,6 @@ steps:
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
-
-  - label: ":docker: build image"
-    commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
-      - "docker push {{ docker_image }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-  - wait
 
   {% for step in steps %}
   - label: "{{ step.label }}"
