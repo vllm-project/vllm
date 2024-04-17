@@ -47,8 +47,8 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_bl,
         num_queries_per_kv: int,
         BLOCK_M: tl.constexpr,
-        BLOCK_DMODEL: tl.constexpr,
-        BLOCK_DMODEL_PADDED: tl.constexpr,
+        BLOCK_DMODEL: tl.constexpr,  # head size
+        BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
     ):
         cur_batch = tl.program_id(0)
@@ -643,7 +643,7 @@ if triton.__version__ >= "2.1.0":
         # shape constraints
         Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
         assert Lq == Lk and Lk == Lv
-        # round up Lk to power of two
+        # round up Lk to a power of 2 - this is required for Triton block size
         Lk_padded = 2**((Lk - 1).bit_length())
 
         sm_scale = 1.0 / (Lq**0.5)
