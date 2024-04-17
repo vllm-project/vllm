@@ -25,7 +25,7 @@ class FP8Config(QuantizationConfig):
     @classmethod
     def get_min_capability(cls) -> int:
         # PyTorch 2.3.0+ is required to run FP8 on SM 89 (e.g. Ada) GPUs.
-        # Specifially, this PR has to be included:
+        # Specifically, this PR has to be included:
         # https://github.com/pytorch/pytorch/pull/118881/files
         return 89
 
@@ -52,7 +52,15 @@ class Fp8LinearState(Enum):
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
+    We now support two types of model checkpoints:
+    1. Common FP16/BF16 model checkpoints. In this case, the weight
+       scaling factor will be initialized during the first forward pass.
+    2. FP8 model checkpoints. In this case, the weight scaling factor
+       will be loaded from the checkpoint with parameter name "w_scale",
+       and the weight should already in FP8 and has been transposed.
 
+    Note that we currently only support per-tensor quantization.
+       
     Args:
         quant_config: The quantization config.
     """
@@ -78,41 +86,37 @@ class Fp8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-        qweight = Parameter(torch.empty(input_size_per_partition,
-                                       output_size_per_partition,
-                                       dtype=torch.float8_e4m3fn),
-                           requires_grad=False)
-        set_weight_attrs(qweight, {"input_dim": 1, "output_dim": 0})
-        layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
-
-        scale = Parameter(
+        # Will be loaded from FP8 checkpoints, or initialized for
+        # FP16/BF16 checkpoints during the first forward pass.
+        w_scale = Parameter(
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        layer.register_parameter("scale", scale)
-        set_weight_attrs(scale, extra_weight_attrs)
+        layer.register_parameter("w_scale", w_scale)
+        set_weight_attrs(w_scale, extra_weight_attrs)
         layer.fp8_linear_state = Fp8LinearState.UNINITIALIZED
 
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qinput, scale = per_tensor_quantize(x)
 
         if layer.fp8_linear_state == Fp8LinearState.UNINITIALIZED:
-            qweight, weight_scale = per_tensor_quantize(layer.weight.data)
-            layer.weight.data = torch.empty_like(layer.weight.data)
-            layer.qweight.data = qweight.t()
-            layer.scale.data = weight_scale
+            # Per-tensor scaling on the fly for FP16/BF16 weights
+            # during the first forward pass.
+            if layer.weight.dtype != torch.float8_e4m3fn:
+                qweight, weight_scale = per_tensor_quantize(layer.weight.data)
+                layer.weight.data = qweight.t()
+                layer.w_scale.data = weight_scale
             layer.fp8_linear_state = Fp8LinearState.READY
 
+        qinput, x_scale = per_tensor_quantize(x)
         output, _ = torch._scaled_mm(
             qinput,
-            layer.qweight,
+            layer.weight,
             out_dtype=x.dtype,
-            scale_a=scale,
-            scale_b=layer.scale,
+            scale_a=x_scale,
+            scale_b=layer.w_scale,
             bias=bias,
         )
         return output
