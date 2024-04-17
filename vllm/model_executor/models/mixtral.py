@@ -89,13 +89,13 @@ class MixtralMoE(nn.Module):
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=dtype=torch.float8_e4m3fn))
+                        dtype=torch.float8_e4m3fn))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=dtype=torch.float8_e4m3fn))
+                        dtype=torch.float8_e4m3fn))
 
         # Scaling factors for fp8 weights
         self.ws_scale = nn.Parameter(
@@ -144,7 +144,7 @@ class MixtralMoE(nn.Module):
                                         self.ws,
                                         self.w2s,
                                         self.ws_scale,
-                                        self.s2s_scale,
+                                        self.w2s_scale,
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,

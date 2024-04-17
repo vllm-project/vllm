@@ -425,7 +425,7 @@ def fused_moe(
 
     ops.scaled_fp8_quant(intermediate_cache2_scaled, intermediate_cache2, a2_scale)
 
-    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3,
+    invoke_fused_moe_kernel(intermediate_cache2_scaled, w2, intermediate_cache3,
                             w2_scale, a2_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
