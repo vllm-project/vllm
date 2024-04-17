@@ -100,9 +100,9 @@ class PersimmonAttention(nn.Module):
             bias=True,
             linear_method=linear_method,
         )
-        self.qk_layernorm = config.qk_layernorm
+        self.is_qk_layernorm = config.qk_layernorm
 
-        if self.qk_layernorm:
+        if self.is_qk_layernorm:
             self.q_layernorm = nn.LayerNorm(
                 config.hidden_size // self.num_heads,
                 eps=config.layer_norm_eps,
@@ -145,7 +145,7 @@ class PersimmonAttention(nn.Module):
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
-        if self.qk_layernorm:
+        if self.is_qk_layernorm:
             # [seq_length, num_heads, head_dim]
             q = self._split_heads(q)
             k = self._split_heads(k)
@@ -316,7 +316,7 @@ class PersimmonForCausalLM(nn.Module):
 
             if "query_key_value" in name:
                 # copy from vllm/model_executor/models/bloom.py
-                # NOTE: BLOOM's fused QKV's output_dim has the shape of
+                # NOTE: Persimmon's fused QKV's output_dim has the shape of
                 # (num_heads * 3 * head_size), while the
                 # required shape is (3 * num_heads * head_size).
                 # Thus, we need weight conversion.
