@@ -10,6 +10,9 @@ def target_fn(env, filepath):
 
 
 def test_library_file():
+    # note: don't import vllm.distributed.device_communicators.pynccl
+    # before running this test, otherwise the library file will be loaded
+    # and it might interfere with the test
     from vllm.utils import find_nccl_library
     so_file = find_nccl_library()
     with open(so_file, 'rb') as f:
