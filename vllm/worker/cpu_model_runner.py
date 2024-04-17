@@ -59,13 +59,14 @@ class CPUModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               load_config=self.load_config,
-                               device_config=self.device_config,
-                               vision_language_config=self.vision_language_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            model_config=self.model_config,
+            load_config=self.load_config,
+            device_config=self.device_config,
+            vision_language_config=self.vision_language_config,
+            lora_config=self.lora_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config)
 
     def _prepare_prompt(
         self,
@@ -122,7 +123,7 @@ class CPUModelRunner:
                 block_offset = i % self.block_size  # type: ignore
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-        
+
         if multi_modal_input_list:
             assert self.vision_language_config, (
                 "Multi-modal inputs are only supported by "
@@ -158,13 +159,8 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            prompt_lens,
-            multi_modal_input
-        )
+        return (input_tokens, input_positions, attn_metadata, prompt_lens,
+                multi_modal_input)
 
     def _prepare_decode(
         self,
@@ -355,8 +351,9 @@ class CPUModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, attn_metadata,
-                 prompt_lens, multi_modal_input) = self._prepare_prompt(seq_group_metadata_list)
+                (input_tokens, input_positions, attn_metadata, prompt_lens,
+                 multi_modal_input
+                 ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
@@ -389,13 +386,8 @@ class CPUModelRunner:
                 perform_sampling=False,
             )
 
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            sampling_metadata,
-            multi_modal_input
-        )
+        return (input_tokens, input_positions, attn_metadata,
+                sampling_metadata, multi_modal_input)
 
     @torch.inference_mode()
     def execute_model(
@@ -403,7 +395,8 @@ class CPUModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata, multi_modal_input
+        (input_tokens, input_positions, attn_metadata, sampling_metadata,
+         multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         model_executable = self.model

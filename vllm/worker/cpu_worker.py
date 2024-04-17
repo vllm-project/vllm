@@ -6,7 +6,8 @@ import torch.distributed
 
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -141,15 +142,16 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
-        self.model_runner = CPUModelRunner(model_config,
-                                           parallel_config,
-                                           scheduler_config,
-                                           device_config,
-                                           load_config=self.load_config,
-                                           lora_config=self.lora_config,
-                                           vision_language_config=self.vision_language_config,
-                                           kv_cache_dtype=kv_cache_dtype,
-                                           is_driver_worker=is_driver_worker)
+        self.model_runner = CPUModelRunner(
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
+            kv_cache_dtype=kv_cache_dtype,
+            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine = None
