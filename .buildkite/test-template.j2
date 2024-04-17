@@ -16,10 +16,110 @@ steps:
           limit: 5
   - wait
 
-  - label: "AMD Test"
+  - label: "AMD Default Test"
     agents:
       queue: amd
-    command: bash .buildkite/run-amd-test.sh
+    command: "bash .buildkite/run-amd-test.sh"
+
+  - label: "AMD Regression Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_regression.sh"
+
+  - label: "AMD Async Engine Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_async_engine.sh"
+
+  - label: "AMD Basic Correctness Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_basic_correctness.sh"
+
+  - label: "AMD Core Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_core.sh"
+
+  - label: "AMD Distributed Comm Ops Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_distributed_comm_ops.sh"
+
+  - label: "AMD Distributed Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_distributed.sh"
+
+  - label: "AMD Engine Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_engine.sh"
+
+  - label: "AMD Entrypoints Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_entrypoints.sh"
+
+  - label: "AMD Examples Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_examples.sh"
+
+  - label: "AMD Kernels Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_kernels.sh"
+
+  - label: "AMD Models Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_models.sh"
+
+  - label: "AMD Llava Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_llava.sh"
+
+  - label: "AMD Prefix Caching Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_prefix_caching.sh"
+
+  - label: "AMD Samplers Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_samplers.sh"
+
+  - label: "AMD Logits Processor Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_logits_processor.sh"
+
+  - label: "AMD Worker Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_worker.sh"
+
+  - label: "AMD Speculative Decoding Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_speculative_decoding.sh"
+
+  - label: "AMD LoRA Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_lora.sh"
+
+  - label: "AMD Metrics Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_metrics.sh"
+
+  - label: "AMD Benchmarks Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_benchmarks.sh"
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
