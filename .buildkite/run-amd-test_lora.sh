@@ -14,7 +14,7 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_lora \
-	rocm python3 -m pytest -v -s vllm/tests/lora \
-	--shard-id=$BUILDKITE_PARALLEL_JOB --num-shards=$BUILDKITE_PARALLEL_JOB_COUNT
+docker run --device /dev/kfd --device /dev/dri --shm-size=10.24gb --network host --name rocm_test_lora \
+	rocm /bin/bash -c "pip install peft; python3 -m pytest -v -s vllm/tests/lora" #\
+#	--shard-id=$BUILDKITE_PARALLEL_JOB --num-shards=$BUILDKITE_PARALLEL_JOB_COUNT
 
