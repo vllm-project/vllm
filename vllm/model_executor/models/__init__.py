@@ -53,6 +53,7 @@ _MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
+    "YakForCausalLM": ("yak", "YakForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 }
 
