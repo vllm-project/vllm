@@ -189,12 +189,16 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
         output_size_per_partition: int,
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        **extra_weight_attrs,
     ) -> Dict[str, Any]:
+        del output_size # Unused.
+
         # Normalize group_size
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
@@ -329,76 +333,80 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
 
-        return {
-            "qweight": qweight,
-            "g_idx": g_idx,
-            "g_idx_sort_indices": g_idx_sort_indices,
-            "scales": scales,
-            "qzeros": qzeros,
-            "workspace": workspace,
-            "input_size_per_partition": input_size_per_partition,
-            "output_size_per_partition": output_size_per_partition,
-            "input_size": input_size,
-            "output_size": output_size,
-            "is_k_full": is_k_full,
-            "marlin_state": GPTQMarlinState.REPACK,
-        }
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("g_idx", g_idx)
+        set_weight_attrs(g_idx, extra_weight_attrs)
+        layer.register_parameter("g_idx_sort_indices", g_idx_sort_indices)
+        set_weight_attrs(g_idx_sort_indices, extra_weight_attrs)
+        layer.register_parameter("scales", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
+        layer.register_parameter("qzeros", qzeros)
+        set_weight_attrs(qzeros, extra_weight_attrs)
+        layer.register_parameter("workspace", workspace)
+        set_weight_attrs(workspace, extra_weight_attrs)
+
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.input_size = input_size
+        layer.is_k_full = is_k_full
+        layer.marlin_state = GPTQMarlinState.REPACK
 
     def apply_weights(
         self,
-        weights: Dict[str, Any],
+        layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         size_m = reshaped_x.shape[0]
-        part_size_n = weights["output_size_per_partition"]
-        part_size_k = weights["input_size_per_partition"]
-        full_size_k = weights["input_size"]
+        part_size_n = layer.output_size_per_partition
+        part_size_k = layer.input_size_per_partition
+        full_size_k = layer.input_size
 
         out_shape = x.shape[:-1] + (part_size_n, )
 
-        if weights["marlin_state"] == GPTQMarlinState.REPACK:
-            weights["marlin_state"] = GPTQMarlinState.READY
+        if layer.marlin_state == GPTQMarlinState.REPACK:
+            layer.marlin_state = GPTQMarlinState.READY
 
             # Newly generated tensors need to replace existing tensors that are
             # already registered as parameters by vLLM (and won't be freed)
             def replace_tensor(name, new_t):
                 # It is important to use resize_() here since it ensures
                 # the same buffer is reused
-                weights[name].resize_(new_t.shape)
-                weights[name].copy_(new_t)
+                getattr(layer, name).resize_(new_t.shape)
+                getattr(layer, name).copy_(new_t)
                 del new_t
 
-            cur_device = weights["qweight"].device
+            cur_device = layer.qweight.device
 
             # Process act_order
             if self.quant_config.desc_act:
                 # Get sorting based on g_idx
-                g_idx_sort_indices = torch.argsort(weights["g_idx"]).to(
+                g_idx_sort_indices = torch.argsort(layer.g_idx).to(
                     torch.int)
 
-                sorted_g_idx = weights["g_idx"][g_idx_sort_indices]
+                sorted_g_idx = layer.g_idx[g_idx_sort_indices]
 
                 replace_tensor("g_idx", sorted_g_idx)
                 replace_tensor("g_idx_sort_indices", g_idx_sort_indices)
 
             else:
                 # Reset g_idx related tensors
-                empty_g_idx = torch.empty(0,
-                                          dtype=torch.int,
-                                          device=cur_device)
-                empty_g_idx_sort_indices = torch.empty(0,
-                                                       dtype=torch.int,
-                                                       device=cur_device)
-                weights["g_idx"] = empty_g_idx
-                weights["g_idx_sort_indices"] = empty_g_idx_sort_indices
+                layer.g_idx = Parameter(torch.empty(0,
+                                                    dtype=torch.int,
+                                                    device=cur_device),
+                                        requires_grad=False)
+                layer.g_idx_sort_indices = Parameter(torch.empty(0,
+                                                                 dtype=torch.int,
+                                                                 device=cur_device),
+                                                    requires_grad=False)
 
             # Repack weights
             marlin_qweight = ops.gptq_marlin_repack(
-                weights["qweight"],
-                weights["g_idx_sort_indices"],
+                layer.qweight,
+                layer.g_idx_sort_indices,
                 part_size_k,
                 part_size_n,
             )
@@ -410,17 +418,17 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             if self.quant_config.desc_act:
                 scales_size_k = full_size_k
 
-            marlin_scales = marlin_permute_scales(weights["scales"],
+            marlin_scales = marlin_permute_scales(layer.scales,
                                                   scales_size_k, scales_size_n,
                                                   self.quant_config.group_size)
             replace_tensor("scales", marlin_scales)
 
-        output = ops.gptq_marlin_gemm(reshaped_x, weights["qweight"],
-                                      weights["scales"], weights["g_idx"],
-                                      weights["g_idx_sort_indices"],
-                                      weights["workspace"], size_m,
+        output = ops.gptq_marlin_gemm(reshaped_x, layer.qweight,
+                                      layer.scales, layer.g_idx,
+                                      layer.g_idx_sort_indices,
+                                      layer.workspace, size_m,
                                       part_size_n, part_size_k,
-                                      weights["is_k_full"])
+                                      layer.is_k_full)
 
         if bias is not None:
             output.add_(bias)  # In-place add

@@ -59,8 +59,6 @@ def test_auto_gptq(model_arg_exptype: str) -> None:
                                    model_path,
                                    tokenizer_mode="auto",
                                    trust_remote_code=False,
-                                   download_dir=None,
-                                   load_format="dummy",
                                    seed=0,
                                    dtype="float16",
                                    revision=None,
