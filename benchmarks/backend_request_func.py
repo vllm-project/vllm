@@ -135,6 +135,7 @@ async def async_request_trt_llm(
                                               "data:")
 
                         data = json.loads(chunk)
+                        output.generated_text += data["text_output"]
                         timestamp = time.perf_counter()
                         # First token
                         if ttft == 0.0:
@@ -149,7 +150,6 @@ async def async_request_trt_llm(
                         most_recent_timestamp = timestamp
 
                     output.latency = most_recent_timestamp - st
-                    output.generated_text = json.loads(data)["text_output"]
                     output.success = True
 
                 else:
