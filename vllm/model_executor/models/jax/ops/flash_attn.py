@@ -24,5 +24,5 @@ def flash_attn(
         min(_DEFAULT_BLOCK_SIZES["block_q"], q.shape[1]),
         min(_DEFAULT_BLOCK_SIZES["block_k_major"], k.shape[1]),
         min(_DEFAULT_BLOCK_SIZES["block_k"], k.shape[1]),
-        min(_DEFAULT_BLOCK_SIZES["block_b"], q.shape[0]))
+        min(_DEFAULT_BLOCK_SIZES["block_b"], q.shape[0])),
     ).transpose(0, 2, 1, 3)
