@@ -568,3 +568,4 @@ def find_nccl_library():
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info(f"Found nccl from library {so_file}")
+    return so_file
