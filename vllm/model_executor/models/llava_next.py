@@ -9,8 +9,8 @@ from transformers.models.llava_next.modeling_llava_next import (
 from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.linear import LinearMethodBase
 
-from .llava import (LlavaImagePixelInputs, LlavaImageFeatureInputs,
-                    LlavaForConditionalGeneration)
+from .llava import (LlavaForConditionalGeneration, LlavaImageFeatureInputs,
+                    LlavaImagePixelInputs)
 
 
 class ImageSizesMixin(TypedDict, total=False):
