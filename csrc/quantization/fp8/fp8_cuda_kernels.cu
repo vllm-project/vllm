@@ -49,7 +49,7 @@ __global__ void segmented_max_reduction(
   // now cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
   if (cacheIndex == 0) {
-    atomicMaxFloat(scale, cache[0] / 448.0);
+    atomicMaxFloat(scale, cache[0] / std::numeric_limits<c10::Float8_e4m3fn>::max());
   }
 }
 
@@ -66,12 +66,27 @@ __global__ void scaled_fp8_quant_kernel(
   }
 }
 
+template<typename scalar_t>
+__global__ void fp8_silu_and_mul_kernel(
+  c10::Float8_e4m3fn* __restrict__ out,
+  const scalar_t* __restrict__ input,
+  const float* __restrict__ scale,
+  const int d) {
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const float x = (float) input[token_idx * 2 * d + idx];
+    const float y = (float) input[token_idx * 2 * d + d + idx];
+    float r = silu_kernel(x) * y;
+    out[token_idx * d + idx] = static_cast<c10::Float8_e4m3fn>(r / *scale);
+  }
+}
+
 } // namespace vllm
 
 void scaled_fp8_quant(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input,    // [..., d]
-  torch::Tensor& scale)   // [d]
+  torch::Tensor& scale)   // [1]
 {
   int64_t num_tokens = input.numel() / input.size(-1);
   int64_t num_elems = input.numel();
@@ -92,5 +107,32 @@ void scaled_fp8_quant(
         input.data_ptr<scalar_t>(),
         scale.data_ptr<float>(),
         num_elems);
+      });
+}
+
+void fp8_silu_and_mul_kernel(
+  torch::Tensor& out,      // [..., d]
+  torch::Tensor& input,    // [..., 2 * d]
+  torch::Tensor& scale)   // [1]
+{
+  int d = input.size(-1) / 2;
+  int64_t num_tokens = input.numel() / input.size(-1);
+  dim3 grid(num_tokens);
+  dim3 block(1024);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_TYPES(
+    out.scalar_type(),
+    "scaled_silu_and_mul_kernel",
+    [&] {
+      vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
+        scale.data_ptr<float>(),
+        input.data_ptr<scalar_t>(),
+        input.numel());
+      vllm::scaled_silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        out.data_ptr<c10::Float8_e4m3fn>(),
+        input.data_ptr<scalar_t>(),
+        scale.data_ptr<float>(),
+        d);
       });
 }

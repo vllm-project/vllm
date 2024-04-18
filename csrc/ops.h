@@ -134,7 +134,12 @@ void gptq_shuffle(
 void scaled_fp8_quant(
   torch::Tensor& out,
   torch::Tensor& input,
-  torch::Tensor& scales);
+  torch::Tensor& scale);
+
+void fp8_silu_and_mul_kernel(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& scale);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,
