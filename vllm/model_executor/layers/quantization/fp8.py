@@ -94,6 +94,11 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("w_scale", w_scale)
         set_weight_attrs(w_scale, extra_weight_attrs)
+
+        # We always initialize the state to UNINITIALIZED because
+        # we cannot know whether weights going to be loaded are in FP8
+        # or not. If they are in FP8, the first forward pass simply
+        # sets the state to READY without re-quantization.
         layer.fp8_linear_state = Fp8LinearState.UNINITIALIZED
 
     def apply_weights(self,
@@ -103,9 +108,12 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if layer.fp8_linear_state == Fp8LinearState.UNINITIALIZED:
             # Per-tensor scaling on the fly for FP16/BF16 weights
-            # during the first forward pass.
+            # during the first forward pass if the loaded weights
+            # are not in FP8.
             if layer.weight.dtype != torch.float8_e4m3fn:
                 qweight, weight_scale = per_tensor_quantize(layer.weight.data)
+                # Note that torch._scaled_mm requires column-major in
+                # the second input, so we transpose the quantized weight here.
                 layer.weight.data = qweight.t()
                 layer.w_scale.data = weight_scale
             layer.fp8_linear_state = Fp8LinearState.READY
