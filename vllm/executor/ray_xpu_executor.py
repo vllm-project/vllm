@@ -47,7 +47,7 @@ class RayXPUExecutor(ExecutorBase):
         assert device_config.device_type == "xpu"
         assert (not speculative_config
                 ), "Speculative decoding not yet supported for XPU backend"
-        
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -72,9 +72,9 @@ class RayXPUExecutor(ExecutorBase):
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
-            
+
     def _init_executor(self) -> None:
-        pass            
+        pass
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -188,26 +188,26 @@ class RayXPUExecutor(ExecutorBase):
                     parallel_config,
                     scheduler_config,
                     device_config,
-                    local_rank,
-                    rank,
-                    distributed_init_method,
+                    cache_config=self.cache_config,
+                    local_rank=local_rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
-                    kv_cache_dtype=kv_cache_dtype,
                 ))
 
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = XPUWorker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config=self.cache_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=True,
         )
 
