@@ -34,7 +34,7 @@ class EngineArgs:
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
-    max_num_batched_tokens: Optional[int] = None
+    max_num_batched_tokens: Optional[int] = 2048
     max_num_seqs: int = 256
     max_logprobs: int = 5  # OpenAI default value
     disable_log_stats: bool = False
@@ -66,7 +66,7 @@ class EngineArgs:
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
-    enable_chunked_prefill: bool = False
+    enable_chunked_prefill: bool = True
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
