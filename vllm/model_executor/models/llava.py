@@ -124,8 +124,8 @@ class LlavaForConditionalGeneration(nn.Module):
                 self.vision_language_config.image_input_shape[1:]):
             raise ValueError(
                 f"The expected image tensor shape is batch dimension plus "
-                f"{self.vision_language_config.image_input_shape[1:]}."
-                f" You supplied {data.shape}. "
+                f"{self.vision_language_config.image_input_shape[1:]}. "
+                f"You supplied {data.shape}. "
                 f"If you are using vLLM's entrypoint, make sure your "
                 f"supplied image input is consistent with "
                 f"image_input_shape in engine args.")

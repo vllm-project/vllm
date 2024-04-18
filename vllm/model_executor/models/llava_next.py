@@ -40,7 +40,7 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
         pixel_values: For PIXEL_VALUES, expects a batch with shape
             [1, num_patches, 3, 336, 336].
         image_features: For IMAGE_FEATURES, expects a batch with shape
-            [1, num_patches, 576, 1024].
+            [1, num_patches, 1176, 1024].
     """
 
     def __init__(self,
@@ -55,14 +55,18 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 
-    def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
-        if list(data.shape[2:]) != list(
-                self.vision_language_config.image_input_shape[1:]):
+    def _validate_image_pixels(self, data: torch.Tensor) -> torch.Tensor:
+        _, num_channels, _, _ = self.vision_language_config.image_input_shape
+
+        # Note that this is different from that of vLLM vision_language_config
+        # since the image is resized by the HuggingFace preprocessor
+        height = width = self.config.vision_config.image_size
+
+        if list(data.shape[2:]) != [num_channels, height, width]:
             raise ValueError(
-                f"The expected image tensor shape is batch dimension "
-                f"plus num_patches plus "
-                f"{self.vision_language_config.image_input_shape[1:]}."
-                f" You supplied {data.shape}. "
+                f"The expected image tensor shape is batch dimension plus "
+                f"num_patches plus {[num_channels, height, width]}. "
+                f"You supplied {data.shape}. "
                 f"If you are using vLLM's entrypoint, make sure your "
                 f"supplied image input is consistent with "
                 f"image_input_shape in engine args.")
@@ -93,7 +97,7 @@ class LlavaNextForConditionalGeneration(LlavaForConditionalGeneration):
 
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_image_data(pixel_values),
+                data=self._validate_image_pixels(pixel_values),
                 image_sizes=image_sizes,
             )
 

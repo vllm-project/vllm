@@ -416,8 +416,8 @@ class ImagePixelData(MultiModalData):
             self, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         # Temporary patch to make LLaVA-NeXT usable
-        # When image size is (336, 336), the feature size is fixed to 1176
-        image = self.image.resize((336, 336))
+        _, _, h, w = vlm_config.image_input_shape
+        image = self.image.resize((w, h))
 
         image_processor = self._get_image_processor(model_config, vlm_config)
         if image_processor is None:
