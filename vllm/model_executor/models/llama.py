@@ -199,7 +199,7 @@ class LlamaAttention(nn.Module):
                 end = num_past_tokens
                 # loop should have 4096 - 1 iterations
                 for abs_pos in range(start, end):
-                    if abs_pos % 100 == 0: print("abs pos", abs_pos)
+                    # if abs_pos % 100 == 0: print("abs pos", abs_pos)
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
@@ -225,6 +225,10 @@ class LlamaAttention(nn.Module):
                     pad=0,
                     dtype=torch.int,
                     device=original_block_tables.device
+                )
+                attn_metadata.decode_metadata.context_lens = torch.clamp(
+                    attn_metadata.decode_metadata.context_lens,
+                    max=llama_context_len
                 )
 
             # compute attention in kernel

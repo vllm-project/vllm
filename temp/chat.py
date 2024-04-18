@@ -50,7 +50,8 @@ def process_requests(engine: LLMEngine,
                 text = request_output.outputs[0].text
                 num_tokens = len(tokenizer.tokenize(text))
                 print(f"\nOUTPUT: ({num_tokens} tokens)")
-                print(text)
+                print(text, "\n")
+                print(request_output.outputs)
 
 
 def main():
