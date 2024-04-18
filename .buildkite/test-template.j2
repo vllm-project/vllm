@@ -3,13 +3,6 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "AMD Test"
-    agents:
-      queue: amd
-    command: bash .buildkite/run-amd-test.sh
-
-  - label: "CPU Test"
-    command: bash .buildkite/run-cpu-test.sh
 
   - label: ":docker: build image"
     commands:
@@ -22,6 +15,14 @@ steps:
         - exit_status: -1  # Agent was lost
           limit: 5
   - wait
+
+  - label: "AMD Test"
+    agents:
+      queue: amd
+    command: bash .buildkite/run-amd-test.sh
+
+  - label: "CPU Test"
+    command: bash .buildkite/run-cpu-test.sh
 
   {% for step in steps %}
   - label: "{{ step.label }}"
