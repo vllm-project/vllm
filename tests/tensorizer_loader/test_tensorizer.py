@@ -12,8 +12,8 @@ import torch
 from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
 from vllm.model_executor.model_loader.tensorizer import (
-    EncryptionParams, TensorizerConfig, TensorSerializer,
-    is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
+    EncryptionParams, is_vllm_tensorized, TensorizerConfig, TensorSerializer,
+    load_with_tensorizer, open_stream, serialize_vllm_model)
 
 prompts = [
     "Hello, my name is",
@@ -56,23 +56,6 @@ def test_load_with_tensorizer(mock_agent, tensorizer_config):
                                        linear_method=mock_linear_method)
     mock_agent_instance.deserialize.assert_called_once()
     assert result == mock_agent_instance.deserialize.return_value
-
-
-def test_is_vllm_model_with_vllm_in_uri(tensorizer_config):
-    tensorizer_config.vllm_tensorized = True
-
-    result = is_vllm_serialized_tensorizer(tensorizer_config)
-
-    assert result is True
-
-
-def test_is_vllm_model_without_vllm_in_uri(tensorizer_config):
-    tensorizer_config.vllm_tensorized = False
-
-    result = is_vllm_serialized_tensorizer(tensorizer_config)
-
-    assert result is False
-
 
 def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
     vllm_model = vllm_runner(model_ref)
@@ -322,4 +305,34 @@ def test_tensorizer_with_tp(vllm_runner):
             tensor_parallel_size=2,
         )
 
-def test_vllm_tensorized_model_has_same_outputs(tmp_path):
+def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
+    model_ref = "facebook/opt-125m"
+    model_path = tmp_path / (model_ref + ".tensors")
+    config = TensorizerConfig(tensorizer_uri=model_path)
+
+    vllm_model = vllm_runner(
+        model_ref,
+    )
+    outputs = vllm_model.generate(prompts, sampling_params)
+    model = serialize_vllm_model(
+        vllm_model.model.llm_engine,
+        config
+    )
+
+    assert is_vllm_tensorized(config)
+    del vllm_model, model
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        load_format="tensorizer",
+        model_loader_extra_config=config
+    )
+    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+
+    assert outputs == deserialized_outputs
+
+
+
+

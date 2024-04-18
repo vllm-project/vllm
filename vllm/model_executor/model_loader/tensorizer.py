@@ -38,6 +38,11 @@ __all__ = [
 
 logger = init_logger(__name__)
 
+_read_stream, _write_stream = (partial(
+    open_stream,
+    mode=mode,
+) for mode in ("rb", "wb+"))
+
 
 @dataclass
 class TensorizerConfig:
@@ -250,12 +255,6 @@ class TensorizerAgent:
             self.linear_method = linear_method
         self.model = self._init_model()
 
-        self._read_stream, self._write_stream = (partial(
-            open_stream,
-            mode=mode,
-            **self.tensorizer_args.stream_params
-        ) for mode in ("rb", "wb+"))
-
     def _init_model(self):
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
@@ -307,8 +306,9 @@ class TensorizerAgent:
         """
         before_mem = get_mem_usage()
         start = time.perf_counter()
-        with self._read_stream(
+        with _read_stream(
                 self.tensorizer_config.tensorizer_uri,
+                **self.tensorizer_args.stream_params
         ) as stream, TensorDeserializer(
                 stream,
                 dtype=self.tensorizer_config.dtype,
@@ -330,19 +330,6 @@ class TensorizerAgent:
         self._resize_lora_embeddings()
         del self.model.vllm_tensorized_marker
         return self.model.eval()
-
-    def serialize(self,
-                  encryption_keyfile_location: str = None):
-
-        if encryption_keyfile_location:
-            encryption_params = EncryptionParams.random()
-            with self._write_stream(encryption_keyfile_location) as stream:
-                stream.write(encryption_params.key)
-
-        with self._write_stream(self.tensorizer_config.tensorizer_uri) as stream:
-            serializer = TensorSerializer(stream, encryption=encryption_params)
-            serializer.write_module(self.model)
-            serializer.close()
 
 
 
@@ -394,13 +381,25 @@ def get_pretensorized_vllm_model(engine: "LLMEngine") -> nn.Module:
     return model
 
 
-def serialize_vllm_model(
-                         tensorizer_agent: "TensorizerAgent",
-                         engine,
+def serialize_vllm_model(engine: "LLMEngine",
+                         tensorizer_config : TensorizerConfig,
                          encryption_keyfile_location: str = None
                          ):
+    ## May want to retrieve tenorizer_config from LoadConfig in Engine
     model = get_pretensorized_vllm_model(engine)
-    tensorizer_agent.model = model
-    tensorizer_agent.serialize(encryption_keyfile_location)
+    tensorizer_args = tensorizer_config._construct_tensorizer_args()
+    encryption_params = None
+    if encryption_keyfile_location:
+        encryption_params = EncryptionParams.random()
+        with _write_stream(encryption_keyfile_location,
+                           **tensorizer_args.stream_params) as stream:
+            stream.write(encryption_params.key)
+
+    with _write_stream(tensorizer_args.tensorizer_uri,
+                       **tensorizer_args.stream_params) as stream:
+        serializer = TensorSerializer(stream, encryption=encryption_params)
+        serializer.write_module(model)
+        serializer.close()
     return model
+
 
