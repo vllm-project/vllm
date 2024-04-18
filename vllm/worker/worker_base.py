@@ -1,5 +1,7 @@
+import datetime
 import importlib
 import os
+import threading
 from abc import ABC, abstractmethod
 from typing import Dict, List, Set, Tuple
 
@@ -115,9 +117,22 @@ class WorkerWrapperBase:
 
     def init_worker(self, *args, **kwargs):
         """
-        Actual initialization of the worker class.
+        Actual initialization of the worker class, and set up
+         logging if required.
         Arguments are passed to the worker class constructor.
         """
+        if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+            from vllm.logger import enable_trace_function_call
+            from vllm.utils import get_vllm_instance_id
+            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
+            log_path = os.path.join(
+                tmp_dir, "vllm", get_vllm_instance_id(),
+                (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                 f"_thread_{threading.get_ident()}_"
+                 f"at_{datetime.datetime.now()}.log").replace(" ", "_"))
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            enable_trace_function_call(log_path)
+
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
         self.worker = worker_class(*args, **kwargs)

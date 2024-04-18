@@ -5,7 +5,6 @@ import datetime
 import logging
 import os
 import sys
-import threading
 from functools import partial
 from typing import Optional
 
@@ -110,7 +109,7 @@ def enable_trace_function_call(log_file_path: str,
     will have the trace enabled. Other threads will not be affected.
     """
     logger.warning(
-        "VLLM_TRACE_FRAME is enabled. It will record every"
+        "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
         "is suggested to be used for debugging hang or crashes only.")
     logger.info(f"Trace frame log is saved to {log_file_path}")
@@ -118,13 +117,3 @@ def enable_trace_function_call(log_file_path: str,
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))
     sys.settrace(partial(_trace_calls, log_file_path, root_dir))
-
-
-if int(os.getenv("VLLM_TRACE_FRAME", "0")):
-    temp_dir = "/tmp/"
-    log_path = os.path.join(temp_dir,
-                            (f"vllm_trace_frame_for_process_{os.getpid()}"
-                             f"_thread_{threading.get_ident()}_"
-                             f"at_{datetime.datetime.now()}.log").replace(
-                                 " ", "_"))
-    enable_trace_function_call(log_path)
