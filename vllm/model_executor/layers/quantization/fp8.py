@@ -46,10 +46,12 @@ class FP8Config(QuantizationConfig):
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     We now support common FP16/BF16 model checkpoints ONLY. The weight
-    scaling factor will be initialized during the first forward pass.
+    scaling factor will be initialized after the model weights are loaded.
 
-    Note that we currently only support per-tensor quantization due to
-    torch._scaled_mm support.
+    Limitations:
+    1. Only support per-tensor quantization due to torch._scaled_mm support.
+    2. Only support float8_e4m3fn data type due to the limitation of
+       torch._scaled_mm (https://github.com/pytorch/pytorch/blob/2e48b39603411a41c5025efbe52f89560b827825/aten/src/ATen/native/cuda/Blas.cpp#L854-L856)
        
     Args:
         quant_config: The quantization config.
@@ -82,16 +84,13 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scaling_factor", w_scale)
 
-    # def proc_before_loading(self, layer: Module, param: Parameter,
-    #                         loaded_weight: torch.Tensor) -> torch.Tensor:
-    #     loaded_weight, weight_scale = per_tensor_quantize(loaded_weight)
-    #     layer.weight_scaling_factor.data.copy_(weight_scale)
-    #     return loaded_weight
-
     def proc_after_loading(self, layer: Module) -> None:
-        # torch._scaled_mm requires column-major in the second
-        # input (weight), so we transpose the quantized weight here.
+        if not hasattr(layer, "weight_scaling_factor"):
+            return
+
         qweight, weight_scale = per_tensor_quantize(layer.weight)
+        # torch._scaled_mm requires column-major in the second
+        # input (weight), so we transpose the quantized weight.
         layer.weight = Parameter(qweight.t(), requires_grad=False)
         layer.weight_scaling_factor.data.copy_(weight_scale)
 
@@ -111,21 +110,18 @@ class Fp8LinearMethod(LinearMethodBase):
         return output
 
 
-#@torch.compile
-def per_tensor_quantize(
-        tensor: torch.Tensor,
-        qdtype=torch.float8_e4m3fn) -> tuple[torch.Tensor, float]:
+@torch.compile
+def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
     """Quantize a tensor using per-tensor static scaling factor.
 
     Args:
         tensor: The input tensor.
         qdtype: The quantized data type.
     """
-    finfo = torch.finfo(qdtype)
+    finfo = torch.finfo(torch.float8_e4m3fn)
     # Calculate the scale as dtype max divided by absmax
-    # min_val, max_val = tensor.aminmax()
-    # amax = max(-min_val, max_val)
-    amax = tensor.abs().max()
+    min_val, max_val = tensor.aminmax()
+    amax = max(-min_val, max_val)
     scale = finfo.max / amax.clamp(min=1e-12)
     # scale and clamp the tensor to bring it to
     # the representative range of float8 data type
@@ -133,6 +129,6 @@ def per_tensor_quantize(
     qweight = (tensor * scale).clamp(min=finfo.min, max=finfo.max)
     # Return both float8 data and the inverse scale (as float),
     # as both required as inputs to torch._scaled_mm
-    qweight = qweight.to(qdtype)
+    qweight = qweight.to(torch.float8_e4m3fn)
     scale = scale.float().reciprocal()
     return qweight, scale
