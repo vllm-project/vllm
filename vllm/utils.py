@@ -167,6 +167,8 @@ def get_vllm_instance_id():
     """
     If the environment variable VLLM_INSTANCE_ID is set, return it.
     Otherwise, return a random UUID.
+    Instance id represents an instance of the VLLM. All processes in the same
+    instance should have the same instance id.
     """
     return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
 
