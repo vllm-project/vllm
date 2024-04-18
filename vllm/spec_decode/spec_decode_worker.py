@@ -89,7 +89,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
 
-        self.scorer: SpeculativeScorer = None
+        # Lazy initiazliation.
+        self.scorer: SpeculativeScorer
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -233,6 +234,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         logger.info("get spec proposals")
         # Generate proposals using draft worker.
+        assert blocks_to_swap_in is not None
+        assert blocks_to_swap_out is not None
+        assert blocks_to_copy is not None
         proposals = self.proposer_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)

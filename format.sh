@@ -104,10 +104,10 @@ mypy vllm/*.py --follow-imports=skip --config-file pyproject.toml
 mypy vllm/transformers_utils/*.py --follow-imports=skip --config-file pyproject.toml
 
 # TODO(sang): Follow up
-# mypy vllm/engine/*.py --follow-imports=skip --config-file pyproject.toml
-# mypy vllm/worker/*.py --follow-imports=skip --config-file pyproject.toml
-# mypy vllm/spec_decoding/*.py --follow-imports=skip --config-file pyproject.toml
-# mypy vllm/model_executor/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/engine/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/worker/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/spec_decode/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/model_executor/*.py --follow-imports=skip --config-file pyproject.toml
 # mypy vllm/lora/*.py --follow-imports=skip --config-file pyproject.toml
 
 
