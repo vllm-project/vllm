@@ -399,13 +399,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         input_size = self.hidden_size
         output_size = (self.num_heads +
                        2 * self.num_kv_heads) * tp_size * self.head_size
+        output_sizes = [
+            self.num_heads * tp_size * self.head_size,
+            self.num_kv_heads * tp_size * self.head_size,
+            self.num_kv_heads * tp_size * self.head_size
+        ]
 
         super().__init__(input_size, output_size, bias, False, skip_bias_add,
-                         params_dtype, linear_method, [
-                             self.num_heads * tp_size * self.head_size,
-                             self.num_kv_heads * tp_size * self.head_size,
-                             self.num_kv_heads * tp_size * self.head_size
-                         ])
+                         params_dtype, linear_method, output_sizes)
 
     def weight_loader(self,
                       param: Parameter,
