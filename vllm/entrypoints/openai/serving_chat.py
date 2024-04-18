@@ -3,8 +3,6 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
                     Optional, Tuple, TypedDict, Union, final)
 
-import numpy as np
-import torch
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartParam,
                                ChatCompletionRole)
@@ -50,14 +48,7 @@ class OpenAIServingChat(OpenAIServing):
 
     async def _get_and_parse_image(self, image_url: str) -> ImagePixelData:
         with await get_image_async(image_url) as image:
-            image_arr = np.array(image, copy=True)
-
-        # Passed to the image processor which is loaded from HuggingFace
-        image_tensor = torch.as_tensor(image_arr) \
-            .view(1, image.height, image.width, -1) \
-            .permute((0, 3, 1, 2))  # NCHW
-
-        return ImagePixelData(image_tensor)
+            return ImagePixelData(image)
 
     def _parse_chat_message_image_input(
         self,

@@ -65,7 +65,7 @@ For now, we only support a single image per text prompt when calling ``llm.gener
     prompt = "<image>" * 576 + (
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
-    # Load the image and reshape to (1, 3, 336, 336)
+    # Load the image using PIL.Image
     image = ...
 
     outputs = llm.generate(prompt, multi_modal_datas=ImagePixelData(image))

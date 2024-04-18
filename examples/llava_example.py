@@ -3,6 +3,7 @@ import os
 import subprocess
 
 import torch
+from PIL import Image
 
 from vllm import LLM
 from vllm.sequence import ImageFeatureData, ImagePixelData
@@ -24,7 +25,9 @@ def run_llava_pixel_values():
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    image = torch.load("images/stop_sign_pixel_values.pt")
+    image_tensor: torch.Tensor = torch.load("images/stop_sign_pixel_values.pt")
+    image_arr = image_tensor.view(3, 336, 336).permute((1, 2, 0)).numpy()
+    image = Image.fromarray(image_arr, mode="RGB")
 
     outputs = llm.generate(prompt, multi_modal_datas=ImagePixelData(image))
     for o in outputs:
@@ -46,7 +49,7 @@ def run_llava_image_features():
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    image = torch.load("images/stop_sign_image_features.pt")
+    image: torch.Tensor = torch.load("images/stop_sign_image_features.pt")
 
     outputs = llm.generate(prompt, multi_modal_datas=ImageFeatureData(image))
     for o in outputs:

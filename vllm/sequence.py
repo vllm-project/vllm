@@ -5,6 +5,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+import numpy as np
+import torch
+from PIL import Image
+
 from vllm.block import LogicalTokenBlock
 from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
@@ -13,8 +17,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.image_processor import cached_get_image_processor
 
 if TYPE_CHECKING:
-    import torch
-
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 logger = init_logger(__name__)
@@ -384,7 +386,7 @@ class MultiModalData(ABC):
     @abstractmethod
     def get_input_kwargs(
             self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
+            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         """Returns a dictionary which are passed as keyword arguments to
         :meth:`torch.nn.Module.forward`.
         """
@@ -393,8 +395,11 @@ class MultiModalData(ABC):
 
 class ImagePixelData(MultiModalData):
 
-    def __init__(self, pixel_values: "torch.Tensor") -> None:
-        self.pixel_values = pixel_values
+    def __init__(self, image: Image.Image) -> None:
+        # So that this class can be created inside the Image context manager
+        image.load()
+
+        self.image = image
 
     def _get_image_processor(self, model_config: ModelConfig,
                              vlm_config: VisionLanguageConfig):
@@ -409,17 +414,22 @@ class ImagePixelData(MultiModalData):
 
     def get_input_kwargs(
             self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
+            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         image_processor = self._get_image_processor(model_config, vlm_config)
         if image_processor is None:
-            return {"pixel_values": self.pixel_values}
+            image = self.image
+            image_arr = np.array(image, copy=True)
+            pixel_values = torch.as_tensor(image_arr) \
+                .view(1, image.height, image.width, -1) \
+                .permute((0, 3, 1, 2))  # NCHW
+
+            return {"pixel_values": pixel_values}
 
         try:
-            out_dict = image_processor.preprocess(self.pixel_values) \
+            out_dict = image_processor.preprocess(self.image) \
                 .convert_to_tensors("pt")
         except Exception:
-            logger.error("Failed to process image with shape %s",
-                         self.pixel_values.shape)
+            logger.error("Failed to process image (%s)", self.image)
             raise
 
         return out_dict.data
@@ -427,12 +437,12 @@ class ImagePixelData(MultiModalData):
 
 class ImageFeatureData(MultiModalData):
 
-    def __init__(self, image_features: "torch.Tensor") -> None:
+    def __init__(self, image_features: torch.Tensor) -> None:
         self.image_features = image_features
 
     def get_input_kwargs(
             self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, "torch.Tensor"]:
+            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         return {"image_features": self.image_features}
 
 
@@ -456,7 +466,7 @@ class SequenceGroup:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_kwargs: Optional[Dict[str, "torch.Tensor"]] = None,
+        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -620,7 +630,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_kwargs: Optional[Dict[str, "torch.Tensor"]] = None,
+        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -718,10 +728,10 @@ class SamplerOutput:
     outputs: List[SequenceGroupOutput]
 
     # On-device tensor containing probabilities of each token.
-    sampled_token_probs: Optional["torch.Tensor"] = None
+    sampled_token_probs: Optional[torch.Tensor] = None
 
     # On-device tensor containing the sampled token ids.
-    sampled_token_ids: Optional["torch.Tensor"] = None
+    sampled_token_ids: Optional[torch.Tensor] = None
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
