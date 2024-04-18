@@ -58,7 +58,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 For now, we only support a single image per text prompt when calling ``llm.generate``. To pass an image to the model, note the following parameters:
 
 * ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
-* ``multi_modal_data``: This should be an instance of ``MultiModalData`` with type ``MultiModalData.Type.IMAGE`` and its data set to a single image tensor with the shape ``image_input_shape``.
+* ``multi_modal_datas``: This should be an instance of ``ImagePixelData``.
 
 .. code-block:: python
 
@@ -68,9 +68,7 @@ For now, we only support a single image per text prompt when calling ``llm.gener
     # Load the image and reshape to (1, 3, 336, 336)
     image = ...
 
-    outputs = llm.generate(prompt,
-                           multi_modal_datas=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=image))
+    outputs = llm.generate(prompt, multi_modal_datas=ImagePixelData(image))
 
     for o in outputs:
         generated_text = o.outputs[0].text

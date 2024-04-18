@@ -1,7 +1,7 @@
 import time
 from typing import Iterable, List, Optional, Type, Union
 
-from transformers import PreTrainedTokenizer, TensorType
+from transformers import PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
@@ -24,7 +24,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
                            SequenceGroup)
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.image_processor import get_image_processor
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
@@ -123,7 +122,6 @@ class LLMEngine:
         self.log_stats = log_stats
 
         self._init_tokenizer()
-        self._init_image_processor()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
 
@@ -288,19 +286,6 @@ class LLMEngine:
         self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
-    def _init_image_processor(self, **processor_init_kwargs):
-        vlm_config = self.vision_language_config
-
-        if vlm_config is None or vlm_config.image_processor is None:
-            self.image_processor = None
-        else:
-            self.image_processor = get_image_processor(
-                vlm_config.image_processor,
-                trust_remote_code=self.model_config.trust_remote_code,
-                revision=vlm_config.image_processor_revision,
-                **processor_init_kwargs,
-            )
-
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
         self.cache_config.verify_with_parallel_config(self.parallel_config)
@@ -322,28 +307,6 @@ class LLMEngine:
                                                      prompt=prompt,
                                                      lora_request=lora_request)
         return prompt_token_ids
-
-    def process_multi_modal_data(self, data: MultiModalData) -> MultiModalData:
-        if data.type == MultiModalData.Type.IMAGE:
-            image_processor = self.image_processor
-            if image_processor is None:
-                return data
-
-            try:
-                out_dict = image_processor.preprocess(data.data) \
-                    .convert_to_tensors(TensorType.PYTORCH)
-            except Exception:
-                logger.error("Failed to process image with shape %s",
-                             data.data.shape)
-                raise
-
-            return MultiModalData(
-                type=data.type,
-                data=out_dict["pixel_values"],
-            )
-        else:
-            msg = f"Unknown data type: {data.type}"
-            raise NotImplementedError(msg)
 
     def add_request(
         self,
@@ -399,7 +362,10 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
-        max_logprobs = self.get_model_config().max_logprobs
+
+        model_config = self.get_model_config()
+
+        max_logprobs = model_config.max_logprobs
         if (sampling_params.logprobs
                 and sampling_params.logprobs > max_logprobs) or (
                     sampling_params.prompt_logprobs
@@ -430,12 +396,20 @@ class LLMEngine:
         sampling_params.eos_token_id = seq.eos_token_id
 
         # Process multi-modal data
-        if multi_modal_data is not None:
-            multi_modal_data = self.process_multi_modal_data(multi_modal_data)
+        if multi_modal_data is None:
+            mm_kwargs = {}
+        else:
+            vlm_config = self.vision_language_config
+            assert vlm_config is not None, (
+                "Multi-modal inputs are only supported by "
+                "vision language models.")
+
+            mm_kwargs = multi_modal_data.get_input_kwargs(
+                self.model_config, vlm_config)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, multi_modal_data)
+                                  arrival_time, lora_request, mm_kwargs)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)

@@ -172,7 +172,7 @@ class HfRunner:
         images: Optional[List[Image.Image]] = None,
         **kwargs,
     ) -> List[Tuple[List[int], str]]:
-        if images:
+        if images is not None:
             assert len(prompts) == len(images)
 
         outputs: List[Tuple[List[int], str]] = []
@@ -182,6 +182,7 @@ class HfRunner:
                                            return_tensors="pt").input_ids
                 inputs = {"input_ids": input_ids.cuda()}
             else:
+                assert self.processor is not None
                 image = images[i] if images else None
                 inputs = self.processor(text=prompt,
                                         images=image,
@@ -190,6 +191,7 @@ class HfRunner:
                     key: value.cuda() if value is not None else None
                     for key, value in inputs.items()
                 }
+
             output_ids = self.model.generate(
                 **inputs,
                 use_cache=True,
@@ -317,18 +319,14 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[torch.Tensor]] = None,
+        multi_modal_datas: Optional[List[Optional[MultiModalData]]] = None,
     ) -> List[Tuple[List[int], str]]:
-        if images is not None:
-            assert len(prompts) == len(images)
+        if multi_modal_datas is not None:
+            assert len(prompts) == len(multi_modal_datas)
 
-        req_outputs = self.model.generate(
-            prompts,
-            sampling_params=sampling_params,
-            multi_modal_datas=[
-                MultiModalData(type=MultiModalData.Type.IMAGE, data=image)
-                for image in images
-            ] if images is not None else None)
+        req_outputs = self.model.generate(prompts,
+                                          sampling_params=sampling_params,
+                                          multi_modal_datas=multi_modal_datas)
 
         outputs = []
         for req_output in req_outputs:
@@ -366,10 +364,12 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[torch.Tensor]] = None,
+        multi_modal_datas: Optional[List[Optional[MultiModalData]]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts, greedy_params, images=images)
+        outputs = self.generate(prompts,
+                                greedy_params,
+                                multi_modal_datas=multi_modal_datas)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 

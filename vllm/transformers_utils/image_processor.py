@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Optional
 
 from transformers import AutoImageProcessor
@@ -39,3 +40,6 @@ def get_image_processor(
             raise e
 
     return processor
+
+
+cached_get_image_processor = lru_cache(get_image_processor)

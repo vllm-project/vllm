@@ -22,42 +22,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
-from vllm.sequence import MultiModalData
+from vllm.sequence import ImagePixelData
 from vllm.utils import get_image_async, random_uuid
 
 logger = init_logger(__name__)
-
-
-async def get_and_parse_image(image_url: str,
-                              config: VisionLanguageConfig) -> MultiModalData:
-
-    if len(config.image_input_shape) == 3:
-        raise ValueError(
-            "The model is configured to accept image features rather than "
-            "pixel values, and thus does not support image inputs")
-
-    batch_size, num_channels, height, width = config.image_input_shape
-
-    if num_channels == 1:
-        image_format = "L"
-    elif num_channels == 3:
-        image_format = "RGB"
-    elif num_channels == 4:
-        image_format = "RGBA"
-    else:
-        msg = f"Unsupported number of channels ({num_channels})"
-        raise NotImplementedError(msg)
-
-    with await get_image_async(image_url) as image:
-        image = image.convert(image_format).resize((height, width))
-        image_arr = np.array(image, copy=True)
-
-    # Passed to the image processor which is loaded from HuggingFace
-    image_tensor = torch.as_tensor(image_arr) \
-        .view(batch_size, height, width, num_channels) \
-        .permute((0, 3, 1, 2))  # NCHW
-
-    return MultiModalData(type=MultiModalData.Type.IMAGE, data=image_tensor)
 
 
 @final  # So that it should be compatible with Dict[str, str]
@@ -80,11 +48,22 @@ class OpenAIServingChat(OpenAIServing):
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
+    async def _get_and_parse_image(self, image_url: str) -> ImagePixelData:
+        with await get_image_async(image_url) as image:
+            image_arr = np.array(image, copy=True)
+
+        # Passed to the image processor which is loaded from HuggingFace
+        image_tensor = torch.as_tensor(image_arr) \
+            .view(1, image.height, image.width, -1) \
+            .permute((0, 3, 1, 2))  # NCHW
+
+        return ImagePixelData(image_tensor)
+
     def _parse_chat_message_image_input(
         self,
         role: ChatCompletionRole,
         content: Iterable[ChatCompletionContentPartParam],
-    ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalData]]]:
+    ) -> Tuple[List[ConversationMessage], List[Awaitable[ImagePixelData]]]:
         """Parse image input defined by OpenAI Chat Completions API."""
         config = getattr(self.engine.engine, "vision_language_config", None)
         if not isinstance(config, VisionLanguageConfig):
@@ -95,7 +74,7 @@ class OpenAIServingChat(OpenAIServing):
         assert tokenizer is not None
 
         texts: List[str] = []
-        image_futures: List[Awaitable[MultiModalData]] = []
+        image_futures: List[Awaitable[ImagePixelData]] = []
 
         for i, part in enumerate(content):
             if part["type"] == "text":
@@ -109,7 +88,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 text = config.get_image_token_text(
                     config, tokenizer, image_idx=len(image_futures))
-                image_future = get_and_parse_image(image_url["url"], config)
+                image_future = self._get_and_parse_image(image_url["url"])
 
                 texts.append(text)
                 image_futures.append(image_future)
@@ -126,7 +105,7 @@ class OpenAIServingChat(OpenAIServing):
         role: ChatCompletionRole,
         content: Optional[Union[str,
                                 Iterable[ChatCompletionContentPartParam]]],
-    ) -> Tuple[List[ConversationMessage], List[Awaitable[MultiModalData]]]:
+    ) -> Tuple[List[ConversationMessage], List[Awaitable[ImagePixelData]]]:
         if content is None:
             return [], []
         if isinstance(content, str):
@@ -153,7 +132,7 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             conversation: List[ConversationMessage] = []
-            multi_modal_futures: List[Awaitable[MultiModalData]] = []
+            multi_modal_futures: List[Awaitable[ImagePixelData]] = []
 
             for m in request.messages:
                 messages, futures = self._parse_chat_message_content(
