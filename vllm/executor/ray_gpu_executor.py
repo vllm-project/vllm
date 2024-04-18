@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+                        get_vllm_instance_id, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -133,12 +133,18 @@ class RayGPUExecutor(ExecutorBase):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        # Set CUDA_VISIBLE_DEVICES for the driver and workers.
+        VLLM_INSTANCE_ID = get_vllm_instance_id()
+
+        # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = []
         for (node_id, _) in worker_node_and_gpu_ids:
             all_args_to_update_environment_variables.append([{
                 "CUDA_VISIBLE_DEVICES":
-                ",".join(map(str, node_gpus[node_id]))
+                ",".join(map(str, node_gpus[node_id])),
+                "VLLM_INSTANCE_ID":
+                VLLM_INSTANCE_ID,
+                "VLLM_TRACE_FUNCTION":
+                os.getenv("VLLM_TRACE_FUNCTION", "0"),
             }])
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
