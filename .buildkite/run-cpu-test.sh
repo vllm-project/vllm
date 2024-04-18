@@ -23,7 +23,6 @@ docker exec cpu-test bash -c "python3 examples/offline_inference.py"
 docker exec cpu-test bash -c "cd tests;
   pip install pytest Pillow
   rm -f __init__.py
-  sed -i '/\"stabilityai/d' models/test_models.py
   bash ../.buildkite/download-images.sh
   pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py --ignore=models/test_marlin.py --ignore=models/test_big_models.py"
 
