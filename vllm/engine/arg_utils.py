@@ -97,7 +97,7 @@ class EngineArgs:
             default=EngineArgs.tokenizer,
             help='name or path of the huggingface tokenizer to use')
         parser.add_argument(
-            '--skip_tokenizer_init',
+            '--skip-tokenizer-init',
             action='store_true',
             help='Skip initialization of tokenizer and detokenizer')
         parser.add_argument(
