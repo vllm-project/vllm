@@ -49,7 +49,7 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "skip"
 
-# files = "vllm"
+files = "vllm"
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 exclude = [
     "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
