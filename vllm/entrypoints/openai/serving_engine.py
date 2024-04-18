@@ -29,10 +29,10 @@ class OpenAIServing:
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  lora_modules=Optional[List[LoRA]]):
         self.engine = engine
-        self.served_model = served_model
+        self.served_model_names = served_model_names
         if lora_modules is None:
             self.lora_requests = []
         else:
@@ -74,13 +74,14 @@ class OpenAIServing:
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
         model_cards = [
-            ModelCard(id=self.served_model,
-                      root=self.served_model,
+            ModelCard(id=served_model_name,
+                      root=self.served_model_names[0],
                       permission=[ModelPermission()])
+            for served_model_name in self.served_model_names
         ]
         lora_cards = [
             ModelCard(id=lora.lora_name,
-                      root=self.served_model,
+                      root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
@@ -150,7 +151,7 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
-        if request.model == self.served_model:
+        if request.model in self.served_model_names:
             return
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return
@@ -160,7 +161,7 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
-        if request.model == self.served_model:
+        if request.model in self.served_model_names:
             return
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
