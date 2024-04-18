@@ -66,6 +66,12 @@ __global__ void scaled_fp8_quant_kernel(
   }
 }
 
+template<typename T>
+__device__ __forceinline__ T silu_kernel(const T& x) {
+  // x * sigmoid(x)
+  return (T) (((float) x) / (1.0f + expf((float) -x)));
+}
+
 template<typename scalar_t>
 __global__ void fp8_silu_and_mul_kernel(
   c10::Float8_e4m3fn* __restrict__ out,
