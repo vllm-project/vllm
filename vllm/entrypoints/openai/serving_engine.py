@@ -5,6 +5,7 @@ from http import HTTPStatus
 from typing import Dict, List, Optional, Union
 
 from pydantic import conint
+import numpy as np
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -103,9 +104,12 @@ class OpenAIServing:
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is not None:
                 token_logprob = step_top_logprobs[token_id].logprob
+                token_logprob = max(token_logprob, -1e9)
+                token_logprob = None if np.isinf(token_logprob) else token_logprob
+                token = step_top_logprobs[token_id].decoded_token
             else:
                 token_logprob = None
-            token = step_top_logprobs[token_id].decoded_token
+                token = ""
             logprobs.tokens.append(token)
             logprobs.token_logprobs.append(token_logprob)
             if len(logprobs.text_offset) == 0:
@@ -117,9 +121,10 @@ class OpenAIServing:
 
             if num_output_top_logprobs:
                 logprobs.top_logprobs.append({
-                    p.decoded_token: p.logprob
+                    p.decoded_token: None if np.isinf(p.logprob) else p.logprob
                     for i, p in step_top_logprobs.items()
                 } if step_top_logprobs else None)
+
         return logprobs
 
     def create_error_response(

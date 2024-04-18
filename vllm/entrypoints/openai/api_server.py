@@ -109,6 +109,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
+        import torch
+        torch.save(generator.model_dump(), '/tmp/dump.pt')
         return JSONResponse(content=generator.model_dump())
 
 
