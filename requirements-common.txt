@@ -5,7 +5,8 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests
 py-cpuinfo
-transformers >= 4.39.1  # Required for StarCoder2 & Llava.
+transformers >= 4.40.0  # Required for StarCoder2 & Llava, Llama 3.
+tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
