@@ -146,7 +146,8 @@ def _is_full_nvlink(rank, world_size):
         if i != rank:
             try:
                 peer_handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                p2p_status = pynvml.nvmlDeviceGetP2PStatus(handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                    handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                 if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                     return False
             except pynvml.NVMLError as error:
