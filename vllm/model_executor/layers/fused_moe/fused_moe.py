@@ -407,8 +407,8 @@ def fused_moe(
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
-    a_scale = torch.empty(1, device=hidden_states.device, dtype=torch.float32)
-    a2_scale = torch.empty(1, device=hidden_states.device, dtype=torch.float32)
+    a_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
+    a2_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
