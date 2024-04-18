@@ -163,6 +163,7 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+@lru_cache(maxsize=None)
 def get_vllm_instance_id():
     """
     If the environment variable VLLM_INSTANCE_ID is set, return it.
