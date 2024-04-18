@@ -169,6 +169,25 @@ class AsyncMetricsCollector:
 
     @staticmethod
     def get_max_num_accepted_tokens(draft_tokens: int, k: int) -> int:
+        
+        """
+        SpecDecodeWorkerMetrics(
+                draft_acceptance_rate=0.888,
+                system_efficiency=29.5,
+                draft_tokens=125,
+                emitted_tokens=118,
+                accepted_tokens=111,
+                num_spec_tokens=5,
+        )
+        
+        accepted / draft ~= 88%
+        125/5 25 spec steps
+        grep says 27 verify steps
+        ok 25 makes sense (metrics lag)
+        
+        118/(25 * (5+1)) = 118/150 = 0.78666666666
+        """
+
         # Divide by k since batch size can be variable.
         total_num_spec_seqs = draft_tokens / k
         num_accepted_per_seq_if_all_accepted = k + 1
