@@ -504,7 +504,6 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
     ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
-#@pytest.mark.skip("used for local testing (cade to remove)")
 def test_wip_validate_acceptance_rate(baseline_llm_generator,
                                       test_llm_generator, batch_size: int,
                                       output_len: int):
