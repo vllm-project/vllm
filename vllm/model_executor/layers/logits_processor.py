@@ -71,9 +71,10 @@ class LogitsProcessor(nn.Module):
         return logits
 
     def extra_repr(self) -> str:
-        s = "vocab_size={vocab_size}, org_vocab_size={org_vocab_size}"
-        s += ", scale={scale}, logits_as_input={logits_as_input}"
-        return s.format(**self.__dict__)
+        s = f"vocab_size={self.vocab_size}"
+        s += f", forg_vocab_size={self.org_vocab_size}"
+        s += f", scale={self.scale}, logits_as_input={self.logits_as_input}"
+        return s
 
 
 def _prune_hidden_states(

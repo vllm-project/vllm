@@ -134,6 +134,12 @@ class ReplicatedLinear(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        return s
+
 
 class ColumnParallelLinear(torch.nn.Module):
     """Linear layer with column parallelism.
