@@ -55,6 +55,7 @@ class BaseLogitsProcessor:
         if type(instruction) == Generate:
             allowed_tokens = instruction.tokens
         elif type(instruction) == Write:
+            # TODO: support fast forward tokens
             allowed_tokens = [instruction.tokens[0]]
 
         mask = torch.full((scores.shape[-1], ),
