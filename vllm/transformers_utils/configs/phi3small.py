@@ -22,20 +22,16 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.onnx import OnnxConfigWithPast, PatchingSpec
 from transformers.utils import logging
 
-""" TNLGv4 model configuration """
+""" Phi3-small model configuration """
 logger = logging.get_logger(__name__)
 
-# TLG_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-#     "tnlgv4": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tnlgv4/huggingface/config.json",
-#     "tlgv4.6": "https://turingmodelshare.blob.core.windows.net/data/checkpoints/tlgv4.6/huggingface/config.json",
-# }
 
 
 def next_mult(x, y):
     return (x + y - 1) // y * y
 
 
-class TLGv4Config(PretrainedConfig):
+class Phi3SmallConfig(PretrainedConfig):
     """
     This is the configuration class to store the configuration of a [`GPT2Model`] or a [`TFGPT2Model`]. It is used to
     instantiate a GPT-2 model according to the specified arguments, defining the model architecture. Instantiating a
@@ -129,7 +125,7 @@ class TLGv4Config(PretrainedConfig):
     >>> configuration = model.config
     ```"""
 
-    model_type = "tnlgv4"
+    model_type = "phi3-small"
     keys_to_ignore_at_inference = ["past_key_values"]
     
 

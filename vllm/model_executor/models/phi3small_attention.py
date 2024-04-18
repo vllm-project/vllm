@@ -11,8 +11,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
-from .tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
-from .tnlgv4_paged_attn import LocalStridedBlockSparseAttnInferenceBT
+from .phi3small_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+from .phi3small_paged_attn import LocalStridedBlockSparseAttnInferenceBT
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)

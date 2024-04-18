@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 import math
-from vllm.model_executor.models.tnlgv4_utils import _get_sparse_attn_mask
+from vllm.model_executor.models.phi3small_utils import _get_sparse_attn_mask
 
 
 class LocalStridedBlockSparseAttnInference(torch.nn.Module):

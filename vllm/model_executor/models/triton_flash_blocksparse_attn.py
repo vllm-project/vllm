@@ -14,7 +14,7 @@ import os
 
 import dataclasses
 
-TLGv4Config = TypeVar('TLGv4Config')
+Phi3SmallConfig = TypeVar('Phi3SmallConfig')
 
 @dataclasses.dataclass
 class BlockSparseParams(object):
@@ -25,7 +25,7 @@ class BlockSparseParams(object):
     homo_head_pattern: bool = False
 
     @classmethod
-    def from_config(cls, config: TLGv4Config) -> "BlockSparseParams":
+    def from_config(cls, config: Phi3SmallConfig) -> "BlockSparseParams":
         return BlockSparseParams(
             block_size=config.blocksparse_block_size,
             kernel_block_size=config.blocksparse_triton_kernel_block_size,
