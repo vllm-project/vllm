@@ -122,30 +122,26 @@ _c_ncclCommInitRank.argtypes = [
 ]
 
 
-class ncclDataType_t(ctypes.c_int):
-    pass
-
-
-class ncclDataTypeEnum:
-    ncclInt8 = ncclDataType_t(0)
-    ncclChar = ncclDataType_t(0)
-    ncclUint8 = ncclDataType_t(1)
-    ncclInt32 = ncclDataType_t(2)
-    ncclInt = ncclDataType_t(2)
-    ncclUint32 = ncclDataType_t(3)
-    ncclInt64 = ncclDataType_t(4)
-    ncclUint64 = ncclDataType_t(5)
-    ncclFloat16 = ncclDataType_t(6)
-    ncclHalf = ncclDataType_t(6)
-    ncclFloat32 = ncclDataType_t(7)
-    ncclFloat = ncclDataType_t(7)
-    ncclFloat64 = ncclDataType_t(8)
-    ncclDouble = ncclDataType_t(8)
-    ncclBfloat16 = ncclDataType_t(9)
-    ncclNumTypes = ncclDataType_t(10)
+class ncclDataType_t:
+    ncclInt8 = 0
+    ncclChar = 0
+    ncclUint8 = 1
+    ncclInt32 = 2
+    ncclInt = 2
+    ncclUint32 = 3
+    ncclInt64 = 4
+    ncclUint64 = 5
+    ncclFloat16 = 6
+    ncclHalf = 6
+    ncclFloat32 = 7
+    ncclFloat = 7
+    ncclFloat64 = 8
+    ncclDouble = 8
+    ncclBfloat16 = 9
+    ncclNumTypes = 10
 
     @classmethod
-    def from_torch(cls, dtype: torch.dtype) -> "ncclDataType_t":
+    def from_torch(cls, dtype: torch.dtype) -> int:
         if dtype == torch.int8:
             return cls.ncclInt8
         if dtype == torch.uint8:
@@ -166,19 +162,15 @@ class ncclDataTypeEnum:
 
 
 class ncclRedOp_t(ctypes.c_int):
-    pass
-
-
-class ncclRedOpEnum:
-    ncclSum = ncclRedOp_t(0)
-    ncclProd = ncclRedOp_t(1)
-    ncclMax = ncclRedOp_t(2)
-    ncclMin = ncclRedOp_t(3)
-    ncclAvg = ncclRedOp_t(4)
-    ncclNumOps = ncclRedOp_t(5)
+    ncclSum = 0
+    ncclProd = 1
+    ncclMax = 2
+    ncclMin = 3
+    ncclAvg = 4
+    ncclNumOps = 5
 
     @classmethod
-    def from_torch(cls, op: ReduceOp) -> "ncclRedOp_t":
+    def from_torch(cls, op: ReduceOp) -> int:
         if op == ReduceOp.SUM:
             return cls.ncclSum
         if op == ReduceOp.PRODUCT:
@@ -201,8 +193,8 @@ class ncclRedOpEnum:
 _c_ncclAllReduce = nccl.ncclAllReduce
 _c_ncclAllReduce.restype = ctypes.c_int
 _c_ncclAllReduce.argtypes = [
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ncclDataType_t,
-    ncclRedOp_t, ctypes.c_void_p, ctypes.c_void_p
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+    ctypes.c_void_p, ctypes.c_void_p
 ]
 
 # equivalent to c declaration:
@@ -272,8 +264,8 @@ class NCCLCommunicator:
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
-                                  ncclDataTypeEnum.from_torch(tensor.dtype),
-                                  ncclRedOpEnum.from_torch(op), self.comm,
+                                  ncclDataType_t.from_torch(tensor.dtype),
+                                  ncclRedOp_t.from_torch(op), self.comm,
                                   ctypes.c_void_p(stream.cuda_stream))
         assert result == 0
 
