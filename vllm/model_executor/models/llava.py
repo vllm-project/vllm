@@ -67,10 +67,13 @@ class LlavaForConditionalGeneration(nn.Module):
 
         self.vision_language_config = vision_language_config
 
-        assert self.vision_language_config, (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
+        assert (self.vision_language_config
+                and vision_language_config.image_token_id
+                and vision_language_config.image_input_shape
+                and vision_language_config.image_feature_size), (
+                    "Provide `image_input_type` and other vision "
+                    "related configurations through LLM entrypoint "
+                    "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
