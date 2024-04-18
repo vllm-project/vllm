@@ -304,8 +304,9 @@ class TensorizerLoader(BaseModelLoader):
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
 
-        See the examples/tensorize_vllm_model.py example
-        script for serializing vLLM models."""
+        Expects a vLLM-tensorized model. See the
+        examples/tensorize_vllm_model.py example script
+        for serializing vLLM models."""
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
