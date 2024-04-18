@@ -1,0 +1,3 @@
+{{'<|begin_of_text|>'}}
+{% for message in messages %}{{'<|start_header_id|>' + message['role'] + '<|end_header_id|>\n' + message['content']}}{% if (loop.last and add_generation_prompt) or not loop.last %}{{'<|eot_id|>'}}{% endif %}{% endfor %}
+{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\n' }}{% endif %}
