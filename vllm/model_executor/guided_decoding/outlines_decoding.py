@@ -12,11 +12,10 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
-from vllm.model_executor.guided_logits_processors import (CFGLogitsProcessor,
-                                                          JSONLogitsProcessor,
-                                                          RegexLogitsProcessor)
+from vllm.model_executor.guided_decoding.outlines_logits_processors import (
+    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
-from vllm.sampling_params import SamplingParams
+
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
@@ -83,6 +82,7 @@ async def get_guided_decoding_logits_processor(
     logits_processor.init_state()
     return logits_processor
 
+
 def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
@@ -90,8 +90,9 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     We cache logit processors by (guide, tokenizer), and on cache hit
     we make a shallow copy to reuse the same underlying FSM.
     """
-    
-    guide, mode = _get_guide_and_mode_from_sampling_params(sampling_params.guided_options)
+
+    guide, mode = _get_guide_and_mode_from_sampling_params(
+        sampling_params.guided_options)
     if not guide:
         return None
 
@@ -101,27 +102,26 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     # reset logits processor's internal state
     logits_processor.init_state()
     return logits_processor
-            
+
 
 def convert_json_format(json):
     if isinstance(json, dict):
-                # turn dict into hashable string
-                json = json_dumps(json)
+        # turn dict into hashable string
+        json = json_dumps(json)
     elif isinstance(json, BaseModel):
         # use pydantic signature so that different model classes
         # with the same fields will get hashed the same
         json = str(json.__signature__)
     return json
 
+
 def convert_guided_choice_format(guided_choice):
-    choices = [
-            regex_escape(str(choice)) for choice in guided_choice
-        ]
+    choices = [regex_escape(str(choice)) for choice in guided_choice]
     return "(" + "|".join(choices) + ")"
 
+
 def _get_guide_and_mode_from_sampling_params(
-    guided_options: Dict[str, str]
-) -> Tuple[str, GuidedDecodingMode]:
+        guided_options: Dict[str, str]) -> Tuple[str, GuidedDecodingMode]:
     if not guided_options:
         return None, None
 
@@ -133,12 +133,14 @@ def _get_guide_and_mode_from_sampling_params(
         return guided_options["guided_regex"], GuidedDecodingMode.REGEX
     elif "guided_choice" in guided_options:
         # choice just uses regex
-        choices_regex = convert_guided_choice_format(guided_options["guided_choice"])
+        choices_regex = convert_guided_choice_format(
+            guided_options["guided_choice"])
         return choices_regex, GuidedDecodingMode.CHOICE
     elif "guided_grammar" in guided_options:
         return guided_options["guided_grammar"], GuidedDecodingMode.GRAMMAR
     else:
         return None, None
+
 
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]

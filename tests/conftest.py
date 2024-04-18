@@ -419,52 +419,54 @@ def get_tokenizer_pool_config(tokenizer_group_type):
 @pytest.fixture
 def sample_regex():
     return (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
-            
+            r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
+
+
 @pytest.fixture
 def sample_json_schema():
     return {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string"
-        },
-        "age": {
-            "type": "integer"
-        },
-        "skills": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "maxLength": 10
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string"
             },
-            "minItems": 3
-        },
-        "work history": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "company": {
-                        "type": "string"
-                    },
-                    "duration": {
-                        "type": "string"
-                    },
-                    "position": {
-                        "type": "string"
-                    }
+            "age": {
+                "type": "integer"
+            },
+            "skills": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "maxLength": 10
                 },
-                "required": ["company", "position"]
+                "minItems": 3
+            },
+            "work history": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "company": {
+                            "type": "string"
+                        },
+                        "duration": {
+                            "type": "string"
+                        },
+                        "position": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["company", "position"]
+                }
             }
-        }
-    },
-    "required": ["name", "age", "skills", "work history"]
-}
+        },
+        "required": ["name", "age", "skills", "work history"]
+    }
+
 
 @pytest.fixture
 def sample_guided_choice():
-    return  [
-    "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
-    "Swift", "Kotlin"
-]
+    return [
+        "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
+        "Ruby", "Swift", "Kotlin"
+    ]

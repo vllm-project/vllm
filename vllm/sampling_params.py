@@ -5,10 +5,9 @@ from functools import cached_property
 from typing import Callable, List, Optional, Union, Dict
 
 import torch
-from pydantic import Field, BaseModel
+from pydantic import Field
 from typing_extensions import Annotated
 
-from json import dumps as json_dumps
 
 _SAMPLING_EPS = 1e-5
 
@@ -178,9 +177,12 @@ class SamplingParams:
             self.output_text_buffer_length = 0
 
         guide_count = sum([
-            guided_options is not None and guided_options.get("guided_json") is not None,
-            guided_options is not None and guided_options.get("guided_regex") is not None,
-            guided_options is not None and guided_options.get("guided_choice") is not None
+            guided_options is not None
+            and guided_options.get("guided_json") is not None,
+            guided_options is not None
+            and guided_options.get("guided_regex") is not None,
+            guided_options is not None
+            and guided_options.get("guided_choice") is not None
         ])
         if guide_count > 1:
             raise ValueError(
@@ -202,8 +204,6 @@ class SamplingParams:
                 self._verify_greedy_sampling()
         # injected by the engine
         self.eos_token_id = None
-
-    
 
     def _verify_args(self) -> None:
         if self.n < 1:

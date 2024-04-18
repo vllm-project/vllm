@@ -1,21 +1,16 @@
 # imports for guided decoding tests
 import json
-import os
 import re
 
 import jsonschema
 import pytest
 
-
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.outputs import RequestOutput
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-
-
 
 prompts = [
     "Hello, my name is",
@@ -51,9 +46,10 @@ def test_simple_prompts(llm):
 
 @pytest.mark.skip_global_cleanup
 def test_guided_regex_(sample_regex, llm):
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     guided_options=dict(guided_regex=sample_regex))
+    sampling_params = SamplingParams(
+        temperature=0.8,
+        top_p=0.95,
+        guided_options=dict(guided_regex=sample_regex))
     outputs = llm.generate(
         prompts=[
             f"Give an example IPv4 address with this regex: {sample_regex}"
@@ -75,10 +71,11 @@ def test_guided_regex_(sample_regex, llm):
 
 @pytest.mark.skip_global_cleanup
 def test_guided_json_completion(sample_json_schema, llm):
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     guided_options=dict(guided_json=sample_json_schema),
-                                     max_tokens=1000)
+    sampling_params = SamplingParams(
+        temperature=0.8,
+        top_p=0.95,
+        guided_options=dict(guided_json=sample_json_schema),
+        max_tokens=1000)
     outputs = llm.generate(
         prompts=[
             f"Give an example JSON for an employee profile "
@@ -94,12 +91,13 @@ def test_guided_json_completion(sample_json_schema, llm):
         assert output is not None
         assert isinstance(output, RequestOutput)
         prompt = output.prompt
-        
+
         generated_text = output.outputs[0].text
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
         jsonschema.validate(instance=output_json, schema=sample_json_schema)
+
 
 @pytest.mark.skip_global_cleanup
 def test_guided_choice_completion(sample_guided_choice, llm):

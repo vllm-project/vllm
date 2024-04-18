@@ -1,9 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 
@@ -16,7 +16,6 @@ class ExecutorBase(ABC):
     that can execute the model on multiple devices.
     """
 
-    @abstractmethod
     def __init__(
         self,
         model_config: ModelConfig,
@@ -24,11 +23,26 @@ class ExecutorBase(ABC):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
     ) -> None:
-        raise NotImplementedError
+        self.model_config = model_config
+        self.cache_config = cache_config
+        self.lora_config = lora_config
+        self.load_config = load_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.vision_language_config = vision_language_config
+        self.speculative_config = speculative_config
+
+        self._init_executor()
+
+    @abstractmethod
+    def _init_executor(self) -> None:
+        pass
 
     @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -58,8 +72,9 @@ class ExecutorBase(ABC):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        """Executes one model step on the given sequences."""
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int) -> List[SamplerOutput]:
+        """Executes at least one model step on the given sequences."""
         raise NotImplementedError
 
     @abstractmethod
@@ -71,7 +86,7 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
     @abstractmethod
@@ -94,8 +109,7 @@ class ExecutorAsyncBase(ExecutorBase):
         """Executes one model step on the given sequences."""
         raise NotImplementedError
 
-    @abstractmethod
     async def check_health_async(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
-        raise NotImplementedError
+        self.check_health()

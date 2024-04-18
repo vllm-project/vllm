@@ -16,21 +16,23 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
 """
 tensorize_vllm_model.py is a script that can be used to serialize and 
-deserialize vLLM models. These models can be loaded using tensorizer directly 
-to the GPU extremely quickly. Tensor encryption and decryption is also 
-supported, although libsodium must be installed to use it. Install
-vllm with tensorizer support using `pip install vllm[tensorizer]`.
+deserialize vLLM models. These models can be loaded using tensorizer 
+to the GPU extremely quickly over an HTTP/HTTPS endpoint, an S3 endpoint,
+or locally. Tensor encryption and decryption is also supported, although 
+libsodium must be installed to use it. Install vllm with tensorizer support 
+using `pip install vllm[tensorizer]`.
 
-To serialize a model, you can run something like this:
+To serialize a model, install vLLM from source, then run something 
+like this from the root level of this repository:
 
-python tensorize_vllm_model.py \
+python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    serialize \
@@ -38,31 +40,57 @@ python tensorize_vllm_model.py \
    --suffix vllm
    
 Which downloads the model from HuggingFace, loads it into vLLM, serializes it,
-and saves it to your S3 bucket. A local directory can also be used.
+and saves it to your S3 bucket. A local directory can also be used. This
+assumes your S3 credentials are specified as environment variables
+in the form of `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT`.
+To provide S3 credentials directly, you can provide `--s3-access-key-id` and 
+`--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this 
+script.
 
 You can also encrypt the model weights with a randomly-generated key by 
 providing a `--keyfile` argument.
 
-To deserialize a model, you can run something like this:
+To deserialize a model, you can run something like this from the root 
+level of this repository:
 
-python tensorize_vllm_model.py \
+python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    deserialize \
    --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/vllm/model.tensors
 
 Which downloads the model tensors from your S3 bucket and deserializes them.
-To provide S3 credentials, you can provide `--s3-access-key-id` and 
-`--s3-secret-access-key`, as well as `--s3-endpoint` as CLI args to this script,
-the OpenAI entrypoint, as arguments for LLM(), or as environment variables
-in the form of `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, and `S3_ENDPOINT`.
-
 
 You can also provide a `--keyfile` argument to decrypt the model weights if 
 they were serialized with encryption.
 
-For more information on the available arguments, run 
-`python tensorize_vllm_model.py --help`.
+For more information on the available arguments for serializing, run 
+`python -m examples.tensorize_vllm_model serialize --help`.
+
+Or for deserializing:
+
+`python -m examples.tensorize_vllm_model deserialize --help`.
+
+Once a model is serialized, it can be used to load the model when running the
+OpenAI inference client at `vllm/entrypoints/openai/api_server.py` by providing
+the `--tensorizer-uri` CLI argument that is functionally the same as the
+`--path-to-tensors` argument in this script, along with `--vllm-tensorized`, to
+signify that the model to be deserialized is a vLLM model, rather than a 
+HuggingFace `PreTrainedModel`, which can also be deserialized using tensorizer
+in the same inference server, albeit without the speed optimizations. To
+deserialize an encrypted file, the `--encryption-keyfile` argument can be used
+to provide the path to the keyfile used to encrypt the model weights. For
+information on all the arguments that can be used to configure tensorizer's
+deserialization, check out the tensorizer options argument group in the
+`vllm/entrypoints/openai/api_server.py` script with `--help`.
+
+Tensorizer can also be invoked with the `LLM` class directly to load models:
+
+    llm = LLM(model="facebook/opt-125m",
+              load_format="tensorizer",
+              tensorizer_uri=path_to_opt_tensors,
+              num_readers=3,
+              vllm_tensorized=True)
 """
 
 

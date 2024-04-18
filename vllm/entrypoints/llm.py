@@ -178,7 +178,8 @@ class LLM:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
 
-        guided_decode_logits_processor = get_local_guided_decoding_logits_processor(sampling_params, self.get_tokenizer())
+        guided_decode_logits_processor = get_local_guided_decoding_logits_processor(
+            sampling_params, self.get_tokenizer())
         if guided_decode_logits_processor:
             if sampling_params.logits_processors is None:
                 sampling_params.logits_processors = []
