@@ -207,7 +207,7 @@ class LlamaAttention(nn.Module):
                     # rotate k based on new relative pos
                     past_key = key_cache[phys_bnum, :, offset]
                     past_keys[abs_pos] = past_key
-                    pos = torch.tensor([abs_pos - start], device=positions.device)
+                    pos = torch.tensor([abs_pos - start + block_size], device=positions.device)
                     past_key = self.rotary_emb._forward_single(pos, past_key.unsqueeze(0))
                     key_cache[phys_bnum, :, offset] = past_key.squeeze(0)
 
@@ -252,14 +252,15 @@ class LlamaAttention(nn.Module):
 
                 # put current key back in cache
                 # slot_map has length num_tokens, but is num_tokens==batch_size (num_seqs) ???
-                slot = attn_metadata.slot_mapping[i]
+                slot = attn_metadata.slot_mapping[i].item()
                 phys_bnum = slot // block_size
                 offset = slot % block_size
                 key_cache[phys_bnum, :, offset] = k_original.squeeze(0)
             
-            # revert block tables inside metadata
-            # so that next attn layer starts with same block tables
+            # revert block_tables and context_lens inside metadata
+            # so that next attn layer starts with same fields
             attn_metadata.decode_metadata.block_tables = original_block_tables
+            attn_metadata.decode_metadata.context_lens = torch.tensor(context_lens, dtype=torch.int, device=positions.device)
             
             output, _ = self.o_proj(attn_output)
             return output
