@@ -21,8 +21,7 @@
 
 import ctypes
 import datetime
-import glob
-import os
+import platform
 
 # ===================== import region =====================
 import torch
@@ -30,40 +29,27 @@ import torch.distributed as dist
 from torch.distributed import ReduceOp
 
 from vllm.logger import init_logger
+from vllm.utils import find_nccl_library, nccl_integrity_check
 
 logger = init_logger(__name__)
 
-so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
-
-# check if we have vllm-managed nccl
-vllm_nccl_path = None
-if torch.version.cuda is not None:
-    cuda_major = torch.version.cuda.split(".")[0]
-    path = os.path.expanduser(
-        f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-    files = glob.glob(path)
-    vllm_nccl_path = files[0] if files else None
-
-# manually load the nccl library
-if so_file:
-    logger.info(
-        f"Loading nccl from environment variable VLLM_NCCL_SO_PATH={so_file}")
-else:
-    if torch.version.cuda is not None:
-        so_file = vllm_nccl_path or "libnccl.so.2"
-    elif torch.version.hip is not None:
-        so_file = "librccl.so.1"
-    else:
-        raise ValueError("NCCL only supports CUDA and ROCm backends.")
-    logger.info(f"Loading nccl from library {so_file}")
+so_file = find_nccl_library()
 
 try:
+    # load the library in another process.
+    # if it core dumps, it will not crash the current process
+    nccl_integrity_check(so_file)
     nccl = ctypes.CDLL(so_file)
 except Exception as e:
     logger.error(
         f"Failed to load NCCL library from {so_file} ."
         "It is expected if you are not running on NVIDIA/AMD GPUs."
-        "Otherwise please set the environment variable VLLM_NCCL_SO_PATH"
+        "Otherwise, the nccl library might not exist, be corrupted "
+        f"or it does not support the current platform {platform.platform()}."
+        f"One solution is to download libnccl2 version 2.18 from "
+        f"https://developer.download.nvidia.com/compute/cuda/repos/ "
+        f"and extract the libnccl.so.2 file. If you already have the "
+        f"library, please set the environment variable VLLM_NCCL_SO_PATH"
         " to point to the correct nccl library path.")
     raise e
 

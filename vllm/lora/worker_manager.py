@@ -107,12 +107,12 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self._lora_manager: LoRAModelManager = lora_manager
         return lora_manager.model
 
-    def set_active_loras(self, lora_requests: List[LoRARequest],
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         self._apply_loras(lora_requests)
         self._lora_manager.set_lora_mapping(lora_mapping)
 
-    def _apply_loras(self, lora_requests: List[LoRARequest]) -> None:
+    def _apply_loras(self, lora_requests: Set[LoRARequest]) -> None:
         loras_that_exist = self.list_loras()
         loras_map = {
             lora_request.lora_int_id: lora_request

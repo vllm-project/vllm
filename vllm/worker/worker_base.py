@@ -1,7 +1,7 @@
 import importlib
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -56,7 +56,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_cache_block_size_bytes() -> int:
+    def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
@@ -71,7 +71,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
 
@@ -86,7 +86,7 @@ class LoraNotSupportedWorkerBase(WorkerBase):
     def remove_lora(self, lora_id: int) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
