@@ -168,7 +168,7 @@ def get_vllm_instance_id():
     If the environment variable VLLM_INSTANCE_ID is set, return it.
     Otherwise, return a random UUID.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", random_uuid())
+    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
 
 
 @lru_cache(maxsize=None)
