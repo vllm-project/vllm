@@ -5,10 +5,10 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Dict, List, Set, Tuple
 
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import update_environment_variables
+from vllm.utils import get_vllm_instance_id, update_environment_variables
 
 logger = init_logger(__name__)
 
@@ -122,8 +122,6 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
-            from vllm.logger import enable_trace_function_call
-            from vllm.utils import get_vllm_instance_id
             tmp_dir = os.environ.get("TMPDIR") or "/tmp"
             log_path = os.path.join(
                 tmp_dir, "vllm", get_vllm_instance_id(),
