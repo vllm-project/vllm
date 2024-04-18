@@ -427,6 +427,10 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
+                if not budget.can_schedule(num_new_tokens = num_running_tokens,
+                                           num_new_seqs = num_running_seqs):
+                    break
+                    
                 logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
@@ -684,16 +688,12 @@ class Scheduler:
         decodes. If there's a pressure on GPU memory, decode requests can
         be swapped or preempted.
         """
-        # Include running requests to the budget.
+        # Create budget to manage scheduled seqs
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
-        # Make sure we include num running seqs before scheduling prefill,
-        # so that we don't schedule beyond max_num_seqs for prefill.
-        for seq_group in self.running:
-            budget.add_num_seqs(seq_group.request_id,
-                                seq_group.get_max_num_running_seqs())
+
         curr_loras = set(
             seq_group.lora_int_id
             for seq_group in self.running) if self.lora_enabled else None
