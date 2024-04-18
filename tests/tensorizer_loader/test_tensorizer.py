@@ -57,30 +57,6 @@ def test_load_with_tensorizer(mock_agent, tensorizer_config):
     mock_agent_instance.deserialize.assert_called_once()
     assert result == mock_agent_instance.deserialize.return_value
 
-def test_deserialized_vllm_model_has_same_outputs(vllm_runner, tmp_path):
-    vllm_model = vllm_runner(model_ref)
-    model_path = tmp_path / (model_ref + ".tensors")
-    outputs = vllm_model.generate(prompts, sampling_params)
-    model = (vllm_model.model.llm_engine.model_executor.driver_worker.
-             model_runner.model)
-    with open_stream(model_path, "wb+") as stream:
-        serializer = TensorSerializer(stream)
-        serializer.write_module(model)
-    del vllm_model, model
-    gc.collect()
-    torch.cuda.empty_cache()
-    loaded_vllm_model = vllm_runner(
-        model_ref,
-        load_format="tensorizer",
-        model_loader_extra_config=TensorizerConfig(tensorizer_uri=model_path,
-                                                   num_readers=1)
-    )
-    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
-
-    # Assumes SamplingParams being seeded ensures the outputs are deterministic
-    assert outputs == deserialized_outputs
-
-
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
 def test_can_deserialize_s3(vllm_runner):
     model_ref = "EleutherAI/pythia-1.4b"
@@ -106,29 +82,28 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
     model_path = tmp_path / (model_ref + ".tensors")
     key_path = tmp_path / (model_ref + ".key")
     outputs = vllm_model.generate(prompts, sampling_params)
-    model = (vllm_model.model.llm_engine.model_executor.driver_worker.
-             model_runner.model)
 
-    encryption_params = EncryptionParams.random()
-    with open_stream(model_path, "wb+") as stream:
-        serializer = TensorSerializer(stream, encryption=encryption_params)
-        serializer.write_module(model)
-    with open_stream(key_path, "wb+") as stream:
-        stream.write(encryption_params.key)
-    del vllm_model, model
+    config_for_serializing = TensorizerConfig(tensorizer_uri=model_path)
+    serialize_vllm_model(vllm_model.model.llm_engine,
+                         config_for_serializing,
+                         encryption_key_path=key_path)
+
+
+    del vllm_model
     gc.collect()
     torch.cuda.empty_cache()
-    loaded_vllm_model = vllm_runner(model_ref,
-                                    load_format="tensorizer",
-                                    model_loader_extra_config=TensorizerConfig(
-                                        tensorizer_uri=model_path,
-                                        encryption_keyfile=key_path,
-                                        num_readers=1,
-                                        ))
+
+    config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
+                              encryption_keyfile=key_path)
+
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        load_format="tensorizer",
+        model_loader_extra_config=config_for_deserializing
+    )
 
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 
-    # Assumes SamplingParams being seeded ensures the outputs are deterministic
     assert outputs == deserialized_outputs
 
 
@@ -170,12 +145,11 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     # Serialize model before deserializing and binding LoRA adapters
     vllm_model = vllm_runner(model_ref, )
     model_path = tmp_path / (model_ref + ".tensors")
-    model = (vllm_model.model.llm_engine.model_executor.driver_worker.
-             model_runner.model)
-    with open_stream(model_path, "wb+") as stream:
-        serializer = TensorSerializer(stream)
-        serializer.write_module(model)
-    del vllm_model, model
+
+    serialize_vllm_model(vllm_model.model.llm_engine,
+                        TensorizerConfig(tensorizer_uri=model_path))
+
+    del vllm_model
     gc.collect()
     torch.cuda.empty_cache()
     loaded_vllm_model = vllm_runner(
@@ -205,51 +179,21 @@ def test_load_without_tensorizer_load_format(vllm_runner):
 
 
 @pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_tensorize_vllm_model(tmp_path):
-    # Test serialize command
-    serialize_args = [
-        "python3", tensorize_model_for_testing_script, "--model", model_ref,
-        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
-        "--suffix", "tests"
-    ]
-    result = subprocess.run(serialize_args, capture_output=True, text=True)
-    print(result.stdout)  # Print the output of the serialize command
-
-    assert result.returncode == 0, (f"Serialize command failed with output:"
-                                    f"\n{result.stdout}\n{result.stderr}")
-
-    path_to_tensors = f"{tmp_path}/vllm/{model_ref}/tests/model.tensors"
-
-    # Test deserialize command
-    deserialize_args = [
-        "python3", tensorize_model_for_testing_script, "--model", model_ref,
-        "--dtype", "float16", "deserialize", "--path-to-tensors",
-        path_to_tensors
-    ]
-    result = subprocess.run(deserialize_args, capture_output=True, text=True)
-    assert result.returncode == 0, (f"Deserialize command failed with output:"
-                                    f"\n{result.stdout}\n{result.stderr}")
-
-
-@pytest.mark.skipif(not is_curl_installed(), reason="cURL is not installed")
-def test_openai_apiserver_with_tensorizer(tmp_path):
+def test_openai_apiserver_with_tensorizer(vllm_runner,tmp_path):
     ## Serialize model
-    serialize_args = [
-        "python3", tensorize_model_for_testing_script, "--model", model_ref,
-        "--dtype", "float16", "serialize", "--serialized-directory", tmp_path,
-        "--suffix", "tests"
-    ]
-    result = subprocess.run(serialize_args, capture_output=True, text=True)
-    print(result.stdout)  # Print the output of the serialize command
+    vllm_model = vllm_runner(model_ref, )
+    model_path = tmp_path / (model_ref + ".tensors")
 
-    assert result.returncode == 0, (f"Serialize command failed with output:"
-                                    f"\n{result.stdout}\n{result.stderr}")
+    serialize_vllm_model(vllm_model.model.llm_engine,
+                         TensorizerConfig(tensorizer_uri=model_path))
 
-    path_to_tensors = f"{tmp_path}/vllm/{model_ref}/tests/model.tensors"
     model_loader_extra_config = {
-        "tensorizer_uri": path_to_tensors,
-        "vllm_tensorized": True
+        "tensorizer_uri": str(model_path),
     }
+
+    del vllm_model
+    gc.collect()
+    torch.cuda.empty_cache()
 
     ## Start OpenAI API server
     openai_args = [
@@ -308,7 +252,7 @@ def test_tensorizer_with_tp(vllm_runner):
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     model_ref = "facebook/opt-125m"
     model_path = tmp_path / (model_ref + ".tensors")
-    config = TensorizerConfig(tensorizer_uri=model_path)
+    config = TensorizerConfig(tensorizer_uri=str(model_path))
 
     vllm_model = vllm_runner(
         model_ref,

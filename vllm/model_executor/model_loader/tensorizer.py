@@ -377,21 +377,21 @@ def get_pretensorized_vllm_model(engine: "LLMEngine") -> nn.Module:
     model = (engine.model_executor.driver_worker.
              model_runner.model)
     model.register_parameter("vllm_tensorized_marker", nn.Parameter(
-        torch.zeros(0), requires_grad=False))
+        torch.tensor((1,), device="meta"), requires_grad=False))
     return model
 
 
 def serialize_vllm_model(engine: "LLMEngine",
                          tensorizer_config : TensorizerConfig,
-                         encryption_keyfile_location: str = None
-                         ):
-    ## May want to retrieve tenorizer_config from LoadConfig in Engine
+                         encryption_key_path: Optional[str] = None) \
+        -> nn.Module:
+
     model = get_pretensorized_vllm_model(engine)
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
     encryption_params = None
-    if encryption_keyfile_location:
+    if encryption_key_path is not None:
         encryption_params = EncryptionParams.random()
-        with _write_stream(encryption_keyfile_location,
+        with _write_stream(encryption_key_path,
                            **tensorizer_args.stream_params) as stream:
             stream.write(encryption_params.key)
 
