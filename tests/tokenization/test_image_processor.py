@@ -5,6 +5,7 @@ from vllm.transformers_utils.image_processor import get_image_processor
 
 IMAGE_PROCESSOR_NAMES = [
     "llava-hf/llava-1.5-7b-hf",
+    "llava-hf/llava-v1.6-34b-hf",
 ]
 
 

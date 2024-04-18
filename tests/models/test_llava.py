@@ -25,10 +25,26 @@ def iter_llava_configs(model_name: str):
                                     image_processor_revision=None))
 
 
+def iter_llava_next_configs(model_name: str):
+    for input_type, input_shape in [
+            # `vision_config` on HuggingFace only supports `image_size=336`
+        (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, 336, 336)),
+        (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, 576, 1024)),
+    ]:
+        yield (model_name,
+               VisionLanguageConfig(image_input_type=input_type,
+                                    image_feature_size=576,
+                                    image_token_id=64000,
+                                    image_input_shape=input_shape,
+                                    image_processor=None,
+                                    image_processor_revision=None))
+
+
 model_and_vl_config = [
     *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
     # Not enough memory
     # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
+    # *iter_llava_next_configs("llava-hf-llava-v1.6-34b-hf"),
 ]
 
 

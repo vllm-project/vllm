@@ -415,9 +415,12 @@ class ImagePixelData(MultiModalData):
     def get_input_kwargs(
             self, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+        # Temporary patch to make LLaVA-NeXT usable
+        # When image size is (336, 336), the feature size is fixed to 1176
+        image = self.image.resize((336, 336))
+
         image_processor = self._get_image_processor(model_config, vlm_config)
         if image_processor is None:
-            image = self.image
             image_arr = np.array(image, copy=True)
             pixel_values = torch.as_tensor(image_arr) \
                 .view(1, image.height, image.width, -1) \
@@ -426,10 +429,10 @@ class ImagePixelData(MultiModalData):
             return {"pixel_values": pixel_values}
 
         try:
-            out_dict = image_processor.preprocess(self.image) \
+            out_dict = image_processor.preprocess(image) \
                 .convert_to_tensors("pt")
         except Exception:
-            logger.error("Failed to process image (%s)", self.image)
+            logger.error("Failed to process image (%s)", image)
             raise
 
         return out_dict.data

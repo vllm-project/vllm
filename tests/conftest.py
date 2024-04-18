@@ -7,7 +7,8 @@ import pytest
 import torch
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
-                          LlavaForConditionalGeneration)
+                          LlavaForConditionalGeneration,
+                          LlavaNextForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -130,7 +131,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 _VISION_LANGUAGE_MODELS = {
     "llava-hf/llava-1.5-7b-hf": LlavaForConditionalGeneration,
     "llava-hf/llava-1.5-13b-hf": LlavaForConditionalGeneration,
-    "llava-hf/bakLlava-v1-hf": LlavaForConditionalGeneration,
+    "llava-hf/llava-v1.6-34b-hf": LlavaNextForConditionalGeneration,
 }
 
 
