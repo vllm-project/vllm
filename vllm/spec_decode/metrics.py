@@ -169,7 +169,6 @@ class AsyncMetricsCollector:
 
     @staticmethod
     def get_max_num_accepted_tokens(draft_tokens: int, k: int) -> int:
-        
         """
         SpecDecodeWorkerMetrics(
                 draft_acceptance_rate=0.888,
