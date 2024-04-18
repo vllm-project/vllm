@@ -124,25 +124,29 @@ _c_ncclCommInitRank.argtypes = [
 
 # enums
 class ncclDataType_t(ctypes.c_int):
-    ncclInt8 = 0
-    ncclChar = 0
-    ncclUint8 = 1
-    ncclInt32 = 2
-    ncclInt = 2
-    ncclUint32 = 3
-    ncclInt64 = 4
-    ncclUint64 = 5
-    ncclFloat16 = 6
-    ncclHalf = 6
-    ncclFloat32 = 7
-    ncclFloat = 7
-    ncclFloat64 = 8
-    ncclDouble = 8
-    ncclBfloat16 = 9
-    ncclNumTypes = 10
+    pass
+
+
+class ncclDataTypeEnum:
+    ncclInt8 = ncclDataType_t(0)
+    ncclChar = ncclDataType_t(0)
+    ncclUint8 = ncclDataType_t(1)
+    ncclInt32 = ncclDataType_t(2)
+    ncclInt = ncclDataType_t(2)
+    ncclUint32 = ncclDataType_t(3)
+    ncclInt64 = ncclDataType_t(4)
+    ncclUint64 = ncclDataType_t(5)
+    ncclFloat16 = ncclDataType_t(6)
+    ncclHalf = ncclDataType_t(6)
+    ncclFloat32 = ncclDataType_t(7)
+    ncclFloat = ncclDataType_t(7)
+    ncclFloat64 = ncclDataType_t(8)
+    ncclDouble = ncclDataType_t(8)
+    ncclBfloat16 = ncclDataType_t(9)
+    ncclNumTypes = ncclDataType_t(10)
 
     @classmethod
-    def from_torch(cls, dtype: torch.dtype) -> int:
+    def from_torch(cls, dtype: torch.dtype) -> "ncclDataType_t":
         if dtype == torch.int8:
             return cls.ncclInt8
         if dtype == torch.uint8:
@@ -163,15 +167,19 @@ class ncclDataType_t(ctypes.c_int):
 
 
 class ncclRedOp_t(ctypes.c_int):
-    ncclSum = 0
-    ncclProd = 1
-    ncclMax = 2
-    ncclMin = 3
-    ncclAvg = 4
-    ncclNumOps = 5
+    pass
+
+
+class ncclRedOpEnum:
+    ncclSum = ncclRedOp_t(0)
+    ncclProd = ncclRedOp_t(1)
+    ncclMax = ncclRedOp_t(2)
+    ncclMin = ncclRedOp_t(3)
+    ncclAvg = ncclRedOp_t(4)
+    ncclNumOps = ncclRedOp_t(5)
 
     @classmethod
-    def from_torch(cls, op: ReduceOp) -> int:
+    def from_torch(cls, op: ReduceOp) -> "ncclRedOp_t":
         if op == ReduceOp.SUM:
             return cls.ncclSum
         if op == ReduceOp.PRODUCT:
@@ -262,11 +270,12 @@ class NCCLCommunicator:
                    stream=None):
         if stream is None:
             stream = self.stream
+        breakpoint()
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
-                                  ncclDataType_t.from_torch(tensor.dtype),
-                                  ncclRedOp_t.from_torch(op), self.comm,
+                                  ncclDataTypeEnum.from_torch(tensor.dtype),
+                                  ncclRedOpEnum.from_torch(op), self.comm,
                                   ctypes.c_void_p(stream.cuda_stream))
         assert result == 0
 

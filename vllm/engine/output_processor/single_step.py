@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, Iterator, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -10,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -33,13 +34,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         stop_checker: StopChecker,
     ):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
-        self.seq_counter: Iterator[int] = iter(seq_counter)
+        self.seq_counter = seq_counter
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
