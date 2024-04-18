@@ -715,9 +715,14 @@ class SpeculativeConfig:
         #    target_model_config.max_model_len,
         #    draft_model_config.max_model_len)
 
-        if speculative_max_model_len is not None:
-            draft_model_config.max_model_len = min(
-                speculative_max_model_len, draft_model_config.max_model_len)
+        max_model_lens = [
+            speculative_max_model_len, draft_model_config.max_model_len,
+            target_model_config.max_model_len
+        ]
+        draft_model_config.max_model_len = min([
+            max_model_len for max_model_len in max_model_lens
+            if max_model_len is not None
+        ])
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(

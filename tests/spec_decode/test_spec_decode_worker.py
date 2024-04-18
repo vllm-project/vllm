@@ -1,4 +1,5 @@
 import random
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -202,17 +203,16 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
                              num_lookahead_slots=k)
 
     assert len(rejection_sampler.call_args_list) == 1
-    args, _ = rejection_sampler.call_args_list[0]
-    (actual_proposal_scores, actual_bonus_token_ids, actual_proposal_probs,
-     actual_proposal_token_ids) = args
+    _, kwargs = rejection_sampler.call_args_list[0]
+    actual = SimpleNamespace(**kwargs)
 
-    assert torch.equal(actual_bonus_token_ids,
+    assert torch.equal(actual.bonus_token_ids,
                        target_token_ids.reshape(batch_size, k + 1)[:, -1:])
     assert torch.equal(
-        actual_proposal_scores,
+        actual.target_probs,
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
-    assert torch.equal(actual_proposal_token_ids, proposal_token_ids)
-    assert torch.equal(actual_proposal_probs, proposal_probs)
+    assert torch.equal(actual.draft_token_ids, proposal_token_ids)
+    assert torch.equal(actual.draft_probs, proposal_probs)
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
