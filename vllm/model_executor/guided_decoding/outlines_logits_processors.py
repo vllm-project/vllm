@@ -29,7 +29,7 @@ from transformers import PreTrainedTokenizerBase
 
 class BaseLogitsProcessor:
 
-    def __init__(self, guide: Guide) -> None:
+    def __init__(self, guide: Guide):
         self._guide: Guide = guide
 
     def init_state(self):
