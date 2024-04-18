@@ -8,6 +8,7 @@ rocminfo
 for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
     #rocm-smi -gpureset -d $i; 
 done
+sleep 10
 
 #pip install huggingface_hub
 #~/.local/bin/huggingface-cli login --token $HF_TOKEN
