@@ -21,13 +21,17 @@ from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import torch
-from outlines.fsm.fsm import CFGFSM, RegexFSM
+from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 
 class BaseLogitsProcessor:
+
+    def __init__(self):
+        # Child class should use initialize in their init.
+        self.fsm: FSM
 
     def init_state(self):
         """Initialize the FSM states."""

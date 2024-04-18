@@ -9,6 +9,7 @@ from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
@@ -118,8 +119,8 @@ class ModelConfig:
         self.tokenizer_mode = tokenizer_mode
 
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
-        rocm_not_supported_quantization = ["awq", "marlin"]
+        supported_quantization = [*QUANTIZATION_METHODS]
+        rocm_supported_quantization = ["gptq", "squeezellm"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -155,7 +156,7 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
             if is_hip(
-            ) and self.quantization in rocm_not_supported_quantization:
+            ) and self.quantization not in rocm_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")

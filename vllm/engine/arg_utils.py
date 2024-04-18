@@ -8,6 +8,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
 logger = init_logger(__name__)
@@ -289,7 +290,7 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=str,
-                            choices=['awq', 'gptq', 'squeezellm', None],
+                            choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '
