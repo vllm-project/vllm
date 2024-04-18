@@ -229,7 +229,8 @@ class DefaultModelLoader(BaseModelLoader):
                                                "fall_back_to_pt_during_load",
                                                True)), )
             for _, module in model.named_modules():
-                if hasattr(module, "linear_method") and hasattr(module, "weight"):
+                if hasattr(module, "linear_method") and hasattr(
+                        module, "weight"):
                     module.linear_method.proc_after_loading(module)
         return model.eval()
 

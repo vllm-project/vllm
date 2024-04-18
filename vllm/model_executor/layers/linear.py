@@ -54,7 +54,7 @@ class LinearMethodBase(ABC):
 
         This can be used for example, to transpose weights for computation.
         """
-        pass
+        return
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
