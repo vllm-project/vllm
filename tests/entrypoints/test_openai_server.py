@@ -123,7 +123,6 @@ def zephyr_lora_files():
 def server(zephyr_lora_files):
     ray.init()
     server_runner = ServerRunner.remote([
-        "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
         "--dtype",

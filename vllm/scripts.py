@@ -12,8 +12,10 @@ def main():
     serve_parser = subparsers.add_parser(
         "serve",
         help="Start the vLLM OpenAI Compatible API server",
-        usage="vllm serve --model <model_tag> [options]")
+        usage="vllm serve <model_tag> [options]")
     make_arg_parser(serve_parser)
+    # Override the `--model` optional argument, make it positional.
+    serve_parser.add_argument("model", type=str, help="The model tag to serve")
     serve_parser.set_defaults(func=run_server)
 
     args = parser.parse_args()

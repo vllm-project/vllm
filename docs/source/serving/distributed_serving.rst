@@ -21,7 +21,7 @@ To run multi-GPU serving, pass in the :code:`--tensor-parallel-size` argument wh
 
 .. code-block:: console
 
-    $ vllm serve --model facebook/opt-13b \
+    $ vllm serve facebook/opt-13b \
     $     --tensor-parallel-size 4
 
 To scale vLLM beyond a single machine, start a `Ray runtime <https://docs.ray.io/en/latest/ray-core/starting-ray.html>`_ via CLI before running vLLM:

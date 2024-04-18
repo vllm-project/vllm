@@ -2,7 +2,7 @@
 
 On the server side, run one of the following commands:
     vLLM OpenAI API server
-    vllm serve --model <your_model> \
+    vllm serve <your_model> \
         --swap-space 16 \
         --disable-log-requests
 
