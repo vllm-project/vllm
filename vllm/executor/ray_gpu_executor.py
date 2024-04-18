@@ -143,6 +143,8 @@ class RayGPUExecutor(ExecutorBase):
                 ",".join(map(str, node_gpus[node_id])),
                 "VLLM_INSTANCE_ID":
                 VLLM_INSTANCE_ID,
+                "VLLM_TRACE_FUNCTION":
+                os.getenv("VLLM_TRACE_FUNCTION", "0"),
             }])
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
