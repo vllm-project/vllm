@@ -723,6 +723,36 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
+                                           guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
+    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
+
+    # -9999.0 is the minimum logprob returned by OpenAI
+    assert all(
+        isinstance(logprob, float) and logprob >= -9999.0
+        for token_dict in top_logprobs
+        for token, logprob in token_dict.items())
+
+
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
