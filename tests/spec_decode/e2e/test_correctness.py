@@ -405,7 +405,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_max_model_len": 32, # TODO expect fail ?
+        "speculative_max_model_len": 32,
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])
@@ -413,7 +413,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     "output_len",
     [
         # Use smaller output len for fast test.
-        512,
+        64,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_skip_speculation(baseline_llm_generator, test_llm_generator,
@@ -421,17 +421,22 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
     """Verify correct output when we skip speculation.
     Test skip 1, skip >1, skip all.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_greedy_equality_correctness_test(
+        baseline_llm_generator,
+        test_llm_generator,
+        batch_size,
+        max_output_len=output_len,
+        force_output_len=True,
+        print_tokens=True,
+    )
 
 
 def run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator, batch_size,
+                                         test_llm_generator,
+                                         batch_size,
                                          max_output_len,
-                                         force_output_len: bool):
+                                         force_output_len: bool,
+                                         print_tokens: bool = False):
     temperature = 0.0
 
     prompts = [
@@ -439,10 +444,10 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-        "Mark Zuckerberg loves to dance, and",
-        "Ray is a framework for",
-        "Chevelle is a heavy-metal band that",
-        "Park is a common surname from the country of",
+        "San Francisco is know for its",
+        "Facebook was created in 2004 by",
+        "Curious George is a",
+        "Python 3.11 brings improvements to its",
     ]
 
     prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
@@ -457,17 +462,23 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         temperature=temperature,
     )
 
-    _, spec_batch_token_ids = get_output_from_llm_generator(
+    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
         test_llm_generator, prompts, sampling_params)
 
-    _, baseline_batch_token_ids = get_output_from_llm_generator(
-        baseline_llm_generator, prompts, sampling_params)
+    (baseline_batch_tokens,
+     baseline_batch_token_ids) = get_output_from_llm_generator(
+         baseline_llm_generator, prompts, sampling_params)
 
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
 
-    for i, (baseline_token_ids, spec_token_ids) in enumerate(
-            zip(baseline_batch_token_ids, spec_batch_token_ids)):
+    for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
+            spec_tokens) in enumerate(
+                zip(baseline_batch_token_ids, baseline_batch_tokens,
+                    spec_batch_token_ids, spec_batch_tokens)):
+        if print_tokens:
+            print(f'{i=} {baseline_tokens=}')
+            print(f'{i=}     {spec_tokens=}')
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
