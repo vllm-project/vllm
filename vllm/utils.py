@@ -533,7 +533,6 @@ def nccl_integrity_check(filepath):
         raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
     import ctypes
 
-    import torch  # noqa
     nccl = ctypes.CDLL(filepath)
     version = ctypes.c_int()
     nccl.ncclGetVersion.restype = ctypes.c_int
