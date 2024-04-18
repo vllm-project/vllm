@@ -128,7 +128,7 @@ void fp8_silu_and_mul_kernel(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
-    out.scalar_type(),
+    input.scalar_type(),
     "fp8_silu_and_mul_kernel_kernel",
     [&] {
       vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
