@@ -6,8 +6,6 @@ import re
 import jsonschema
 import pytest
 
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
@@ -17,52 +15,7 @@ from vllm.outputs import RequestOutput
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
-TEST_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "name": {
-            "type": "string"
-        },
-        "age": {
-            "type": "integer"
-        },
-        "skills": {
-            "type": "array",
-            "items": {
-                "type": "string",
-                "maxLength": 10
-            },
-            "minItems": 3
-        },
-        "work history": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "company": {
-                        "type": "string"
-                    },
-                    "duration": {
-                        "type": "string"
-                    },
-                    "position": {
-                        "type": "string"
-                    }
-                },
-                "required": ["company", "position"]
-            }
-        }
-    },
-    "required": ["name", "age", "skills", "work history"]
-}
 
-TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
-
-TEST_CHOICE = [
-    "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
-    "Swift", "Kotlin"
-]
 
 prompts = [
     "Hello, my name is",
@@ -97,13 +50,13 @@ def test_simple_prompts(llm):
 
 
 @pytest.mark.skip_global_cleanup
-def test_guided_regex_(llm):
+def test_guided_regex_(sample_regex, llm):
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     guided_options=dict(guided_regex=TEST_REGEX))
+                                     guided_options=dict(guided_regex=sample_regex))
     outputs = llm.generate(
         prompts=[
-            f"Give an example IPv4 address with this regex: {TEST_REGEX}"
+            f"Give an example IPv4 address with this regex: {sample_regex}"
         ],
         sampling_params=sampling_params,
         use_tqdm=True,
@@ -116,20 +69,20 @@ def test_guided_regex_(llm):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        assert re.fullmatch(TEST_REGEX, generated_text) is not None
+        assert re.fullmatch(sample_regex, generated_text) is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
 @pytest.mark.skip_global_cleanup
-def test_guided_json_completion(llm):
+def test_guided_json_completion(sample_json_schema, llm):
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     guided_options=dict(guided_json=TEST_SCHEMA),
+                                     guided_options=dict(guided_json=sample_json_schema),
                                      max_tokens=1000)
     outputs = llm.generate(
         prompts=[
             f"Give an example JSON for an employee profile "
-            f"that fits this schema: {TEST_SCHEMA}"
+            f"that fits this schema: {sample_json_schema}"
         ],
         sampling_params=sampling_params,
         use_tqdm=True,
@@ -146,14 +99,14 @@ def test_guided_json_completion(llm):
         assert generated_text is not None
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
         output_json = json.loads(generated_text)
-        jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
+        jsonschema.validate(instance=output_json, schema=sample_json_schema)
 
 @pytest.mark.skip_global_cleanup
-def test_guided_choice_completion(llm):
+def test_guided_choice_completion(sample_guided_choice, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_choice=TEST_CHOICE))
+        guided_options=dict(guided_choice=sample_guided_choice))
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
@@ -167,7 +120,7 @@ def test_guided_choice_completion(llm):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        assert generated_text in TEST_CHOICE
+        assert generated_text in sample_guided_choice
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 

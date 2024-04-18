@@ -90,15 +90,10 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     We cache logit processors by (guide, tokenizer), and on cache hit
     we make a shallow copy to reuse the same underlying FSM.
     """
-    # global global_thread_pool
     
     guide, mode = _get_guide_and_mode_from_sampling_params(sampling_params.guided_options)
     if not guide:
         return None
-
-    # if global_thread_pool is None:
-    #     global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-    #         max_workers=2)
 
     result = _get_cached_logits_processor(guide, tokenizer, mode)
 
@@ -108,6 +103,22 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     return logits_processor
             
 
+def convert_json_format(json):
+    if isinstance(json, dict):
+                # turn dict into hashable string
+                json = json_dumps(json)
+    elif isinstance(json, BaseModel):
+        # use pydantic signature so that different model classes
+        # with the same fields will get hashed the same
+        json = str(json.__signature__)
+    return json
+
+def convert_guided_choice_format(guided_choice):
+    choices = [
+            regex_escape(str(choice)) for choice in guided_choice
+        ]
+    return "(" + "|".join(choices) + ")"
+
 def _get_guide_and_mode_from_sampling_params(
     guided_options: Dict[str, str]
 ) -> Tuple[str, GuidedDecodingMode]:
@@ -116,22 +127,13 @@ def _get_guide_and_mode_from_sampling_params(
 
     if "guided_json" in guided_options:
         json = guided_options["guided_json"]
-        if isinstance(json, dict):
-            # turn dict into hashable string
-            json = json_dumps(json)
-        elif isinstance(json, BaseModel):
-            # use pydantic signature so that different model classes
-            # with the same fields will get hashed the same
-            json = str(json.__signature__)
+        json = convert_json_format(json)
         return json, GuidedDecodingMode.JSON
     elif "guided_regex" in guided_options:
         return guided_options["guided_regex"], GuidedDecodingMode.REGEX
     elif "guided_choice" in guided_options:
         # choice just uses regex
-        choices = [
-            regex_escape(str(choice)) for choice in guided_options["guided_choice"]
-        ]
-        choices_regex = "(" + "|".join(choices) + ")"
+        choices_regex = convert_guided_choice_format(guided_options["guided_choice"])
         return choices_regex, GuidedDecodingMode.CHOICE
     elif "guided_grammar" in guided_options:
         return guided_options["guided_grammar"], GuidedDecodingMode.GRAMMAR
@@ -144,22 +146,13 @@ def _get_guide_and_mode(
 
     if request.guided_json:
         json = request.guided_json
-        if isinstance(json, dict):
-            # turn dict into hashable string
-            json = json_dumps(json)
-        elif isinstance(json, BaseModel):
-            # use pydantic signature so that different model classes
-            # with the same fields will get hashed the same
-            json = str(json.__signature__)
+        json = convert_json_format(json)
         return json, GuidedDecodingMode.JSON
     elif request.guided_regex:
         return request.guided_regex, GuidedDecodingMode.REGEX
     elif request.guided_choice:
         # choice just uses regex
-        choices = [
-            regex_escape(str(choice)) for choice in request.guided_choice
-        ]
-        choices_regex = "(" + "|".join(choices) + ")"
+        choices_regex = convert_guided_choice_format(request.guided_choice)
         return choices_regex, GuidedDecodingMode.CHOICE
     elif request.guided_grammar:
         return request.guided_grammar, GuidedDecodingMode.GRAMMAR
