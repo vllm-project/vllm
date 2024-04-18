@@ -299,6 +299,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_token_ids=proposal_token_ids,
         )
 
+        print(f'{accepted_token_ids=}')
+
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
         non_spec_token_ids = non_spec_token_ids.expand(-1, max_proposal_len +

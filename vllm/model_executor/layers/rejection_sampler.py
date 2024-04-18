@@ -312,13 +312,25 @@ class RejectionSampler(nn.Module):
         output.mul_(~after_false_mask).add_(
             recovered_token_ids.mul(after_false_mask))
 
-        self.num_accepted_tokens += accepted.sum()
-        self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
-        self.num_draft_tokens += batch_size * k
+        da = accepted.sum()
+        de = (output_with_bonus_tokens != -1).sum()
+        dd = batch_size * k
 
-        print(f'{self.num_accepted_tokens=}')
-        print(f'{self.num_emitted_tokens=}')
-        print(f'{self.num_draft_tokens=}')
+        self.num_accepted_tokens += da
+        self.num_emitted_tokens += de
+        self.num_draft_tokens += dd
+
+        #self.num_accepted_tokens += accepted.sum()
+        #self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
+        #self.num_draft_tokens += batch_size * k
+
+        print(f'delta num_accepted={da}')
+        print(f'delta num_emitted_tokens={de}')
+        print(f'delta num_draft_tokens={dd}')
+
+        print(f'cumulative {self.num_accepted_tokens=}')
+        print(f'cumulative {self.num_emitted_tokens=}')
+        print(f'cumulative {self.num_draft_tokens=}')
 
         return output_with_bonus_tokens
 
@@ -347,7 +359,7 @@ class RejectionSampler(nn.Module):
             assert bonus_batch_size == target_batch_size
             assert num_bonus_tokens == self._num_bonus_tokens
         except:
-            breakpoint()
+            #breakpoint()
             raise
 
     def _raise_if_incorrect_dtype(

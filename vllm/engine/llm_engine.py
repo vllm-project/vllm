@@ -457,7 +457,14 @@ class LLMEngine:
                 scheduled_seq_group.token_chunk_size)
             # If uncomputed tokens > 0, it means prefill is chunked.
             # We don't need to process outputs in that case.
-            if seq_group.get_num_uncomputed_tokens() == 0:
+            
+            from vllm.sequence import SequenceStage
+            stages = [seq.data._stage for seq in seq_group.seqs_dict.values()]
+            all_decode = all([stage == SequenceStage.DECODE for stage in stages])
+            
+            print(f'{seq_group.get_num_uncomputed_tokens()=}')
+            print(f'{all_decode=} {stages=}')
+            if all_decode:
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.

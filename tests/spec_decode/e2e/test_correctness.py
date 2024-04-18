@@ -499,11 +499,12 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
     "output_len",
     [
         # Use long output len for the small model test.
-        1536,
+        #1536,
+        128,
     ])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.skip("used for local testing (cade to remove)")
+#@pytest.mark.skip("used for local testing (cade to remove)")
 def test_wip_validate_acceptance_rate(baseline_llm_generator,
                                       test_llm_generator, batch_size: int,
                                       output_len: int):

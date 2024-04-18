@@ -187,7 +187,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 speculated_batch_size, k + 1, self._vocab_size)
         except Exception as e:
             print(e)
-            breakpoint()
+            #breakpoint()
             raise
 
         all_tokens = torch.full(size=(original_bs, k + 1),
@@ -205,7 +205,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
                 all_probs[non_spec_indices, :1, :] = non_spec_target_probs
             except:
-                breakpoint()
+                #breakpoint()
                 raise
 
         if spec_indices:
