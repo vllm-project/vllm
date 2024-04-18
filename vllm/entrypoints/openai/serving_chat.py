@@ -24,12 +24,12 @@ class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRA]] = None,
                  chat_template=None):
         super().__init__(engine=engine,
-                         served_model=served_model,
+                         served_model_names=served_model_names,
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
@@ -109,7 +109,7 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput], request_id: str
     ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
 
-        model_name = request.model
+        model_name = self.served_model_names[0]
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
         first_iteration = True
@@ -251,7 +251,7 @@ class OpenAIServingChat(OpenAIServing):
             result_generator: AsyncIterator[RequestOutput],
             request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
 
-        model_name = request.model
+        model_name = self.served_model_names[0]
         created_time = int(time.time())
         final_res: RequestOutput = None
 
