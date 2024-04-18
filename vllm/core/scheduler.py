@@ -427,10 +427,9 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                if not budget.can_schedule(num_new_tokens = num_running_tokens,
-                                           num_new_seqs = num_running_seqs):
+                if not budget.can_schedule(num_new_tokens=num_running_tokens,
+                                           num_new_seqs=num_running_seqs):
                     break
-                    
                 logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
