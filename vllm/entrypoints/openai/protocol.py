@@ -57,7 +57,7 @@ class UsageInfo(BaseModel):
 
 class ResponseFormat(BaseModel):
     # type must be "json_object" or "text"
-    type = Literal["text", "json_object"]
+    type: Literal["text", "json_object"]
 
 
 class ChatCompletionRequest(BaseModel):
