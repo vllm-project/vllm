@@ -15,5 +15,7 @@ remove_docker_container
 
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_entrypoints \
-        rocm python3 -m pytest -v -s vllm/tests/entrypoints 
+         --shm-size=10.24gb rocm /bin/bash -c "pip install openai; \
+         python3 -m pytest -v -s vllm/tests/entrypoints"
+
 
