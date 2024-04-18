@@ -163,6 +163,14 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+def get_vllm_instance_id():
+    """
+    If the environment variable VLLM_INSTANCE_ID is set, return it.
+    Otherwise, return a random UUID.
+    """
+    return os.environ.get("VLLM_INSTANCE_ID", random_uuid())
+
+
 @lru_cache(maxsize=None)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
