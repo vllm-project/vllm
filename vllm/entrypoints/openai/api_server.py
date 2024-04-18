@@ -7,7 +7,7 @@ from http import HTTPStatus
 
 import fastapi
 import uvicorn
-from fastapi import Request, APIRouter
+from fastapi import APIRouter, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
