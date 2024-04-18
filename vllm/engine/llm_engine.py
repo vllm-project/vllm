@@ -123,6 +123,7 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
+            self.tokenizer: BaseTokenizerGroup
             self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
         else:
@@ -290,7 +291,7 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-        self.tokenizer: BaseTokenizerGroup = get_tokenizer_group(
+        self.tokenizer = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
     def _verify_args(self) -> None:
