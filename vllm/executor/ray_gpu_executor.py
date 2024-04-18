@@ -2,6 +2,8 @@ import asyncio
 import os
 import pickle
 from collections import defaultdict
+from functools import partial
+from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 from vllm.engine.ray_utils import RayWorkerWrapper, ray
@@ -136,46 +138,38 @@ class RayGPUExecutor(ExecutorBase):
         VLLM_INSTANCE_ID = get_vllm_instance_id()
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = []
-        for (node_id, _) in worker_node_and_gpu_ids:
-            all_args_to_update_environment_variables.append([{
-                "CUDA_VISIBLE_DEVICES":
-                ",".join(map(str, node_gpus[node_id])),
-                "VLLM_INSTANCE_ID":
-                VLLM_INSTANCE_ID,
-                "VLLM_TRACE_FUNCTION":
-                os.getenv("VLLM_TRACE_FUNCTION", "0"),
-            }])
+        all_args_to_update_environment_variables = [({
+            "CUDA_VISIBLE_DEVICES":
+            ",".join(map(str, node_gpus[node_id])),
+            "VLLM_INSTANCE_ID":
+            VLLM_INSTANCE_ID,
+            "VLLM_TRACE_FUNCTION":
+            os.getenv("VLLM_TRACE_FUNCTION", "0"),
+        }, ) for (node_id, _) in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
-        def collect_arg_helper_func(**kwargs):
-            # avoid writing `{"name": value}` manually
-            return kwargs
-
-        init_worker_all_kwargs = []
-
         # Initialize the actual workers inside worker wrapper.
-        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids, ):
+        init_worker_all_kwargs = []
+        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
-            init_worker_all_kwargs.append(
-                collect_arg_helper_func(
-                    model_config=self.model_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                    device_config=self.device_config,
-                    cache_config=self.cache_config,
-                    load_config=self.load_config,
-                    local_rank=local_rank,
-                    rank=rank,
-                    distributed_init_method=distributed_init_method,
-                    lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
-                    is_driver_worker=rank == 0,
-                ))
+            init_worker_all_kwargs.append({
+                "model_config": self.model_config,
+                "parallel_config": self.parallel_config,
+                "scheduler_config": self.scheduler_config,
+                "device_config": self.device_config,
+                "cache_config": self.cache_config,
+                "load_config": self.load_config,
+                "local_rank": local_rank,
+                "rank": rank,
+                "distributed_init_method": distributed_init_method,
+                "lora_config": self.lora_config,
+                "vision_language_config": self.vision_language_config,
+                "is_driver_worker": rank == 0,
+            })
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         self._run_workers("init_device")
@@ -265,9 +259,9 @@ class RayGPUExecutor(ExecutorBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
-        all_args: Optional[List[List[Any]]] = None,
+        all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
@@ -278,26 +272,21 @@ class RayGPUExecutor(ExecutorBase):
         all_args and all_kwargs are used to pass heterogeneous arguments,
         i.e. different arguments for each worker.
         """
+
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
         if driver_args is None:
             driver_args = args
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-        # for mypy type checking
-        assert driver_args is not None
-        assert driver_kwargs is not None
-        if all_args is None:
-            all_args = [driver_args] + [args] * len(self.workers)
-        if all_kwargs is None:
-            all_kwargs = [driver_kwargs] + [kwargs] * len(self.workers)
-
-        # for mypy type checking
-        assert all_args is not None
-        assert all_kwargs is not None
-
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
+        count = len(self.workers)
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, 1, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, 1, None)
 
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
@@ -310,22 +299,17 @@ class RayGPUExecutor(ExecutorBase):
                 worker.execute_method.remote(method, *worker_args,
                                              **worker_kwargs)
                 for (worker, worker_args, worker_kwargs
-                     ) in zip(self.workers, all_args[1:], all_kwargs[1:])
+                     ) in zip(self.workers, all_worker_args, all_worker_kwargs)
             ]
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
         if not use_dummy_driver:
             driver_worker_output = self.driver_worker.execute_method(
-                method, *all_args[0], **all_kwargs[0])
+                method, *driver_args, **driver_kwargs)
         else:
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
-                    method, *all_args[0], **all_kwargs[0]))
+                    method, *driver_args, **driver_kwargs))
         # Get the results of the ray workers.
         if self.workers:
             if use_ray_compiled_dag:
@@ -399,12 +383,9 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-        # Run the driver worker asynchronously.
-        def helper():
-            return self.driver_worker.execute_method(method, *driver_args,
-                                                     **driver_kwargs)
-
-        driver_executor = make_async(helper)
+        driver_executor = make_async(
+            partial(self.driver_worker.execute_method, *driver_args,
+                    **driver_kwargs))
         coros.append(driver_executor())
 
         # Run the ray workers asynchronously.
