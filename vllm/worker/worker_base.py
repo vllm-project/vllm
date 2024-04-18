@@ -1,6 +1,7 @@
 import datetime
 import importlib
 import os
+import tempfile
 import threading
 from abc import ABC, abstractmethod
 from typing import Dict, List, Set, Tuple
@@ -122,12 +123,12 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
-            tmp_dir = os.environ.get("TMPDIR") or "/tmp"
-            log_path = os.path.join(
-                tmp_dir, "vllm", get_vllm_instance_id(),
-                (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
-                 f"_thread_{threading.get_ident()}_"
-                 f"at_{datetime.datetime.now()}.log").replace(" ", "_"))
+            tmp_dir = tempfile.gettempdir()
+            filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                        f"_thread_{threading.get_ident()}_"
+                        f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+            log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                    filename)
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             enable_trace_function_call(log_path)
 
