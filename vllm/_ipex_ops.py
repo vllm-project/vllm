@@ -207,7 +207,7 @@ class ipex_cache_ops:
         torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)
 
     @staticmethod
-    def swap_blocks(src: List[torch.Tensor], dst: List[torch.Tensor],
+    def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                     block_mapping: Dict[int, int]) -> None:
         keys = list(block_mapping.keys())
         values = list(block_mapping.values())
