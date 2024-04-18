@@ -314,13 +314,13 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
         model_ref,
     )
     outputs = vllm_model.generate(prompts, sampling_params)
-    model = serialize_vllm_model(
+    serialize_vllm_model(
         vllm_model.model.llm_engine,
         config
     )
 
     assert is_vllm_tensorized(config)
-    del vllm_model, model
+    del vllm_model
     gc.collect()
     torch.cuda.empty_cache()
 
