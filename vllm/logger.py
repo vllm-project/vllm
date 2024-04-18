@@ -73,7 +73,7 @@ def init_logger(name: str):
 logger = init_logger(__name__)
 
 
-def trace_calls(log_path, root_dir, frame, event, arg=None):
+def _trace_calls(log_path, root_dir, frame, event, arg=None):
     if event in ['call', 'return']:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
@@ -94,21 +94,37 @@ def trace_calls(log_path, root_dir, frame, event, arg=None):
         except NameError:
             # modules are deleted during shutdown
             pass
-    return partial(trace_calls, log_path, root_dir)
+    return partial(_trace_calls, log_path, root_dir)
 
 
-if int(os.getenv("VLLM_TRACE_FRAME", "0")):
+def enable_trace_function_call(log_file_path: str,
+                               root_dir: Optional[str] = None):
+    """
+    Enable tracing of every function call in code under `root_dir`.
+    This is useful for debugging hangs or crashes.
+    `log_file_path` is the path to the log file.
+    `root_dir` is the root directory of the code to trace. If None, it is the
+    vllm root directory.
+
+    Note that this call is thread-level, any threads calling this function
+    will have the trace enabled. Other threads will not be affected.
+    """
     logger.warning(
         "VLLM_TRACE_FRAME is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
-        "is suggested to be used for debugging hang in distributed"
-        " inference only.")
+        "is suggested to be used for debugging hang or crashes only.")
+    logger.info(f"Trace frame log is saved to {log_file_path}")
+    if root_dir is None:
+        # by default, this is the vllm root directory
+        root_dir = os.path.dirname(os.path.dirname(__file__))
+    sys.settrace(partial(_trace_calls, log_file_path, root_dir))
+
+
+if int(os.getenv("VLLM_TRACE_FRAME", "0")):
     temp_dir = "/tmp/"
     log_path = os.path.join(temp_dir,
                             (f"vllm_trace_frame_for_process_{os.getpid()}"
                              f"_thread_{threading.get_ident()}_"
                              f"at_{datetime.datetime.now()}.log").replace(
                                  " ", "_"))
-    logger.info(f"Trace frame log is saved to {log_path}")
-    root_dir = os.path.dirname(os.path.dirname(__file__))
-    sys.settrace(partial(trace_calls, log_path, root_dir))
+    enable_trace_function_call(log_path)
