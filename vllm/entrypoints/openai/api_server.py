@@ -150,18 +150,18 @@ if __name__ == "__main__":
     logger.info(f"args: {args}")
 
     if args.served_model_name is not None:
-        served_model = args.served_model_name
+        served_model_names = args.served_model_name
     else:
-        served_model = args.model
+        served_model_names = [args.model]
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-    openai_serving_chat = OpenAIServingChat(engine, served_model,
+    openai_serving_chat = OpenAIServingChat(engine, served_model_names,
                                             args.response_role,
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model, args.lora_modules)
+        engine, served_model_names, args.lora_modules)
 
     app.root_path = args.root_path
     uvicorn.run(app,
