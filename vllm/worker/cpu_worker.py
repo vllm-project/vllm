@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed
@@ -152,8 +152,8 @@ class CPUWorker(LoraNotSupportedWorkerBase):
                                            is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine = None
-        self.cpu_cache = None
+        self.cache_engine: CPUCacheEngine
+        self.cpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
         self.init_distributed_environment()
@@ -257,13 +257,13 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
-            num_seq_groups = len(seq_group_metadata_list)
+            num_seq_groups: int = len(seq_group_metadata_list)
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
             assert len(blocks_to_swap_in) == 0
             assert len(blocks_to_swap_out) == 0
-            data = {
+            data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_copy": blocks_to_copy,
             }
@@ -273,6 +273,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             num_seq_groups = data["num_seq_groups"]
             blocks_to_copy = data["blocks_to_copy"]
 
+        assert blocks_to_copy is not None
         self.cache_copy(blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
