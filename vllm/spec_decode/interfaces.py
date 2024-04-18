@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 
@@ -73,5 +73,5 @@ class SpeculativeScorer(ABC):
         blocks_to_copy: Optional[Dict[int, List[int]]],
         k: int,
         proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> SpeculativeScores:
         raise NotImplementedError

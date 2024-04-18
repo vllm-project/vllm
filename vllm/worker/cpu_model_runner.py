@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional, Tuple
 
 import torch
+from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -48,13 +49,14 @@ class CPUModelRunner:
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
-        self.model = None
-        self.block_size = None  # Set after initial profiling.
-
         self.kv_cache_dtype = kv_cache_dtype
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
+
+        # Lazy initialization.
+        self.model: nn.Module  # Set after init_Model
+        self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
         self.model = get_model(model_config=self.model_config,
@@ -245,7 +247,11 @@ class CPUModelRunner:
         selected_token_indices: List[int] = []
         generators: List[torch.Generator] = []
         selected_token_start_idx = 0
-        categorized_sample_indices = {t: [] for t in SamplingType}
+        categorized_sample_indices: Dict[SamplingType,
+                                         List[Tuple[int, int]]] = {
+                                             t: []
+                                             for t in SamplingType
+                                         }
         categorized_sample_indices_start_idx = 0
         categorized_sampled_token_indices_start_idx = 0
 
@@ -262,10 +268,9 @@ class CPUModelRunner:
                     categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
-                    sampling_params.sampling_type].append([
-                        categorized_sample_indices_start_idx,
-                        categorized_sampled_token_indices_start_idx
-                    ])
+                    sampling_params.sampling_type].append(
+                        (categorized_sample_indices_start_idx,
+                         categorized_sampled_token_indices_start_idx))
                 categorized_sample_indices_start_idx += 1
                 categorized_sampled_token_indices_start_idx += 1
 
@@ -328,7 +333,7 @@ class CPUModelRunner:
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
                SamplingMetadata]:
         if self.is_driver_worker:
@@ -381,7 +386,7 @@ class CPUModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata
