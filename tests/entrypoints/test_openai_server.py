@@ -82,7 +82,7 @@ class ServerRunner:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
+            ["vllm", "serve"] + args,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,

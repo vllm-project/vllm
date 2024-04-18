@@ -4,7 +4,7 @@ vLLM provides an HTTP server that implements OpenAI's [Completions](https://plat
 
 You can start the server using Python, or using [Docker](deploying_with_docker.rst):
 ```bash
-python -m vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --dtype auto --api-key token-abc123
+vllm serve --model mistralai/Mistral-7B-Instruct-v0.2 --dtype auto --api-key token-abc123
 ```
 
 To call the server, you can use the official OpenAI Python client library, or any other HTTP client.
@@ -95,8 +95,7 @@ template, or the template in string form. Without a chat template, the server wi
 and all chat requests will error.
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model ... \
+vllm serve --model ... \
   --chat-template ./path-to-chat-template.jinja
 ```
 
