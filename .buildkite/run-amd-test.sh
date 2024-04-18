@@ -5,6 +5,10 @@ set -ex
 # Print ROCm version
 rocminfo
 
+for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
+    rocm-smi -gpureset -d $i; 
+donec
+
 #rocminfo | grep 'gfx*'
 
 #rocm-smi
