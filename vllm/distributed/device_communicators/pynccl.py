@@ -122,7 +122,6 @@ _c_ncclCommInitRank.argtypes = [
 ]
 
 
-# enums
 class ncclDataType_t(ctypes.c_int):
     pass
 
@@ -270,7 +269,6 @@ class NCCLCommunicator:
                    stream=None):
         if stream is None:
             stream = self.stream
-        breakpoint()
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
