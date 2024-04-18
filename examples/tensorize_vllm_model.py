@@ -1,25 +1,22 @@
 import argparse
 import dataclasses
+import json
 import os
 import time
 import uuid
 from functools import partial
 from typing import Type
-import json
 
 import torch
 import torch.nn as nn
-from tensorizer import (DecryptionParams, TensorDeserializer,
-                        stream_io)
+from tensorizer import DecryptionParams, TensorDeserializer, stream_io
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from transformers import AutoConfig, PretrainedConfig
 
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
-                                                         TensorizerConfig,
-                                                         TensorizerAgent,
+from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          serialize_vllm_model)
 from vllm.model_executor.models import ModelRegistry
 
@@ -213,9 +210,12 @@ def deserialize():
 
 args = parse_args()
 
-s3_access_key_id = getattr(args, 's3_access_key_id', None) or os.environ.get("S3_ACCESS_KEY_ID", None)
-s3_secret_access_key = getattr(args, 's3_secret_access_key', None) or os.environ.get("S3_SECRET_ACCESS_KEY", None)
-s3_endpoint = getattr(args, 's3_endpoint', None) or os.environ.get("S3_ENDPOINT", None)
+s3_access_key_id = (getattr(args, 's3_access_key_id', None)
+                    or os.environ.get("S3_ACCESS_KEY_ID", None))
+s3_secret_access_key = (getattr(args, 's3_secret_access_key', None)
+                        or os.environ.get("S3_SECRET_ACCESS_KEY", None))
+s3_endpoint = (getattr(args, 's3_endpoint', None)
+               or os.environ.get("S3_ENDPOINT", None))
 
 credentials = {
     "s3_access_key_id": s3_access_key_id,

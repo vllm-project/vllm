@@ -14,8 +14,8 @@ from vllm.config import (VLLM_USE_MODELSCOPE, DeviceConfig, LoadConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, load_with_tensorizer,
-    tensorizer_weights_iterator, is_vllm_tensorized)
+    TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
+    tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (

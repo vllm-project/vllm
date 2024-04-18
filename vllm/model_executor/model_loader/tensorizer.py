@@ -13,8 +13,8 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.logger import init_logger
 from vllm.engine.llm_engine import LLMEngine
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -279,7 +279,6 @@ class TensorizerAgent:
                 new_weight[child.weight.shape[0]:].fill_(0)
                 child.weight.data = new_weight
 
-
     def _check_tensors_on_meta_device(self):
         for tensor in self.model.state_dict().values():
             if tensor.device.type == 'meta':
@@ -332,8 +331,6 @@ class TensorizerAgent:
         return self.model.eval()
 
 
-
-
 def tensorizer_weights_iterator(
     tensorizer_args: "TensorizerArgs"
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
@@ -353,6 +350,7 @@ def tensorizer_weights_iterator(
             yield name, param
     del state
 
+
 def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     """
     Infer if the model is a vLLM model by checking the weights for
@@ -365,19 +363,20 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
         bool: True if the model is a vLLM model, False otherwise.
     """
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
-    deserializer = TensorDeserializer(
-        open_stream(tensorizer_args.tensorizer_uri,
-                    **tensorizer_args.stream_params),
-        **tensorizer_args.deserializer_params, lazy_load=True)
-    if (".vllm_tensorized_marker" in deserializer.keys()):
+    deserializer = TensorDeserializer(open_stream(
+        tensorizer_args.tensorizer_uri, **tensorizer_args.stream_params),
+                                      **tensorizer_args.deserializer_params,
+                                      lazy_load=True)
+    if (".vllm_tensorized_marker" in deserializer):
         return True
     return False
 
+
 def get_pretensorized_vllm_model(engine: "LLMEngine") -> nn.Module:
-    model = (engine.model_executor.driver_worker.
-             model_runner.model)
-    model.register_parameter("vllm_tensorized_marker", nn.Parameter(
-        torch.tensor((1,), device="meta"), requires_grad=False))
+    model = (engine.model_executor.driver_worker.model_runner.model)
+    model.register_parameter(
+        "vllm_tensorized_marker",
+        nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False))
     return model
 
 
@@ -400,8 +399,6 @@ def serialize_vllm_model(engine: "LLMEngine",
         serializer = TensorSerializer(stream, encryption=encryption_params)
         serializer.write_module(model)
         serializer.close()
-    logger.info(f"Succesfully serialized model "
+    logger.info(f"Successfully serialized model "
                 f"to {tensorizer_args.tensorizer_uri}")
     return model
-
-
