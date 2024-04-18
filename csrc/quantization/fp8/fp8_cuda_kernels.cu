@@ -49,7 +49,7 @@ __global__ void segmented_max_reduction(
   // now cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
   if (cacheIndex == 0) {
-    atomicMaxFloat(scale, cache[0]);
+    atomicMaxFloat(scale, cache[0] / 448.0);
   }
 }
 
