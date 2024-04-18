@@ -25,7 +25,7 @@ def iter_llava_configs(model_name: str):
 
 
 model_and_vl_config = [
-    *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
+    # *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
     *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
 
