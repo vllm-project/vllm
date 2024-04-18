@@ -267,6 +267,8 @@ class XFormersImpl(AttentionImpl):
             )
 
             # attention sinks: revert key in cache to pre-rotated state
+            # this causes "CUBLAS_STATUS_EXECUTION_FAILED when calling cublasGemmEx"
+            # so this logic is moved inside llama forward
             use_attn_sinks = False
             if use_attn_sinks:
                 if kv_cache is not None:

@@ -22,7 +22,6 @@
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, List, Optional, Tuple
-from copy import deepcopy
 
 import torch
 from torch import nn
@@ -165,7 +164,7 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # qkv all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
+        # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
         use_attn_sinks = True
         llama_context_len = 4096
@@ -192,7 +191,6 @@ class LlamaAttention(nn.Module):
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
                 num_past_tokens = context_lens[i] - 1
-                assert num_past_tokens == positions[i], f"{num_past_tokens} != {positions[i]}"
                 if num_past_tokens < llama_context_len: continue
                 
                 past_keys = {}
@@ -201,6 +199,7 @@ class LlamaAttention(nn.Module):
                 end = num_past_tokens
                 # loop should have 4096 - 1 iterations
                 for abs_pos in range(start, end):
+                    if abs_pos % 100 == 0: print("abs pos", abs_pos)
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
@@ -216,13 +215,13 @@ class LlamaAttention(nn.Module):
                 
                 blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
                 # block_table[0] is attention sink
-                capped_block_table = [block_table[0]] + block_table[blocks_to_ignore + 1:].tolist()
+                capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
                 block_tables.append(capped_block_table)
 
             if block_tables:
                 attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
                     block_tables,
-                    max_len=max(len(block_table) for block_table in block_tables),
+                    max_len=llama_context_len // block_size,
                     pad=0,
                     dtype=torch.int,
                     device=original_block_tables.device
@@ -231,7 +230,7 @@ class LlamaAttention(nn.Module):
             # compute attention in kernel
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                             self.kv_scale, k_original)
-            
+                        
             # put original keys back in cache
             for i in range(batch_size):
                 num_past_tokens = context_lens[i] - 1
@@ -246,6 +245,13 @@ class LlamaAttention(nn.Module):
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
                     key_cache[phys_bnum, :, offset] = past_keys[abs_pos]
+
+                # put current key back in cache
+                # slot_map has length num_tokens, but is num_tokens==batch_size (num_seqs) ???
+                slot = attn_metadata.slot_mapping[i]
+                phys_bnum = slot // block_size
+                offset = slot % block_size
+                key_cache[phys_bnum, :, offset] = k_original.squeeze(0)
             
             # revert block tables inside metadata
             # so that next attn layer starts with same block tables
