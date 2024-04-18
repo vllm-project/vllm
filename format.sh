@@ -101,14 +101,12 @@ mypy vllm/entrypoints --config-file pyproject.toml
 mypy vllm/executor --config-file pyproject.toml
 mypy vllm/usage --config-file pyproject.toml
 mypy vllm/*.py --config-file pyproject.toml
-mypy vllm/transformers_utils/*.py --config-file pyproject.toml
-
-# TODO(sang): Follow up
+mypy vllm/transformers_utils --config-file pyproject.toml
 mypy vllm/engine  --config-file pyproject.toml
 mypy vllm/worker --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
 mypy vllm/model_executor/*.py  --config-file pyproject.toml
-# mypy vllm/lora/*.py --follow-imports=skip --config-file pyproject.toml
+# mypy vllm/lora/*.py --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
