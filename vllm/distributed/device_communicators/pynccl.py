@@ -142,7 +142,7 @@ class ncclDataType_t(ctypes.c_int):
     ncclNumTypes = 10
 
     @classmethod
-    def from_torch(cls, dtype: torch.dtype) -> 'ncclDataType_t':
+    def from_torch(cls, dtype: torch.dtype) -> int:
         if dtype == torch.int8:
             return cls.ncclInt8
         if dtype == torch.uint8:
@@ -171,7 +171,7 @@ class ncclRedOp_t(ctypes.c_int):
     ncclNumOps = 5
 
     @classmethod
-    def from_torch(cls, op: ReduceOp) -> 'ncclRedOp_t':
+    def from_torch(cls, op: ReduceOp) -> int:
         if op == ReduceOp.SUM:
             return cls.ncclSum
         if op == ReduceOp.PRODUCT:

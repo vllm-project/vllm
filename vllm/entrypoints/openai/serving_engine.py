@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple, Union
 
-from pydantic import conint
+from pydantic import Field
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import Annotated
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -45,7 +47,8 @@ class OpenAIServing:
             ]
 
         self.max_model_len = 0
-        self.tokenizer = None
+        # Lazy initialized
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -90,7 +93,7 @@ class OpenAIServing:
     def _create_logprobs(
         self,
         token_ids: List[int],
-        top_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None,
+        top_logprobs: List[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: Optional[int] = None,
         initial_text_offset: int = 0,
     ) -> LogProbs:
@@ -106,6 +109,7 @@ class OpenAIServing:
                 token = self.tokenizer.decode(token_id)
                 logprobs.tokens.append(token)
                 logprobs.token_logprobs.append(None)
+                assert logprobs.top_logprobs is not None
                 logprobs.top_logprobs.append(None)
             else:
                 token_logprob = step_top_logprobs[token_id].logprob
@@ -114,6 +118,7 @@ class OpenAIServing:
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
+                    assert logprobs.top_logprobs is not None
                     logprobs.top_logprobs.append({
                         p.decoded_token: p.logprob
                         for i, p in step_top_logprobs.items()
@@ -151,9 +156,9 @@ class OpenAIServing:
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
         if request.model == self.served_model:
-            return
+            return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
-            return
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
@@ -161,7 +166,7 @@ class OpenAIServing:
 
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
         if request.model == self.served_model:
-            return
+            return None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
@@ -173,7 +178,7 @@ class OpenAIServing:
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt: Optional[str] = None,
         prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")

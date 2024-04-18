@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple, Union
+from typing import Dict, Iterable, Iterator, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -39,7 +39,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
-        self.seq_counter = seq_counter
+        self.seq_counter: Iterator[int] = iter(seq_counter)
         self.stop_checker = stop_checker
 
     def process_outputs(self, sequence_group: SequenceGroup,
@@ -68,7 +68,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
-        parent_child_dict = {
+        parent_child_dict: Dict[int, List[SequenceOutput]] = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
@@ -91,7 +91,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
-                new_child_seq_id = next(self.seq_counter)
+                new_child_seq_id: int = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
                                       child_sample.logprobs)
