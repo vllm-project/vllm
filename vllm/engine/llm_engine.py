@@ -1,7 +1,7 @@
 import time
 from typing import Iterable, List, Optional, Type, Union
 
-from transformers import PreTrainedTokenizer, GenerationConfig
+from transformers import GenerationConfig, PreTrainedTokenizer
 
 import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,

@@ -2,7 +2,7 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Callable, List, Optional, Union, Dict, Any
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import Field
