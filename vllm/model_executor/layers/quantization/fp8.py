@@ -3,7 +3,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch._dynamo
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
@@ -12,7 +11,6 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
-torch._dynamo.config.suppress_errors = True
 
 class FP8Config(QuantizationConfig):
     """Config class for FP8."""
@@ -47,12 +45,6 @@ class FP8Config(QuantizationConfig):
         return []
 
 
-class Fp8LinearState(Enum):
-
-    UNINITIALIZED = enum.auto()
-    READY = enum.auto()
-
-
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     We now support common FP16/BF16 model checkpoints ONLY. The weight
@@ -80,58 +72,35 @@ class Fp8LinearMethod(LinearMethodBase):
     ):
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
-                                       dtype=torch.float8_e4m3fn),
+                                       dtype=params_dtype),
                            requires_grad=False)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         set_weight_attrs(weight, extra_weight_attrs)
 
-        # Will be initialized for FP16/BF16 checkpoints
-        # during the first forward pass.
         w_scale = Parameter(
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
         layer.register_parameter("weight_scaling_factor", w_scale)
 
-        # We always initialize the state to UNINITIALIZED because
-        # we cannot know whether weights going to be loaded are in FP8
-        # or not. If they are in FP8, the first forward pass simply
-        # sets the state to READY without re-quantization.
-        layer.fp8_linear_state = Fp8LinearState.UNINITIALIZED
-
-    def proc_before_loading(self, layer: Module, param: Parameter,
-                            loaded_weight: torch.Tensor) -> torch.Tensor:
-        if loaded_weight.dtype != torch.float8_e4m3fn:
-            loaded_weight, weight_scale = per_tensor_quantize(loaded_weight)
-            # If the loaded weight is not in FP8, we override the
-            # weight and scaling factor with the quantized weight.
-            layer.weight_scaling_factor.data.copy_(weight_scale)
-        return loaded_weight
+    # def proc_before_loading(self, layer: Module, param: Parameter,
+    #                         loaded_weight: torch.Tensor) -> torch.Tensor:
+    #     loaded_weight, weight_scale = per_tensor_quantize(loaded_weight)
+    #     layer.weight_scaling_factor.data.copy_(weight_scale)
+    #     return loaded_weight
 
     def proc_after_loading(self, layer: Module) -> None:
-        # Note that torch._scaled_mm requires column-major in
-        # the second input (weight), so we transpose the quantized
-        # weight here.
-        layer.weight.data = layer.weight.data.t()
+        # torch._scaled_mm requires column-major in the second
+        # input (weight), so we transpose the quantized weight here.
+        qweight, weight_scale = per_tensor_quantize(layer.weight)
+        layer.weight = Parameter(qweight.t(), requires_grad=False)
+        layer.weight_scaling_factor.data.copy_(weight_scale)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-
-        # if layer.fp8_linear_state == Fp8LinearState.UNINITIALIZED:
-        #     # Per-tensor scaling on the fly for FP16/BF16 weights
-        #     # during the first forward pass if the loaded weights
-        #     # are not in FP8.
-        #     if layer.weight.dtype != torch.float8_e4m3fn:
-        #         qweight, weight_scale = per_tensor_quantize(layer.weight.data)
-        #         # Note that torch._scaled_mm requires column-major in
-        #         # the second input, so we transpose the quantized weight here.
-        #         layer.weight.data = qweight.t()
-        #         layer.weight_scaling_factor.data = weight_scale
-        #     layer.fp8_linear_state = Fp8LinearState.READY
-
         qinput, x_scale = per_tensor_quantize(x)
         output, _ = torch._scaled_mm(
             qinput,

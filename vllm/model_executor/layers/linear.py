@@ -49,17 +49,7 @@ class LinearMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
-    def proc_before_loading(self, layer: nn.Module, param: Parameter,
-                            loaded_weight: torch.Tensor) -> torch.Tensor:
-        """Process the weight before loading.
-
-        This can be used for exmaple, quantizing the weight before
-        loading it to the model.
-        """
-        return loaded_weight
-
-    def proc_after_loading(self, layer: nn.Module, param: Parameter,
-                           loaded_weight: torch.Tensor) -> None:
+    def proc_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 
         This can be used for example, to transpose weights for computation.
@@ -218,9 +208,6 @@ class ColumnParallelLinear(torch.nn.Module):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        loaded_weight = self.linear_method.proc_before_loading(
-            self, param, loaded_weight)
-
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
@@ -287,9 +274,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
-        loaded_weight = self.linear_method.proc_before_loading(
-            self, param, loaded_weight)
-
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         if loaded_shard_id is None:
@@ -416,9 +400,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                       param: Parameter,
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[str] = None):
-        loaded_weight = self.linear_method.proc_before_loading(
-            self, param, loaded_weight)
-
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
 
@@ -576,9 +557,6 @@ class RowParallelLinear(torch.nn.Module):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        loaded_weight = self.linear_method.proc_before_loading(
-            self, param, loaded_weight)
-
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
