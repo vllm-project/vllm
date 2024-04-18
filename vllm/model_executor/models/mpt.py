@@ -10,11 +10,13 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -23,9 +25,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
-
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
 
 
 def _get_alibi_slopes(
@@ -40,15 +39,17 @@ def _get_alibi_slopes(
         slopes = torch.concat([slopes[1::2], slopes[::2]])[:total_num_heads]
     return slopes
 
+
 def _get_norm_class(config):
 
-    if config.norm_type.lower() not in NORM_CLASS_REGISTRY.keys():
-        norm_options = " | ".join(NORM_CLASS_REGISTRY.keys())
+    if config.norm_type.lower() not in NORM_CLASS_REGISTRY:
+        norm_options = " | ".join(NORM_CLASS_REGISTRY)
         raise NotImplementedError(
-            f"Requested norm type ({config.norm_type}) is not implemented within this repo (Options: {norm_options})."
-        )
+            f"Requested norm type ({config.norm_type}) is not "
+            f"implemented within this repo (Options: {norm_options}).")
     norm_class = NORM_CLASS_REGISTRY[config.norm_type.lower()]
     return norm_class
+
 
 class MPTAttention(nn.Module):
 
@@ -218,6 +219,7 @@ FFN_CLASS_REGISTRY = {
     'mptglu': MPTGLU,
 }
 
+
 class MPTBlock(nn.Module):
 
     def __init__(
@@ -231,7 +233,8 @@ class MPTBlock(nn.Module):
         self.norm_1 = norm_class(hidden_size)
         self.attn = MPTAttention(config, linear_method)
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](config, linear_method)
+        self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](
+            config, linear_method)
 
     def forward(
         self,

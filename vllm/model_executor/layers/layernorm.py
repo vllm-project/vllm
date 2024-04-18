@@ -18,7 +18,9 @@ def _cast_if_autocast_enabled(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.to(dtype=dtype)
     return tensor
 
+
 class LPLayerNorm(torch.nn.LayerNorm):
+
     def __init__(
         self,
         normalized_shape: Union[int, List[int], torch.Size],
@@ -38,14 +40,10 @@ class LPLayerNorm(torch.nn.LayerNorm):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         module_device = x.device
         downcast_x = _cast_if_autocast_enabled(x)
-        downcast_weight = (
-            _cast_if_autocast_enabled(self.weight)
-            if self.weight is not None
-            else self.weight
-        )
-        downcast_bias = (
-            _cast_if_autocast_enabled(self.bias) if self.bias is not None else self.bias
-        )
+        downcast_weight = (_cast_if_autocast_enabled(self.weight)
+                           if self.weight is not None else self.weight)
+        downcast_bias = (_cast_if_autocast_enabled(self.bias)
+                         if self.bias is not None else self.bias)
         with torch.autocast(enabled=False, device_type=module_device.type):
             return torch.nn.functional.layer_norm(
                 downcast_x,
@@ -54,6 +52,7 @@ class LPLayerNorm(torch.nn.LayerNorm):
                 downcast_bias,
                 self.eps,
             )
+
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.
@@ -113,6 +112,7 @@ class RMSNorm(nn.Module):
         )
         return out
 
+
 class LPRMSNorm(nn.Module):
     """Root mean square normalization with low precision
     """
@@ -142,8 +142,8 @@ class LPRMSNorm(nn.Module):
             residual = _cast_if_autocast_enabled(residual)
 
         # do calculations with downcasted variables
-        with torch.autocast(enabled=False, device_type=x.device.type):    
-            if residual is not None:   
+        with torch.autocast(enabled=False, device_type=x.device.type):
+            if residual is not None:
                 x = x + residual.to(torch.float32)
                 residual = x.to(orig_dtype)
 
@@ -154,6 +154,7 @@ class LPRMSNorm(nn.Module):
             return x
         else:
             return x, residual
+
 
 NORM_CLASS_REGISTRY: Dict[str, Type[torch.nn.Module]] = {
     "layernorm": torch.nn.LayerNorm,
