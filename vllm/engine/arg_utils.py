@@ -1,15 +1,12 @@
 import argparse
 import dataclasses
-import io
-import os
 from dataclasses import dataclass
-from typing import BinaryIO, Optional, Union
+from typing import Optional
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig, TensorizerConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          TokenizerPoolConfig, VisionLanguageConfig)
-from vllm.model_executor.tensorizer_loader import TensorizerArgs
 from vllm.utils import str_to_int_tuple
 
 
@@ -60,17 +57,7 @@ class EngineArgs:
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
-
-    # Tensorizer configuration parameters
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
-                          bytes, os.PathLike, int] = None
-    vllm_tensorized: bool = False
-    verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
-    encryption_keyfile: Optional[str] = None
-    s3_access_key_id: Optional[str] = None
-    s3_secret_access_key: Optional[str] = None
-    s3_endpoint: Optional[str] = None
+    model_loader_extra_config: Optional[dict] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -429,7 +416,16 @@ class EngineArgs:
             default=None,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding')
-        parser = TensorizerArgs.add_cli_args(parser)
+
+        parser.add_argument('--model-loader-extra-config',
+                            type=str,
+                            default=EngineArgs.model_loader_extra_config,
+                            help='Extra config for model loader. '
+                            'This will be passed to the model loader '
+                            'corresponding to the chosen load_format. '
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary.')
+
         return parser
 
     @classmethod
@@ -444,11 +440,11 @@ class EngineArgs:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
-            self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.trust_remote_code, self.dtype, self.seed, self.revision,
+            self.code_revision, self.tokenizer_revision, self.max_model_len,
+            self.quantization, self.quantization_param_path,
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -492,15 +488,10 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
-        tensorizer_config = TensorizerConfig(
-            tensorizer_uri=self.tensorizer_uri,
-            vllm_tensorized=self.vllm_tensorized,
-            verify_hash=self.verify_hash,
-            num_readers=self.num_readers,
-            encryption_keyfile=self.encryption_keyfile,
-            s3_access_key_id=self.s3_access_key_id,
-            s3_secret_access_key=self.s3_secret_access_key,
-            s3_endpoint=self.s3_endpoint,
+        load_config = LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
         )
 
         if self.image_input_type:
@@ -530,8 +521,8 @@ class EngineArgs:
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
                             speculative_config=speculative_config,
-                            decoding_config=decoding_config,
-                            tensorizer_config=tensorizer_config)
+                            load_config=load_config,
+                            decoding_config=decoding_config)
 
 
 @dataclass
