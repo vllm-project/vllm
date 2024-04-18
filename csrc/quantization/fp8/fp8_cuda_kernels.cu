@@ -129,13 +129,13 @@ void fp8_silu_and_mul_kernel(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
     out.scalar_type(),
-    "scaled_silu_and_mul_kernel",
+    "fp8_silu_and_mul_kernel_kernel",
     [&] {
       vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
         scale.data_ptr<float>(),
         input.data_ptr<scalar_t>(),
         input.numel());
-      vllm::scaled_silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+      vllm::fp8_silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
         out.data_ptr<c10::Float8_e4m3fn>(),
         input.data_ptr<scalar_t>(),
         scale.data_ptr<float>(),
