@@ -118,7 +118,7 @@ class WorkerWrapperBase:
     def init_worker(self, *args, **kwargs):
         """
         Actual initialization of the worker class, and set up
-         logging if required.
+       function tracing if required.
         Arguments are passed to the worker class constructor.
         """
         if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
