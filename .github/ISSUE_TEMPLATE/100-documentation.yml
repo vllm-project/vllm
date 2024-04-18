@@ -1,7 +1,7 @@
 name: 📚 Documentation
 description: Report an issue related to https://docs.vllm.ai/
 title: "[Doc]: "
-labels: ["doc"]
+labels: ["documentation"]
 
 body:
 - type: textarea

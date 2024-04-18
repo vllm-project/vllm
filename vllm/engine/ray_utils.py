@@ -1,10 +1,10 @@
 import pickle
-
-from typing import Optional, List, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import is_hip, set_cuda_visible_devices, get_ip
+from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
+from vllm.worker.worker import Worker
 
 logger = init_logger(__name__)
 
@@ -19,22 +19,36 @@ try:
             if init_cached_hf_modules:
                 from transformers.dynamic_module_utils import init_hf_modules
                 init_hf_modules()
-            self.worker = None
+            self._worker: Optional[Worker] = None
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
             # that thread.
             self.compiled_dag_cuda_device_set = False
 
-        def init_worker(self, worker_init_fn):
-            self.worker = worker_init_fn()
+        def init_worker(self, worker_init_fn: Callable[[], Worker]):
+            self._worker = worker_init_fn()
+
+        @property
+        def worker(self) -> Worker:
+            assert self._worker is not None
+            return self._worker
 
         def __getattr__(self, name):
             return getattr(self.worker, name)
 
         def execute_method(self, method, *args, **kwargs):
-            executor = getattr(self, method)
-            return executor(*args, **kwargs)
+            try:
+                executor = getattr(self, method)
+                return executor(*args, **kwargs)
+            except Exception as e:
+                # exceptions in ray worker may cause deadlock
+                # see https://github.com/vllm-project/vllm/issues/3455
+                # print the error and inform the user to solve the error
+                msg = (f"Error executing method {method}. "
+                       "This might cause deadlock in distributed execution.")
+                logger.exception(msg)
+                raise e
 
         def get_node_ip(self) -> str:
             return get_ip()
@@ -62,8 +76,8 @@ except ImportError as e:
     logger.warning(f"Failed to import Ray with {e!r}. "
                    "For distributed inference, please install Ray with "
                    "`pip install ray`.")
-    ray = None
-    RayWorkerVllm = None
+    ray = None  # type: ignore
+    RayWorkerVllm = None  # type: ignore
 
 
 def initialize_ray_cluster(

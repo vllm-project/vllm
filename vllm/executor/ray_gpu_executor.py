@@ -1,21 +1,17 @@
 import asyncio
 import copy
-from collections import defaultdict
 import os
 import pickle
-import importlib
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from collections import defaultdict
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
 from vllm.engine.ray_utils import RayWorkerVllm, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
-from vllm.executor.utils import check_block_size_valid
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (set_cuda_visible_devices, get_ip, get_open_port,
-                        get_distributed_init_method, make_async)
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        make_async, set_cuda_visible_devices)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -25,12 +21,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# A map between the device type (in device config) to its worker module.
-DEVICE_TO_WORKER_MODULE_MAP = {
-    "cuda": "vllm.worker.worker",
-    "neuron": "vllm.worker.neuron_worker",
-}
-
 # If the env var is set, it uses the Ray's compiled DAG API
 # which optimizes the control plane overhead.
 # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
@@ -39,21 +29,9 @@ USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 class RayGPUExecutor(ExecutorBase):
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-    ) -> None:
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
+    def _init_executor(self) -> None:
+        assert (not self.speculative_config
+                ), "Speculative decoding not yet supported for RayGPU backend."
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
@@ -66,19 +44,24 @@ class RayGPUExecutor(ExecutorBase):
         # Create the parallel GPU workers.
         self._init_workers_ray(placement_group)
 
-        # Profile the memory usage and initialize the cache.
-        self._init_cache()
-
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
 
-    def _dispatch_worker(self):
-        worker_module = DEVICE_TO_WORKER_MODULE_MAP[
-            self.device_config.device_type]
-        imported_worker = importlib.import_module(worker_module)
-        Worker = imported_worker.Worker
-        return Worker
+    def _configure_ray_workers_use_nsight(self,
+                                          ray_remote_kwargs) -> Dict[str, Any]:
+        # If nsight profiling is enabled, we need to set the profiling
+        # configuration for the ray workers as runtime env.
+        runtime_env = ray_remote_kwargs.setdefault("runtime_env", {})
+        runtime_env.update({
+            "nsight": {
+                "t": "cuda,cudnn,cublas",
+                "o": "'worker_process_%p'",
+                "cuda-graph-trace": "node",
+            }
+        })
+
+        return ray_remote_kwargs
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
@@ -94,6 +77,10 @@ class RayGPUExecutor(ExecutorBase):
         self.driver_dummy_worker: RayWorkerVllm = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerVllm] = []
+
+        if self.parallel_config.ray_workers_use_nsight:
+            ray_remote_kwargs = self._configure_ray_workers_use_nsight(
+                ray_remote_kwargs)
 
         # Create the workers.
         driver_ip = get_ip()
@@ -155,14 +142,15 @@ class RayGPUExecutor(ExecutorBase):
 
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        Worker = self._dispatch_worker()
+        from vllm.worker.worker import Worker
 
         model_config = copy.deepcopy(self.model_config)
         parallel_config = copy.deepcopy(self.parallel_config)
         scheduler_config = copy.deepcopy(self.scheduler_config)
         device_config = copy.deepcopy(self.device_config)
         lora_config = copy.deepcopy(self.lora_config)
-        kv_cache_dtype = self.cache_config.cache_dtype
+        cache_config = copy.deepcopy(self.cache_config)
+        vision_language_config = copy.deepcopy(self.vision_language_config)
 
         # Initialize the actual workers with the Worker class.
         for rank, (worker, (node_id, _)) in enumerate(
@@ -172,93 +160,82 @@ class RayGPUExecutor(ExecutorBase):
             local_rank = node_workers[node_id].index(rank)
             worker.init_worker.remote(
                 lambda rank=rank, local_rank=local_rank: Worker(
-                    model_config,
-                    parallel_config,
-                    scheduler_config,
-                    device_config,
-                    local_rank,
-                    rank,
-                    distributed_init_method,
+                    model_config=model_config,
+                    parallel_config=parallel_config,
+                    scheduler_config=scheduler_config,
+                    device_config=device_config,
+                    cache_config=cache_config,
+                    local_rank=local_rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
                     lora_config=lora_config,
-                    kv_cache_dtype=kv_cache_dtype,
+                    vision_language_config=vision_language_config,
+                    tensorizer_config=self.tensorizer_config,
                 ))
 
         # Initialize the driver worker with the Worker class.
         driver_rank = 0
         driver_local_rank = node_workers[driver_node_id].index(driver_rank)
         self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            local_rank=driver_local_rank,
+            rank=driver_rank,
+            distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
-            kv_cache_dtype=kv_cache_dtype,
+            vision_language_config=self.vision_language_config,
+            tensorizer_config=self.tensorizer_config,
             is_driver_worker=True,
         )
 
-        # FIXME(woosuk): We are not properly initializing cupy NCCL when
-        # we have multiple nodes.
-        self._run_workers("init_model",
-                          cupy_port=get_open_port()
-                          if not model_config.enforce_eager else None)
+        self._run_workers("init_device")
         self._run_workers(
             "load_model",
             max_concurrent_workers=self.parallel_config.
             max_parallel_loading_workers,
         )
 
-    def _init_cache(self) -> None:
-        """Profiles the memory usage and initializes the KV cache.
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Determine the number of available KV blocks.
 
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-        More details can be found in the
-        :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method
-        from class :class:`~vllm.worker.Worker`.
+        This invokes `determine_num_available_blocks` on each worker and takes
+        the min of the results, guaranteeing that the selected cache sizes are
+        compatible with all workers.
 
-        Afterwards, as there may be multiple workers,
-        we take the minimum number of blocks across all workers
-        to ensure this can be applied to all of them.
-
-        Finally, the engine will initialize the KV cache
-        with the calculated number of blocks.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameter.
+        Returns:
+            - Tuple[num_gpu_blocks, num_cpu_blocks]
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers(
-            "profile_num_available_blocks",
-            block_size=self.cache_config.block_size,
-            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-            cpu_swap_space=self.cache_config.swap_space_bytes,
-            cache_dtype=self.cache_config.cache_dtype,
-        )
+        num_blocks = self._run_workers("determine_num_available_blocks", )
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory
         # operators can be applied to all workers.
         num_gpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)
+
+        return num_gpu_blocks, num_cpu_blocks
+
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Initialize the KV cache in all workers.
+        """
+
+        # NOTE: We log here to avoid multiple logs when number of workers is
+        # greater than one. We could log in the engine, but not all executors
+        # have GPUs.
         logger.info(f"# GPU blocks: {num_gpu_blocks}, "
                     f"# CPU blocks: {num_cpu_blocks}")
-
-        check_block_size_valid(num_gpu_blocks, self.cache_config.block_size,
-                               self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-        # Initialize the cache.
-        self._run_workers("init_cache_engine", cache_config=self.cache_config)
-        # Warm up the model. This includes capturing the model into CUDA graph
-        # if enforce_eager is False.
-        self._run_workers("warm_up_model")
+        self._run_workers("initialize_cache",
+                          num_gpu_blocks=num_gpu_blocks,
+                          num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -293,14 +270,14 @@ class RayGPUExecutor(ExecutorBase):
             lora_id=lora_id,
         )
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self._run_workers("list_loras")
 
     def _run_workers(
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
@@ -315,6 +292,7 @@ class RayGPUExecutor(ExecutorBase):
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
             # input. TODO(sang): Fix it.
+            assert self.forward_dag is not None
             output_channels = self.forward_dag.execute(1)
         else:
             # Start the ray workers first.
@@ -357,7 +335,7 @@ class RayGPUExecutor(ExecutorBase):
             raise ValueError(f"Ray version {required_version} or greater is "
                              f"required, but found {current_version}")
 
-        from ray.dag import MultiOutputNode, InputNode
+        from ray.dag import InputNode, MultiOutputNode
         assert self.parallel_config.worker_use_ray
 
         # Right now, compiled DAG requires at least 1 arg. We send
@@ -393,7 +371,7 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         self,
         method: str,
         *args,
-        driver_args: Optional[List[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Any:
@@ -435,7 +413,3 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         # Only the driver worker returns the sampling results.
         output = all_outputs[0]
         return output
-
-    async def check_health_async(self) -> None:
-        """Raises an error if engine is unhealthy."""
-        self._check_if_any_actor_is_dead()

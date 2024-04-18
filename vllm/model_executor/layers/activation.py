@@ -6,11 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.utils import divide
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -20,8 +19,8 @@ class SiluAndMul(nn.Module):
     The function computes x -> silu(x[:d]) * x[d:] where d = x.shape[-1] // 2.
 
     Shapes:
-        x: (batch_size, seq_len, 2 * d) or (num_tokens, 2 * d)
-        return: (batch_size, seq_len, d) or (num_tokens, d)
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
     def _forward(self, x: torch.Tensor) -> torch.Tensor:

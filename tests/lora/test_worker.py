@@ -3,10 +3,10 @@ import random
 import tempfile
 from unittest.mock import patch
 
+from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
-                         DeviceConfig, LoRAConfig)
 from vllm.worker.worker import Worker
 
 
@@ -25,15 +25,19 @@ def test_worker_apply_lora(sql_lora_files):
             revision=None,
         ),
         parallel_config=ParallelConfig(1, 1, False),
-        scheduler_config=SchedulerConfig(32, 32, 32, 256),
+        scheduler_config=SchedulerConfig(32, 32, 32),
         device_config=DeviceConfig("cuda"),
+        cache_config=CacheConfig(block_size=16,
+                                 gpu_memory_utilization=1.,
+                                 swap_space=0,
+                                 cache_dtype="auto"),
         local_rank=0,
         rank=0,
         lora_config=LoRAConfig(max_lora_rank=8, max_cpu_loras=32,
                                max_loras=32),
         distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
     )
-    worker.init_model()
+    worker.init_device()
     worker.load_model()
 
     worker.model_runner.set_active_loras([], LoRAMapping([], []))

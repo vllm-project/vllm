@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -108,7 +108,7 @@ class RotaryEmbedding(nn.Module):
             query_pass = query[..., self.rotary_dim:]
             key_pass = key[..., self.rotary_dim:]
 
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.get_device())
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -142,7 +142,7 @@ class RotaryEmbedding(nn.Module):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.get_device())
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
@@ -247,11 +247,12 @@ def _yarn_find_correction_dim(num_rotations: int,
 
 
 # Find dim range bounds based on rotations
-def _yarn_find_correction_range(low_rot: int,
-                                high_rot: int,
-                                dim: int,
-                                base: float = 10000,
-                                max_position_embeddings: int = 2048) -> int:
+def _yarn_find_correction_range(
+        low_rot: int,
+        high_rot: int,
+        dim: int,
+        base: float = 10000,
+        max_position_embeddings: int = 2048) -> Tuple[int, int]:
     low = math.floor(
         _yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = math.ceil(
@@ -293,8 +294,8 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         *,
         extrapolation_factor: float = 1,
         attn_factor: float = 1,
-        beta_fast: float = 32,
-        beta_slow: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor

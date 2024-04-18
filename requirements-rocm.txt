@@ -1,13 +1,5 @@
-ninja  # For faster builds.
-typing-extensions>=4.8.0
-starlette
-psutil
-ray >= 2.9
-sentencepiece  # Required for LLaMA tokenizer.
-numpy
-tokenizers>=0.15.0
-transformers >= 4.38.0  # Required for Gemma.
-fastapi
-uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
-prometheus_client >= 0.18.0
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for AMD GPUs
+ray == 2.9.3

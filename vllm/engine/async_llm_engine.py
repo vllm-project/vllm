@@ -3,19 +3,21 @@ import os
 import time
 from http import HTTPStatus
 from functools import partial
-from typing import (Callable, Dict, Iterable, List, Optional, Set, Tuple, Type,
-                    Union, AsyncIterator)
+from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
+                    Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
 
-from vllm.lora.request import LoRARequest
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import MultiModalData
+from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
@@ -248,6 +250,7 @@ class _AsyncLLMEngine(LLMEngine):
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -260,17 +263,13 @@ class _AsyncLLMEngine(LLMEngine):
             prompt_token_ids=prompt_token_ids,
             lora_request=lora_request)
 
-        try:
-            self.add_request(
-                request_id,
-                prompt=prompt,
-                prompt_token_ids=prompt_token_ids,
-                sampling_params=sampling_params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
-        except Exception as e:
-            raise e
+        return self.add_request(request_id,
+                                prompt=prompt,
+                                prompt_token_ids=prompt_token_ids,
+                                sampling_params=sampling_params,
+                                arrival_time=arrival_time,
+                                lora_request=lora_request,
+                                multi_modal_data=multi_modal_data)
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
@@ -329,31 +328,41 @@ class AsyncLLMEngine:
         self._errored_with: Optional[BaseException] = None
 
     @classmethod
-    def from_engine_args(cls,
-                         engine_args: AsyncEngineArgs,
-                         start_engine_loop: bool = True) -> "AsyncLLMEngine":
+    def from_engine_args(
+        cls,
+        engine_args: AsyncEngineArgs,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+    ) -> "AsyncLLMEngine":
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
-        if parallel_config.worker_use_ray or engine_args.engine_use_ray:
-            initialize_ray_cluster(parallel_config)
+        engine_config = engine_args.create_engine_config()
+
+        if engine_config.device_config.device_type == "neuron":
+            raise NotImplementedError("Neuron is not supported for "
+                                      "async engine yet.")
+        elif (engine_config.parallel_config.worker_use_ray
+              or engine_args.engine_use_ray):
+            initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
         else:
-            assert parallel_config.world_size == 1, (
+            assert engine_config.parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
         # Create the async LLM engine.
-        engine = cls(parallel_config.worker_use_ray,
-                     engine_args.engine_use_ray,
-                     *engine_configs,
-                     executor_class,
-                     log_requests=not engine_args.disable_log_requests,
-                     log_stats=not engine_args.disable_log_stats,
-                     max_log_len=engine_args.max_log_len,
-                     start_engine_loop=start_engine_loop)
+        engine = cls(
+            engine_config.parallel_config.worker_use_ray,
+            engine_args.engine_use_ray,
+            **engine_config.to_dict(),
+            executor_class=executor_class,
+            log_requests=not engine_args.disable_log_requests,
+            log_stats=not engine_args.disable_log_stats,
+            max_log_len=engine_args.max_log_len,
+            start_engine_loop=start_engine_loop,
+            usage_context=usage_context,
+        )
         return engine
 
     @property
@@ -493,6 +502,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncStream:
         curr_queue_len = len(self.engine.scheduler.waiting)
         max_queue_len = self.engine.scheduler.scheduler_config.get_max_queue_length(
@@ -548,7 +558,9 @@ class AsyncLLMEngine:
             sampling_params=sampling_params,
             prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
-            lora_request=lora_request)
+            lora_request=lora_request,
+            multi_modal_data=multi_modal_data,
+        )
 
         return stream
 
@@ -559,6 +571,7 @@ class AsyncLLMEngine:
         request_id: str,
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -574,6 +587,7 @@ class AsyncLLMEngine:
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             lora_request: LoRA request to use for generation, if any.
+            multi_modal_data: Multi modal data per request.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
@@ -623,8 +637,7 @@ class AsyncLLMEngine:
             >>> ...
         """
         # Preprocess the request.
-        # This should not be used for logging, as it is monotonic time.
-        arrival_time = time.monotonic()
+        arrival_time = time.time()
 
         try:
             stream = await self.add_request(
@@ -634,6 +647,7 @@ class AsyncLLMEngine:
                 prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                multi_modal_data=multi_modal_data,
             )
 
             async for request_output in stream:
