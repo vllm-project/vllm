@@ -1209,7 +1209,7 @@ def _prepare_fake_inputs(
         ImageInputType = VisionLanguageConfig.ImageInputType
 
         if config_input_type == ImageInputType.PIXEL_VALUES:
-            values_arr = values.view(3, 336, 336).permute((1, 2, 0)).numpy()
+            values_arr = values.squeeze(dim=0).permute((1, 2, 0)).numpy()
             image = Image.fromarray(values_arr, mode="RGB")
             fake_mm_data = ImagePixelData(image)
         elif config_input_type == ImageInputType.IMAGE_FEATURES:
