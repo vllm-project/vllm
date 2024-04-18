@@ -10,7 +10,7 @@ from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
-HEAD_SIZES = [128]
+HEAD_SIZES = [128, 96]
 DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
