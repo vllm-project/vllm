@@ -115,3 +115,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+# (Requires multiple GPUs)
