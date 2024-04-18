@@ -6,8 +6,8 @@ set -ex
 rocminfo
 
 for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
-    rocm-smi -gpureset -d $i; 
-donec
+    #rocm-smi -gpureset -d $i; 
+done
 
 #rocminfo | grep 'gfx*'
 

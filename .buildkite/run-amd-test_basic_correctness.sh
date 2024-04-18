@@ -6,7 +6,7 @@ set -ex
 rocminfo
 
 for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
-    rocm-smi -gpureset -d $i; 
+    #rocm-smi -gpureset -d $i; 
 done
 
 #pip install huggingface_hub
