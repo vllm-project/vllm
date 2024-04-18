@@ -5,11 +5,12 @@ import time
 import uuid
 from functools import partial
 from typing import Type
+import json
 
 import torch
 import torch.nn as nn
-from tensorizer import (DecryptionParams, EncryptionParams, TensorDeserializer,
-                        TensorSerializer, stream_io)
+from tensorizer import (DecryptionParams, TensorDeserializer,
+                        stream_io)
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from transformers import AutoConfig, PretrainedConfig
 
@@ -167,12 +168,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def make_model_contiguous(model):
-    # Ensure tensors are saved in memory contiguously
-    for param in model.parameters():
-        param.data = param.data.contiguous()
-
-
 def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -217,27 +212,21 @@ def deserialize():
     )
     print(f"Memory usage before: {before_mem}")
     print(f"Memory usage after: {after_mem}")
-
+    del model.vllm_tensorized_marker
     return model
 
 
 args = parse_args()
 
-model_extra_config = args.model_loader_extra_config or {}
+s3_access_key_id = getattr(args, 's3_access_key_id', None) or os.environ.get("S3_ACCESS_KEY_ID", None)
+s3_secret_access_key = getattr(args, 's3_secret_access_key', None) or os.environ.get("S3_SECRET_ACCESS_KEY", None)
+s3_endpoint = getattr(args, 's3_endpoint', None) or os.environ.get("S3_ENDPOINT", None)
 
-tensorizer_args = TensorizerArgs(model_extra_config) \
-    if model_extra_config else None
-
-# TODO: Fix this, especially in the case of model_extra_config not being passed
-
-s3_access_key_id = tensorizer_args.s3_access_key_id if tensorizer_args \
-    else os.environ.get("S3_ACCESS_KEY_ID", None)
-
-s3_secret_access_key = tensorizer_args.s3_secret_access_key if tensorizer_args \
-    else os.environ.get("S3_SECRET_ACCESS_KEY", None)
-
-s3_endpoint = tensorizer_args.s3_endpoint if tensorizer_args \
-    else os.environ.get("S3_ENDPOINT", None)
+credentials = {
+    "s3_access_key_id": s3_access_key_id,
+    "s3_secret_access_key": s3_secret_access_key,
+    "s3_endpoint": s3_endpoint
+}
 
 _read_stream, _write_stream = (partial(
     stream_io.open_stream,
@@ -262,26 +251,33 @@ keyfile = args.keyfile if args.keyfile else None
 eng_args_dict = {f.name: getattr(args, f.name) for f in
                  dataclasses.fields(EngineArgs)}
 
-tensorizer_args = args - eng_args_dict
-
-## TODO: There's clearly too much needless stuff going on to instantiate the agent
-config = TensorizerConfig(tensorizer_args)
-tensorizer_args = TensorizerConfig._construct_tensorizer_args()
-tensorizer_agent = TensorizerAgent(tensorizer_args)
-
-eng_args_dict = {f.name: getattr(args, f.name) for f in
-                 dataclasses.fields(EngineArgs)}
 engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
 engine = LLMEngine.from_engine_args(engine_args)
+
+if args.model_loader_extra_config:
+    config = json.loads(args.model_loader_extra_config)
+    tensorizer_args = TensorizerConfig(**config)._construct_tensorizer_args()
+    tensorizer_args.tensorizer_uri = args.path_to_tensors
+else:
+    tensorizer_args = None
 
 if args.command == "serialize":
     input_dir = args.serialized_directory.rstrip('/')
     suffix = args.suffix if args.suffix else uuid.uuid4().hex
     base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
     model_path = f"{base_path}/model.tensors"
-    serialize_vllm_model(tensorizer_agent, engine, keyfile)
+    tensorizer_config = TensorizerConfig(
+        tensorizer_uri=model_path,
+        **credentials)
+    serialize_vllm_model(engine, tensorizer_config, keyfile)
 elif args.command == "deserialize":
-    tensorizer_args = TensorizerArgs.from_cli_args(args)
+    if not tensorizer_args:
+        tensorizer_args = TensorizerConfig(
+            tensorizer_uri=args.path_to_tensors,
+            encryption_keyfile = keyfile,
+            **credentials
+        )._construct_tensorizer_args()
+        tensorizer_args.tensorizer_uri = args.path_to_tensors
     model_path = args.path_to_tensors
     deserialize()
 else:
