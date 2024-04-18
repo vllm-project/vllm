@@ -5,8 +5,12 @@ set -ex
 # Print ROCm version
 rocminfo
 
-pip install huggingface_hub
-~/.local/bin/huggingface-cli login --token $HF_TOKEN
+for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
+    rocm-smi -gpureset -d $i; 
+done
+
+#pip install huggingface_hub
+#~/.local/bin/huggingface-cli login --token $HF_TOKEN
 
 # Try building the docker image
 docker build -t rocm -f Dockerfile.rocm .

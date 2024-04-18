@@ -5,6 +5,10 @@ set -ex
 # Print ROCm version
 rocminfo
 
+for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
+    rocm-smi -gpureset -d $i; 
+done
+
 # Try building the docker image
 docker build -t rocm -f Dockerfile.rocm .
 
