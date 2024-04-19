@@ -73,9 +73,9 @@ def process_requests(engine: LLMEngine,
     "max_wait_q_len, expect_error",
     [
         (1, True),  # error expected 
-        # (2, True),
-        # (3, False),  # No error expected 
-        # (4, False),
+        (2, True),
+        (3, False),  # No error expected 
+        (4, False),
     ])
 def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
 
@@ -88,7 +88,13 @@ def test_max_queue_length(max_wait_q_len, expect_error, test_prompts):
         "float",
         '--max-num-seqs',
         str(1), '--max-queue-length',
-        str(max_wait_q_len)
+        str(max_wait_q_len),
+        "--max-num-batched-tokens",
+        "2048",
+        "--gpu-memory-utilization",
+        "1",
+        "--max-model-len",
+        "1024",
     ]
     args = parser.parse_args(args_to_test)
     engine_args = EngineArgs.from_cli_args(args)

@@ -1,5 +1,6 @@
 import time
 from typing import Iterable, List, Optional, Type, Union
+from http import HTTPStatus
 
 from transformers import PreTrainedTokenizer
 
