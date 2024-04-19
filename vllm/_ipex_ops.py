@@ -91,6 +91,7 @@ class ipex_ops:
             0,
             num_kv_heads,
             dtype=torch.int32,
+            device=query.device,
         ).view(num_kv_heads,
                1).repeat_interleave(num_queries_per_tokens).flatten()
         # todo: ipex will refactor namespace
