@@ -553,47 +553,53 @@ class LLMEngine:
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
-        """Get Stats to be Logged to Prometheus."""
+        """Get Stats to be Logged to StdOut and Prometheus."""
         now = time.time()
 
-        # KV Cache Usage in %.
+        # System State
+        #   Scheduler State
+        num_running_sys = len(self.scheduler.running)
+        num_swapped_sys = len(self.scheduler.swapped)
+        num_waiting_sys = len(self.scheduler.waiting)
+
+        # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
-        cpu_cache_usage = 0.
+        cpu_cache_usage_sys = 0.
         if num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
-            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
+            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
-        # Scheduler State
-        num_running = len(self.scheduler.running)
-        num_swapped = len(self.scheduler.swapped)
-        num_waiting = len(self.scheduler.waiting)
+        # Iteration stats
+        time_to_first_tokens_iter = []
+        time_per_output_tokens_iter = []
 
-        # Iteration stats if we have scheduler output.
-        num_prompt_tokens = []
-        num_generation_tokens = []
-        request_n = []
-        request_best_of = []
-        time_to_first_tokens = []
-        time_per_output_tokens = []
+        # Request stats
+        #   Latency
         time_e2e_requests = []
-        finished_reason_lst = []
+        #   Metadata
+        num_prompt_tokens_requests = []
+        num_generation_tokens_requests = []
+        best_of_requests = []
+        n__requests = []
+        finished_reason_requests = []
+
         if scheduler_outputs is not None:
             prompt_run = scheduler_outputs.num_prefill_groups > 0
 
             # Number of Tokens
             if prompt_run:
-                num_prompt_tokens = [
+                num_prompt_tokens_requests = [
                     len(scheduled_seq_group.seq_group.prompt_token_ids)
                     for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups
                 ]
             else:
-                num_generation_tokens = [
+                num_generation_tokens_requests = [
                     seq.get_output_len() for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups for seq in
                     scheduled_seq_group.seq_group.get_finished_seqs()
@@ -601,12 +607,12 @@ class LLMEngine:
 
             # Sampling Params
             if prompt_run:
-                request_n = [
+                n__requests = [
                     scheduled_seq_group.seq_group.sampling_params.n
                     for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups
                 ]
-                request_best_of = [
+                best_of_requests = [
                     scheduled_seq_group.seq_group.sampling_params.best_of
                     for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups
@@ -624,11 +630,11 @@ class LLMEngine:
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
 
-            time_to_first_tokens = time_last_iters if prompt_run else []
-            time_per_output_tokens = [] if prompt_run else time_last_iters
+            time_to_first_tokens_iter = time_last_iters if prompt_run else []
+            time_per_output_tokens_iter = [] if prompt_run else time_last_iters
 
             # Finished Requests
-            finished_reason_lst = [
+            finished_reason_requests = [
                 SequenceStatus.get_finished_reason(seq.status) for
                 scheduled_seq_group in scheduler_outputs.scheduled_seq_groups
                 if scheduled_seq_group.seq_group.is_finished()
@@ -637,19 +643,29 @@ class LLMEngine:
 
         return Stats(
             now=now,
-            num_running=num_running,
-            num_swapped=num_swapped,
-            num_waiting=num_waiting,
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
-            finished_reason_lst=finished_reason_lst,
-            num_prompt_tokens=num_prompt_tokens,
-            num_generation_tokens=num_generation_tokens,
-            request_n=request_n,
-            request_best_of=request_best_of,
-            time_to_first_tokens=time_to_first_tokens,
-            time_per_output_tokens=time_per_output_tokens,
+
+            # System stats
+            #   Scheduler State
+            num_running_sys=num_running_sys,
+            num_swapped_sys=num_swapped_sys,
+            num_waiting_sys=num_waiting_sys,
+            #   KV Cache Usage in %
+            gpu_cache_usage_sys=gpu_cache_usage_sys,
+            cpu_cache_usage_sys=cpu_cache_usage_sys,
+
+            # Iteration stats
+            time_to_first_tokens_iter=time_to_first_tokens_iter,
+            time_per_output_tokens_iter=time_per_output_tokens_iter,
+
+            # Request stats
+            #   Latency
             time_e2e_requests=time_e2e_requests,
+            #   Metadata
+            num_prompt_tokens_requests=num_prompt_tokens_requests,
+            num_generation_tokens_requests=num_generation_tokens_requests,
+            best_of_requests=best_of_requests,
+            n_requests=n__requests,
+            finished_reason_requests=finished_reason_requests,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
