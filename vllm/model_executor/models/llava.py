@@ -1,4 +1,5 @@
-from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
+from typing import (ClassVar, Iterable, List, Literal, Optional, Tuple,
+                    TypedDict, Union)
 
 import torch
 from torch import nn
@@ -52,7 +53,13 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
                              image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
-    inputs_embeds[mask] = vision_embeddings.view(-1,
+
+    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
+    if mask.sum() != image_feature_size:
+        raise ValueError(f"image_feature_size should be {image_feature_size}, "
+                         f"but found: {mask.sum()}")
+
+    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
                                                  vision_embeddings.shape[-1])
     return inputs_embeds
 
@@ -74,11 +81,17 @@ LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
 class LlavaForConditionalGeneration(nn.Module):
 
+    is_vlm: ClassVar[bool] = True
+    """Indicates that the model is a vision-language model and thus accepts
+    the `vision_language_config` parameter.
+    """
+
     def __init__(self,
-                 config: "LlavaConfig",
+                 config: LlavaConfig,
                  vision_language_config: VisionLanguageConfig,
-                 linear_method: Optional["LinearMethodBase"] = None) -> None:
+                 linear_method: Optional[LinearMethodBase] = None) -> None:
         super().__init__()
+
         self.config = config
 
         self.vision_language_config = vision_language_config
@@ -213,7 +226,7 @@ class LlavaForConditionalGeneration(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs: object,
-    ) -> SamplerOutput:  # noqa: E501
+    ) -> SamplerOutput:
         """Run forward pass for Llava 1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -264,6 +277,7 @@ class LlavaForConditionalGeneration(nn.Module):
             input_ids = None
         else:
             inputs_embeds = None
+
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             kv_caches,

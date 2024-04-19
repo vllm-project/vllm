@@ -33,6 +33,8 @@ _MODELS = {
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "LlavaForConditionalGeneration":
     ("llava", "LlavaForConditionalGeneration"),
+    "LlavaNextForConditionalGeneration":
+    ("llava_next", "LlavaNextForConditionalGeneration"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),

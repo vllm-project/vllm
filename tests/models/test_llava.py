@@ -29,10 +29,32 @@ def iter_llava_configs(model_name: str):
                                         image_processor_revision=None))
 
 
+def iter_llava_next_configs(model_name: str):
+    image_hw_to_feature_size = {
+        (336, 336): 1176,
+        (672, 672): 2928,
+        (1344, 336): 1944,
+        (336, 1344): 1890,
+    }
+
+    for (h, w), f in image_hw_to_feature_size.items():
+        for input_type, input_shape in [
+            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
+            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
+        ]:
+            yield (model_name,
+                   VisionLanguageConfig(image_input_type=input_type,
+                                        image_feature_size=f,
+                                        image_token_id=64000,
+                                        image_input_shape=input_shape,
+                                        image_processor=model_name,
+                                        image_processor_revision=None))
+
+
 model_and_vl_config = [
     *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
     # Not enough memory
-    # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
+    # *iter_llava_next_configs("llava-hf/llava-v1.6-34b-hf"),
 ]
 
 
