@@ -84,31 +84,31 @@ class Metrics:
 
         # Request stats
         #   Latency
-        self.histogram_e2e_request_latency = Histogram(
+        self.histogram_e2e_time_request = Histogram(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
         #   Metadata
-        self.histogram_request_prompt_tokens = Histogram(
+        self.histogram_num_prompt_tokens_request = Histogram(
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
-        self.histogram_request_generation_tokens = Histogram(
+        self.histogram_num_generation_tokens_request = Histogram(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames,
             buckets=build_1_2_5_buckets(max_model_len),
         )
-        self.histogram_request_best_of = Histogram(
+        self.histogram_best_of_request = Histogram(
             name="vllm:request_params_best_of",
             documentation="Histogram of the best_of request parameter.",
             labelnames=labelnames,
             buckets=[1, 2, 5, 10, 20],
         )
-        self.histogram_request_n = Histogram(
+        self.histogram_n_request = Histogram(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
             labelnames=labelnames,
@@ -249,7 +249,7 @@ class StatLogger:
 
         # Request level data
         # Latency
-        self._log_histogram(self.metrics.histogram_e2e_request_latency,
+        self._log_histogram(self.metrics.histogram_e2e_time_request,
                             stats.time_e2e_requests)
         # Metadata
         finished_reason_counter = CollectionsCounter(
@@ -257,12 +257,13 @@ class StatLogger:
         self._log_counter_labels(self.metrics.counter_request_success,
                                  finished_reason_counter,
                                  Metrics.labelname_finish_reason)
-        self._log_histogram(self.metrics.histogram_request_prompt_tokens,
+        self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
                             stats.num_prompt_tokens_requests)
-        self._log_histogram(self.metrics.histogram_request_generation_tokens,
-                            stats.num_generation_tokens_requests)
-        self._log_histogram(self.metrics.histogram_request_n, stats.n_requests)
-        self._log_histogram(self.metrics.histogram_request_best_of,
+        self._log_histogram(
+            self.metrics.histogram_num_generation_tokens_request,
+            stats.num_generation_tokens_requests)
+        self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+        self._log_histogram(self.metrics.histogram_best_of_request,
                             stats.best_of_requests)
 
     def _log_gauge(self, gauge: Gauge, data: Union[int, float]) -> None:
