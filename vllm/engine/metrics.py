@@ -55,6 +55,14 @@ class Metrics:
             labelnames=labelnames)
 
         # Raw stats from last model iteration
+        self.counter_prompt_tokens = Counter(
+            name="vllm:prompt_tokens_total",
+            documentation="Number of prefill tokens processed.",
+            labelnames=labelnames)
+        self.counter_generation_tokens = Counter(
+            name="vllm:generation_tokens_total",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames)
         self.counter_request_success = Counter(
             name="vllm:request_success",
             documentation="Count of successfully processed requests.",
@@ -105,16 +113,6 @@ class Metrics:
             buckets=[1, 2, 5, 10, 20],
         )
 
-        # Deprecated in favor of vllm:request_prompt_tokens_sum
-        self.counter_prompt_tokens = Counter(
-            name="vllm:prompt_tokens_total",
-            documentation="Number of prefill tokens processed.",
-            labelnames=labelnames)
-        # Deprecated in favor of vllm:request_generation_tokens_sum
-        self.counter_generation_tokens = Counter(
-            name="vllm:generation_tokens_total",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames)
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = Gauge(
             name="vllm:avg_prompt_throughput_toks_per_s",
@@ -169,6 +167,8 @@ class Stats:
     cpu_cache_usage_sys: float
 
     # Iteration stats (should have _iter suffix)
+    num_prompt_tokens_iter: int
+    num_generation_tokens_iter: int
     time_to_first_tokens_iter: List[float]
     time_per_output_tokens_iter: List[float]
 
@@ -233,9 +233,9 @@ class StatLogger:
 
         # Add to token counters.
         self.metrics.counter_prompt_tokens.labels(**self.labels).inc(
-            sum(stats.num_prompt_tokens_requests))
+            stats.num_prompt_tokens_iter)
         self.metrics.counter_generation_tokens.labels(**self.labels).inc(
-            sum(stats.num_generation_tokens_requests))
+            stats.num_generation_tokens_iter)
 
         # Add to request counters.
         finished_reason_counter = CollectionsCounter(
@@ -296,9 +296,8 @@ class StatLogger:
         self._log_prometheus(stats)
 
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(sum(stats.num_prompt_tokens_requests))
-        self.num_generation_tokens.append(
-            sum(stats.num_generation_tokens_requests))
+        self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
+        self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):

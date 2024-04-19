@@ -575,6 +575,8 @@ class LLMEngine:
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
         # Iteration stats
+        num_prompt_tokens_iter = 0
+        num_generation_tokens_iter = 0
         time_to_first_tokens_iter = []
         time_per_output_tokens_iter = []
 
@@ -609,6 +611,8 @@ class LLMEngine:
                     if latency is not None:
                         time_to_first_tokens_iter.append(latency)
                 else:
+                    num_generation_tokens_iter += seq_group.num_unfinished_seqs(
+                    )
                     assert latency is not None
                     time_per_output_tokens_iter.append(latency)
 
@@ -647,6 +651,8 @@ class LLMEngine:
             cpu_cache_usage_sys=cpu_cache_usage_sys,
 
             # Iteration stats
+            num_prompt_tokens_iter=num_prompt_tokens_iter,
+            num_generation_tokens_iter=num_generation_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
 
