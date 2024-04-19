@@ -307,6 +307,12 @@ class RejectionSampler(nn.Module):
         # with causal acceptance.
         output_with_bonus_tokens[:, -1] = torch.where(output[:, -1] != -1,
                                                       bonus_token_ids, -1)
+        
+        # We disable bonus tokens because it causes corrupt KV cache for
+        # proposal methods that require KV cache. We can fix it by "prefilling"
+        # the bonus token in the proposer.
+        # https://github.com/vllm-project/vllm/issues/4212
+        output_with_bonus_tokens[:, -1] = -1
 
         # Fill the recovered token ids.
         output.mul_(~after_false_mask).add_(
