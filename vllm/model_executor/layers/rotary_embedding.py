@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+from functools import lru_cache
 
 from vllm._C import ops
 
@@ -236,6 +237,123 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
+class PhiLongScaledRotaryEmbedding(nn.Module):
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        original_max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        short_factor: List[float],
+        long_factor: List[float],
+        short_mscale: float = 1.1,
+        long_mscale: float = 1.225,
+    ):
+        super().__init__()
+
+        self.head_size = head_size
+        self.rotary_dim = rotary_dim
+        self.base = base
+        self.is_neox_style = is_neox_style
+
+        self.max_position_embeddings = max_position_embeddings
+        self.original_max_position_embeddings = original_max_position_embeddings
+
+        self.short_factor = short_factor
+        self.long_factor = long_factor
+        self.short_mscale = short_mscale
+        self.long_mscale = long_mscale
+
+        short_cache = self._compute_cos_sin_cache(
+            original_max_position_embeddings, short_factor, short_mscale)
+        short_cache = short_cache.to(torch.get_default_dtype())
+        self.register_buffer("short_cos_sin_cache", short_cache, persistent=False)
+
+        long_cache = self._compute_cos_sin_cache(
+            max_position_embeddings, long_factor, long_mscale)
+        long_cache = long_cache.to(torch.get_default_dtype())
+        self.register_buffer("long_cos_sin_cache", long_cache, persistent=False)
+
+        long_short_cache = torch.cat([self.short_cos_sin_cache,
+                           self.long_cos_sin_cache], dim=0)
+        self.register_buffer("long_short_cos_sin_cache", long_short_cache, persistent=False)
+
+
+    def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
+        rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
+        inv_freq = 1.0 / (rescale_factors * (self.base **(torch.arange(
+            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
+        return inv_freq
+
+    def _compute_cos_sin_cache(
+        self,
+        max_position_embeddings: int,
+        rescale_factors: List[float],
+        mscale: float,
+    ) -> torch.Tensor:
+        inv_freq = self._compute_inv_freq(rescale_factors)
+        t = torch.arange(max_position_embeddings, dtype=torch.float)
+        freqs = torch.einsum("i,j -> ij", t, inv_freq)
+        cos = (freqs.cos() * mscale)
+        sin = (freqs.sin() * mscale)
+        cache = torch.cat((cos, sin), dim=-1)
+        return cache
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # TODO: CUDA kernels for multiple caches
+
+        query_shape = query.shape
+        key_shape = key.shape
+        query = query.view(*query.shape[:-1], -1, self.head_size)
+        key = key.view(*key.shape[:-1], -1, self.head_size)
+
+        query_rot = query[..., :self.rotary_dim]
+        key_rot = key[..., :self.rotary_dim]
+        if self.rotary_dim < self.head_size:
+            query_pass = query[..., self.rotary_dim:]
+            key_pass = key[..., self.rotary_dim:]
+
+        # LongRoPE switch logic
+        #For long prompt, offset position by original_max_position_embeddings to index long_cos_sin_cache properly
+        k = self.original_max_position_embeddings
+        long_prompt_offset = (torch.any(positions > k).float() * torch.full_like(positions, k)).long()
+        idx = torch.add(positions, long_prompt_offset) if long_prompt_offset is not None else positions
+        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(idx.device)
+        idx = torch.add(idx, offsets) if offsets is not None else idx
+
+        cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if self.is_neox_style:
+            # NOTE(woosuk): Here we assume that the positions tensor has the
+            # shape [batch_size, seq_len].
+            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        else:
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+
+        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
+        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
+        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
+
+        if self.rotary_dim < self.head_size:
+            query = torch.cat((query_rot, query_pass), dim=-1)
+            key = torch.cat((key_rot, key_pass), dim=-1)
+        else:
+            query = query_rot
+            key = key_rot
+        return query.view(query_shape), key.view(key_shape)
+
+
 # Inverse dim formula to find dim based on number of rotations
 def _yarn_find_correction_dim(num_rotations: int,
                               dim: int,
@@ -347,8 +465,12 @@ def get_rope(
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
+    # key = (head_size, rotary_dim, max_position, base, is_neox_style,
+    #        tuple(rope_scaling.items()) if rope_scaling is not None else None)
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           tuple(rope_scaling.items()) if rope_scaling is not None else None)
+           (v for v in rope_scaling.items() if type(v) is not list)
+           if rope_scaling is not None else None)
+
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
@@ -357,7 +479,9 @@ def get_rope(
                                      is_neox_style)
     else:
         scaling_type = rope_scaling["type"]
-        scaling_factor = rope_scaling["factor"]
+
+        if scaling_type != "longrope":
+            scaling_factor = rope_scaling["factor"]
         if scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
                                                       max_position, base,
@@ -381,6 +505,23 @@ def get_rope(
                                                     base, is_neox_style,
                                                     scaling_factor,
                                                     **extra_kwargs)
+        elif scaling_type == 'longrope':
+            short_factor = rope_scaling["short_factor"]
+            long_factor = rope_scaling["long_factor"]
+            original_max_position = rope_scaling[
+                "original_max_position_embeddings"]
+            extra_kwargs = {
+                k: v
+                for k, v in rope_scaling.items()
+                if k in ("short_mscale", "long_mscale")
+            }
+            rotary_emb = PhiLongScaledRotaryEmbedding(head_size, rotary_dim,
+                                                      max_position,
+                                                      original_max_position,
+                                                      base, is_neox_style,
+                                                      short_factor,
+                                                      long_factor,
+                                                      **extra_kwargs)
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb

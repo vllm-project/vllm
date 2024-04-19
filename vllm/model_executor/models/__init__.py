@@ -54,6 +54,7 @@ _MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
     "TLGv4ForCausalLM": ("tnlgv4", "TLGv4ForCausalLM"),
+    "Phi3SmallForCausalLM": ("tnlgv4", "TLGv4ForCausalLM"),
 }
 
 # Architecture -> type.

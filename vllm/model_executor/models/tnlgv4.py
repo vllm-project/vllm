@@ -175,6 +175,17 @@ class TLGv4SelfAttention(nn.Module):
             linear_method=None
         )
 
+        if getattr(self.config, 'rope_scaling', None) is not None:
+            rope_scaling = self.config.rope_scaling
+            for key in rope_scaling:
+                if isinstance(rope_scaling[key], list):
+                    rope_scaling[key] = tuple(rope_scaling[key])
+
+            if "factor" not in rope_scaling:
+                rope_scaling['factor'] = self.rope_position_scale
+        else:
+            rope_scaling={"type":"linear","factor": self.rope_position_scale}
+
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -192,7 +203,6 @@ class TLGv4SelfAttention(nn.Module):
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        # use_dense_attn = True
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,
@@ -200,23 +210,16 @@ class TLGv4SelfAttention(nn.Module):
                                 num_kv_heads=self.num_kv_heads_per_partion,
                                 )
         else:
-            self.attn = Attention(self.num_heads_per_partition,
-                    self.head_dim,
-                    self.scale,
-                    num_kv_heads=self.num_kv_heads_per_partion,
-                    blocksparse_local_blocks=self.blocksparse_num_local_blocks,
-                    blocksparse_vert_stride=self.blocksparse_vert_stride,
-                    blocksparse_block_size=self.blocksparse_block_size)
-            # self.attn = BlockSparseFlashAttention(
-            #                       self.lcoal_blocks,
-            #                       self.vert_stride,
-            #                       self.num_heads_per_partition,
-            #                       self.head_dim,
-            #                       self.scale,
-            #                       max_seqlen=self.max_position_embeddings,
-            #                       sparse_block_size=self.sparse_block_size,
-            #                       num_kv_heads=self.num_kv_heads_per_partion,
-            #                       layer_idx=layer_idx)
+            self.attn = BlockSparseFlashAttention(
+                                  self.lcoal_blocks,
+                                  self.vert_stride,
+                                  self.num_heads_per_partition,
+                                  self.head_dim,
+                                  self.scale,
+                                  max_seqlen=self.max_position_embeddings,
+                                  sparse_block_size=self.sparse_block_size,
+                                  num_kv_heads=self.num_kv_heads_per_partion,
+                                  layer_idx=layer_idx)
 
     def forward(
         self,
