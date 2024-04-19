@@ -106,17 +106,6 @@ class Metrics:
             buckets=[1, 2, 5, 10, 20],
         )
 
-        # Legacy metrics
-        self.gauge_avg_prompt_throughput = Gauge(
-            name="vllm:avg_prompt_throughput_toks_per_s",
-            documentation="Average prefill throughput in tokens/s.",
-            labelnames=labelnames,
-        )
-        self.gauge_avg_generation_throughput = Gauge(
-            name="vllm:avg_generation_throughput_toks_per_s",
-            documentation="Average generation throughput in tokens/s.",
-            labelnames=labelnames,
-        )
         # Deprecated in favor of vllm:request_prompt_tokens_sum
         self.counter_prompt_tokens = Counter(
             name="vllm:prompt_tokens_total",
@@ -127,6 +116,18 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
+        # Deprecated in favor of vllm:prompt_tokens_total
+        self.gauge_avg_prompt_throughput = Gauge(
+            name="vllm:avg_prompt_throughput_toks_per_s",
+            documentation="Average prefill throughput in tokens/s.",
+            labelnames=labelnames,
+        )
+        # Deprecated in favor of vllm:generation_tokens_total
+        self.gauge_avg_generation_throughput = Gauge(
+            name="vllm:avg_generation_throughput_toks_per_s",
+            documentation="Average generation throughput in tokens/s.",
+            labelnames=labelnames,
+        )
 
 
 # end-metrics-definitions
