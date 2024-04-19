@@ -5,10 +5,15 @@ set -ex
 # Print ROCm version
 rocminfo
 
-for((i=0;i<`rocm-smi -i | grep "Device ID" | wc -l`;i++)); do 
-    #rocm-smi -gpureset -d $i; 
+echo "reset" > /opt/amdgpu/etc/gpu_state
+
+while true; do
+        sleep 3
+        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+                echo "Node's GPUs state is \"clean\""
+                break
+        fi
 done
-sleep 10
 
 #pip install huggingface_hub
 #~/.local/bin/huggingface-cli login --token $HF_TOKEN
