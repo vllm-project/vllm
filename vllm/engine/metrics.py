@@ -167,7 +167,7 @@ class Stats:
     cpu_cache_usage: float
 
     # Raw stats from last model iteration.
-    finished_reason_counter: CollectionsCounter[str]
+    finished_reason_lst: List[str]
     num_prompt_tokens: int
     num_generation_tokens: int
     num_prompt_tokens_lst: List[int]
@@ -234,7 +234,8 @@ class StatLogger:
             stats.num_generation_tokens)
 
         # Add to request counters.
-        for finished_reason, count in stats.finished_reason_counter.items():
+        finished_reason_counter = CollectionsCounter(stats.finished_reason_lst)
+        for finished_reason, count in finished_reason_counter.items():
             self.metrics.counter_request_success.labels(**{
                 **self.labels,
                 Metrics.labelname_finish_reason:

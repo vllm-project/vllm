@@ -1,5 +1,4 @@
 import time
-from collections import Counter as CollectionsCounter
 from typing import Iterable, List, Optional, Type, Union
 
 from transformers import PreTrainedTokenizer
@@ -584,7 +583,7 @@ class LLMEngine:
         time_to_first_tokens = []
         time_per_output_tokens = []
         time_e2e_requests = []
-        finished_reason_counter = CollectionsCounter()
+        finished_reason_lst = []
         if scheduler_outputs is not None:
             prompt_run = scheduler_outputs.num_prefill_groups > 0
 
@@ -637,13 +636,12 @@ class LLMEngine:
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
             # Finished Requests
-            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
-                if not scheduled_seq_group.seq_group.is_finished():
-                    continue
-                finished_reason_counter += CollectionsCounter([
-                    SequenceStatus.get_finished_reason(seq.status) for seq in
-                    scheduled_seq_group.seq_group.get_finished_seqs()
-                ])
+            finished_reason_lst = [
+                SequenceStatus.get_finished_reason(seq.status) for
+                scheduled_seq_group in scheduler_outputs.scheduled_seq_groups
+                if scheduled_seq_group.seq_group.is_finished()
+                for seq in scheduled_seq_group.seq_group.get_finished_seqs()
+            ]
 
         return Stats(
             now=now,
@@ -652,7 +650,7 @@ class LLMEngine:
             num_waiting=num_waiting,
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
-            finished_reason_counter=finished_reason_counter,
+            finished_reason_lst=finished_reason_lst,
             num_prompt_tokens=num_prompt_tokens,
             num_generation_tokens=num_generation_tokens,
             num_prompt_tokens_lst=num_prompt_tokens_lst,
