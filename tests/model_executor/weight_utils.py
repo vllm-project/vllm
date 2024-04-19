@@ -3,7 +3,7 @@ import os
 import huggingface_hub.constants
 import pytest
 
-from vllm.model_executor.weight_utils import enable_hf_transfer
+from vllm.model_executor.model_loader.weight_utils import enable_hf_transfer
 
 
 def test_hf_transfer_auto_activation():

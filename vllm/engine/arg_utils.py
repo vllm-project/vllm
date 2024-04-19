@@ -3,10 +3,11 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional
 
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig,
-                         VisionLanguageConfig)
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
+                         TokenizerPoolConfig, VisionLanguageConfig)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
 
@@ -57,16 +58,17 @@ class EngineArgs:
     ray_workers_use_nsight: bool = False
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
+    model_loader_extra_config: Optional[dict] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
-
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
+    guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
@@ -135,7 +137,9 @@ class EngineArgs:
             '--load-format',
             type=str,
             default=EngineArgs.load_format,
-            choices=['auto', 'pt', 'safetensors', 'npcache', 'dummy'],
+            choices=[
+                'auto', 'pt', 'safetensors', 'npcache', 'dummy', 'tensorizer'
+            ],
             help='The format of the model weights to load. '
             '"auto" will try to load the weights in the safetensors format '
             'and fall back to the pytorch bin format if safetensors format '
@@ -145,7 +149,10 @@ class EngineArgs:
             '"npcache" will load the weights in pytorch format and store '
             'a numpy cache to speed up the loading. '
             '"dummy" will initialize the weights with random values, '
-            'which is mainly for profiling.')
+            'which is mainly for profiling.'
+            '"tensorizer" will load the weights using tensorizer from CoreWeave'
+            'which assumes tensorizer_uri is set to the location of the '
+            'serialized weights.')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -182,6 +189,13 @@ class EngineArgs:
                             default=EngineArgs.max_model_len,
                             help='model context length. If unspecified, '
                             'will be automatically derived from the model.')
+        parser.add_argument(
+            '--guided-decoding-backend',
+            type=str,
+            default='outlines',
+            choices=['outlines', 'lm-format-enforcer'],
+            help='Which engine will be used for guided decoding'
+            ' (JSON schema / regex etc)')
         # Parallel arguments
         parser.add_argument('--worker-use-ray',
                             action='store_true',
@@ -273,7 +287,7 @@ class EngineArgs:
         parser.add_argument('--quantization',
                             '-q',
                             type=str,
-                            choices=['awq', 'gptq', 'squeezellm', None],
+                            choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
                             'None, we first check the `quantization_config` '
@@ -403,6 +417,16 @@ class EngineArgs:
             default=None,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding')
+
+        parser.add_argument('--model-loader-extra-config',
+                            type=str,
+                            default=EngineArgs.model_loader_extra_config,
+                            help='Extra config for model loader. '
+                            'This will be passed to the model loader '
+                            'corresponding to the chosen load_format. '
+                            'This should be a JSON string that will be '
+                            'parsed into a dictionary.')
+
         return parser
 
     @classmethod
@@ -417,11 +441,11 @@ class EngineArgs:
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
-            self.trust_remote_code, self.download_dir, self.load_format,
-            self.dtype, self.seed, self.revision, self.code_revision,
-            self.tokenizer_revision, self.max_model_len, self.quantization,
-            self.quantization_param_path, self.enforce_eager,
-            self.max_context_len_to_capture, self.max_logprobs)
+            self.trust_remote_code, self.dtype, self.seed, self.revision,
+            self.code_revision, self.tokenizer_revision, self.max_model_len,
+            self.quantization, self.quantization_param_path,
+            self.enforce_eager, self.max_context_len_to_capture,
+            self.max_logprobs)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -465,6 +489,12 @@ class EngineArgs:
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 
+        load_config = LoadConfig(
+            load_format=self.load_format,
+            download_dir=self.download_dir,
+            model_loader_extra_config=self.model_loader_extra_config,
+        )
+
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):
@@ -481,6 +511,9 @@ class EngineArgs:
         else:
             vision_language_config = None
 
+        decoding_config = DecodingConfig(
+            guided_decoding_backend=self.guided_decoding_backend)
+
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,
                             parallel_config=parallel_config,
@@ -488,7 +521,9 @@ class EngineArgs:
                             device_config=device_config,
                             lora_config=lora_config,
                             vision_language_config=vision_language_config,
-                            speculative_config=speculative_config)
+                            speculative_config=speculative_config,
+                            load_config=load_config,
+                            decoding_config=decoding_config)
 
 
 @dataclass

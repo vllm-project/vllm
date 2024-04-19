@@ -1,5 +1,5 @@
 """A Neuron worker class."""
-from typing import List, Optional
+from typing import List, Tuple
 
 import torch
 import torch.distributed
@@ -29,6 +29,10 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
         self.model_runner = NeuronModelRunner(model_config, parallel_config,
                                               scheduler_config, device_config)
@@ -40,7 +44,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def determine_num_available_blocks(self) -> tuple[int, int]:
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 
         Swapping is not yet supported, so always return num_cpu_blocks=0.
@@ -73,15 +77,18 @@ class NeuronWorker(LoraNotSupportedWorkerBase):
     def execute_model(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Optional[SamplerOutput]:
+    ) -> List[SamplerOutput]:
         num_seq_groups = len(seq_group_metadata_list)
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list)
-        return output
+
+        # Neuron worker only supports single-step output. Wrap the output in a
+        # list to conform to interface.
+        return [output]
 
     def get_cache_block_size_bytes(self) -> int:
         """Determine the size in bytes of a cache block.

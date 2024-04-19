@@ -1,0 +1,50 @@
+name: mypy
+
+on:
+  # Trigger the workflow on push or pull request,
+  # but only for the main branch
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mypy==1.9.0
+        pip install types-setuptools
+        pip install types-PyYAML
+        pip install types-requests
+        pip install types-setuptools
+    - name: Mypy
+      run: |
+        mypy vllm/attention/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/distributed/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/entrypoints/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/executor/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/usage/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/transformers_utils/*.py --follow-imports=skip --config-file pyproject.toml
+
+        mypy vllm/engine/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/worker/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/spec_decode/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/model_executor/*.py --follow-imports=skip --config-file pyproject.toml
+        # TODO(sang): Follow up
+        # mypy vllm/lora/*.py --follow-imports=skip --config-file pyproject.toml
+
