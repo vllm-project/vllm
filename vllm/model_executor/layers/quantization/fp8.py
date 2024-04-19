@@ -114,7 +114,6 @@ class Fp8LinearMethod(LinearMethodBase):
         return output
 
 
-@torch.compile
 def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
     """Quantize a tensor using per-tensor static scaling factor.
 
@@ -123,9 +122,11 @@ def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
         qdtype: The quantized data type.
     """
     finfo = torch.finfo(torch.float8_e4m3fn)
-    # Calculate the scale as dtype max divided by absmax
+    # Calculate the scale as dtype max divided by absmax.
+    # Since .abs() creates a new tensor, we use aminmax to get
+    # the min and max first and then calculate the absmax.
     min_val, max_val = tensor.aminmax()
-    amax = max(-min_val, max_val)
+    amax = min_val.abs().max(max_val.abs())
     scale = finfo.max / amax.clamp(min=1e-12)
     # scale and clamp the tensor to bring it to
     # the representative range of float8 data type
