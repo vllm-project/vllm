@@ -312,8 +312,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_offset = shard_offset // param.pack_factor
 
             # If marlin and awq, we need to adjust the offset and size to account for the tiling.
-            shard_size, shard_offset = adjust_shard(
-                param, shard_size, shard_offset)
+            shard_size, shard_offset = adjust_shard(param, shard_size,
+                                                    shard_offset)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
@@ -447,8 +447,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_offset = shard_offset // param.pack_factor
 
             # If marlin and awq, we need to adjust the offset and size to account for the tiling.
-            shard_size, shard_offset = adjust_shard(
-                param, shard_size, shard_offset)
+            shard_size, shard_offset = adjust_shard(param, shard_size,
+                                                    shard_offset)
 
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
