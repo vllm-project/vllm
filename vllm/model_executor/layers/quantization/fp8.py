@@ -119,7 +119,6 @@ def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
 
     Args:
         tensor: The input tensor.
-        qdtype: The quantized data type.
     """
     finfo = torch.finfo(torch.float8_e4m3fn)
     # Calculate the scale as dtype max divided by absmax.
