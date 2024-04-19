@@ -17,8 +17,6 @@ while true; do
 done
 
 
-
-
 # Try building the docker image
 docker build -t rocm -f Dockerfile.rocm .
 
