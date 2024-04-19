@@ -144,6 +144,12 @@ def baichuan_lora_files():
 
 
 @pytest.fixture(scope="session")
+def baichuan_zero_lora_files():
+    # all the lora_B weights are initialized to zero.
+    return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
