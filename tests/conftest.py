@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 import torch
 from PIL import Image
-from transformers import (AutoModel, AutoProcessor, AutoTokenizer, LlavaConfig,
-                          LlavaForConditionalGeneration)
+from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
+                          LlavaConfig, LlavaForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -131,7 +131,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
 }
 
-AutoModel.register(LlavaConfig, LlavaForConditionalGeneration)
+AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
 
 
 class HfRunner:
@@ -146,7 +146,7 @@ class HfRunner:
 
         self.model_name = model_name
 
-        self.model = AutoModel.from_pretrained(
+        self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
             trust_remote_code=True,
