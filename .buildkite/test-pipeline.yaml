@@ -40,7 +40,7 @@ steps:
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
 
 - label: Engine Test
-  command: pytest -v -s engine tokenization test_sequence.py test_config.py
+  command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
   commands:
