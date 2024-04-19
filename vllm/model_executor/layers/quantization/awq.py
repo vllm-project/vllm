@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn.parameter import Parameter
@@ -92,6 +92,150 @@ class AWQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
 
+class AWQGemm(torch.nn.Module):
+    def __init__(self, quant_config: AWQConfig) -> None:
+        self.quant_config = quant_config
+    
+    def create_weights(self, input_size_per_partition: int, output_size_per_partition: int, params_dtype: torch.dtype) -> Tuple[Parameter, Parameter, Parameter]:
+        qweight = Parameter(
+            torch.empty(
+                input_size_per_partition,
+                output_size_per_partition // self.quant_config.pack_factor_int32,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qweight, {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor_int32,
+            })
+        qzeros = Parameter(
+            torch.empty(
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition // self.quant_config.pack_factor_int32,
+                dtype=torch.int32,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qzeros, {
+                "input_dim": 0,
+                "output_dim": 1,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor_int32,
+            })
+        scales = Parameter(
+            torch.empty(
+                input_size_per_partition // self.quant_config.group_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(scales, {
+            "input_dim": 0,
+            "output_dim": 1,
+        })
+
+        return qweight, qzeros, scales
+
+    def forward(
+        self,
+        qweight,
+        scales,
+        qzeros,
+        x: torch.Tensor,
+        reshaped_x,
+        out_shape) -> torch.Tensor:
+        
+        pack_factor = self.quant_config.pack_factor_int32
+
+        # num_tokens >= threshold
+        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
+
+        if FP16_MATMUL_HEURISTIC_CONDITION:
+            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+            out = torch.matmul(reshaped_x, out)
+        else:
+            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
+                                pack_factor)
+        
+        return out
+
+class AWQGemvFast(torch.nn.Module):
+    def __init__(self, quant_config: AWQConfig) -> None:
+        self.quant_config = quant_config
+    
+    def create_weights(self, input_size_per_partition: int, output_size_per_partition: int, params_dtype: torch.dtype) -> Tuple[Parameter, Parameter, Parameter]:
+        qweight = Parameter(
+            torch.empty(
+                output_size_per_partition // self.quant_config.interleave,
+                input_size_per_partition // self.quant_config.pack_factor_int16 * self.quant_config.interleave,
+                dtype=torch.int16,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qweight, {
+                "input_dim": 1,
+                "output_dim": 0,
+                "packed_dim": 1,
+                "pack_factor": self.quant_config.pack_factor_int16,
+                "awq_interleave": self.quant_config.interleave,
+            })
+        qzeros = Parameter(
+            torch.empty(
+                calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor_int32,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            qzeros, {
+                "input_dim": 0,
+                "output_dim": 1,
+            })
+        scales = Parameter(
+            torch.empty(
+                calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor_int32,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            scales, {
+                "input_dim": 0,
+                "output_dim": 1,
+            })
+
+        return qweight, qzeros, scales
+
+    def forward(
+        self,
+        qweight,
+        scales,
+        qzeros,
+        x: torch.Tensor,
+        reshaped_x,
+        out_shape) -> torch.Tensor:
+        
+        out_shape = (x.shape[:-1] + (qweight.shape[0] * self.quant_config.interleave, ))
+        GEMM_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 8 and x.shape[1] == 1
+        if not GEMM_HEURISTIC_CONDITION:
+            out = ops.awq_gemv_fast(
+                reshaped_x, qweight, scales, qzeros, reshaped_x.shape[0],
+                out_shape[-1], reshaped_x.shape[1], self.quant_config.group_size
+            )
+        else:
+            out = ops.awq_gemm_fast(reshaped_x, qweight, scales, qzeros)
+        
+        return out
+
 
 class AWQLinearMethod(LinearMethodBase):
     """Linear method for AWQ.
@@ -119,92 +263,19 @@ class AWQLinearMethod(LinearMethodBase):
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
 
-        if self.quant_config.version == "gemv_fast":
-            qweight = Parameter(
-                torch.empty(
-                    output_size_per_partition // self.quant_config.interleave,
-                    input_size_per_partition // self.quant_config.pack_factor_int16 * self.quant_config.interleave,
-                    dtype=torch.int16,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                qweight, {
-                    "input_dim": 1,
-                    "output_dim": 0,
-                    "packed_dim": 1,
-                    "pack_factor": self.quant_config.pack_factor_int16,
-                    "awq_interleave": self.quant_config.interleave,
-                })
-            qzeros = Parameter(
-                torch.empty(
-                    calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor_int32,
-                    output_size_per_partition,
-                    dtype=params_dtype,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                qzeros, {
-                    "input_dim": 0,
-                    "output_dim": 1,
-                })
-            scales = Parameter(
-                torch.empty(
-                    calculate_zeros_width(input_size_per_partition, self.quant_config.group_size) * self.quant_config.pack_factor_int32,
-                    output_size_per_partition,
-                    dtype=params_dtype,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                scales, {
-                    "input_dim": 0,
-                    "output_dim": 1,
-                })
-        else:
-            qweight = Parameter(
-                torch.empty(
-                    input_size_per_partition,
-                    output_size_per_partition // self.quant_config.pack_factor_int32,
-                    dtype=torch.int32,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                qweight, {
-                    "input_dim": 0,
-                    "output_dim": 1,
-                    "packed_dim": 1,
-                    "pack_factor": self.quant_config.pack_factor_int32,
-                })
-            qzeros = Parameter(
-                torch.empty(
-                    input_size_per_partition // self.quant_config.group_size,
-                    output_size_per_partition // self.quant_config.pack_factor_int32,
-                    dtype=torch.int32,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                qzeros, {
-                    "input_dim": 0,
-                    "output_dim": 1,
-                    "packed_dim": 1,
-                    "pack_factor": self.quant_config.pack_factor_int32,
-                })
-            scales = Parameter(
-                torch.empty(
-                    input_size_per_partition // self.quant_config.group_size,
-                    output_size_per_partition,
-                    dtype=params_dtype,
-                ),
-                requires_grad=False,
-            )
-            set_weight_attrs(scales, {
-                "input_dim": 0,
-                "output_dim": 1,
-            })
+        VERSION_TO_AWQ_MODULE_MAP = {
+            "gemm": AWQGemm,
+            "gemv_fast": AWQGemvFast,
+        }
+        self.awq_module = VERSION_TO_AWQ_MODULE_MAP[self.quant_config.version](
+            self.quant_config
+        )
+        qweight, qzeros, scales = self.awq_module.create_weights(
+            input_size_per_partition,
+            output_size_per_partition,
+            params_dtype
+        )
+
         return {
             "qweight": qweight,
             "qzeros": qzeros,
@@ -221,29 +292,16 @@ class AWQLinearMethod(LinearMethodBase):
         pack_factor = self.quant_config.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-        if self.quant_config.version == "gemv_fast":
-            out_shape = (x.shape[:-1] + (qweight.shape[0] * self.quant_config.interleave, ))
-            GEMM_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 8
-            if not GEMM_HEURISTIC_CONDITION:
-                out = ops.awq_gemv_fast(
-                    reshaped_x, qweight, scales, qzeros, reshaped_x.shape[0],
-                    out_shape[-1], reshaped_x.shape[1], self.quant_config.group_size
-                )
-            else:
-                out = ops.awq_gemm_fast(reshaped_x, qweight, scales, qzeros)
-        else:
-            pack_factor = self.quant_config.pack_factor_int32
-            out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
 
-            # num_tokens >= threshold
-            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-
-            if FP16_MATMUL_HEURISTIC_CONDITION:
-                out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-                out = torch.matmul(reshaped_x, out)
-            else:
-                out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
-                                   pack_factor)
+        out = self.awq_module.forward(
+            qweight,
+            scales,
+            qzeros,
+            x,
+            reshaped_x,
+            out_shape,
+        )
+        
         if bias is not None:
             out.add_(bias)
         return out.reshape(out_shape)
