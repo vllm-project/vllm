@@ -27,6 +27,11 @@ try:
     from tensorizer.stream_io import open_stream
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
+
+    _read_stream, _write_stream = (partial(
+        open_stream,
+        mode=mode,
+    ) for mode in ("rb", "wb+"))
 except ImportError as e:
     tensorizer_load_fail = e
 
@@ -37,11 +42,6 @@ __all__ = [
 ]
 
 logger = init_logger(__name__)
-
-_read_stream, _write_stream = (partial(
-    open_stream,
-    mode=mode,
-) for mode in ("rb", "wb+"))
 
 
 @dataclass
