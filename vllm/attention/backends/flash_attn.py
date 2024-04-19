@@ -100,6 +100,7 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+    tree_width: Optional[int] = 1
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -264,6 +265,8 @@ class FlashAttentionImpl(AttentionImpl):
                 self.scale,
                 self.alibi_slopes,
                 kv_scale,
+                decode_meta.prompt_lens_tensor,
+                decode_meta.tree_width,
             )
 
         # Reshape the output tensor.

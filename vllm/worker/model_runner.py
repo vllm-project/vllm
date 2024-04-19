@@ -423,9 +423,25 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
+        prompt_lens = None
+        prompt_lens_tensor = None
+        tree_width = 1
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
+        
+        use_captured_graph = (
+            not self.model_config.enforce_eager
+            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+            and max_context_len <= self.max_context_len_to_capture)
+        
+        def is_tree_parallel_decoding(meta_data: SequenceGroupMetadata):
+            return len(meta_data.seq_data)>1 and meta_data.sampling_params.sampling_type in \
+                    (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph
+        enable_tree_attn = all(is_tree_parallel_decoding(data) for data in seq_group_metadata_list)
+        if enable_tree_attn:
+            prompt_lens = []
+            tree_width = seq_group_metadata_list[0].sampling_params.best_of
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -436,14 +452,9 @@ class ModelRunner:
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
-            use_captured_graph = (
-                not self.model_config.enforce_eager
-                and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                and max_context_len <= self.max_context_len_to_capture)
 
             # Parallel decoding with tree attention
-            if len(seq_ids)>1 and seq_group_metadata.sampling_params.sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph:
-                tree_width = seq_group_metadata.sampling_params.best_of
+            if enable_tree_attn:
                 assert len(seq_ids) == tree_width, "The best_of arg in sampling_params should be same with sequence number of group."
                 root_seq = seq_group_metadata.seq_data[seq_group_metadata.root_seq_id]
                 prompt_len = root_seq.get_prompt_len()
@@ -455,6 +466,7 @@ class ModelRunner:
                 block_table = seq_group_metadata.block_tables[seq_group_metadata.root_seq_id]
                 block_tables.append(block_table)
                 context_lens.append(context_len)
+                prompt_lens.append(prompt_len)
                 # I don't know what this variable is used for, so let's set it like this for now.
                 input_positions.extend(position)
                 input_tokens.extend([seq.get_last_token_id() for seq in seq_group_metadata.seq_data.values()])
@@ -515,6 +527,10 @@ class ModelRunner:
         context_lens = torch.tensor(context_lens,
                                     dtype=torch.int,
                                     device=self.device)
+        if enable_tree_attn:
+            prompt_lens_tensor = torch.tensor(prompt_lens,
+                                        dtype=torch.long,
+                                        device=self.device)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -540,11 +556,12 @@ class ModelRunner:
                 dtype=torch.int,
                 device=self.device,
             )
+        
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
-            prompt_lens=None,
-            prompt_lens_tensor=None,
+            prompt_lens=prompt_lens,
+            prompt_lens_tensor=prompt_lens_tensor,
             max_subquery_len=None,
             max_context_len=max_context_len,
             max_prompt_len=None,
@@ -553,10 +570,8 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            tree_width=tree_width
         )
-        print("+"*100)
-        print(input_tokens)
-        print(slot_mapping)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

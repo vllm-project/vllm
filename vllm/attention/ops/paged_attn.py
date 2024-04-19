@@ -5,6 +5,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.attention.ops.tree_attn import tree_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -92,6 +93,8 @@ class PagedAttention:
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
         kv_scale: float,
+        prompt_lens: Optional[torch.Tensor],
+        tree_width: Optional[int],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
 
@@ -108,7 +111,11 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_context_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
-        if use_v1:
+        if tree_width > 1:
+            tree_attention_fwd(query, output, key_cache, value_cache,
+                               block_tables, context_lens, prompt_lens, tree_width, alibi_slopes)
+            
+        elif use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
                 output,
