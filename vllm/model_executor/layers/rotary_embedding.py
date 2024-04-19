@@ -237,83 +237,6 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
-class LongRotaryEmbedding(RotaryEmbedding):
-    """LongRoPE.
-    paper:　https://arxiv.org/abs/2402.13753
-    """
-
-    def __init__(
-        self,
-        head_size: int,
-        rotary_dim: int,
-        max_position_embeddings: int,
-        base: int,
-        is_neox_style: bool,
-        short_factor = None,
-        long_factor = None,
-        short_mscale = -1,
-        long_mscale = -1,
-        original_max_position_embeddings: Optional[int] = None
-    ) -> None:
-        self.original_max_position_embeddings = original_max_position_embeddings
-        self.short_factor = short_factor or ([1.0] * len(long_factor))
-        self.long_factor = long_factor
-        self.short_mscale = short_mscale
-        self.long_mscale = long_mscale
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style)
-
-    def _calc_mscale(self, scale):
-        if scale <= 1.0:
-            return 1.0
-        return math.sqrt(1 + math.log(scale) / math.log(self.original_max_position_embeddings))
-
-    @lru_cache
-    def _compute_cos_sin_cache(self) -> torch.Tensor:
-        device = torch.cuda.current_device()
-        dtype = torch.float
-
-        seqlen = self.max_position_embeddings
-        max_seqlen = self.max_position_embeddings
-        max_orig_seqlen = self.original_max_position_embeddings
-        if seqlen > max_orig_seqlen:
-            t = torch.arange(seqlen, device=device, dtype=torch.float)
-            rescale_factors = torch.tensor(self.long_factor, dtype=torch.float, device=device)
-            mscale = self.long_mscale if self.long_mscale > 0 else self._calc_mscale(max_seqlen / max_orig_seqlen)
-        else:
-            t = torch.arange(max_orig_seqlen, device=device, dtype=torch.float)
-            rescale_factors = torch.tensor(self.short_factor, dtype=torch.float, device=device)
-            mscale = self.short_mscale if self.short_mscale > 0 else 1.0
-        assert rescale_factors.shape == (self.rotary_dim // 2, ), \
-            f"misaligned shape for LongRoPE rescale factors: {rescale_factors.shape}"
-
-        inv_freq = 1.0 / (rescale_factors * (self.base ** (torch.arange(0, self.rotary_dim, 2).float().to(device) / self.rotary_dim)))
-        freqs = torch.outer(t, inv_freq)
-
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos_cached = (emb.cos() * mscale).to(dtype)
-        sin_cached = (emb.sin() * mscale).to(dtype)
-        return torch.cat((cos_cached, sin_cached), dim=-1)
-
-    def _update_cos_sin_cache(self, positions: torch.Tensor):
-        max_position_id = positions.max()
-        seqlen = None if max_position_id < self.original_max_position_embeddings else self.max_position_embeddings
-
-        if hasattr(self, 'cos_sin_cache'):
-            self.cos_sin_cache = self._compute_cos_sin_cache(seqlen).type_as(self.cos_sin_cache)
-        else:
-            self.cos_sin_cache = self._compute_cos_sin_cache(seqlen)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        *args,
-        **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        import ipdb; ipdb.set_trace()
-        self._update_cos_sin_cache(positions)
-        return super().forward(positions, *args, **kwargs)
-
 class PhiLongScaledRotaryEmbedding(nn.Module):
 
     def __init__(
@@ -357,7 +280,6 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         long_short_cache = torch.cat([self.short_cos_sin_cache,
                            self.long_cos_sin_cache], dim=0)
         self.register_buffer("long_short_cos_sin_cache", long_short_cache, persistent=False)
-
 
     def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
@@ -583,15 +505,6 @@ def get_rope(
                                                     scaling_factor,
                                                     **extra_kwargs)
         elif scaling_type == 'longrope':
-            # rotary_emb = LongRotaryEmbedding(head_size, rotary_dim,
-            #                 max_position,
-            #                 base, is_neox_style,
-            #                 short_factor=rope_scaling["short_factor"],
-            #                 long_factor=rope_scaling["long_factor"],
-            #                 short_mscale=rope_scaling["short_mscale"],
-            #                 long_mscale=rope_scaling["long_mscale"],
-            #                 original_max_position_embeddings=rope_scaling["original_max_position_embeddings"]
-            #                 )
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
             original_max_position = rope_scaling[

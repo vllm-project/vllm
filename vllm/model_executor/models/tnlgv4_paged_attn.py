@@ -3,10 +3,7 @@ import triton.language as tl
 import torch
 import math
 from vllm.model_executor.models.tnlgv4_utils import _get_sparse_attn_mask, dense_to_crow_col
-import ipdb
-_b = ipdb.set_trace
-
-print(f'>> {triton.__version__=}, {triton.__file__=}')
+from functools import lru_cache
 
 
 def blocksparse_flash_attn_varlen_fwd_with_blocktable(
@@ -464,6 +461,8 @@ def _fwd_kernel_batch_inference_with_blocktable(
         tl.store(M + offs_m * stride_mh, m_i, mask=offs_m < 1)
 
 
+
+@lru_cache
 class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
     '''
     Support both varlen or fixed-len (with left or right paddings
@@ -534,6 +533,7 @@ class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
             self.sparse_layout = sparse_layout
             self.sparse_pattern = self.sparse_pattern
 
+    @lru_cache
     def get_remote_sparse_layout(self, n_heads, max_seqlen, dtype, device, block_size, local_blocks, vert_stride,
                             homo_head=False, return_dense=False):
         _, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,

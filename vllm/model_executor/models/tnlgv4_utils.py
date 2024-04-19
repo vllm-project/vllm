@@ -1,6 +1,7 @@
 import torch
 import triton
 import numpy as np
+from functools import lru_cache
 
 
 # helper functions for 3D sparse pattern
@@ -82,6 +83,7 @@ def _get_sparse_attn_mask_homo_head(q_len, N_CTX, dtype, device, BLOCK=128, loca
         return (block_mask_dense_output.crow_indices(), block_mask_dense_output.col_indices()), block_mask_dense, None
 
 
+@lru_cache
 def _get_sparse_attn_mask(n_heads, q_len, N_CTX, dtype, device, BLOCK=128, local_blocks=4, vert_stride=4, homo_head=True, return_dense=False):
     '''
     :return: a tuple of 3:

@@ -2,9 +2,11 @@ import triton
 import triton.language as tl
 import torch
 import math
-from vllm.model_executor.models.tnlgv4_utils import _get_sparse_attn_mask
+from vllm.model_executor.models.tnlgv4_utils import _get_sparse_attn_mask, dense_to_crow_col
+from functools import lru_cache
 
 
+@lru_cache
 class LocalStridedBlockSparseAttnInference(torch.nn.Module):
     '''
     Support both varlen or fixed-len (with left or right paddings
@@ -19,21 +21,35 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
     '''
     def __init__(self, n_heads, max_seqlen, local_blocks, vert_stride, block_size,
                 device=None, dtype=torch.bfloat16, homo_head=False,
-                active_head_range=None):
+                active_head_range=None, q_block_size=None):
         super().__init__()
         device = device or torch.cuda.current_device()
         self.max_seqlen = max_seqlen
         self.block_size = block_size
-        self.sparse_layout, _, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
+        self.q_block_size= q_block_size
+        sparse_layout, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=vert_stride,
                                                 homo_head=homo_head, return_dense=False)
+
+        if q_block_size is not None and q_block_size != block_size:
+            if q_block_size > block_size:
+                assert q_block_size % block_size == 0
+                blocks_to_merge = q_block_size // block_size
+                shape = sparse_pattern.shape
+                sparse_pattern = sparse_pattern.view(shape[0], -1, blocks_to_merge, shape[-1])
+                sparse_pattern = sparse_pattern.sum(2)
+                sparse_layout = dense_to_crow_col(sparse_pattern)
+            else:
+                raise ValueError('Does not support smaller q_block_size. It will be slower.')
 
         if (not homo_head) and (active_head_range is not None):
             assert isinstance(active_head_range, tuple)
             assert len(active_head_range) == 2, '"active_head_range" should be a tuple of start/end index of the heads.'
             h_start, h_end = active_head_range
-            self.sparse_layout = tuple(x[h_start:h_end] for x in self.sparse_layout)
+            sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
+
+        self.sparse_layout = sparse_layout
 
     def varlen_attn(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
         '''
@@ -56,6 +72,7 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
                     sm_scale,
                     self.sparse_layout,
                     block_size=self.block_size,
+                    q_block_size=self.q_block_size,
                     max_seqlen=self.max_seqlen)
 
     def forward(self, q, k, v, *args, **kwargs):
@@ -76,6 +93,7 @@ def blocksparse_flash_attn_varlen_fwd(
     sparse_layout,
     *,
     block_size=64,
+    q_block_size=None,
     max_seqlen = None
 ):
     # split q to blocks
@@ -84,6 +102,7 @@ def blocksparse_flash_attn_varlen_fwd(
 
     _, n_heads, head_size = q.shape
     batch_size = cu_seqlens_k.size(0) - 1
+    q_block_size = q_block_size or block_size
 
     assert q.dim() == k.dim() == v.dim() == 3
     assert q.size(1) % k.size(1) == 0
@@ -115,15 +134,14 @@ def blocksparse_flash_attn_varlen_fwd(
     if max_seqlen:
         assert k_lens.max() <= max_seqlen
 
-    n_blocks = (q_lens + block_size - 1) // block_size
+    n_blocks = (q_lens + q_block_size - 1) // q_block_size
 
     q_batch_ids = torch.tensor([i for i, n in enumerate(n_blocks) for _ in range(n)],
                                 dtype=cu_seqlens_q.dtype,
                                 device=cu_seqlens_q.device)
-    q_start_sids = torch.tensor([i * block_size for n in n_blocks for i in range(n)],
+    q_start_sids = torch.tensor([i * q_block_size for n in n_blocks for i in range(n)],
                                dtype=cu_seqlens_q.dtype,
                                device=cu_seqlens_q.device)
-
 
     out = q.new_empty(q.shape)
     cu_seqlens_q = cu_seqlens_q.contiguous()
@@ -158,17 +176,16 @@ def blocksparse_flash_attn_varlen_fwd(
     q_k_ratio,
     HAS_BATCH_DIM = False,
     D_HEAD = head_size,
-    BLOCK_M = block_size,
+    BLOCK_M = q_block_size,
     BLOCK_N = block_size,
     BLOCK_D = block_d,
-    BLOCK_M_LOADING = 16 if decoding_only else block_size, # smaller for decoding
+    BLOCK_M_LOADING = 16 if decoding_only else q_block_size, # smaller for decoding
     EVEN_D = block_d == head_size,
     num_warps = 1 if decoding_only else 4,
     num_stages = 3
     )
 
     return out
-
 
 
 @triton.jit
