@@ -187,9 +187,7 @@ class HfRunner:
             if images is not None and images[i] is not None:
                 processor_kwargs["images"] = images[i]
 
-            inputs = self.processor(text=prompt,
-                                    images=images[i] if images else None,
-                                    return_tensors="pt")
+            inputs = self.processor(**processor_kwargs)
             inputs = {
                 key: value.cuda() if value is not None else None
                 for key, value in inputs.items()
