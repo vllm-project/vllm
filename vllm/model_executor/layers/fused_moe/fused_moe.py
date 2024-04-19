@@ -133,9 +133,8 @@ def fused_moe_kernel(
         b = tl.load(b_ptrs,
                     mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
                     other=0.0)
-        scaled_a = (a / a_scale).to(tl.float8e4nv)
         # We accumulate along the K dimension.
-        accumulator = tl.dot(scaled_a, b, acc=accumulator, allow_tf32=True)
+        accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=True)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk

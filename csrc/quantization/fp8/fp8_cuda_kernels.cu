@@ -17,6 +17,12 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
     return old;
 }
 
+// Compute the absolute maximum m of the input tensor and store
+// m / float8_e4m3::max() in *scale. Each thread block performs a
+// reduction tree and the memory in scale is atomically updated.
+// So to get the right answer, *scale needs to be initialized to
+// a value <= 0.0 and we need to wait for all thread blocks to
+// finishe before consuming *scale.
 template<typename scalar_t>
 __global__ void segmented_max_reduction(
   float* __restrict__ scale,
@@ -24,31 +30,31 @@ __global__ void segmented_max_reduction(
   int64_t num_elems) {
   __shared__ float cache[1024];
   int i = blockDim.x * blockIdx.x + threadIdx.x;
-  int cacheIndex = threadIdx.x;
 
+  // First store maximum for all values processes by
+  // the current thread in cache[threadIdx.x]
   scalar_t tmp = 0.0;
   while (i < num_elems) {
     float x = static_cast<float>(input[i]);
     tmp = max(tmp, fabs(x));
     i += blockDim.x * gridDim.x;
   }
-
-  cache[cacheIndex] = tmp;
+  cache[threadIdx.x] = tmp;
 
   __syncthreads();
 
-  // perform parallel reduction
+  // Now perform parallel reduction within the thread block
   int ib = blockDim.x / 2;
   while (ib != 0) {
-    if (cacheIndex < ib && cache[cacheIndex + ib] > cache[cacheIndex]) {
-        cache[cacheIndex] = cache[cacheIndex + ib];
+    if (threadIdx.x < ib && cache[threadIdx.x + ib] > cache[threadIdx.x]) {
+        cache[threadIdx.x] = cache[threadIdx.x + ib];
     }
     __syncthreads();
     ib /= 2;
   }
-  // now cache[0] contains the maximum for this thread block,
+  // Finally, since cache[0] contains the maximum for this thread block,
   // atomically write the max to the target location
-  if (cacheIndex == 0) {
+  if (threadIdx.x == 0) {
     atomicMaxFloat(scale, cache[0] / std::numeric_limits<c10::Float8_e4m3fn>::max());
   }
 }
@@ -63,27 +69,6 @@ __global__ void scaled_fp8_quant_kernel(
   while (i < num_elems) {
     out[i] = static_cast<c10::Float8_e4m3fn>(input[i] / *scale);
     i += blockDim.x * gridDim.x;
-  }
-}
-
-template<typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T) (((float) x) / (1.0f + expf((float) -x)));
-}
-
-template<typename scalar_t>
-__global__ void fp8_silu_and_mul_kernel(
-  c10::Float8_e4m3fn* __restrict__ out,
-  const scalar_t* __restrict__ input,
-  const float* __restrict__ scale,
-  const int d) {
-  const int64_t token_idx = blockIdx.x;
-  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
-    const float x = (float) input[token_idx * 2 * d + idx];
-    const float y = (float) input[token_idx * 2 * d + d + idx];
-    float r = silu_kernel(x) * y;
-    out[token_idx * d + idx] = static_cast<c10::Float8_e4m3fn>(r / *scale);
   }
 }
 
@@ -116,29 +101,3 @@ void scaled_fp8_quant(
       });
 }
 
-void fp8_silu_and_mul_kernel(
-  torch::Tensor& out,      // [..., d]
-  torch::Tensor& input,    // [..., 2 * d]
-  torch::Tensor& scale)   // [1]
-{
-  int d = input.size(-1) / 2;
-  int64_t num_tokens = input.numel() / input.size(-1);
-  dim3 grid(num_tokens);
-  dim3 block(1024);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
-    input.scalar_type(),
-    "fp8_silu_and_mul_kernel_kernel",
-    [&] {
-      vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
-        scale.data_ptr<float>(),
-        input.data_ptr<scalar_t>(),
-        input.numel());
-      vllm::fp8_silu_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<c10::Float8_e4m3fn>(),
-        input.data_ptr<scalar_t>(),
-        scale.data_ptr<float>(),
-        d);
-      });
-}
