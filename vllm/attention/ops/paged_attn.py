@@ -5,6 +5,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.utils import is_xpu
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
 _PARTITION_SIZE = 512
@@ -119,6 +120,7 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+        use_v1 = use_v1 or is_xpu() # ipex page_attn v2 is not ready yet.
 
         if use_v1:
             # Run PagedAttention V1.
