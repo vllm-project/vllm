@@ -12,9 +12,8 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
-from vllm.model_executor.guided_logits_processors import (CFGLogitsProcessor,
-                                                          JSONLogitsProcessor,
-                                                          RegexLogitsProcessor)
+from vllm.model_executor.guided_decoding.outlines_logits_processors import (
+    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):
@@ -54,9 +53,9 @@ pair   : UNESCAPED_STRING ":" value
 global_thread_pool = None  # used for generating logits processor fsm
 
 
-async def get_guided_decoding_logits_processor(
+async def get_outlines_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
-        tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+        tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -85,7 +84,7 @@ async def get_guided_decoding_logits_processor(
 
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
-) -> Tuple[str, GuidedDecodingMode]:
+) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
 
     if request.guided_json:
         json = request.guided_json
