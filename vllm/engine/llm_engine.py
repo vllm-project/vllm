@@ -585,61 +585,54 @@ class LLMEngine:
         num_prompt_tokens_requests = []
         num_generation_tokens_requests = []
         best_of_requests = []
-        n__requests = []
+        n_requests = []
         finished_reason_requests = []
 
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.num_prefill_groups > 0
-
-            # Number of Tokens
-            if prompt_run:
-                num_prompt_tokens_requests = [
-                    len(scheduled_seq_group.seq_group.prompt_token_ids)
-                    for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups
-                ]
-            else:
-                num_generation_tokens_requests = [
-                    seq.get_output_len() for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups for seq in
-                    scheduled_seq_group.seq_group.get_finished_seqs()
-                ]
-
-            # Sampling Params
-            if prompt_run:
-                n__requests = [
-                    scheduled_seq_group.seq_group.sampling_params.n
-                    for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups
-                ]
-                best_of_requests = [
-                    scheduled_seq_group.seq_group.sampling_params.best_of
-                    for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups
-                ]
-
-            # Latency Timings
-            time_last_iters = []
             for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
                 seq_group = scheduled_seq_group.seq_group
-                # Time since last token.
+
+                # Iteration time
                 # (n.b. updates seq_group.metrics.last_token_time)
-                time_last_iters.append(seq_group.get_last_latency(now))
-                # Time since arrival for all finished requests.
+                latency = seq_group.maybe_get_last_latency(now)
+
+                # Number of tokens (for throughput calculations).
+                # Because of chunked prefill, we can have prefills and decodes
+                # in the same batch.
+                # If token_chunk_size > 1, this seq_group is a chunk of a
+                # prefill.
+                # If token_chunk_size = 1, this seq_group is a decode.
+                if (seq_group.is_prefill()
+                        or scheduled_seq_group.token_chunk_size > 1):
+                    num_prompt_tokens_iter += (
+                        scheduled_seq_group.token_chunk_size)
+                    if latency is not None:
+                        time_to_first_tokens_iter.append(latency)
+                else:
+                    assert latency is not None
+                    time_per_output_tokens_iter.append(latency)
+
+                # Because of chunked prefill, we can have a single sequence
+                # group that does multiple prompt_runs. To prevent logging
+                # the same metadata more than once per request, we standardize
+                # on logging request level information for finished requests,
+                # which can only happen once.
                 if seq_group.is_finished():
+                    # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
 
-            time_to_first_tokens_iter = time_last_iters if prompt_run else []
-            time_per_output_tokens_iter = [] if prompt_run else time_last_iters
-
-            # Finished Requests
-            finished_reason_requests = [
-                SequenceStatus.get_finished_reason(seq.status) for
-                scheduled_seq_group in scheduler_outputs.scheduled_seq_groups
-                if scheduled_seq_group.seq_group.is_finished()
-                for seq in scheduled_seq_group.seq_group.get_finished_seqs()
-            ]
+                    # Metadata
+                    num_prompt_tokens_requests.append(
+                        len(seq_group.prompt_token_ids))
+                    num_generation_tokens_requests.extend(
+                        seq.get_output_len()
+                        for seq in seq_group.get_finished_seqs())
+                    best_of_requests.append(seq_group.sampling_params.best_of)
+                    n_requests.append(seq_group.sampling_params.n)
+                    finished_reason_requests.extend(
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs())
 
         return Stats(
             now=now,
@@ -664,7 +657,7 @@ class LLMEngine:
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
             best_of_requests=best_of_requests,
-            n_requests=n__requests,
+            n_requests=n_requests,
             finished_reason_requests=finished_reason_requests,
         )
 

@@ -160,7 +160,7 @@ class SequenceData:
         self._stage = SequenceStage.PREFILL
 
     def get_num_uncomputed_tokens(self) -> int:
-        """Return the number of prefil tokens that are not computed."""
+        """Return the number of prefill tokens that are not computed."""
         # we use `get_len()` which includes prompt_len + output_len instead
         # of prompt_len here. This is because during recompute we need to
         # prefill for both prompt and output.
@@ -442,15 +442,25 @@ class SequenceGroup:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    def get_last_latency(self, now: float) -> float:
-        """Gets last token latency for Request level timings."""
+    def maybe_get_last_latency(self, now: float) -> Optional[float]:
+        """Sets the last token time for Request level timings."""
+        # If prompt not done, return None.
+        if self.is_prefill():
+            return None
+
+        # Otherwise return token latency.
         latency = now - self.metrics.last_token_time
         self.metrics.last_token_time = now
         return latency
 
     def maybe_set_first_token_time(self, time: float) -> None:
         """Sets the first token time for Request level timings."""
-        if self.metrics.first_token_time is None:
+        # Note: in a case where a sequence_group is swapped and
+        #   recomputed, the time between iterations is counted
+        #   in TPOT, rather than recalculating TTFT (since from the )
+        #   POV of the user, there is simply a long generation delay.
+        if (self.metrics.first_token_time is None
+                and self.get_seqs()[0].get_output_len() == 1):
             self.metrics.first_token_time = time
 
     def maybe_set_first_scheduled_time(self, time: float) -> None:
