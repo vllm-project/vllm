@@ -15,6 +15,7 @@ while true; do
         fi
 done
 
+
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
