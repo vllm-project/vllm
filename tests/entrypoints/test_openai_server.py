@@ -64,8 +64,8 @@ TEST_SCHEMA = {
     "required": ["name", "age", "skills", "work history"]
 }
 
-TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-              r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
+TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9])\d)\.){3}"
+              r"(25[0-5]|(2[0-4]|1\d|[1-9])\d)")
 
 TEST_CHOICE = [
     "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
@@ -82,7 +82,7 @@ class ServerRunner:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
+            [sys.executable, "-m", "vllm.entrypoints.openai.api_server"] + args,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
