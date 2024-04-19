@@ -20,7 +20,7 @@ from transformers import GemmaConfig
 
 from vllm.model_executor.models.jax.ops.flash_attn import flash_attn
 from vllm.model_executor.models.jax.ops.paged_attn import paged_attn
-from vllm.model_executor.models.jax.ops.write_to_cache import write_to_cache
+from vllm.model_executor.models.jax.ops.write_to_cache import write_to_kv_cache
 
 K_MASK = -2.3819763e38  # Set to a large negative number.
 
@@ -154,9 +154,7 @@ class Attention(nn.Module):
     )
 
     # Write the incoming keys and values to KV cache.
-    key_cache = write_to_cache(key_proj, cache[0], slot_mapping)
-    value_cache = write_to_cache(value_proj, cache[1], slot_mapping)
-    cache = jnp.stack([key_cache, value_cache])
+    cache = write_to_kv_cache(key_proj, value_proj, cache, slot_mapping)
 
     if block_tables is None:
       # Prompt attention.
