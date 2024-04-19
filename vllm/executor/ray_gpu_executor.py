@@ -2,7 +2,6 @@ import asyncio
 import os
 import pickle
 from collections import defaultdict
-from functools import partial
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -372,6 +371,10 @@ class RayGPUExecutor(ExecutorBase):
 
 class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.driver_executor = make_async(self.driver_worker.execute_method)
+
     async def _run_workers_async(
         self,
         method: str,
@@ -388,10 +391,8 @@ class RayGPUExecutorAsync(RayGPUExecutor, ExecutorAsyncBase):
         if driver_kwargs is None:
             driver_kwargs = kwargs
 
-        driver_executor = make_async(
-            partial(self.driver_worker.execute_method, *driver_args,
-                    **driver_kwargs))
-        coros.append(driver_executor())
+        coros.append(
+            self.driver_executor(method, *driver_args, **driver_kwargs))
 
         # Run the ray workers asynchronously.
         for worker in self.workers:
