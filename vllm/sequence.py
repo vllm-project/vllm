@@ -424,7 +424,8 @@ class ImagePixelData(MultiModalData):
             image_arr = np.array(image, copy=True)
             pixel_values = torch.as_tensor(image_arr) \
                 .view(1, image.height, image.width, -1) \
-                .permute((0, 3, 1, 2))  # NCHW
+                .permute((0, 3, 1, 2)) \
+                .to(model_config.dtype)
 
             return {"pixel_values": pixel_values}
 
@@ -435,7 +436,7 @@ class ImagePixelData(MultiModalData):
             logger.error("Failed to process image (%s)", image)
             raise
 
-        return out_dict.data
+        return {k: v.to(model_config.dtype) for k, v in out_dict.data.items()}
 
 
 class ImageFeatureData(MultiModalData):
@@ -446,7 +447,9 @@ class ImageFeatureData(MultiModalData):
     def get_input_kwargs(
             self, model_config: "ModelConfig",
             vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
-        return {"image_features": self.image_features}
+        image_features = self.image_features.to(model_config.dtype)
+
+        return {"image_features": image_features}
 
 
 class SequenceGroup:
