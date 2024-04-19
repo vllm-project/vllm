@@ -13,7 +13,7 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
-from vllm.sequence import MultiModalData
+from vllm.sequence import ImageFeatureData, ImagePixelData, MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_DIR = os.path.dirname(__file__)
@@ -21,10 +21,6 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
-_PIXEL_VALUES_FILES = [
-    os.path.join(_TEST_DIR, "images", filename) for filename in
-    ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
-]
 _IMAGE_FEATURES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
@@ -37,8 +33,7 @@ _IMAGE_PROMPTS = [
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
     "<image>\nUSER: What is the season?\nASSISTANT:"
 ]
-assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
-    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
+assert len(_IMAGE_FEATURES_FILES) == len(_IMAGE_FILES) == len(_IMAGE_PROMPTS)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -86,15 +81,18 @@ def hf_images() -> List[Image.Image]:
 
 
 @pytest.fixture()
-def vllm_images(request) -> List[torch.Tensor]:
+def vllm_images(request) -> List[MultiModalData]:
     vision_language_config = request.getfixturevalue("model_and_config")[1]
     if vision_language_config.image_input_type == (
             VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
-        filenames = _IMAGE_FEATURES_FILES
+        return [
+            ImageFeatureData(torch.load(filename))
+            for filename in _IMAGE_FEATURES_FILES
+        ]
     else:
-        filenames = _PIXEL_VALUES_FILES
-
-    return [torch.load(filename) for filename in filenames]
+        return [
+            ImagePixelData(Image.open(filename)) for filename in _IMAGE_FILES
+        ]
 
 
 @pytest.fixture()

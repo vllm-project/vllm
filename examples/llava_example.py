@@ -18,16 +18,13 @@ def run_llava_pixel_values():
         image_token_id=32000,
         image_input_shape="1,3,336,336",
         image_feature_size=576,
-        no_image_processor=True,
     )
 
     prompt = "<image>" * 576 + (
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    image_tensor: torch.Tensor = torch.load("images/stop_sign_pixel_values.pt")
-    image_arr = image_tensor.view(3, 336, 336).permute((1, 2, 0)).numpy()
-    image = Image.fromarray(image_arr, mode="RGB")
+    image = Image.open("images/stop_sign.jpg")
 
     outputs = llm.generate(prompt, multi_modal_datas=ImagePixelData(image))
     for o in outputs:
@@ -42,7 +39,6 @@ def run_llava_image_features():
         image_token_id=32000,
         image_input_shape="1,576,1024",
         image_feature_size=576,
-        no_image_processor=True,
     )
 
     prompt = "<image>" * 576 + (
