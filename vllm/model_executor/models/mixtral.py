@@ -89,13 +89,13 @@ class MixtralMoE(nn.Module):
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=torch.float8_e4m3fn))
+                        dtype=self.params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=torch.float8_e4m3fn))
+                        dtype=self.params_dtype))
 
         # Scaling factors for fp8 weights
         self.ws_scale = nn.Parameter(
@@ -121,6 +121,12 @@ class MixtralMoE(nn.Module):
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
+        # First we check if the parameters in the checkpoint have a different
+        # dtype than the native dtype of this model -- this is for example
+        # the case if we want to use FP8 for the MoE layer and FP16 for the
+        # rest of the model. If this happens, we convert the dtype.
+        if param_data.dtype != loaded_weight.dtype:
+            param = param.to(loaded_weight.dtype)
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
