@@ -757,12 +757,16 @@ class SchedulerConfig:
                 f"({self.max_num_seqs}).")
         # TODO: verify max_queue_length
 
+    
+
         if self.num_lookahead_slots < 0:
             raise ValueError(
                 "num_lookahead_slots "
                 f"({self.num_lookahead_slots}) must be greater than or "
                 "equal to 0.")
 
+    def get_max_queue_length(self) -> int:
+            return self.max_queue_length
 
 class DeviceConfig:
 
