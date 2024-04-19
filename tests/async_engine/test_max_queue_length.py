@@ -24,53 +24,6 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
-# TEST_SCHEMA = {
-#     "type": "object",
-#     "properties": {
-#         "name": {
-#             "type": "string"
-#         },
-#         "age": {
-#             "type": "integer"
-#         },
-#         "skills": {
-#             "type": "array",
-#             "items": {
-#                 "type": "string",
-#                 "maxLength": 10
-#             },
-#             "minItems": 3
-#         },
-#         "work history": {
-#             "type": "array",
-#             "items": {
-#                 "type": "object",
-#                 "properties": {
-#                     "company": {
-#                         "type": "string"
-#                     },
-#                     "duration": {
-#                         "type": "string"
-#                     },
-#                     "position": {
-#                         "type": "string"
-#                     }
-#                 },
-#                 "required": ["company", "position"]
-#             }
-#         }
-#     },
-#     "required": ["name", "age", "skills", "work history"]
-# }
-
-# TEST_REGEX = (r"((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.){3}"
-#               r"(25[0-5]|(2[0-4]|1\d|[1-9]|)\d)")
-
-# TEST_CHOICE = [
-#     "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript", "Ruby",
-#     "Swift", "Kotlin"
-# ]
-
 pytestmark = pytest.mark.asyncio
 
 
@@ -130,17 +83,6 @@ def server():
         "--max-model-len",
         "1024",
         "--enforce-eager",
-        # lora config below
-        # "--enable-lora",
-        # "--lora-modules",
-        # f"zephyr-lora={zephyr_lora_files}",
-        # f"zephyr-lora2={zephyr_lora_files}",
-        # "--max-lora-rank",
-        # "64",
-        # "--max-cpu-loras",
-        # "2",
-        # "--max-num-seqs",
-        # "128",
         "--max-num-seqs",
         "1",
         "--max-queue-length",
