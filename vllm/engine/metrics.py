@@ -168,8 +168,8 @@ class Stats:
 
     # Raw stats from last model iteration.
     finished_reason_lst: List[str]
-    num_prompt_tokens_lst: List[int]
-    num_generation_tokens_lst: List[int]
+    num_prompt_tokens: List[int]
+    num_generation_tokens: List[int]
     request_n: List[int]
     request_best_of: List[int]
     time_to_first_tokens: List[float]
@@ -227,9 +227,9 @@ class StatLogger:
 
         # Add to token counters.
         self.metrics.counter_prompt_tokens.labels(**self.labels).inc(
-            sum(stats.num_prompt_tokens_lst))
+            sum(stats.num_prompt_tokens))
         self.metrics.counter_generation_tokens.labels(**self.labels).inc(
-            sum(stats.num_generation_tokens_lst))
+            sum(stats.num_generation_tokens))
 
         # Add to request counters.
         finished_reason_counter = CollectionsCounter(stats.finished_reason_lst)
@@ -241,10 +241,10 @@ class StatLogger:
             }).inc(count)
 
         # Observe number of tokens in histograms.
-        for val in stats.num_prompt_tokens_lst:
+        for val in stats.num_prompt_tokens:
             self.metrics.histogram_request_prompt_tokens.labels(
                 **self.labels).observe(val)
-        for val in stats.num_generation_tokens_lst:
+        for val in stats.num_generation_tokens:
             self.metrics.histogram_request_generation_tokens.labels(
                 **self.labels).observe(val)
 
@@ -289,8 +289,8 @@ class StatLogger:
         self._log_prometheus(stats)
 
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(sum(stats.num_prompt_tokens_lst))
-        self.num_generation_tokens.append(sum(stats.num_generation_tokens_lst))
+        self.num_prompt_tokens.append(sum(stats.num_prompt_tokens))
+        self.num_generation_tokens.append(sum(stats.num_generation_tokens))
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):

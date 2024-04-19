@@ -574,8 +574,8 @@ class LLMEngine:
         num_waiting = len(self.scheduler.waiting)
 
         # Iteration stats if we have scheduler output.
-        num_prompt_tokens_lst = []
-        num_generation_tokens_lst = []
+        num_prompt_tokens = []
+        num_generation_tokens = []
         request_n = []
         request_best_of = []
         time_to_first_tokens = []
@@ -587,13 +587,13 @@ class LLMEngine:
 
             # Number of Tokens
             if prompt_run:
-                num_prompt_tokens_lst = [
+                num_prompt_tokens = [
                     len(scheduled_seq_group.seq_group.prompt_token_ids)
                     for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups
                 ]
             else:
-                num_generation_tokens_lst = [
+                num_generation_tokens = [
                     seq.get_output_len() for scheduled_seq_group in
                     scheduler_outputs.scheduled_seq_groups for seq in
                     scheduled_seq_group.seq_group.get_finished_seqs()
@@ -643,8 +643,8 @@ class LLMEngine:
             gpu_cache_usage=gpu_cache_usage,
             cpu_cache_usage=cpu_cache_usage,
             finished_reason_lst=finished_reason_lst,
-            num_prompt_tokens_lst=num_prompt_tokens_lst,
-            num_generation_tokens_lst=num_generation_tokens_lst,
+            num_prompt_tokens=num_prompt_tokens,
+            num_generation_tokens=num_generation_tokens,
             request_n=request_n,
             request_best_of=request_best_of,
             time_to_first_tokens=time_to_first_tokens,
