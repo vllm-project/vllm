@@ -82,6 +82,9 @@ steps:
 - label: LogitsProcessor Test
   command: pytest -v -s test_logits_processor.py
 
+- label: Utils Test
+  command: pytest -v -s test_utils.py
+
 - label: Worker Test
   command: pytest -v -s worker
 

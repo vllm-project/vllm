@@ -2,11 +2,12 @@ import enum
 import json
 import os
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from typing import (TYPE_CHECKING, ClassVar, Dict, List, Optional, Protocol,
+                    Union)
 
 import torch
 from packaging.version import Version
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -841,6 +842,44 @@ class LoRAConfig:
                 "LoRA is enabled.")
 
 
+class OpenAIVisionAdapter(Protocol):
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        """Defines how to represent an image in the text prompt."""
+        ...
+
+
+class OpenAIVisionAdapterForNoImage(OpenAIVisionAdapter):
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        raise NotImplementedError("Image input not supported")
+
+
+class OpenAIVisionAdapterForSingleImage(OpenAIVisionAdapter):
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        if image_idx > 0:
+            raise NotImplementedError("Multiple image input not supported")
+
+        image_token_str = tokenizer.decode(config.image_token_id)
+        return image_token_str * config.image_feature_size
+
+
+class OpenAIVisionAdapterForMultiImage(OpenAIVisionAdapter):
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        image_token_str = tokenizer.decode(config.image_token_id + image_idx)
+        return image_token_str * config.image_feature_size
+
+
 @dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for
@@ -862,6 +901,14 @@ class VisionLanguageConfig:
         PIXEL_VALUES = enum.auto()
         IMAGE_FEATURES = enum.auto()
 
+    class ImageOpenAI(enum.Enum):
+        """Specifies how the model implements
+        `OpenAI's GPT-4 with Vision API <https://platform.openai.com/docs/guides/vision>`_.
+        """
+        UNSUPPORTED = enum.auto()
+        SINGLE_IMAGE = enum.auto()
+        MULTI_IMAGE = enum.auto()
+
     image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
@@ -874,6 +921,14 @@ class VisionLanguageConfig:
     image_processor: Optional[str]
     image_processor_revision: Optional[str]
 
+    image_openai: ImageOpenAI = ImageOpenAI.SINGLE_IMAGE
+    _image_openai_processors: ClassVar[Dict[
+        ImageOpenAI, OpenAIVisionAdapter]] = {
+            ImageOpenAI.UNSUPPORTED: OpenAIVisionAdapterForNoImage(),
+            ImageOpenAI.SINGLE_IMAGE: OpenAIVisionAdapterForSingleImage(),
+            ImageOpenAI.MULTI_IMAGE: OpenAIVisionAdapterForMultiImage(),
+        }
+
     @classmethod
     def get_image_input_enum_type(cls, value: str) -> ImageInputType:
         """Get the image input type from a string."""
@@ -883,6 +938,22 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+    @classmethod
+    def get_image_openai_enum_type(cls, value: str) -> ImageOpenAI:
+        """Get the GPT-4 with Vision API implementation from a string."""
+        try:
+            return cls.ImageOpenAI[value.upper()]
+        except KeyError as e:
+            raise ValueError(f"{value} is not a valid choice. "
+                             f"Expecting to choose from "
+                             f"{[x.name for x in cls.ImageOpenAI]}.") from e
+
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase,
+                             image_idx: int) -> str:
+        return self._image_openai_processors[self.image_openai] \
+            .get_image_token_text(config, tokenizer, image_idx)
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

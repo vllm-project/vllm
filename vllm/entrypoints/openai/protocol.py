@@ -4,6 +4,7 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Annotated
 
@@ -63,7 +64,7 @@ class ResponseFormat(BaseModel):
 class ChatCompletionRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Dict[str, str]]
+    messages: List[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
