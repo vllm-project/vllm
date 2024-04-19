@@ -10,13 +10,13 @@ import torch
 from PIL import Image
 
 from vllm.block import LogicalTokenBlock
-from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.image_processor import cached_get_image_processor
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VisionLanguageConfig
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 logger = init_logger(__name__)
@@ -385,8 +385,8 @@ class MultiModalData(ABC):
 
     @abstractmethod
     def get_input_kwargs(
-            self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
         """Returns a dictionary which are passed as keyword arguments to
         :meth:`torch.nn.Module.forward`.
         """
@@ -401,8 +401,8 @@ class ImagePixelData(MultiModalData):
 
         self.image = image
 
-    def _get_image_processor(self, model_config: ModelConfig,
-                             vlm_config: VisionLanguageConfig):
+    def _get_image_processor(self, model_config: "ModelConfig",
+                             vlm_config: "VisionLanguageConfig"):
         if vlm_config is None or vlm_config.image_processor is None:
             return None
 
@@ -413,8 +413,8 @@ class ImagePixelData(MultiModalData):
         )
 
     def get_input_kwargs(
-            self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
         # Temporary patch to make LLaVA-NeXT usable
         _, _, h, w = vlm_config.image_input_shape
         image = self.image.resize((w, h))
@@ -444,8 +444,8 @@ class ImageFeatureData(MultiModalData):
         self.image_features = image_features
 
     def get_input_kwargs(
-            self, model_config: ModelConfig,
-            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
         return {"image_features": self.image_features}
 
 

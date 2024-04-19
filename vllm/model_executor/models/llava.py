@@ -40,7 +40,7 @@ class LlavaMultiModalProjector(nn.Module):
                                   text_hidden_size,
                                   bias=True)
 
-    def forward(self, image_features: torch.Tensor):
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
