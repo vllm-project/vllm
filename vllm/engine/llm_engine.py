@@ -34,6 +34,17 @@ logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
 
+def _load_generation_config_dict(model_config: ModelConfig):
+    try:
+        return GenerationConfig.from_pretrained(
+            model_config.model,
+            revision=model_config.revision,
+        ).to_diff_dict()
+    except OSError:
+        # Not found.
+        return {}
+
+
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
 
@@ -121,11 +132,11 @@ class LLMEngine:
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
-        self.generation_config_fields = GenerationConfig.from_pretrained(
-            model_config.model).to_diff_dict()
         self._init_tokenizer()
         self.detokenizer = Detokenizer(self.tokenizer)
         self.seq_counter = Counter()
+        self.generation_config_fields = _load_generation_config_dict(
+            model_config)
 
         self.model_executor = executor_class(
             model_config=model_config,
