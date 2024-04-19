@@ -282,9 +282,9 @@ class RayGPUExecutor(ExecutorBase):
                 "max_concurrent_workers is not supported yet.")
 
         if driver_args is None:
-            driver_args = args
+            driver_args = args if all_args is None else all_args[0]
         if driver_kwargs is None:
-            driver_kwargs = kwargs
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
         count = len(self.workers)
         all_worker_args = repeat(args, count) if all_args is None \
