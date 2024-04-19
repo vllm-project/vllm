@@ -259,6 +259,9 @@ class LLMEngine:
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
+        elif engine_config.parallel_config.worker_use_torchrun:
+            from vllm.executor.torchrun_gpu_executor import TorchrunGPUExecutor
+            executor_class = TorchrunGPUExecutor
         else:
             assert engine_config.parallel_config.world_size == 1, (
                 "Ray is required if parallel_config.world_size > 1.")

@@ -285,8 +285,12 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank)
+    if not parallel_config.worker_use_torchrun:
+        init_distributed_environment(parallel_config.world_size, rank,
+                                     distributed_init_method, local_rank)
+    else:
+        init_distributed_environment(parallel_config.world_size, -1, "env://",
+                                     local_rank)
 
     if pynccl_utils.is_initialized():
         pynccl_world_size = pynccl_utils.get_world_size()

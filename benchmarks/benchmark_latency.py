@@ -28,6 +28,7 @@ def main(args: argparse.Namespace):
               quantization_param_path=args.quantization_param_path,
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
+              worker_use_ray=args.worker_use_ray,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size)
@@ -191,5 +192,10 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
+    parser.add_argument('--worker-use-ray',
+                        action='store_true',
+                        help='use Ray for distributed serving, will be '
+                        'automatically set when using more than 1 GPU '
+                        'unless on ROCm where the default is torchrun')
     args = parser.parse_args()
     main(args)
