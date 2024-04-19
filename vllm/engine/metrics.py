@@ -168,8 +168,6 @@ class Stats:
 
     # Raw stats from last model iteration.
     finished_reason_lst: List[str]
-    num_prompt_tokens: int
-    num_generation_tokens: int
     num_prompt_tokens_lst: List[int]
     num_generation_tokens_lst: List[int]
     request_n: List[int]
@@ -229,9 +227,9 @@ class StatLogger:
 
         # Add to token counters.
         self.metrics.counter_prompt_tokens.labels(**self.labels).inc(
-            stats.num_prompt_tokens)
+            sum(stats.num_prompt_tokens_lst))
         self.metrics.counter_generation_tokens.labels(**self.labels).inc(
-            stats.num_generation_tokens)
+            sum(stats.num_generation_tokens_lst))
 
         # Add to request counters.
         finished_reason_counter = CollectionsCounter(stats.finished_reason_lst)
@@ -291,8 +289,8 @@ class StatLogger:
         self._log_prometheus(stats)
 
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(stats.num_prompt_tokens)
-        self.num_generation_tokens.append(stats.num_generation_tokens)
+        self.num_prompt_tokens.append(sum(stats.num_prompt_tokens_lst))
+        self.num_generation_tokens.append(sum(stats.num_generation_tokens_lst))
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):
