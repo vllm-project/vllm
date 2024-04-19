@@ -10,7 +10,7 @@ echo "reset" > /opt/amdgpu/etc/gpu_state
 while true; do
         sleep 3
         if grep -q clean /opt/amdgpu/etc/gpu_state; then
-                echo "Node's GPUs state is \"clean\""
+                echo "GPUs state is \"clean\""
                 break
         fi
 done
