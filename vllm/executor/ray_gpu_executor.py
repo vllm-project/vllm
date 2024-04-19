@@ -152,24 +152,29 @@ class RayGPUExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
+        def collect_arg_helper_func(**kwargs):
+            # avoid writing `{"name": value}` manually
+            return kwargs
+
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = []
         for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
-            init_worker_all_kwargs.append({
-                "model_config": self.model_config,
-                "parallel_config": self.parallel_config,
-                "scheduler_config": self.scheduler_config,
-                "device_config": self.device_config,
-                "cache_config": self.cache_config,
-                "load_config": self.load_config,
-                "local_rank": local_rank,
-                "rank": rank,
-                "distributed_init_method": distributed_init_method,
-                "lora_config": self.lora_config,
-                "vision_language_config": self.vision_language_config,
-                "is_driver_worker": rank == 0,
-            })
+            init_worker_all_kwargs.append(
+                collect_arg_helper_func(
+                    model_config=self.model_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                    device_config=self.device_config,
+                    cache_config=self.cache_config,
+                    load_config=self.load_config,
+                    local_rank=local_rank,
+                    rank=rank,
+                    distributed_init_method=distributed_init_method,
+                    lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
+                    is_driver_worker=rank == 0,
+                ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         self._run_workers("init_device")
