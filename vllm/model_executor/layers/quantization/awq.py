@@ -252,6 +252,9 @@ class AWQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
+        self.pack_factor = quant_config.pack_factor_int16 if (
+            quant_config.version
+            == "gemv_fast") else quant_config.pack_factor_int32
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -278,6 +281,13 @@ class AWQLinearMethod(LinearMethodBase):
         qweight, qzeros, scales = self.awq_module.create_weights(
             input_size_per_partition, output_size_per_partition, params_dtype)
 
+        layer.register_parameter("qweight", qweight)
+        set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("qzeros", qzeros)
+        set_weight_attrs(qzeros, extra_weight_attrs)
+        layer.register_parameter("scales", scales)
+        set_weight_attrs(scales, extra_weight_attrs)
+
         return {
             "qweight": qweight,
             "qzeros": qzeros,
@@ -291,7 +301,7 @@ class AWQLinearMethod(LinearMethodBase):
         qweight = layer.qweight
         scales = layer.scales
         qzeros = layer.qzeros
-        pack_factor = self.quant_config.pack_factor
+        pack_factor = self.pack_factor
         out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
 
