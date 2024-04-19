@@ -65,6 +65,10 @@ class EngineArgs:
     image_token_id: Optional[int] = None
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
+    image_processor: Optional[str] = None
+    image_processor_revision: Optional[str] = None
+    no_image_processor: bool = False
+
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
 
@@ -368,15 +372,15 @@ class EngineArgs:
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
-        parser.add_argument(
-            '--image-input-type',
-            type=str,
-            default=None,
-            choices=[
-                t.name.lower() for t in VisionLanguageConfig.ImageInputType
-            ],
-            help=('The image input type passed into vLLM. '
-                  'Should be one of "pixel_values" or "image_features".'))
+        # (listed separately in docs/source/models/vlm.rst)
+        parser.add_argument('--image-input-type',
+                            type=str,
+                            default=None,
+                            choices=[
+                                t.name.lower()
+                                for t in VisionLanguageConfig.ImageInputType
+                            ],
+                            help=('The image input type passed into vLLM.'))
         parser.add_argument('--image-token-id',
                             type=int,
                             default=None,
@@ -392,6 +396,24 @@ class EngineArgs:
             type=int,
             default=None,
             help=('The image feature size along the context dimension.'))
+        parser.add_argument(
+            '--image-processor',
+            type=str,
+            default=EngineArgs.image_processor,
+            help='name or path of the huggingface image processor to use')
+        parser.add_argument(
+            '--image-processor-revision',
+            type=str,
+            default=None,
+            help='the specific image processor version to use. It can be a '
+            'branch name, a tag name, or a commit id. If unspecified, will use '
+            'the default version.')
+        parser.add_argument(
+            '--no-image-processor',
+            action='store_true',
+            help='Disables the use of image processor, even if one is defined '
+            'for the model on huggingface.')
+
         parser.add_argument(
             '--scheduler-delay-factor',
             type=float,
@@ -410,7 +432,6 @@ class EngineArgs:
             default=None,
             help=
             'The name of the draft model to be used in speculative decoding.')
-
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -501,12 +522,25 @@ class EngineArgs:
                 raise ValueError(
                     'Specify `image_token_id`, `image_input_shape` and '
                     '`image_feature_size` together with `image_input_type`.')
+
+            if self.image_processor is None:
+                self.image_processor = self.model
+            if self.no_image_processor:
+                if self.image_processor != self.model:
+                    raise ValueError(
+                        'Do not specify `image_processor` when it is disabled '
+                        'by `--no-image-processor`.')
+
+                self.image_processor = None
+
             vision_language_config = VisionLanguageConfig(
                 image_input_type=VisionLanguageConfig.
                 get_image_input_enum_type(self.image_input_type),
                 image_token_id=self.image_token_id,
                 image_input_shape=str_to_int_tuple(self.image_input_shape),
                 image_feature_size=self.image_feature_size,
+                image_processor=self.image_processor,
+                image_processor_revision=self.image_processor_revision,
             )
         else:
             vision_language_config = None

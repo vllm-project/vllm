@@ -9,19 +9,30 @@ from transformers import AutoTokenizer
 
 from vllm.config import VisionLanguageConfig
 
+
+def iter_llava_configs(model_name: str):
+    image_hw_to_feature_size = {
+        (336, 336): 576,
+    }
+
+    for (h, w), f in image_hw_to_feature_size.items():
+        for input_type, input_shape in [
+            (VisionLanguageConfig.ImageInputType.PIXEL_VALUES, (1, 3, h, w)),
+            (VisionLanguageConfig.ImageInputType.IMAGE_FEATURES, (1, f, 1024)),
+        ]:
+            yield (model_name,
+                   VisionLanguageConfig(image_input_type=input_type,
+                                        image_feature_size=f,
+                                        image_token_id=32000,
+                                        image_input_shape=input_shape,
+                                        image_processor=model_name,
+                                        image_processor_revision=None))
+
+
 model_and_vl_config = [
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.PIXEL_VALUES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 3, 336, 336))),
-    ("llava-hf/llava-1.5-7b-hf",
-     VisionLanguageConfig(
-         image_input_type=VisionLanguageConfig.ImageInputType.IMAGE_FEATURES,
-         image_feature_size=576,
-         image_token_id=32000,
-         image_input_shape=(1, 576, 1024)))
+    *iter_llava_configs("llava-hf/llava-1.5-7b-hf"),
+    # Not enough memory
+    # *iter_llava_configs("llava-hf/llava-1.5-13b-hf"),
 ]
 
 
@@ -39,6 +50,10 @@ def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
             result[field.name] = ",".join([str(item) for item in value])
         else:
             result[field.name] = value
+
+    result[
+        "no_image_processor"] = vision_language_config.image_processor is None
+
     return result
 
 
@@ -72,36 +87,56 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
     """Inference result should be the same between hf and vllm.
 
     All the image fixtures for the test is under tests/images.
-    For huggingface runner, we provide the raw images as input.
-    For vllm runner, we provide image tensors and corresponding
+    For huggingface runner, we provide the PIL images as input.
+    For vllm runner, we provide MultiModalData objects and corresponding
     vision language config as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
     model_id, vision_language_config = model_and_config
+
     hf_model = hf_runner(model_id, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(hf_image_prompts,
-                                          max_tokens,
-                                          images=hf_images)
+    _, vision_language_config = model_and_config
+    if vision_language_config.image_input_type == (
+            VisionLanguageConfig.ImageInputType.IMAGE_FEATURES):
+        # HuggingFace does not support image feature input
+        hf_outputs = [None] * len(hf_image_prompts)
+    else:
+        _, _, h, w = vision_language_config.image_input_shape
+        hf_outputs = hf_model.generate_greedy(
+            hf_image_prompts,
+            max_tokens,
+            # To be compatible with the patch for LLaVA-NeXT
+            images=[im.resize((w, h)) for im in hf_images])
     del hf_model
 
     vllm_model = vllm_runner(model_id,
                              dtype=dtype,
                              worker_use_ray=worker_use_ray,
+                             enforce_eager=True,
                              **as_dict(vision_language_config))
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
-                                              images=vllm_images)
+                                              multi_modal_datas=vllm_images)
     del vllm_model
 
     gc.collect()
     torch.cuda.empty_cache()
 
     for i in range(len(hf_image_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
+        hf_output = hf_outputs[i]
+        if hf_output is None:
+            continue
+
+        hf_output_ids, hf_output_str = hf_output
         vllm_output_ids, vllm_output_str = sanitize_vllm_output(
             vllm_outputs[i], vision_language_config, model_id)
+        print(f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_str == vllm_output_str, (
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+# TODO: Add test for `tensor_parallel_size` [ref: PR #3883]
+# (Requires multiple GPUs)

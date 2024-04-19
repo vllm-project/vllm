@@ -1,17 +1,25 @@
 """Sequence and its related classes."""
 import copy
 import enum
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+import numpy as np
+import torch
+from PIL import Image
+
 from vllm.block import LogicalTokenBlock
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.image_processor import cached_get_image_processor
 
 if TYPE_CHECKING:
-    import torch
-
+    from vllm.config import ModelConfig, VisionLanguageConfig
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -373,23 +381,72 @@ class SequenceGroupState:
     generator: Optional = None  # type: ignore
 
 
-class MultiModalData:
-    """Multi modal request.
-    
-    Args:
-        type: The data type.
-        data: The actual data.
-        The required shape and semantic meaning of it depends on the vision
-        language config of the hosted model. 
-        See `VisionLanguageConfig` in `config.py`.
-    """
+class MultiModalData(ABC):
 
-    class Type(enum.Enum):
-        IMAGE = enum.auto()
+    @abstractmethod
+    def get_input_kwargs(
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
+        """Returns a dictionary which are passed as keyword arguments to
+        :meth:`torch.nn.Module.forward`.
+        """
+        raise NotImplementedError
 
-    def __init__(self, type: Type, data: "torch.Tensor"):
-        self.type = type
-        self.data = data
+
+class ImagePixelData(MultiModalData):
+
+    def __init__(self, image: Image.Image) -> None:
+        # So that this class can be created inside the Image context manager
+        image.load()
+
+        self.image = image
+
+    def _get_image_processor(self, model_config: "ModelConfig",
+                             vlm_config: "VisionLanguageConfig"):
+        if vlm_config is None or vlm_config.image_processor is None:
+            return None
+
+        return cached_get_image_processor(
+            vlm_config.image_processor,
+            trust_remote_code=model_config.trust_remote_code,
+            revision=vlm_config.image_processor_revision,
+        )
+
+    def get_input_kwargs(
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
+        # Temporary patch to make LLaVA-NeXT usable
+        _, _, h, w = vlm_config.image_input_shape
+        image = self.image.resize((w, h))
+
+        image_processor = self._get_image_processor(model_config, vlm_config)
+        if image_processor is None:
+            image_arr = np.array(image, copy=True)
+            pixel_values = torch.as_tensor(image_arr) \
+                .view(1, image.height, image.width, -1) \
+                .permute((0, 3, 1, 2))  # NCHW
+
+            return {"pixel_values": pixel_values}
+
+        try:
+            out_dict = image_processor.preprocess(image) \
+                .convert_to_tensors("pt")
+        except Exception:
+            logger.error("Failed to process image (%s)", image)
+            raise
+
+        return out_dict.data
+
+
+class ImageFeatureData(MultiModalData):
+
+    def __init__(self, image_features: torch.Tensor) -> None:
+        self.image_features = image_features
+
+    def get_input_kwargs(
+            self, model_config: "ModelConfig",
+            vlm_config: "VisionLanguageConfig") -> Dict[str, torch.Tensor]:
+        return {"image_features": self.image_features}
 
 
 class SequenceGroup:
@@ -401,7 +458,8 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        multi_modal_data: Multi modal data associated with the request.
+        multi_modal_kwargs: Extra kwargs to the model that are associated with
+        multi modal data.
     """
 
     def __init__(
@@ -411,7 +469,7 @@ class SequenceGroup:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -424,7 +482,7 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
-        self.multi_modal_data = multi_modal_data
+        self.multi_modal_kwargs = multi_modal_kwargs or {}
 
     @property
     def prompt(self) -> str:
@@ -575,7 +633,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
+        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -584,7 +642,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
-        self.multi_modal_data = multi_modal_data
+        self.multi_modal_kwargs = multi_modal_kwargs or {}
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
 
@@ -673,10 +731,10 @@ class SamplerOutput:
     outputs: List[SequenceGroupOutput]
 
     # On-device tensor containing probabilities of each token.
-    sampled_token_probs: Optional["torch.Tensor"] = None
+    sampled_token_probs: Optional[torch.Tensor] = None
 
     # On-device tensor containing the sampled token ids.
-    sampled_token_ids: Optional["torch.Tensor"] = None
+    sampled_token_ids: Optional[torch.Tensor] = None
 
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None

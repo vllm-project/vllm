@@ -30,6 +30,3 @@ ai2-olmo # required for OLMo
 
 # Benchmarking
 aiohttp
-
-# Multimodal
-pillow
