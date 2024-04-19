@@ -1,0 +1,17 @@
+FROM intel/intel-optimized-pytorch:2.1.10-xpu-pip-base
+ 
+RUN apt update && apt install -y intel-basekit
+ 
+RUN apt-get update  -y \
+&& apt-get install -y curl libicu70 lsb-release git wget vim numactl python3 python3-pip
+
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install -v -r requirements-xpu.txt
+
+RUN VLLM_TARGET_DEVICE=xpu python3 setup.py install
+
+CMD ["/bin/bash"]
