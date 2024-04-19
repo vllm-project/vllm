@@ -100,11 +100,11 @@ def test_guided_json_completion(sample_json_schema, llm):
 
 
 @pytest.mark.skip_global_cleanup
-def test_guided_choice_completion(sample_guided_choice, llm):
+def test_guided_choice_completion(sample_json_schema, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_choice=sample_guided_choice))
+        guided_options=dict(guided_choice=sample_json_schema))
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
@@ -118,7 +118,7 @@ def test_guided_choice_completion(sample_guided_choice, llm):
         prompt = output.prompt
         generated_text = output.outputs[0].text
         assert generated_text is not None
-        assert generated_text in sample_guided_choice
+        assert generated_text in sample_json_schema
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 

@@ -8,7 +8,6 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
-
 _SAMPLING_EPS = 1e-5
 
 

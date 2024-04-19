@@ -16,7 +16,6 @@ from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
 
-
 class GuidedDecodingMode(Enum):
     JSON = "json"
     REGEX = "regex"
@@ -54,7 +53,7 @@ pair   : UNESCAPED_STRING ":" value
 global_thread_pool = None  # used for generating logits processor fsm
 
 
-async def get_guided_decoding_logits_processor(
+async def get_outlines_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
         tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
     """
@@ -96,6 +95,10 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     if not guide:
         return None
 
+    # if global_thread_pool is None:
+    #     global_thread_pool = concurrent.futures.ThreadPoolExecutor(
+    #         max_workers=2)
+
     result = _get_cached_logits_processor(guide, tokenizer, mode)
 
     logits_processor = copy(result)
@@ -127,7 +130,13 @@ def _get_guide_and_mode_from_sampling_params(
 
     if "guided_json" in guided_options:
         json = guided_options["guided_json"]
-        json = convert_json_format(json)
+        if isinstance(json, dict):
+            # turn dict into hashable string
+            json = json_dumps(json)
+        elif isinstance(json, BaseModel):
+            # use pydantic signature so that different model classes
+            # with the same fields will get hashed the same
+            json = str(json.__signature__)
         return json, GuidedDecodingMode.JSON
     elif "guided_regex" in guided_options:
         return guided_options["guided_regex"], GuidedDecodingMode.REGEX
@@ -148,13 +157,22 @@ def _get_guide_and_mode(
 
     if request.guided_json:
         json = request.guided_json
-        json = convert_json_format(json)
+        if isinstance(json, dict):
+            # turn dict into hashable string
+            json = json_dumps(json)
+        elif isinstance(json, BaseModel):
+            # use pydantic signature so that different model classes
+            # with the same fields will get hashed the same
+            json = str(json.__signature__)
         return json, GuidedDecodingMode.JSON
     elif request.guided_regex:
         return request.guided_regex, GuidedDecodingMode.REGEX
     elif request.guided_choice:
         # choice just uses regex
-        choices_regex = convert_guided_choice_format(request.guided_choice)
+        choices = [
+            regex_escape(str(choice)) for choice in request.guided_choice
+        ]
+        choices_regex = "(" + "|".join(choices) + ")"
         return choices_regex, GuidedDecodingMode.CHOICE
     elif request.guided_grammar:
         return request.guided_grammar, GuidedDecodingMode.GRAMMAR

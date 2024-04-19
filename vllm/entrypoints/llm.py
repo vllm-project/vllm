@@ -13,7 +13,7 @@ from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
-from vllm.model_executor.guided_decoding import get_local_guided_decoding_logits_processor
+from vllm.model_executor.guided_decoding.outlines_decoding import get_local_guided_decoding_logits_processor
 
 
 class LLM:

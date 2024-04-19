@@ -9,7 +9,8 @@ from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
                           LlavaForConditionalGeneration)
 
-from vllm import LLM, SamplingParams
+from vllm.entrypoints.llm import LLM
+from vllm.sampling_params import SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.sequence import MultiModalData
