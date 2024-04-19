@@ -289,7 +289,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                # If marlin and awq, we need to adjust the offset and size to account for the tiling.
+                # If marlin and awq, we need to adjust the offset and
+                # size to account for the tiling.
                 shard_size, shard_offset = adjust_shard(
                     param, shard_size, shard_offset)
 
@@ -311,7 +312,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-            # If marlin and awq, we need to adjust the offset and size to account for the tiling.
+            # If marlin and awq, we need to adjust the offset
+            # and size to account for the tiling.
             shard_size, shard_offset = adjust_shard(param, shard_size,
                                                     shard_offset)
 
@@ -417,7 +419,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
 
-                # If marlin and awq, we need to adjust the offset and size to account for the tiling.
+                # If marlin and awq, we need to adjust the offset
+                # and size to account for the tiling.
                 shard_size, shard_offset = adjust_shard(
                     param, shard_size, shard_offset)
 
@@ -446,7 +449,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size = shard_size // param.pack_factor
                 shard_offset = shard_offset // param.pack_factor
 
-            # If marlin and awq, we need to adjust the offset and size to account for the tiling.
+            # If marlin and awq, we need to adjust the offset
+            # and size to account for the tiling.
             shard_size, shard_offset = adjust_shard(param, shard_size,
                                                     shard_offset)
 
