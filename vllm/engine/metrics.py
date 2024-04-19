@@ -33,18 +33,20 @@ class Metrics:
             documentation='information of cache_config')
 
         # System stats
+        #   Scheduler State
         self.gauge_scheduler_running = Gauge(
             name="vllm:num_requests_running",
             documentation="Number of requests currently running on GPU.",
-            labelnames=labelnames)
-        self.gauge_scheduler_swapped = Gauge(
-            name="vllm:num_requests_swapped",
-            documentation="Number of requests swapped to CPU.",
             labelnames=labelnames)
         self.gauge_scheduler_waiting = Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames)
+        self.gauge_scheduler_swapped = Gauge(
+            name="vllm:num_requests_swapped",
+            documentation="Number of requests swapped to CPU.",
+            labelnames=labelnames)
+        #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = Gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
@@ -54,7 +56,7 @@ class Metrics:
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames)
 
-        # Raw stats from last model iteration
+        # Iteration stats
         self.counter_prompt_tokens = Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -63,22 +65,6 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
-        self.counter_request_success = Counter(
-            name="vllm:request_success",
-            documentation="Count of successfully processed requests.",
-            labelnames=labelnames + [Metrics.labelname_finish_reason])
-        self.histogram_request_prompt_tokens = Histogram(
-            name="vllm:request_prompt_tokens",
-            documentation="Number of prefill tokens processed.",
-            labelnames=labelnames,
-            buckets=build_1_2_5_buckets(max_model_len),
-        )
-        self.histogram_request_generation_tokens = Histogram(
-            name="vllm:request_generation_tokens",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames,
-            buckets=build_1_2_5_buckets(max_model_len),
-        )
         self.histogram_time_to_first_token = Histogram(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -95,16 +81,26 @@ class Metrics:
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5
             ])
+
+        # Request stats
+        #   Latency
         self.histogram_e2e_request_latency = Histogram(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
-        self.histogram_request_n = Histogram(
-            name="vllm:request_params_n",
-            documentation="Histogram of the n request parameter.",
+        #   Metadata
+        self.histogram_request_prompt_tokens = Histogram(
+            name="vllm:request_prompt_tokens",
+            documentation="Number of prefill tokens processed.",
             labelnames=labelnames,
-            buckets=[1, 2, 5, 10, 20],
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
+        self.histogram_request_generation_tokens = Histogram(
+            name="vllm:request_generation_tokens",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_request_best_of = Histogram(
             name="vllm:request_params_best_of",
@@ -112,6 +108,16 @@ class Metrics:
             labelnames=labelnames,
             buckets=[1, 2, 5, 10, 20],
         )
+        self.histogram_request_n = Histogram(
+            name="vllm:request_params_n",
+            documentation="Histogram of the n request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
+        self.counter_request_success = Counter(
+            name="vllm:request_success",
+            documentation="Count of successfully processed requests.",
+            labelnames=labelnames + [Metrics.labelname_finish_reason])
 
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = Gauge(
