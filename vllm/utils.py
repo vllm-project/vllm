@@ -506,13 +506,6 @@ def is_pin_memory_available() -> bool:
     return True
 
 
-def device_sync():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    elif is_xpu():
-        torch.xpu.synchronize()
-
-
 class CudaMemoryProfiler:
 
     def __init__(self, device=None):

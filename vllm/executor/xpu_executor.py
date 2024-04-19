@@ -4,7 +4,7 @@ import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TensorizerConfig, VisionLanguageConfig)
+                         VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -27,7 +27,6 @@ class XPUExecutor(ExecutorBase):
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
         speculative_config: Optional[SpeculativeConfig],
-        tensorizer_config: Optional[TensorizerConfig],
     ) -> None:
         assert device_config.device_type == "xpu"
         assert (not speculative_config
@@ -42,7 +41,6 @@ class XPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
-        self.tensorizer_config = tensorizer_config
 
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
@@ -70,7 +68,6 @@ class XPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
-            tensorizer_config=self.tensorizer_config,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
@@ -96,7 +93,8 @@ class XPUExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int) -> List[SamplerOutput]:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,

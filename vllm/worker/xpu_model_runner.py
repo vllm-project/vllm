@@ -1,22 +1,135 @@
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
+import torch.nn as nn
 
+from vllm.attention import get_attn_backend
+from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
+from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad, maybe_expand_dim
-from vllm.worker.model_runner import (AttentionMetadata, ModelRunner,
-                                      SamplingMetadata)
+from vllm.worker.model_runner import (AttentionMetadata, SamplingMetadata,
+                                      _prepare_fake_inputs)
 
 _PAD_SLOT_ID = -1
+_BATCH_SIZE_ALIGNMENT = 8
+_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
+]
 
 
-class XPUModelRunner(ModelRunner):
+class XPUModelRunner():
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
+        is_driver_worker: bool = False,
+        *args,
+        **kwargs,
+    ):
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.lora_config = lora_config
+        self.load_config = load_config
+        self.is_driver_worker = is_driver_worker
+
+        # model_config can be None in tests/samplers/test_sampler.py.
+        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
+        self.sliding_window = (model_config.get_sliding_window()
+                               if model_config is not None else None)
+        self.device_config = (device_config
+                              if device_config is not None else DeviceConfig())
+        self.device = self.device_config.device
+
+        self.kv_cache_dtype = kv_cache_dtype
+        self.max_context_len_to_capture = (
+            self.model_config.max_context_len_to_capture
+            if self.model_config is not None else 0)
+
+        self.attn_backend = get_attn_backend(
+            self.model_config.dtype if model_config is not None else None)
+
+        # Lazy initialization.
+        self.model: nn.Module  # Set after init_Model
+        self.block_size: int  # Set after initial profiling.
+
+    def load_model(self) -> None:
+        self.model = get_model(model_config=self.model_config,
+                               load_config=self.load_config,
+                               device_config=self.device_config,
+                               vision_language_config=None,
+                               lora_config=self.lora_config,
+                               parallel_config=self.parallel_config,
+                               scheduler_config=self.scheduler_config)
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
+
+    @torch.inference_mode()
+    def profile_run(self) -> None:
+        # Enable top-k sampling to reflect the accurate memory usage.
+        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        max_num_seqs = self.scheduler_config.max_num_seqs
+
+        # Profile memory usage with max_num_sequences sequences and the total
+        # number of tokens equal to max_num_batched_tokens.
+        seqs: List[SequenceGroupMetadata] = []
+        # Additional GPU memory may be needed for vision encoding, which needs
+        # to be accounted for when calculating the GPU blocks for
+        # vLLM blocker manager.
+        # To exercise the worst scenario for GPU memory consumption,
+        # the number of seqs (batch_size) is chosen to maximize the number
+        # of images processed.
+        for group_id in range(max_num_seqs):
+            seq_len = (max_num_batched_tokens // max_num_seqs +
+                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seq_data, fake_multi_modal_input = _prepare_fake_inputs(
+                seq_len, None)
+            seq = SequenceGroupMetadata(
+                request_id=str(group_id),
+                is_prompt=True,
+                seq_data={group_id: seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+                lora_request=None,
+                multi_modal_data=fake_multi_modal_input,
+            )
+            seqs.append(seq)
+
+        # Run the model with the dummy inputs.
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        kv_caches = [None] * num_layers
+        self.execute_model(seqs, kv_caches)
+        torch.xpu.synchronize()
+        return
+
+    def set_block_size(self, block_size: int) -> None:
+        self.block_size = block_size
+
+        self.graph_block_tables = np.zeros(
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
+
+    def get_max_block_per_batch(self) -> int:
+        block_size = self.block_size
+        return (self.max_context_len_to_capture + block_size - 1) // block_size
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
                SamplingMetadata]:
         if self.is_driver_worker:
@@ -162,7 +275,11 @@ class XPUModelRunner(ModelRunner):
         selected_token_indices: List[int] = []
         generators: List[torch.Generator] = []
         selected_token_start_idx = 0
-        categorized_sample_indices = {t: [] for t in SamplingType}
+        categorized_sample_indices: Dict[SamplingType,
+                                         List[Tuple[int, int]]] = {
+                                             t: []
+                                             for t in SamplingType
+                                         }
         categorized_sample_indices_start_idx = 0
         categorized_sampled_token_indices_start_idx = 0
 
@@ -179,10 +296,9 @@ class XPUModelRunner(ModelRunner):
                     categorized_sample_indices_start_idx += subquery_len - 1
 
                 categorized_sample_indices[
-                    sampling_params.sampling_type].append([
-                        categorized_sample_indices_start_idx,
-                        categorized_sampled_token_indices_start_idx
-                    ])
+                    sampling_params.sampling_type].append(
+                        (categorized_sample_indices_start_idx,
+                         categorized_sampled_token_indices_start_idx))
                 categorized_sample_indices_start_idx += 1
                 categorized_sampled_token_indices_start_idx += 1
 
@@ -247,7 +363,7 @@ class XPUModelRunner(ModelRunner):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata

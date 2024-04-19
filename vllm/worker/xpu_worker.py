@@ -1,14 +1,14 @@
 """A XPU worker class."""
 import gc
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import intel_extension_for_pytorch  # noqa: F401
 import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, TensorizerConfig,
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized)
@@ -40,12 +40,12 @@ class XPUWorker(LoraNotSupportedWorkerBase):
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
         cache_config: CacheConfig,
+        load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
-        tensorizer_config: Optional[TensorizerConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
@@ -56,11 +56,11 @@ class XPUWorker(LoraNotSupportedWorkerBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.cache_config = cache_config
+        self.load_config = load_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
-        self.tensorizer_config = tensorizer_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -75,16 +75,16 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            load_config=self.load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            tensorizer_config=tensorizer_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine = None
-        self.gpu_cache = None
+        self.cache_engine: CacheEngine
+        self.gpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "xpu" and is_xpu():
@@ -148,8 +148,6 @@ class XPUWorker(LoraNotSupportedWorkerBase):
                              cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
         torch.xpu.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
@@ -179,11 +177,8 @@ class XPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        # IPEX don't support capture graph yet
+        pass
 
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
@@ -206,7 +201,7 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
-            data = {
+            data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
@@ -220,6 +215,9 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
 
+        assert blocks_to_swap_in is not None
+        assert blocks_to_swap_out is not None
+        assert blocks_to_copy is not None
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
