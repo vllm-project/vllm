@@ -231,7 +231,7 @@ class DefaultModelLoader(BaseModelLoader):
             for _, module in model.named_modules():
                 linear_method = getattr(module, "linear_method", None)
                 if linear_method is not None:
-                    linear_method.proc_after_loading(module)
+                    linear_method.process_weights_after_loading(module)
         return model.eval()
 
 

@@ -49,7 +49,7 @@ class LinearMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
-    def proc_after_loading(self, layer: nn.Module) -> None:
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 
         This can be used for example, to transpose weights for computation.

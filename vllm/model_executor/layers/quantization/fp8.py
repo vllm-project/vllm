@@ -84,7 +84,7 @@ class Fp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scaling_factor", w_scale)
 
-    def proc_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: Module) -> None:
         # Although the linear_method is propagated to all layers,
         # only linear layers invoke "create_weights". So we check
         # whether "weight_scaling_facor" is registered to determine
