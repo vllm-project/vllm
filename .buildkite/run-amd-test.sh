@@ -5,6 +5,7 @@ set -ex
 # Print ROCm version
 rocminfo
 
+
 echo "reset" > /opt/amdgpu/etc/gpu_state
 
 while true; do
