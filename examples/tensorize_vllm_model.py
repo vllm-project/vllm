@@ -20,9 +20,6 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          serialize_vllm_model)
 from vllm.model_executor.models import ModelRegistry
 
-# TODO: Update this to account for new changes with model_loader_extra_config
-#       and the vLLM type reader when applicable
-
 # yapf conflicts with isort for this docstring
 # yapf: disable
 """
