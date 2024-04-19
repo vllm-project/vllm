@@ -56,6 +56,9 @@ on:
         type: string
         required: true
 
+env:
+    VENV_BASE: "BUILD"
+
 jobs:
 
     BUILD:
@@ -88,13 +91,7 @@ jobs:
               uses: ./.github/actions/nm-set-python/
               with:
                 python: ${{ inputs.python }}
-                venv: TEST
-
-            - name: hf cache
-              id: hf_cache
-              uses: ./.github/actions/nm-hf-cache/
-              with:
-                fs_cache: ${{ secrets.HF_FS_CACHE }}
+                venv: ${{ env.VENV_BASE }}
 
             - name: create testmo run
               id: create_testmo_run
@@ -105,16 +102,12 @@ jobs:
                 testmo_token: ${{ secrets.TESTMO_TEST_TOKEN }}
                 source: 'build-test'
 
-            - name: python lint
-              id: lint
-              uses: ./.github/actions/nm-lint-python/
-
             - name: build
               id: build
               uses: ./.github/actions/nm-build-vllm/
               with:
                 python: ${{ inputs.python }}
-                venv: TEST
+                venv: ${{ env.VENV_BASE }}
                 pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
 
             - name: upload whl
@@ -141,7 +134,6 @@ jobs:
                 gitref: ${{ inputs.gitref }}
                 testmo_run_url: https://neuralmagic.testmo.net/automation/runs/view/${{ steps.create_testmo_run.outputs.id }}
                 python: ${{ steps.set_python.outputs.version }}
-                lint_status: ${{ steps.lint.outputs.status }}
                 build_status: ${{ steps.build.outputs.build_status }}
                 whl_status: ${{ steps.build.outputs.whl_status }}
 
@@ -149,14 +141,11 @@ jobs:
               id: run_status
               if: success() || failure()
               env:
-                LINT_STATUS: ${{ steps.lint.outputs.status }}
                 BUILD_STATUS: ${{ steps.build.outputs.build_status }}
                 WHL_STATUS: ${{ steps.build.outputs.whl_status }}
               run: |
-                echo "lint status: ${LINT_STATUS}"
                 echo "build status: ${BUILD_STATUS}"
                 echo "build status: ${WHL_STATUS}"
-                if [ -z "${LINT_STATUS}" ] || [ "${LINT_STATUS}" -ne "0" ]; then exit 1; fi
                 if [ -z "${BUILD_STATUS}" ] || [ "${BUILD_STATUS}" -ne "0" ]; then exit 1; fi
                 if [ -z "${WHL_STATUS}" ] || [ "${WHL_STATUS}" -ne "0" ]; then exit 1; fi
 

@@ -1,5 +1,5 @@
 name: lint python
-description: "runs 'ruff' and reports errors"
+description: "(DEPRECATED) runs 'ruff' and reports errors"
 outputs:
   status:
     description: "return code from 'ruff'"

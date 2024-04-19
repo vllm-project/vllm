@@ -13,9 +13,6 @@ inputs:
   python:
     description: 'python version info'
     required: true
-  lint_status:
-    description: 'status from python lint step'
-    required: true
   build_status:
     description: 'status from build step'
     required: true
@@ -26,8 +23,6 @@ runs:
   using: composite
   steps:
   - run: |
-      LINT_STATUS=${{ inputs.lint_status }}
-      LINT_EMOJI=$(./.github/scripts/step-status ${LINT_STATUS})
       BUILD_STATUS=${{ inputs.build_status }}
       BUILD_EMOJI=$(./.github/scripts/step-status ${BUILD_STATUS})
       WHL_STATUS=${{ inputs.whl_status }}
@@ -42,7 +37,6 @@ runs:
       echo "| gitref: | '${{ inputs.gitref }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| branch name: | '${{ github.ref_name }}' |" >> $GITHUB_STEP_SUMMARY
       echo "| python: | ${{ inputs.python }} |" >> $GITHUB_STEP_SUMMARY
-      echo "| lint: | ${LINT_EMOJI} |" >> $GITHUB_STEP_SUMMARY
       echo "| build: | ${BUILD_EMOJI} |" >> $GITHUB_STEP_SUMMARY
       echo "| whl: | ${WHL_EMOJI} |" >> $GITHUB_STEP_SUMMARY
     shell: bash

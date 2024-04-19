@@ -17,14 +17,11 @@ runs:
     - id: set_python
       run: |
         command -v pyenv
-        pyenv root
-        pyenv versions
         pyenv local ${{ inputs.python }}
         COMMIT=${{ github.sha }}
         VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-        pyenv virtualenv ${VENV}
+        pyenv virtualenv ${VENV} || true
         source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
-        pyenv versions
         VERSION=$(python --version)
         echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       shell: bash
