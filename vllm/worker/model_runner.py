@@ -400,8 +400,9 @@ class ModelRunner:
             use_cuda_graph=False,
         )
 
+        model_dtype = self.model_config.dtype
         multi_modal_kwargs = {
-            k: torch.cat(v, dim=0).to(self.device)
+            k: torch.cat(v, dim=0).to(self.device, dtype=model_dtype)
             for k, v in multi_modal_kwargs_list.items()
         }
 
