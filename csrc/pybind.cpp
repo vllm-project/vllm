@@ -25,7 +25,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def(
     "gelu_and_mul",
     &gelu_and_mul,
-    "Activation function used in GeGLU.");
+    "Activation function used in GeGLU with `none` approximation.");
+  ops.def(
+    "gelu_tanh_and_mul",
+    &gelu_tanh_and_mul,
+    "Activation function used in GeGLU with `tanh` approximation.");
   ops.def(
     "gelu_new",
     &gelu_new,
@@ -51,6 +55,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "rotary_embedding",
     &rotary_embedding,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key");
+
+  ops.def(
+    "batched_rotary_embedding",
+    &batched_rotary_embedding,
+    "Apply GPT-NeoX or GPT-J style rotary embedding to query and key (supports multiple loras)");
 
 // Quantization ops
 #ifndef USE_ROCM
@@ -84,9 +93,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
   cache_ops.def(
-    "convert_fp8_e5m2",
-    &convert_fp8_e5m2,
-    "Convert the key and value cache to fp8_e5m2 data type");
+    "convert_fp8",
+    &convert_fp8,
+    "Convert the key and value cache to fp8 data type");
 
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");

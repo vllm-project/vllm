@@ -36,7 +36,7 @@ Below, you can find an explanation of every engine argument for vLLM:
 
     Directory to download and load the weights, default to the default cache dir of huggingface.
 
-.. option:: --load-format {auto,pt,safetensors,npcache,dummy}
+.. option:: --load-format {auto,pt,safetensors,npcache,dummy,tensorizer}
 
     The format of the model weights to load.
 
@@ -45,6 +45,7 @@ Below, you can find an explanation of every engine argument for vLLM:
     * "safetensors" will load the weights in the safetensors format.
     * "npcache" will load the weights in pytorch format and store a numpy cache to speed up the loading.
     * "dummy" will initialize the weights with random values, mainly for profiling.
+    * "tensorizer" will load serialized weights using `CoreWeave's Tensorizer model deserializer. <https://github.com/coreweave/tensorizer>`_ See `examples/tensorize_vllm_model.py <https://github.com/vllm-project/vllm/blob/main/examples/tensorize_vllm_model.py>`_ to serialize a vLLM model, and for more information.
 
 .. option:: --dtype {auto,half,float16,bfloat16,float,float32}
 
@@ -118,3 +119,19 @@ Below, you can find an explanation of every engine argument for vLLM:
 .. option:: --quantization (-q) {awq,squeezellm,None}
 
     Method used to quantize the weights.
+
+Async Engine Arguments
+----------------------
+Below are the additional arguments related to the asynchronous engine:
+
+.. option:: --engine-use-ray
+
+    Use Ray to start the LLM engine in a separate process as the server process.
+
+.. option:: --disable-log-requests
+
+    Disable logging requests.
+    
+.. option:: --max-log-len
+
+    Max number of prompt characters or prompt ID numbers being printed in log. Defaults to unlimited.

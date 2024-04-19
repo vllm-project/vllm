@@ -1,10 +1,12 @@
-from vllm.logger import init_logger
-from prometheus_client import Counter, Gauge, Histogram, Info, REGISTRY, disable_created_metrics
-
 import time
-import numpy as np
-from typing import Dict, List
 from dataclasses import dataclass
+from typing import Dict, List, Protocol
+
+import numpy as np
+from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
+                               disable_created_metrics)
+
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
@@ -117,12 +119,18 @@ class Stats:
     time_e2e_requests: List[float]
 
 
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
+
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
     def __init__(self, local_interval: float, labels: Dict[str, str]) -> None:
         # Metadata for logging locally.
-        self.last_local_log = time.monotonic()
+        self.last_local_log = time.time()
         self.local_interval = local_interval
 
         # Tracked stats over current local logging interval.
@@ -133,7 +141,7 @@ class StatLogger:
         self.labels = labels
         self.metrics = Metrics(labelnames=list(labels.keys()))
 
-    def info(self, type: str, obj: object) -> None:
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
             self.metrics.info_cache_config.info(obj.metrics_info())
 
@@ -177,10 +185,12 @@ class StatLogger:
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
         # Logs metrics to prometheus that are computed every logging_interval.
-        # Support legacy gauge metrics that make throughput calculations on the vLLM side.
-        # Moving forward, we should use counters like counter_prompt_tokens, counter_generation_tokens
-        # Which log raw data and calculate summaries using rate() on the grafana/prometheus side.
-        # See https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
+        # Support legacy gauge metrics that make throughput calculations on
+        # the vLLM side. Moving forward, we should use counters like
+        # counter_prompt_tokens, counter_generation_tokens
+        # Which log raw data and calculate summaries using rate() on the
+        # grafana/prometheus side. See
+        # https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
         self.metrics.gauge_avg_prompt_throughput.labels(
             **self.labels).set(prompt_throughput)
         self.metrics.gauge_avg_generation_throughput.labels(
@@ -188,7 +198,7 @@ class StatLogger:
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
-           Logs to prometheus and tracked stats every iteration. 
+           Logs to prometheus and tracked stats every iteration.
            Logs to Stdout every self.local_interval seconds."""
 
         # Log to prometheus.
@@ -200,8 +210,8 @@ class StatLogger:
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):
-
-            # Compute summary metrics for tracked stats (and log them to promethus if applicable).
+            # Compute summary metrics for tracked stats (and log them
+            # to promethus if applicable).
             prompt_throughput = self._get_throughput(self.num_prompt_tokens,
                                                      now=stats.now)
             generation_throughput = self._get_throughput(
@@ -213,7 +223,8 @@ class StatLogger:
             # Log to stdout.
             logger.info(
                 f"Avg prompt throughput: {prompt_throughput:.1f} tokens/s, "
-                f"Avg generation throughput: {generation_throughput:.1f} tokens/s, "
+                f"Avg generation throughput: "
+                f"{generation_throughput:.1f} tokens/s, "
                 f"Running: {stats.num_running} reqs, "
                 f"Swapped: {stats.num_swapped} reqs, "
                 f"Pending: {stats.num_waiting} reqs, "

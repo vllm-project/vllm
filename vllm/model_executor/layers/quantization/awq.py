@@ -3,10 +3,11 @@ from typing import Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 
 def make_divisible(c, divisor):
@@ -73,7 +74,8 @@ class AWQConfig(QuantizationConfig):
     def get_config_filenames() -> List[str]:
         return [
             "quant_config.json",  # E.g., casperhansen/vicuna-7b-v1.5-awq
-            "quantize_config.json",  # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
+            # E.g., abhinavkulkarni/mosaicml-mpt-7b-instruct-w4-g128-awq
+            "quantize_config.json",
         ]
 
     @classmethod
@@ -101,10 +103,11 @@ class AWQLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, input_size_per_partition: int,
+    def create_weights(self, layer: torch.nn.Module,
+                       input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype) -> Dict[str, Any]:
+                       output_size: int, params_dtype: torch.dtype,
+                       **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(
                 "The input size is not aligned with the quantized "
@@ -209,12 +212,14 @@ class AWQLinearMethod(LinearMethodBase):
         }
 
     def apply_weights(self,
-                      weights: Dict[str, Any],
+                      layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qweight = weights["qweight"]
-        scales = weights["scales"]
-        qzeros = weights["qzeros"]
+        qweight = layer.qweight
+        scales = layer.scales
+        qzeros = layer.qzeros
+        pack_factor = self.quant_config.pack_factor
+        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
         if self.quant_config.version == "gemv_fast":
             out_shape = (x.shape[:-1] + (qweight.shape[0] * self.quant_config.interleave, ))
@@ -240,5 +245,5 @@ class AWQLinearMethod(LinearMethodBase):
                 out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
                                    pack_factor)
         if bias is not None:
-            out = out + bias
+            out.add_(bias)
         return out.reshape(out_shape)

@@ -90,9 +90,10 @@ Requests can specify the LoRA adapter as if it were any other model via the ``mo
 processed according to the server-wide LoRA configuration (i.e. in parallel with base model requests, and potentially other
 LoRA adapter requests if they were provided and ``max_loras`` is set high enough).
 
-The following is an example request 
+The following is an example request
 
-.. code-block::bash 
+.. code-block:: bash
+
     curl http://localhost:8000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{

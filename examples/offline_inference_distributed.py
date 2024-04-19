@@ -5,10 +5,12 @@ distributively on a multi-nodes cluster.
 Learn more about Ray Data in https://docs.ray.io/en/latest/data/data.html
 """
 
-from vllm import LLM, SamplingParams
 from typing import Dict
+
 import numpy as np
 import ray
+
+from vllm import LLM, SamplingParams
 
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)

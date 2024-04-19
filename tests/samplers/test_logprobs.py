@@ -1,7 +1,7 @@
 import pytest
 import torch
-from tests.conftest import VllmRunner
 
+from tests.conftest import VllmRunner
 from vllm import SamplingParams
 
 MODELS = ["facebook/opt-125m"]
@@ -70,8 +70,8 @@ def test_get_prompt_logprobs(
                                            hf_logprob[i][-1][token_id].item(),
                                            atol=1e-2,
                                            rtol=1e-2)
-                assert isinstance(sample_logprob.decoded_token, str), \
-                    ("The token should be decoded by the time it is returned "
+                assert isinstance(sample_logprob.decoded_token, str), (
+                    "The token should be decoded by the time it is returned "
                     " to the user.")
 
 
