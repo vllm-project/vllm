@@ -398,14 +398,10 @@ def _sample_with_torch(
 
             # TODO clean up
             # self._include_gpu_probs_tensor
-            # modify greedy probs
-            modify_greedy_probs = False
-            if modify_greedy_probs:
-                logprobs[s_i, :] = -float('inf')
-                logprobs[s_i, greedy_samples] = 0.0
-                probs[s_i, :] = 0
-                probs[s_i, greedy_samples] = 1.0
-
+            logprobs[s_i, :] = -float('inf')
+            logprobs[s_i, greedy_samples] = 0.0
+            probs[s_i, :] = 0
+            probs[s_i, greedy_samples] = 1.0
             sampled_token_ids_tensor[s_i] = greedy_samples.unsqueeze(-1)
 
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):

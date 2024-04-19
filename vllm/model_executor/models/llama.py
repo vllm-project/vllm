@@ -285,13 +285,6 @@ class LlamaModel(nn.Module):
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
         for i in range(len(self.layers)):
-            def xform(kv_cache, blocks):
-                if kv_cache is None:
-                    return None
-                return torch.abs(kv_cache[:, :blocks]).sum(-1)
-
-            uniq_hs_val_0 = torch.abs(hidden_states).sum(dim=-1)
-            uniq_kv_val_0 = xform(kv_caches[i], blocks=2)
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -300,12 +293,6 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-
-            uniq_hs_val_1 = torch.abs(hidden_states).sum(dim=-1)
-            uniq_kv_val_1 = xform(kv_caches[i], blocks=2)
-            print(f'uniq_val hs {positions=} {i=} {uniq_hs_val_0=} -> {uniq_hs_val_1}=')
-            print(f'uniq_val kv {positions=} {i=} {uniq_kv_val_0=} -> {uniq_kv_val_1}=')
-
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

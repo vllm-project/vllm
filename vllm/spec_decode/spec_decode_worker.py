@@ -292,9 +292,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #if -1 in proposals.proposal_token_ids:
         #    breakpoint()
 
-        self.rejection_sampler.seq_group_metadata_list = seq_group_metadata_list
-        self.rejection_sampler.spec_indices = spec_indices
-
         accepted_token_ids = self.rejection_sampler(
             target_probs=proposal_verifier_probs,
             bonus_token_ids=bonus_token_ids,
