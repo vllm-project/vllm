@@ -508,7 +508,10 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
     assert first_response != completion.choices[0].text
 
 
-async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
+                                      guided_decoding_backend: str):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example JSON for an employee profile "
@@ -516,7 +519,8 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
         n=3,
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_json=TEST_SCHEMA))
+        extra_body=dict(guided_json=TEST_SCHEMA,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 3
@@ -526,7 +530,10 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI):
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
 
-async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
+                                guided_decoding_backend: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -540,8 +547,9 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=500,
-        extra_body=dict(guided_json=TEST_SCHEMA))
+        max_tokens=1000,
+        extra_body=dict(guided_json=TEST_SCHEMA,
+                        guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
@@ -557,8 +565,9 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        max_tokens=500,
-        extra_body=dict(guided_json=TEST_SCHEMA))
+        max_tokens=1000,
+        extra_body=dict(guided_json=TEST_SCHEMA,
+                        guided_decoding_backend=guided_decoding_backend))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -567,14 +576,18 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI):
     assert json1["age"] != json2["age"]
 
 
-async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
+                                       guided_decoding_backend: str):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt=f"Give an example IPv4 address with this regex: {TEST_REGEX}",
         n=3,
         temperature=1.0,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX))
+        extra_body=dict(guided_regex=TEST_REGEX,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 3
@@ -583,7 +596,10 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI):
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
-async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
+                                 guided_decoding_backend: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -597,7 +613,8 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX))
+        extra_body=dict(guided_regex=TEST_REGEX,
+                        guided_decoding_backend=guided_decoding_backend))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(TEST_REGEX, ip1) is not None
@@ -608,21 +625,26 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=20,
-        extra_body=dict(guided_regex=TEST_REGEX))
+        extra_body=dict(guided_regex=TEST_REGEX,
+                        guided_decoding_backend=guided_decoding_backend))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
     assert re.fullmatch(TEST_REGEX, ip2) is not None
     assert ip1 != ip2
 
 
-async def test_guided_choice_completion(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
+                                        guided_decoding_backend: str):
     completion = await client.completions.create(
         model=MODEL_NAME,
         prompt="The best language for type-safe systems programming is ",
         n=2,
         temperature=1.0,
         max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE))
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 2
@@ -630,7 +652,10 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI):
         assert completion.choices[i].text in TEST_CHOICE
 
 
-async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
+                                  guided_decoding_backend: str):
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -644,7 +669,8 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE))
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
     choice1 = chat_completion.choices[0].message.content
     assert choice1 in TEST_CHOICE
 
@@ -657,18 +683,23 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=messages,
         max_tokens=10,
-        extra_body=dict(guided_choice=TEST_CHOICE))
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
     choice2 = chat_completion.choices[0].message.content
     assert choice2 in TEST_CHOICE
     assert choice1 != choice2
 
 
-async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
+                                          guided_decoding_backend: str):
     with pytest.raises(openai.BadRequestError):
         _ = await client.completions.create(
             model=MODEL_NAME,
             prompt="Give an example JSON that fits this schema: 42",
-            extra_body=dict(guided_json=42))
+            extra_body=dict(guided_json=42,
+                            guided_decoding_backend=guided_decoding_backend))
 
     messages = [{
         "role": "system",
@@ -692,6 +723,36 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI):
             model=MODEL_NAME,
             prompt="Give an example string that fits this regex",
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
+
+
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
+                                           guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=10,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
+    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
+
+    # -9999.0 is the minimum logprob returned by OpenAI
+    assert all(
+        isinstance(logprob, float) and logprob >= -9999.0
+        for token_dict in top_logprobs
+        for token, logprob in token_dict.items())
 
 
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):

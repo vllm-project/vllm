@@ -113,6 +113,8 @@ class SamplingTensors:
                              get_num_triton_sampler_splits(vocab_size))
 
         sample_indices_start_idx = 0
+        assert sampling_metadata.seq_groups is not None
+        assert sampling_metadata.seq_data is not None
         for i, seq_group in enumerate(sampling_metadata.seq_groups):
             seq_ids, sampling_params = seq_group
             temperature = sampling_params.temperature
@@ -147,6 +149,7 @@ class SamplingTensors:
                     and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
+                assert sampling_metadata.prompt_lens is not None
                 prompt_len = sampling_metadata.prompt_lens[i]
                 temperatures += [temperature] * (prompt_len - 1)
                 top_ps += [top_p] * (prompt_len - 1)
@@ -172,6 +175,7 @@ class SamplingTensors:
             is_prompt = i < sampling_metadata.num_prompts
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
+                assert sampling_metadata.prompt_lens is not None
                 prompt_len = sampling_metadata.prompt_lens[i]
 
                 if sampling_params.prompt_logprobs is not None:
