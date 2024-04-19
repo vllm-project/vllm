@@ -39,10 +39,12 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
+        version: str
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.zero_point = zero_point
+        self.version = version
 
         if self.weight_bits != 4:
             raise ValueError(
@@ -79,7 +81,8 @@ class AWQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
         group_size = cls.get_from_keys(config, ["q_group_size", "group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
-        return cls(weight_bits, group_size, zero_point)
+        version = cls.get_from_keys(config, ["version"])
+        return cls(weight_bits, group_size, zero_point, version)
 
     def get_linear_method(self) -> "AWQLinearMethod":
         return AWQLinearMethod(self)
@@ -113,7 +116,7 @@ class AWQLinearMethod(LinearMethodBase):
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
 
-        if self.quant_config:
+        if self.quant_config.version == "gemv_fast":
             qweight = Parameter(
                 torch.empty(
                     output_size_per_partition // self.quant_config.interleave,
@@ -128,7 +131,7 @@ class AWQLinearMethod(LinearMethodBase):
                     "output_dim": 0,
                     "packed_dim": 1,
                     "pack_factor": self.quant_config.pack_factor_int16,
-                    "interleave": self.quant_config.interleave,
+                    "awq_interleave": self.quant_config.interleave,
                 })
             qzeros = Parameter(
                 torch.empty(
@@ -142,8 +145,6 @@ class AWQLinearMethod(LinearMethodBase):
                 qzeros, {
                     "input_dim": 0,
                     "output_dim": 1,
-                    "packed_dim": 0,
-                    "pack_factor": self.quant_config.pack_factor_int32,
                 })
             scales = Parameter(
                 torch.empty(
@@ -157,14 +158,12 @@ class AWQLinearMethod(LinearMethodBase):
                 scales, {
                     "input_dim": 0,
                     "output_dim": 1,
-                    "packed_dim": 0,
-                    "pack_factor": self.quant_config.pack_factor_int32,
                 })
         else:
             qweight = Parameter(
                 torch.empty(
                     input_size_per_partition,
-                    output_size_per_partition // self.quant_config.pack_factor,
+                    output_size_per_partition // self.quant_config.pack_factor_int32,
                     dtype=torch.int32,
                 ),
                 requires_grad=False,
@@ -174,12 +173,12 @@ class AWQLinearMethod(LinearMethodBase):
                     "input_dim": 0,
                     "output_dim": 1,
                     "packed_dim": 1,
-                    "pack_factor": self.quant_config.pack_factor,
+                    "pack_factor": self.quant_config.pack_factor_int32,
                 })
             qzeros = Parameter(
                 torch.empty(
                     input_size_per_partition // self.quant_config.group_size,
-                    output_size_per_partition // self.quant_config.pack_factor,
+                    output_size_per_partition // self.quant_config.pack_factor_int32,
                     dtype=torch.int32,
                 ),
                 requires_grad=False,
@@ -189,7 +188,7 @@ class AWQLinearMethod(LinearMethodBase):
                     "input_dim": 0,
                     "output_dim": 1,
                     "packed_dim": 1,
-                    "pack_factor": self.quant_config.pack_factor,
+                    "pack_factor": self.quant_config.pack_factor_int32,
                 })
             scales = Parameter(
                 torch.empty(
@@ -216,19 +215,30 @@ class AWQLinearMethod(LinearMethodBase):
         qweight = weights["qweight"]
         scales = weights["scales"]
         qzeros = weights["qzeros"]
-        pack_factor = self.quant_config.pack_factor_int32
-        out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
         reshaped_x = x.reshape(-1, x.shape[-1])
-
-        # num_tokens >= threshold
-        FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-
-        if FP16_MATMUL_HEURISTIC_CONDITION:
-            out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-            out = torch.matmul(reshaped_x, out)
+        if self.quant_config.version == "gemv_fast":
+            out_shape = (x.shape[:-1] + (qweight.shape[0] * self.quant_config.interleave, ))
+            GEMM_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 8
+            if not GEMM_HEURISTIC_CONDITION:
+                out = ops.awq_gemv_fast(
+                    reshaped_x, qweight, scales, qzeros, reshaped_x.shape[0],
+                    out_shape[-1], reshaped_x.shape[1], self.quant_config.group_size
+                )
+            else:
+                out = ops.awq_gemm_fast(reshaped_x, qweight, scales, qzeros)
         else:
-            out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
-                               pack_factor)
+            pack_factor = self.quant_config.pack_factor_int32
+            out_shape = (x.shape[:-1] + (qweight.shape[-1] * pack_factor, ))
+
+            # num_tokens >= threshold
+            FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
+
+            if FP16_MATMUL_HEURISTIC_CONDITION:
+                out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
+                out = torch.matmul(reshaped_x, out)
+            else:
+                out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
+                                   pack_factor)
         if bias is not None:
             out = out + bias
         return out.reshape(out_shape)
