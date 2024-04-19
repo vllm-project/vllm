@@ -63,7 +63,12 @@ class AWQConfig(QuantizationConfig):
 
     def get_min_capability(self) -> int:
         # The AWQ kernel only supports Turing or newer GPUs.
-        return 75
+        VERSION_MIN_CAPABILITY_MAP = {
+            "gemm": 75,
+            "gemv_fast": 80,
+        }
+
+        return VERSION_MIN_CAPABILITY_MAP[self.version]
 
     @staticmethod
     def get_config_filenames() -> List[str]:
