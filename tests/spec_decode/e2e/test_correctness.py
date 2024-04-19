@@ -483,6 +483,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         # Note that one is equal to the draft model, another isn't.
         {
             "model": "JackFram/llama-68m",
+            "gpu_memory_utilization": 0.5,
         },
         #{
         #    "model": "JackFram/llama-160m",

@@ -510,6 +510,12 @@ class ModelRunner:
         else:
             max_block_table_len = max(
                 len(block_table) for block_table in block_tables)
+            print(f'model runner {input_tokens=}')
+            print(f'model runner {input_positions=}')
+            print(f'model runner {context_lens=}')
+            print(f'model runner {slot_mapping=}')
+            print(f'model runner {max_block_table_len=}')
+            print(f'model runner {block_tables=}')
             block_tables = make_tensor_with_pad(
                 block_tables,
                 max_len=max_block_table_len,
@@ -517,6 +523,7 @@ class ModelRunner:
                 dtype=torch.int,
                 device=self.device,
             )
+
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,

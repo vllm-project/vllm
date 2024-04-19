@@ -62,7 +62,9 @@ class MultiStepWorker(Worker):
 
         # Run model num_steps times.
         model_outputs = []
-        for _ in range(num_steps):
+        for i in range(num_steps):
+            print(f'multi step worker running step {i}/{num_steps}')
+
             model_output = super().execute_model(
                 seq_group_metadata_list=copied_seq_group_metadata_list,
                 blocks_to_swap_in=blocks_to_swap_in,

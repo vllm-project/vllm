@@ -212,6 +212,11 @@ class Worker(WorkerBase):
         blocks_to_copy: Optional[Dict[int, List[int]]] = None,
         num_lookahead_slots: int = 0,
     ) -> List[SamplerOutput]:
+            
+        print(f'worker execute model')
+        for seq_group in seq_group_metadata_list:
+            for seq_data in seq_group.seq_data.values():
+                print(f'{seq_data.get_token_ids()}=')
 
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None

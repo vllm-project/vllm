@@ -116,6 +116,7 @@ class RejectionSampler(nn.Module):
             draft_token_ids,
             bonus_token_ids,
         )
+
         return output_token_ids
 
     def _batch_modified_rejection_sampling(
@@ -137,6 +138,17 @@ class RejectionSampler(nn.Module):
 
         batch_size, k, vocab_size = draft_probs.shape
 
+        target_probs_unmodified = target_probs.clone()
+        draft_probs_unmodified = draft_probs.clone()
+
+        target_greedy_bois = target_probs.argmax(dim=-1)
+        draft_greedy_bois = draft_probs.argmax(dim=-1)
+
+        target_probs[:] = 0
+        target_probs[:, torch.arange(k), target_greedy_bois] = 1
+        draft_probs[:] = 0
+        draft_probs[:, torch.arange(k), draft_greedy_bois] = 1
+        
         # shape [batch_size, k]
         accepted = self._get_accepted(target_probs, draft_probs,
                                       draft_token_ids)
@@ -144,10 +156,24 @@ class RejectionSampler(nn.Module):
         recovered_probs = self._get_recovered_probs(
             target_probs, draft_probs).reshape(batch_size * k, vocab_size)
 
+        recovered_probs_clone = recovered_probs.clone()
+
         # NOTE: the recovered_probs are overwritten by this method.
         recovered_token_ids = _multinomial(recovered_probs,
                                            num_samples=1).reshape(
                                                batch_size, k)
+        
+        if False in accepted:
+            print(f'{accepted=}')
+            print(f'{target_greedy_bois=}')
+            print(f'{draft_greedy_bois=}')
+            toks = [target_greedy_bois[0, 1].item(), draft_greedy_bois[0, 1].item()]
+            print(f'{toks=}')
+            print(f'{target_probs_unmodified[0, 1, toks]=}')
+            print(f'{draft_probs_unmodified[0, 1, toks]=}')
+            # [1, 15043, 29892, 590, 1024, 338, 590, 1024, 29889, 306, 626, 263, 29871]
+            #breakpoint()
+
         return accepted, recovered_token_ids
 
     def _get_accepted(
@@ -307,6 +333,8 @@ class RejectionSampler(nn.Module):
         # with causal acceptance.
         output_with_bonus_tokens[:, -1] = torch.where(output[:, -1] != -1,
                                                       bonus_token_ids, -1)
+        print(f'disabling bonus token')
+        output_with_bonus_tokens[:, -1] = -1
 
         # Fill the recovered token ids.
         output.mul_(~after_false_mask).add_(
