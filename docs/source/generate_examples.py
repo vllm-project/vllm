@@ -29,19 +29,21 @@ def generate_title(filename: str) -> str:
 
 
 def generate_examples():
+    root_dir = Path(__file__).parent.parent.parent.resolve()
+
     # Source paths
-    script_dir = Path("../examples")
+    script_dir = root_dir / "examples"
     script_paths = sorted(script_dir.glob("*.py"))
 
     # Destination paths
-    doc_dir = Path("source/getting_started/examples")
+    doc_dir = root_dir / "docs/source/getting_started/examples"
     doc_paths = [doc_dir / f"{path.stem}.rst" for path in script_paths]
 
     # Generate the example docs for each example script
     for script_path, doc_path in zip(script_paths, doc_paths):
         script_url = f"https://github.com/vllm-project/vllm/blob/main/examples/{script_path.name}"
         # Make script_path relative to doc_path and call it include_path
-        include_path = '../../..' / script_path
+        include_path = '../../../..' / script_path.relative_to(root_dir)
         content = (f"{generate_title(doc_path.stem)}\n\n"
                    f"Source {script_url}.\n\n"
                    f".. literalinclude:: {include_path}\n"
