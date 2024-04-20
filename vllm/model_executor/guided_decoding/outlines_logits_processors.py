@@ -131,6 +131,11 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         fsm = CFGFSM(cfg, tokenizer)
         self.fsm = fsm
 
+    def init_state(self):
+        """Initialize state with a CFGFSM copy."""
+        super().init_state()
+        self.fsm = self.fsm.copy()
+
 
 @lru_cache
 def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
