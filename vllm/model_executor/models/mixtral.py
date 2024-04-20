@@ -66,6 +66,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        use_fp8: bool = True,
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -73,6 +74,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.use_fp8 = use_fp8
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -110,23 +112,10 @@ class MixtralMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
-        set_weight_attrs(self.ws_scale, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.w2s_scale, {
-            "weight_loader": self.weight_loader,
-        })
-
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         param_data = param.data
-        # First we check if the parameters in the checkpoint have a different
-        # dtype than the native dtype of this model -- this is for example
-        # the case if we want to use FP8 for the MoE layer and FP16 for the
-        # rest of the model. If this happens, we convert the dtype.
-        if param_data.dtype != loaded_weight.dtype:
-            param = param.to(loaded_weight.dtype)
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
@@ -136,10 +125,15 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-        # For loading weight scales
-        if "scales" in weight_name:
-            param_data[expert_id] = loaded_weight
-            print("loaded scale", weight_name, loaded_weight.shape)
+
+    def process_weights_after_loading(self):
+        if self.use_fp8:
+            qws, ws_scale = per_tensor_quantize(self.ws.data)
+            self.ws = nn.Parameter(qws, requires_grad=False)
+            self.ws_scale.data.copy_(ws_scale)
+            qw2s, w2s_scale = per_tensor_quantize(self.w2s.data)
+            self.w2s = nn.Parameter(qw2s, requires_grad=False)
+            self.w2s_scale.data.copy_(w2s_scale)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -428,17 +422,9 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
-            # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
-        ] + [
-            # These are the weight scales for the experts
-            # (param_name, weight_name, expert_id)
-            ("ws_scale" if weight_name in ["w1", "w3"] else "w2s_scale",
-             f"scales.{expert_id}.{weight_name}", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
