@@ -1,10 +1,11 @@
 from typing import Optional
+
 from vllm.config import TokenizerPoolConfig
+from vllm.engine.ray_utils import ray
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
 from vllm.transformers_utils.tokenizer_group.tokenizer_group import (
     TokenizerGroup)
-from vllm.engine.ray_utils import ray
 
 if ray:
     from vllm.transformers_utils.tokenizer_group.ray_tokenizer_group import (

@@ -6,10 +6,10 @@
 # Run it with `python collect_env.py` or `python -m torch.utils.collect_env`
 import datetime
 import locale
+import os
 import re
 import subprocess
 import sys
-import os
 from collections import namedtuple
 
 try:
@@ -63,6 +63,7 @@ DEFAULT_CONDA_PATTERNS = {
     "magma",
     "triton",
     "optree",
+    "nccl",
 }
 
 DEFAULT_PIP_PATTERNS = {
@@ -73,6 +74,7 @@ DEFAULT_PIP_PATTERNS = {
     "triton",
     "optree",
     "onnx",
+    "nccl",
 }
 
 

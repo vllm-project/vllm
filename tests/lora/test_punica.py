@@ -36,22 +36,70 @@ def _lora_ref_impl(
         xi = x[i].unsqueeze(0).to(torch.float32)
         wa = wa_T_all[lora_idx, layer_idx].transpose(-1, -2).to(torch.float32)
         if not just_lora_a:
-            wb = wb_T_all[lora_idx, layer_idx].transpose(-1, -2).to(torch.float32)
+            wb = wb_T_all[lora_idx, layer_idx].transpose(-1,
+                                                         -2).to(torch.float32)
 
         tmp = xi @ wa
         y_stage_1[i] = tmp.squeeze(0)
-        y_final[i] += ((tmp @ wb).squeeze(0) * s 
-                       if not just_lora_a else y_stage_1[i])
+        y_final[i] += ((tmp @ wb).squeeze(0) *
+                       s if not just_lora_a else y_stage_1[i])
     return y_final, y_stage_1
 
 
 H1 = H2 = [
-    128, 256, 512, 1024, 1280, 2048, 2560, 2752, 3072, 3456, 3584, 4096, 5120,
-    5504, 5632, 6144, 6912, 7168, 8192, 9216, 10240, 11008, 13824, 14336,
-    22016, 24576, 32000, 32256, 32512, 32768, 33024
+    128,
+    256,
+    512,
+    1024,
+    1152,
+    1280,
+    1536,
+    2048,
+    2304,
+    2560,
+    2752,
+    3072,
+    3456,
+    3584,
+    4096,
+    4608,
+    5120,
+    5504,
+    5632,
+    6144,
+    6848,
+    6912,
+    7168,
+    8192,
+    9216,
+    10240,
+    11008,
+    13824,
+    14336,
+    15360,
+    22016,
+    24576,
+    27392,
+    32000,
+    32256,
+    32512,
+    32768,
+    33024,
+    36864,
+    43264,
+    49152,
+    64000,
+    64256,
+    102400,
+    102656,
+    128000,
+    128256,
 ]
 R = [1, 2, 4]
 SEED = [0xabcdabcd987]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
 
 
 @pytest.mark.parametrize("dtype_str", ["float16", "bfloat16"])
@@ -80,8 +128,14 @@ def test_tp_lora_a_correctness(dtype_str, h1, r, seed):
         y = torch.randn(bs, r, dtype=dtype, device=device)
 
         y_ref = y.clone()
-        _lora_ref_impl(y_ref, x, wa_T_all, None, indices, layer_idx, 
-                       1.0, just_lora_a=True)
+        _lora_ref_impl(y_ref,
+                       x,
+                       wa_T_all,
+                       None,
+                       indices,
+                       layer_idx,
+                       1.0,
+                       just_lora_a=True)
 
         y_our = y.clone()
         punica.bgmv(y_our, x, wa_T_all, indices, layer_idx, 1.0)
@@ -93,8 +147,9 @@ def test_tp_lora_a_correctness(dtype_str, h1, r, seed):
 @pytest.mark.parametrize("h1", H1)
 @pytest.mark.parametrize("h2", H2)
 @pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_lora_correctness(dtype_str, h1, h2, seed):
+def test_lora_correctness(dtype_str, h1, h2, seed, device):
     torch.manual_seed(seed)
     num_loras = 4
     num_layers = 1
@@ -102,25 +157,15 @@ def test_lora_correctness(dtype_str, h1, h2, seed):
     bs = 32
     scale = 0.123
     dtype = getattr(torch, dtype_str)
-    device = torch.device("cuda")
+    torch.set_default_device(device)
 
-    wa_T_all = torch.randn(num_loras,
-                           num_layers,
-                           r,
-                           h1,
-                           dtype=dtype,
-                           device=device)
-    wb_T_all = torch.randn(num_loras,
-                           num_layers,
-                           h2,
-                           r,
-                           dtype=dtype,
-                           device=device)
-    indices = torch.randint(num_loras, (bs, ), dtype=torch.long, device=device)
+    wa_T_all = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wb_T_all = torch.randn(num_loras, num_layers, h2, r, dtype=dtype)
+    indices = torch.randint(num_loras, (bs, ), dtype=torch.long)
 
     for layer_idx in range(num_layers):
-        x = torch.randn(bs, h1, dtype=dtype, device=device)
-        y = torch.randn(bs, h2, dtype=dtype, device=device)
+        x = torch.randn(bs, h1, dtype=dtype)
+        y = torch.randn(bs, h2, dtype=dtype)
 
         y_ref = y.clone()
         _lora_ref_impl(y_ref, x, wa_T_all, wb_T_all, indices, layer_idx, scale)
@@ -136,8 +181,9 @@ def test_lora_correctness(dtype_str, h1, h2, seed):
 @pytest.mark.parametrize("h1", H1)
 @pytest.mark.parametrize("h2", H2)
 @pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_lora_correctness_slice(dtype_str, h1, h2, seed):
+def test_lora_correctness_slice(dtype_str, h1, h2, seed, device):
     if h2 % 3 != 0 or h2 // 3 not in H1:
         pytest.skip("h2 must be divisible by 3 and in supported shapes")
     torch.manual_seed(seed)
@@ -147,50 +193,20 @@ def test_lora_correctness_slice(dtype_str, h1, h2, seed):
     bs = 32
     scale = 0.123
     dtype = getattr(torch, dtype_str)
-    device = torch.device("cuda")
+    torch.set_default_device(device)
 
-    wa_T_all_0 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype,
-                             device=device)
-    wa_T_all_1 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype,
-                             device=device)
-    wa_T_all_2 = torch.randn(num_loras,
-                             num_layers,
-                             r,
-                             h1,
-                             dtype=dtype,
-                             device=device)
-    wb_T_all_0 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype,
-                             device=device)
-    wb_T_all_1 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype,
-                             device=device)
-    wb_T_all_2 = torch.randn(num_loras,
-                             num_layers,
-                             h2 // 3,
-                             r,
-                             dtype=dtype,
-                             device=device)
+    wa_T_all_0 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wa_T_all_1 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wa_T_all_2 = torch.randn(num_loras, num_layers, r, h1, dtype=dtype)
+    wb_T_all_0 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
+    wb_T_all_1 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
+    wb_T_all_2 = torch.randn(num_loras, num_layers, h2 // 3, r, dtype=dtype)
 
-    indices = torch.randint(num_loras, (bs, ), dtype=torch.long, device=device)
+    indices = torch.randint(num_loras, (bs, ), dtype=torch.long)
 
     for layer_idx in range(num_layers):
-        x = torch.randn(bs, h1, dtype=dtype, device=device)
-        y = torch.randn(bs, h2, dtype=dtype, device=device)
+        x = torch.randn(bs, h1, dtype=dtype)
+        y = torch.randn(bs, h2, dtype=dtype)
         s = h2 // 3
 
         y_ref = y.clone()

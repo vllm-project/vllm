@@ -1,13 +1,22 @@
 """Compare the outputs of HF and distributed vLLM when using greedy sampling.
-
-Run `pytest tests/distributed/test_basic_distributed_correctness.py --forked`.
+vLLM will allocate all the available memory, so we need to run the tests one
+by one. The solution is to pass arguments (model name) by environment
+variables.
+Run:
+```sh
+TEST_DIST_MODEL=facebook/opt-125m pytest \
+    test_basic_distributed_correctness.py
+TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
+    test_basic_distributed_correctness.py
+```
 """
+import os
+
 import pytest
 import torch
 
 MODELS = [
-    "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    os.environ["TEST_DIST_MODEL"],
 ]
 
 
@@ -24,11 +33,16 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, tensor_parallel_size=2)
+    vllm_model = vllm_runner(
+        model,
+        dtype=dtype,
+        tensor_parallel_size=2,
+    )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

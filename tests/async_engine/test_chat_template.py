@@ -1,12 +1,12 @@
-from dataclasses import dataclass
 import os
 import pathlib
+from dataclasses import dataclass
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 chatml_jinja_path = pathlib.Path(os.path.dirname(os.path.abspath(
     __file__))).parent.parent / "examples/template_chatml.jinja"

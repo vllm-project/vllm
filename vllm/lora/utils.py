@@ -1,70 +1,59 @@
-import logging
-from typing import Tuple, Optional
+import inspect
+from typing import Tuple, Optional, Set, Type, List
 from vllm.config import LoRAConfig
 from transformers import PretrainedConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear,
-                                               QKVParallelLinear,
-                                               MergedColumnParallelLinear)
+# being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA, VocabParallelEmbeddingWithLoRA,
-    ColumnParallelLinearWithLoRA, RowParallelLinearWithLoRA,
-    QKVParallelLinearWithLora, MergedColumnParallelLinearWithLoRA,
-    SamplerWithLoRA)
+    ColumnParallelLinearWithLoRA, MergedColumnParallelLinearWithLoRA,
+    QKVParallelLinearWithLora, MergedQKVParallelLinearWithLora,
+    RowParallelLinearWithLoRA, LogitsProcessorWithLoRA)
 from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA,
-    QKVParallelLinearWithShardedLora,
-    MergedColumnParallelLinearWithShardedLoRA)
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (ParallelLMHead
-                                                                 )
+    ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 from torch import nn
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+_all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
+    cls
+    for cls in globals().values() if inspect.isclass(cls)
+    and issubclass(cls, BaseLayerWithLoRA) and cls is not BaseLayerWithLoRA
+}
 
 
-def from_layer(
-        layer: nn.Module,
-        max_loras: int,
-        lora_config: LoRAConfig,
-        model_config: Optional[PretrainedConfig] = None) -> BaseLayerWithLoRA:
-    if lora_config.fully_sharded_loras:
-        supported_layer_types = {
-            VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
-            ColumnParallelLinear: ColumnParallelLinearWithShardedLoRA,
-            QKVParallelLinear: QKVParallelLinearWithShardedLora,
-            MergedColumnParallelLinear:
-            MergedColumnParallelLinearWithShardedLoRA,
-            RowParallelLinear: RowParallelLinearWithShardedLoRA,
-        }
-    else:
-        supported_layer_types = {
-            VocabParallelEmbedding: VocabParallelEmbeddingWithLoRA,
-            ColumnParallelLinear: ColumnParallelLinearWithLoRA,
-            QKVParallelLinear: QKVParallelLinearWithLora,
-            MergedColumnParallelLinear: MergedColumnParallelLinearWithLoRA,
-            RowParallelLinear: RowParallelLinearWithLoRA,
-        }
-    for src_layer_type, lora_layer_type in supported_layer_types.items():
-        if type(layer) is src_layer_type:  # pylint: disable=unidiomatic-typecheck
-            ret = lora_layer_type(layer)
+def from_layer(layer: nn.Module,
+               max_loras: int,
+               lora_config: LoRAConfig,
+               packed_modules_list: List,
+               model_config: Optional[PretrainedConfig] = None) -> nn.Module:
+    for lora_cls in _all_lora_classes:
+        # specifying kwargs so they can be easily accessed in decorator
+        if lora_cls.can_replace_layer(source_layer=layer,
+                                      lora_config=lora_config,
+                                      packed_modules_list=packed_modules_list,
+                                      model_config=model_config):
+            ret = lora_cls(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
     return layer
 
 
-def from_layer_sampler(
-    layer: Sampler,
+def from_layer_logits_processor(
+    layer: LogitsProcessor,
     lm_head: ParallelLMHead,
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: Optional[PretrainedConfig] = None,
-) -> SamplerWithLoRA:
-    ret = SamplerWithLoRA(layer, lm_head.embedding_dim, lm_head.weight.dtype,
-                          lm_head.weight.device)
+) -> LogitsProcessorWithLoRA:
+    ret = LogitsProcessorWithLoRA(layer, lm_head.embedding_dim,
+                                  lm_head.weight.dtype, lm_head.weight.device)
     ret.create_lora_weights(max_loras, lora_config, model_config)
     return ret
 

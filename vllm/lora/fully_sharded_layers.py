@@ -2,26 +2,42 @@
 from typing import TYPE_CHECKING, Optional, List
 
 import torch
+import torch.nn as nn
+from transformers import PretrainedConfig
 
+from vllm.config import LoRAConfig
 from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
-from vllm.model_executor.parallel_utils.communication_op import (
+from vllm.distributed.communication_op import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank)
+from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank)
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
-                              QKVParallelLinearWithLora,
+                              MergedQKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
 
 if TYPE_CHECKING:
     pass
 
 
+def _fully_sharded_can_replace(can_replace):
+    """
+    decorator which adds the condition of fully sharded loras
+    intended to wrap can_replace_layer()
+    """
+
+    def dec(*args, **kwargs):
+        return (can_replace(*args, **kwargs)
+                and kwargs['lora_config'].fully_sharded_loras)
+
+    return dec
+
+
 # these layers are based on the tensor parallelism strategy given in
-# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023, 
+# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023,
 # https://arxiv.org/abs/2311.03285.
+
 
 class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     """
@@ -40,7 +56,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     def apply_weights(self, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x, bias)
+            self.base_layer, x, bias)
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1,
@@ -59,6 +75,20 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         output = output.view(*out_orig_shape)
         return output
 
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
 
 def _mcp_apply_weights(x, bias, layer):
     """
@@ -70,10 +100,10 @@ def _mcp_apply_weights(x, bias, layer):
     vary for QKVParallelLinearWithShardedLora but is constant for 
     MergedColumnParallelLinearWithShardedLoRA.
     """
-    n = len(
-        layer.lora_a_stacked)  # expecting 2 for column parallel and 3 for qkv
+    # expecting 2 for column parallel and 3 for qkv
+    n = len(layer.lora_a_stacked)
     output = layer.base_layer.linear_method.apply_weights(
-        layer.base_layer.linear_weights, x, bias)
+        layer.base_layer, x, bias)
 
     x = x.view(-1, x.shape[-1])
     output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
@@ -121,8 +151,22 @@ class MergedColumnParallelLinearWithShardedLoRA(
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         return _mcp_apply_weights(x, bias, self)
 
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
 
-class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
+
+class MergedQKVParallelLinearWithShardedLora(MergedQKVParallelLinearWithLora):
     """
     Differs from QKVParallelLinearWithLora by slicing the 
     LoRA A's also.
@@ -144,6 +188,20 @@ class QKVParallelLinearWithShardedLora(QKVParallelLinearWithLora):
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
         return _mcp_apply_weights(x, bias, self)
 
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
+
 
 class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
     """
@@ -164,7 +222,7 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
 
     def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.linear_method.apply_weights(
-            self.base_layer.linear_weights, x)
+            self.base_layer, x)
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1,
@@ -178,9 +236,10 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
 
         # following S-LoRA, allows the fusing of all_gather and all_reduce
         # by adding the column partitioned lora output to a slice of output
-        # tensor. All that remains is a standard all_reduce. User should
-        # be aware though that the output is not the same as a normal
-        # row_parallel, it should be reduced before being used
+        # tensor, which is a partial sum due to row parallel. All that
+        # remains is a standard all_reduce. User should be aware though that
+        # the output is not the same as a normal row_parallel, it should be
+        # reduced before being used
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
         dispatch_bgmv_low_level(output, buffer, self.lora_b_stacked,
@@ -189,3 +248,17 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
 
         output = output.view(*out_orig_shape)
         return output
+
+    @classmethod
+    @_fully_sharded_can_replace
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        # specifying kwargs so they can be easily accessed in decorator
+        return super().can_replace_layer(
+            source_layer=source_layer,
+            lora_config=lora_config,
+            packed_modules_list=packed_modules_list,
+            model_config=model_config,
+            decorate=False,
+        )
