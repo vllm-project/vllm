@@ -24,8 +24,13 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
+export HIP_VISIBLE_DEVICES=1
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_entrypoints \
          --shm-size=10.24gb rocm /bin/bash -c "pip install openai; \
-         python3 -m pytest -v -s vllm/tests/entrypoints"
-
+         python3 -m pytest -v -s vllm/tests/entrypoints --ignore=vllm/tests/entrypoints/test_server_oot_registration.py" &
+         
+export HIP_VISIBLE_DEVICES=2
+docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_entrypoints \
+         --shm-size=10.24gb rocm /bin/bash -c "pip install openai; \
+         python3 -m pytest -v -s vllm/tests/entrypoints/test_server_oot_registration.py"
 

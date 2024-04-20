@@ -24,7 +24,28 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_kernels \
-	rocm python3 -m pytest -v -s vllm/tests/kernels #\
-	#--shard-id=$BUILDKITE_PARALLEL_JOB --num-shards=$BUILDKITE_PARALLEL_JOB_COUNT
 
+#PROTOTYPE
+#docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES \
+#        --name rocm_test_kernels rocm python3 -m pytest -v -s vllm/tests/kernels \
+#        --shard-id=0 --num-shards=4
+
+export HIP_VISIBLE_DEVICES=1
+docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES \
+        --name rocm_test_kernels rocm python3 -m pytest -v -s vllm/tests/kernels \
+        --shard-id=0 --num-shards=4 &
+
+export HIP_VISIBLE_DEVICES=2
+docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES \
+        --name rocm_test_kernels rocm python3 -m pytest -v -s vllm/tests/kernels \
+        --shard-id=1 --num-shards=4 &
+
+export HIP_VISIBLE_DEVICES=3
+docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES \
+        --name rocm_test_kernels rocm python3 -m pytest -v -s vllm/tests/kernels \
+        --shard-id=2 --num-shards=4 &
+
+export HIP_VISIBLE_DEVICES=4
+docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES \
+        --name rocm_test_kernels rocm python3 -m pytest -v -s vllm/tests/kernels \
+        --shard-id=3 --num-shards=4 
