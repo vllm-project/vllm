@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -114,7 +114,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return output
 
 
-def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+def per_tensor_quantize(tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
     """Quantize a tensor using per-tensor static scaling factor.
 
     Args:
