@@ -3,6 +3,6 @@ Examples
 
 .. toctree::
    :maxdepth: 1
-   :caption: Example Scripts
+   :caption: Scripts
 
    %EXAMPLE_DOCS%
