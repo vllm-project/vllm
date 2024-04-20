@@ -31,8 +31,8 @@ _MODELS = {
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
-    "LlavaForConditionalGeneration":
-    ("llava", "LlavaForConditionalGeneration"),
+    "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
+    "Moondream": ("moondream", "Moondream"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),

@@ -205,8 +205,13 @@ class PhiModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_tokens(input_ids)
+
         for i in range(self.config.num_hidden_layers):
             layer = self.layers[i]
             hidden_states = layer(
@@ -244,9 +249,11 @@ class PhiForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata)
+        hidden_states = self.model(
+            input_ids, positions, kv_caches, attn_metadata, inputs_embeds
+        )
 
         return hidden_states
 
@@ -295,6 +302,5 @@ class PhiForCausalLM(nn.Module):
                 # pylint: disable=E1136
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)

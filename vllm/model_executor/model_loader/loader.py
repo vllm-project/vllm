@@ -23,13 +23,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+from vllm.model_executor.models.moondream import Moondream
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearMethodBase
 
-_VISION_MODEL_CLASSES = [
-    LlavaForConditionalGeneration,
-]
+_VISION_MODEL_CLASSES = [LlavaForConditionalGeneration, Moondream]
 
 logger = init_logger(__name__)
 
