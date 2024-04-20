@@ -42,10 +42,11 @@ class LLM:
             However, if the `torch_dtype` in the config is `float32`, we will
             use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
-            we support "awq", "gptq" and "squeezellm". If None, we first check
-            the `quantization_config` attribute in the model config file. If
-            that is None, we assume the model weights are not quantized and use
-            `dtype` to determine the data type of the weights.
+            we support "awq", "gptq", "squeezellm", and "fp8" (experimental).
+            If None, we first check the `quantization_config` attribute in the
+            model config file. If that is None, we assume the model weights are
+            not quantized and use `dtype` to determine the data type of
+            the weights.
         sparsity: The format of the sparse model weights. Currently,
             we support "sparse_w16a16". If None, we first check the `sparsity` 
             attribute in the model config file. If that is None, we assume the 
