@@ -31,6 +31,11 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test_lora.sh"
 
+  - label: "Neuron Test"
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh
 

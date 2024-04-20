@@ -134,11 +134,18 @@ def get_quant_config(model_config: ModelConfig,
                                           tqdm_class=DisabledTqdm)
     else:
         hf_folder = model_name_or_path
+
+    possible_config_filenames = quant_cls.get_config_filenames()
+
+    # If the quantization config is not found, use the default config.
+    if not possible_config_filenames:
+        return quant_cls()
+
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
 
     quant_config_files = [
         f for f in config_files if any(
-            f.endswith(x) for x in quant_cls.get_config_filenames())
+            f.endswith(x) for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
         raise ValueError(

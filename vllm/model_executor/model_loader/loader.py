@@ -228,6 +228,10 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True)), )
+            for _, module in model.named_modules():
+                linear_method = getattr(module, "linear_method", None)
+                if linear_method is not None:
+                    linear_method.process_weights_after_loading(module)
         return model.eval()
 
 
