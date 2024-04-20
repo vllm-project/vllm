@@ -73,10 +73,12 @@ html_theme_options = {
 # so a file named "default.css" will overwrite the builtin "default.css".
 # html_static_path = ['_static']
 
+
 # Generate additional rst documentation here.
 def setup(app):
     from docs.source.generate_examples import generate_examples
     generate_examples()
+
 
 # Mock out external dependencies here.
 autodoc_mock_imports = [

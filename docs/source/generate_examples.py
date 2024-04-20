@@ -42,13 +42,11 @@ def generate_examples():
         script_url = f"https://github.com/vllm-project/vllm/blob/main/examples/{script_path.name}"
         # Make script_path relative to doc_path and call it include_path
         include_path = '../../..' / script_path
-        content = (
-            f"{generate_title(doc_path.stem)}\n\n"
-            f"Source {script_url}.\n\n"
-            f".. literalinclude:: {include_path}\n"
-            "    :language: python\n"
-            "    :linenos:\n"
-        ) 
+        content = (f"{generate_title(doc_path.stem)}\n\n"
+                   f"Source {script_url}.\n\n"
+                   f".. literalinclude:: {include_path}\n"
+                   "    :language: python\n"
+                   "    :linenos:\n")
         with open(doc_path, "w+") as f:
             f.write(content)
 
@@ -58,4 +56,3 @@ def generate_examples():
     with open(doc_dir / "examples_index.rst", "w+") as f:
         example_docs = "\n   ".join(path.stem for path in script_paths)
         f.write(examples_index.replace(r"%EXAMPLE_DOCS%", example_docs))
-
