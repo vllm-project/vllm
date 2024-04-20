@@ -39,6 +39,8 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8 import (
+    Fp8LinearMethod, per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -47,31 +49,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-
-
-# Temporary until https://github.com/vllm-project/vllm/pull/4118 is merged
-
-def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
-    """Quantize a tensor using per-tensor static scaling factor.
-    Args:
-        tensor: The input tensor.
-    """
-    finfo = torch.finfo(torch.float8_e4m3fn)
-    # Calculate the scale as dtype max divided by absmax.
-    # Since .abs() creates a new tensor, we use aminmax to get
-    # the min and max first and then calculate the absmax.
-    min_val, max_val = tensor.aminmax()
-    amax = min_val.abs().max(max_val.abs())
-    scale = finfo.max / amax.clamp(min=1e-12)
-    # scale and clamp the tensor to bring it to
-    # the representative range of float8 data type
-    # (as default cast is unsaturated)
-    qweight = (tensor * scale).clamp(min=finfo.min, max=finfo.max)
-    # Return both float8 data and the inverse scale (as float),
-    # as both required as inputs to torch._scaled_mm
-    qweight = qweight.to(torch.float8_e4m3fn)
-    scale = scale.float().reciprocal()
-    return qweight, scale
 
 
 class MixtralMoE(nn.Module):
@@ -286,7 +263,8 @@ class MixtralDecoderLayer(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size)
+            intermediate_size=config.intermediate_size,
+            use_fp8=isinstance(linear_method, Fp8LinearMethod))
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
