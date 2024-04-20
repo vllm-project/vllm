@@ -577,18 +577,18 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
-        time_to_first_tokens_iter = []
-        time_per_output_tokens_iter = []
+        time_to_first_tokens_iter: List[float] = []
+        time_per_output_tokens_iter: List[float] = []
 
         # Request stats
         #   Latency
-        time_e2e_requests = []
+        time_e2e_requests: List[float] = []
         #   Metadata
-        num_prompt_tokens_requests = []
-        num_generation_tokens_requests = []
-        best_of_requests = []
-        n_requests = []
-        finished_reason_requests = []
+        num_prompt_tokens_requests: List[int] = []
+        num_generation_tokens_requests: List[int] = []
+        best_of_requests: List[int] = []
+        n_requests: List[int] = []
+        finished_reason_requests: List[str] = []
 
         if scheduler_outputs is not None:
             for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
