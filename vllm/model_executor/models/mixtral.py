@@ -196,6 +196,12 @@ class MixtralAttention(nn.Module):
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
+        if isinstance(linear_method, Fp8LinearMethod):
+            # If we are using FP8, we currently do not want to
+            # use quantize the attention layers until we improve
+            # the performance and make sure the accuracy is good.
+            linear_method = None
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
