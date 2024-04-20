@@ -21,8 +21,8 @@ def fused_moe_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
-    w_scale_ptr,
     a_scale_ptr,
+    b_scale_ptr,
     topk_weights_ptr,
     sorted_token_ids_ptr,
     expert_ids_ptr,
@@ -115,8 +115,8 @@ def fused_moe_kernel(
                                                 offs_bn[None, :] * stride_bn)
 
     if use_fp8:
-        w_scale = tl.load(w_scale_ptr + off_experts)
         a_scale = tl.load(a_scale_ptr)
+        b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -151,7 +151,7 @@ def fused_moe_kernel(
         accumulator = accumulator * moe_weight[:, None]
 
     if use_fp8:
-        accumulator = (accumulator * w_scale * a_scale).to(compute_type)
+        accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
@@ -220,7 +220,7 @@ def moe_align_block_size(
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            w_scale: torch.Tensor, a_scale: torch.Tensor,
+                            B_scale: torch.Tensor,
                             topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
@@ -231,6 +231,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
+    if use_fp8:
+        A, A_scale = ops.scaled_fp8_quant(A)
+    else:
+        A_scale = None
+
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
         'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
 
@@ -238,8 +243,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         A,
         B,
         C,
-        w_scale,
-        a_scale,
+        B_scale,
+        A_scale,
         topk_weights,
         sorted_token_ids,
         expert_ids,
@@ -412,32 +417,17 @@ def fused_moe(
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
-    a1_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
-    a2_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
-
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    if use_fp8:
-        a1 = torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn)
-        ops.scaled_fp8_quant(a1, hidden_states, a1_scale)
-    else:
-        a1 = hidden_states
-
-    invoke_fused_moe_kernel(a1, w1, intermediate_cache1, w1_scale, a1_scale,
+    invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1, w1_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
                             topk_ids.shape[1], config, compute_type=tl.float16, use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    if use_fp8:
-        a2 = torch.empty_like(intermediate_cache2, dtype=torch.float8_e4m3fn)
-        ops.scaled_fp8_quant(a2, intermediate_cache2, a2_scale)
-    else:
-        a2 = intermediate_cache2
-
-    invoke_fused_moe_kernel(a2, w2, intermediate_cache3, w2_scale, a2_scale,
+    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3, w2_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
                             config, compute_type=tl.float16, use_fp8=use_fp8)
