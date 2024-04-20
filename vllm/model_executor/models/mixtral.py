@@ -176,7 +176,8 @@ class MixtralMoE(nn.Module):
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
-                                        inplace=True)
+                                        inplace=True,
+                                        use_fp8=self.use_fp8)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(

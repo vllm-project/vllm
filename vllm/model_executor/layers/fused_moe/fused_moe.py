@@ -51,6 +51,7 @@ def fused_moe_kernel(
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
+    use_fp8: tl.constexpr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -113,8 +114,9 @@ def fused_moe_kernel(
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
 
-    w_scale = tl.load(w_scale_ptr + off_experts)
-    a_scale = tl.load(a_scale_ptr)
+    if use_fp8:
+        w_scale = tl.load(w_scale_ptr + off_experts)
+        a_scale = tl.load(a_scale_ptr)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -134,7 +136,10 @@ def fused_moe_kernel(
                     mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
                     other=0.0)
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=True)
+        if use_fp8:
+            accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=True)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -145,7 +150,10 @@ def fused_moe_kernel(
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
 
-    accumulator = (accumulator * w_scale * a_scale).to(compute_type)
+    if use_fp8:
+        accumulator = (accumulator * w_scale * a_scale).to(compute_type)
+    else:
+        accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -218,7 +226,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int,
-                            config: Dict[str, Any], compute_type: tl.dtype) -> None:
+                            config: Dict[str, Any], compute_type: tl.dtype,
+                            use_fp8: bool) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
@@ -249,6 +258,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
+        use_fp8=use_fp8,
         **config,
     )
 
@@ -298,6 +308,7 @@ def fused_moe(
     renormalize: bool,
     inplace: bool = False,
     override_config: Optional[Dict[str, Any]] = None,
+    use_fp8: bool = False,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -419,7 +430,7 @@ def fused_moe(
                             w1_scale, a_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
-                            topk_ids.shape[1], config, compute_type=tl.float16)
+                            topk_ids.shape[1], config, compute_type=tl.float16, use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
@@ -429,7 +440,7 @@ def fused_moe(
                             w2_scale, a2_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
-                            config, compute_type=tl.float16)
+                            config, compute_type=tl.float16, use_fp8=use_fp8)
 
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
