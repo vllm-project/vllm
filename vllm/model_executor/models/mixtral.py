@@ -49,6 +49,31 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 
 
+# Temporary until https://github.com/vllm-project/vllm/pull/4118 is merged
+
+def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """Quantize a tensor using per-tensor static scaling factor.
+    Args:
+        tensor: The input tensor.
+    """
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    # Calculate the scale as dtype max divided by absmax.
+    # Since .abs() creates a new tensor, we use aminmax to get
+    # the min and max first and then calculate the absmax.
+    min_val, max_val = tensor.aminmax()
+    amax = min_val.abs().max(max_val.abs())
+    scale = finfo.max / amax.clamp(min=1e-12)
+    # scale and clamp the tensor to bring it to
+    # the representative range of float8 data type
+    # (as default cast is unsaturated)
+    qweight = (tensor * scale).clamp(min=finfo.min, max=finfo.max)
+    # Return both float8 data and the inverse scale (as float),
+    # as both required as inputs to torch._scaled_mm
+    qweight = qweight.to(torch.float8_e4m3fn)
+    scale = scale.float().reciprocal()
+    return qweight, scale
+
+
 class MixtralMoE(nn.Module):
     """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
