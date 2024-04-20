@@ -402,42 +402,42 @@ def fused_moe(
                     'GROUP_SIZE_M': 1
                 }
 
-    intermediate_cache0 = torch.empty(hidden_states.shape,
-                                      device=hidden_states.device,
-                                      dtype=torch.float8_e4m3fn)
     intermediate_cache1 = torch.empty((M, topk_ids.shape[1], N),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
     intermediate_cache2 = torch.empty((M * topk_ids.shape[1], N // 2),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
-    intermediate_cache2_scaled = torch.empty((M * topk_ids.shape[1], N // 2),
-                                             device=hidden_states.device,
-                                             dtype=torch.float8_e4m3fn)
     intermediate_cache3 = torch.empty((M, topk_ids.shape[1], w2.shape[1]),
                                       device=hidden_states.device,
                                       dtype=hidden_states.dtype)
 
-    a_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
+    a1_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
     a2_scale = torch.zeros(1, device=hidden_states.device, dtype=torch.float32)
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    ops.scaled_fp8_quant(intermediate_cache0, hidden_states, a_scale)
+    if use_fp8:
+        a1 = torch.empty_like(hidden_states, dtype=torch.float8_e4m3fn)
+        ops.scaled_fp8_quant(a1, hidden_states, a1_scale)
+    else:
+        a1 = hidden_states
 
-    invoke_fused_moe_kernel(intermediate_cache0, w1, intermediate_cache1,
-                            w1_scale, a_scale,
+    invoke_fused_moe_kernel(a1, w1, intermediate_cache1, w1_scale, a1_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, False,
                             topk_ids.shape[1], config, compute_type=tl.float16, use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    ops.scaled_fp8_quant(intermediate_cache2_scaled, intermediate_cache2, a2_scale)
+    if use_fp8:
+        a2 = torch.empty_like(intermediate_cache2, dtype=torch.float8_e4m3fn)
+        ops.scaled_fp8_quant(a2, intermediate_cache2, a2_scale)
+    else:
+        a2 = intermediate_cache2
 
-    invoke_fused_moe_kernel(intermediate_cache2_scaled, w2, intermediate_cache3,
-                            w2_scale, a2_scale,
+    invoke_fused_moe_kernel(a2, w2, intermediate_cache3, w2_scale, a2_scale,
                             topk_weights, topk_ids, sorted_token_ids,
                             expert_ids, num_tokens_post_padded, True, 1,
                             config, compute_type=tl.float16, use_fp8=use_fp8)
