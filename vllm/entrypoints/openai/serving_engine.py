@@ -68,6 +68,7 @@ class OpenAIServing:
         self.tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
+            tokenizer_revision=engine_model_config.tokenizer_revision,
             trust_remote_code=engine_model_config.trust_remote_code,
             truncation_side="left")
 
