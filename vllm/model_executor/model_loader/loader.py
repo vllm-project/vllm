@@ -228,6 +228,10 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True)), )
+
+            for _, module in model.named_modules():
+                if hasattr(module, "process_weights_after_loading"):
+                    module.process_weights_after_loading()
         return model.eval()
 
 
