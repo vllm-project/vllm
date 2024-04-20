@@ -11,12 +11,14 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import logging
+import os
 import sys
 from typing import List
 
 from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
+sys.path.append(os.path.abspath("../.."))
 
 # -- Project information -----------------------------------------------------
 
