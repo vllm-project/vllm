@@ -21,7 +21,6 @@ from vllm.sequence import SampleLogprobs
 
 logger = init_logger(__name__)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import is_cpu
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -60,7 +59,7 @@ def cleanup():
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
-    if not is_cpu():
+    if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
@@ -155,10 +154,10 @@ _EMBEDDING_MODELS = [
 class HfRunner:
 
     def wrap_device(self, input: any):
-        if is_cpu():
-            return input.cpu()
-        else:
+        if torch.cuda.is_available():
             return input.cuda()
+        else:
+            return input.cpu()
 
     def __init__(
         self,
