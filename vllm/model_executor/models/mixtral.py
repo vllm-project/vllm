@@ -126,9 +126,11 @@ class MixtralMoE(nn.Module):
 
         # Scaling factors for fp8 weights
         self.ws_scale = nn.Parameter(
-            torch.ones(self.num_total_experts, device="cuda", dtype=torch.float32))
+            torch.ones(self.num_total_experts,device="cuda", dtype=torch.float32),
+            requires_grad=False)
         self.w2s_scale = nn.Parameter(
-            torch.ones(self.num_total_experts, device="cuda", dtype=torch.float32))
+            torch.ones(self.num_total_experts, device="cuda", dtype=torch.float32),
+            requires_grad=False)
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
