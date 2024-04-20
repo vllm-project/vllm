@@ -8,6 +8,7 @@ def fix_case(text: str) -> str:
         ("llm", "LLM"),
         ("vllm", "vLLM"),
         ("openai", "OpenAI"),
+        ("multilora", "MultiLoRA"),
     ]
     for sub in subs:
         text = re.sub(*sub, text, flags=re.IGNORECASE)
