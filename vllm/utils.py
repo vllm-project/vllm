@@ -1,6 +1,7 @@
 import asyncio
 import enum
 import gc
+import glob
 import os
 import socket
 import subprocess
@@ -163,6 +164,17 @@ def random_uuid() -> str:
 
 
 @lru_cache(maxsize=None)
+def get_vllm_instance_id():
+    """
+    If the environment variable VLLM_INSTANCE_ID is set, return it.
+    Otherwise, return a random UUID.
+    Instance id represents an instance of the VLLM. All processes in the same
+    instance should have the same instance id.
+    """
+    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+
+
+@lru_cache(maxsize=None)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
@@ -273,7 +285,7 @@ def get_open_port() -> int:
 
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
-        if k in os.environ:
+        if k in os.environ and os.environ[k] != v:
             logger.warning(f"Overwriting environment variable {k} "
                            f"from '{os.environ[k]}' to '{v}'")
         os.environ[k] = v
@@ -517,3 +529,53 @@ def init_cached_hf_modules():
     """
     from transformers.dynamic_module_utils import init_hf_modules
     init_hf_modules()
+
+
+def nccl_integrity_check(filepath):
+    """
+    when the library is corrupted, we cannot catch
+    the exception in python. it will crash the process.
+    instead, we use the exit code of `ldd` to check
+    if the library is corrupted. if not, we will return
+    the version of the library.
+    """
+    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
+    import ctypes
+
+    nccl = ctypes.CDLL(filepath)
+    version = ctypes.c_int()
+    nccl.ncclGetVersion.restype = ctypes.c_int
+    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    result = nccl.ncclGetVersion(ctypes.byref(version))
+    assert result == 0
+    return version.value
+
+
+def find_nccl_library():
+    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+
+    # check if we have vllm-managed nccl
+    vllm_nccl_path = None
+    if torch.version.cuda is not None:
+        cuda_major = torch.version.cuda.split(".")[0]
+        path = os.path.expanduser(
+            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+        files = glob.glob(path)
+        vllm_nccl_path = files[0] if files else None
+
+    # manually load the nccl library
+    if so_file:
+        logger.info(
+            f"Found nccl from environment variable VLLM_NCCL_SO_PATH={so_file}"
+        )
+    else:
+        if torch.version.cuda is not None:
+            so_file = vllm_nccl_path or "libnccl.so.2"
+        elif torch.version.hip is not None:
+            so_file = "librccl.so.1"
+        else:
+            raise ValueError("NCCL only supports CUDA and ROCm backends.")
+        logger.info(f"Found nccl from library {so_file}")
+    return so_file
