@@ -153,12 +153,13 @@ class MixtralMoE(nn.Module):
 
     def process_weights_after_loading(self):
         if self.use_fp8:
-            qws, ws_scale = per_tensor_quantize(self.ws.data)
-            self.ws = nn.Parameter(qws, requires_grad=False)
-            self.ws_scale.data.copy_(ws_scale)
-            qw2s, w2s_scale = per_tensor_quantize(self.w2s.data)
-            self.w2s = nn.Parameter(qw2s, requires_grad=False)
-            self.w2s_scale.data.copy_(w2s_scale)
+            ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
+            w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
+            for expert in range(self.num_total_experts):
+                ws[expert,:,:], self.ws_scale[expert] = per_tensor_quantize(self.ws.data[expert,:,:])
+                w2s[expert,:,:], self.w2s_scale[expert] = per_tensor_quantize(self.w2s.data[expert,:,:])
+            self.ws = nn.Parameter(ws, requires_grad=False)
+            self.w2s = nn.Parameter(w2s, requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
