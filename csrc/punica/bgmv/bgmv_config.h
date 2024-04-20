@@ -57,7 +57,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 
 // Used for defining kernels going from the variety of dim in to the narrow dim out
     // one, because the kernel has this flexibility so add support for it
-    // but mainly, using it for the column parallel LoRA A from S-LoRA which splits the rank dim, but all_gathers before LoRA B 
+    // but mainly, using it for the fully sharded column parallel LoRA A which splits the rank dim
 #define FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, narrow) \
     f(in_T, out_T, W_T, 128, narrow) \
     f(in_T, out_T, W_T, 256, narrow) \

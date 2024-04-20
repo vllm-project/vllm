@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     pass
 
 
+# these layers are based on the tensor parallelism strategy given in
+# Y. Sheng et al., S-LoRA: Serving Thousands of Concurrent LoRA Adapters. 2023, 
+# https://arxiv.org/abs/2311.03285.
+
 class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     """
     Differs from ColumnParallelLinearWithLoRA by slicing LoRA A also.
