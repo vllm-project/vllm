@@ -83,6 +83,7 @@ class LLMEngine:
         lora_config: Optional[LoRAConfig],
         placement_group: Optional["PlacementGroup"],
         log_stats: bool,
+        local_rank: int = 0,
     ) -> None:
         logger.info(
             "Initializing an LLM engine with config: "
@@ -112,6 +113,7 @@ class LLMEngine:
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.log_stats = log_stats
+        self.local_rank = local_rank
         self._verify_args()
 
         self._init_tokenizer()
@@ -170,7 +172,7 @@ class LLMEngine:
             self.parallel_config,
             self.scheduler_config,
             self.device_config,
-            local_rank=0,
+            local_rank=self.local_rank,
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
