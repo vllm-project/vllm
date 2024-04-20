@@ -125,6 +125,20 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return vllm_ops.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
+def awq_gemm_fast(input: torch.Tensor, qweight: torch.Tensor,
+                  qzeros: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    return vllm_ops.awq_gemm_fast(input, qweight, scales, qzeros)
+
+
+def awq_gemv_fast(input: torch.Tensor, qweight: torch.Tensor,
+                  scales: torch.Tensor, qzeros: torch.Tensor,
+                  out_features: int, in_features: int,
+                  group_size: int) -> torch.Tensor:
+    return vllm_ops.awq_gemv_fast(input, qweight, scales, qzeros,
+                                  input.numel() // input.shape[-1],
+                                  out_features, in_features, group_size)
+
+
 # gptq
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,

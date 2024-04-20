@@ -164,7 +164,7 @@ class AWQGemm(torch.nn.Module):
             out = ops.awq_gemm(reshaped_x, qweight, scales, qzeros,
                                pack_factor)
 
-        return out
+        return out.reshape(out_shape)
 
 
 class AWQGemvFast(torch.nn.Module):
@@ -228,15 +228,16 @@ class AWQGemvFast(torch.nn.Module):
     def forward(self, qweight, scales, qzeros, x: torch.Tensor, reshaped_x,
                 out_shape) -> torch.Tensor:
 
-        out_shape = (x.shape[:-1] +
-                     (qweight.shape[0] * self.quant_config.interleave, ))
-        GEMM_HEURISTIC_CONDITION = x.shape[:-1].numel(
-        ) >= 8 and x.shape[1] == 1
-        if not GEMM_HEURISTIC_CONDITION:
-            out = ops.awq_gemv_fast(reshaped_x, qweight, scales, qzeros,
-                                    reshaped_x.shape[0], out_shape[-1],
-                                    reshaped_x.shape[1],
-                                    self.quant_config.group_size)
+        if x.shape[:-1].numel() < 8:
+            out_shape = (x.shape[:-1] +
+                         (qweight.shape[0] * self.quant_config.interleave, ))
+            out = ops.awq_gemv_fast(input=reshaped_x,
+                                    qweight=qweight,
+                                    scales=scales,
+                                    qzeros=qzeros,
+                                    out_features=out_shape[-1],
+                                    in_features=reshaped_x.shape[1],
+                                    group_size=self.quant_config.group_size)
         else:
             out = ops.awq_gemm_fast(reshaped_x, qweight, scales, qzeros)
 
@@ -306,14 +307,14 @@ class AWQLinearMethod(LinearMethodBase):
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         out = self.awq_module.forward(
-            qweight,
-            scales,
-            qzeros,
-            x,
-            reshaped_x,
-            out_shape,
+            qweight=qweight,
+            scales=scales,
+            qzeros=qzeros,
+            x=x,
+            reshaped_x=reshaped_x,
+            out_shape=out_shape,
         )
 
         if bias is not None:
             out.add_(bias)
-        return out.reshape(out_shape)
+        return out
