@@ -1,4 +1,4 @@
-from typing import Optional, Iterable, Tuple, List
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -8,13 +8,14 @@ from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import VisionLanguageConfig
 from vllm.model_executor.layers.linear import LinearMethodBase
-from vllm.model_executor.models.phi import PhiForCausalLM
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.phi import PhiForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
 
 class Attention(nn.Module):
+
     def __init__(self, dim, num_heads=16):
         super().__init__()
         assert dim % num_heads == 0, "dim should be divisible by num_heads"
@@ -27,11 +28,8 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, self.head_dim)
-            .permute(2, 0, 3, 1, 4)
-        )
+        qkv = (self.qkv(x).reshape(B, N, 3, self.num_heads,
+                                   self.head_dim).permute(2, 0, 3, 1, 4))
         q, k, v = qkv.unbind(0)
 
         # TODO: Replace with VLLM attention implementation after adding support
@@ -44,6 +42,7 @@ class Attention(nn.Module):
 
 
 class VitBlock(nn.Module):
+
     def __init__(self, embed_dim):
         super().__init__()
         self.attn = Attention(embed_dim)
@@ -58,6 +57,7 @@ class VitBlock(nn.Module):
 
 
 class VisionTransformer(nn.Module):
+
     def __init__(self):
         super().__init__()
 
@@ -65,7 +65,7 @@ class VisionTransformer(nn.Module):
         embed_dim = 1152
 
         self.patch_embed = LinearPatchEmbedding()
-        self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * 0.02)
+        self.pos_embed = nn.Parameter(torch.zeros(1, embed_len, embed_dim))
         self.blocks = nn.Sequential(*[VitBlock(embed_dim) for _ in range(27)])
         self.norm = nn.LayerNorm(embed_dim)
 
@@ -78,6 +78,7 @@ class VisionTransformer(nn.Module):
 
 
 class EncoderWrapper(nn.Module):
+
     def __init__(self):
         super().__init__()
         self.model = nn.ModuleDict({"visual": VisionTransformer()})
@@ -87,6 +88,7 @@ class EncoderWrapper(nn.Module):
 
 
 class LinearPatchEmbedding(nn.Module):
+
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(588, 1152)
@@ -103,6 +105,7 @@ class LinearPatchEmbedding(nn.Module):
 
 
 class MLP(nn.Module):
+
     def __init__(
         self,
         in_features: int,
@@ -124,6 +127,7 @@ class MLP(nn.Module):
 
 
 class VisionProjection(nn.Module):
+
     def __init__(self):
         super().__init__()
 
@@ -138,6 +142,7 @@ class VisionProjection(nn.Module):
 
 
 class VisionEncoder(nn.Module):
+
     def __init__(self):
         super().__init__()
         self.encoder = EncoderWrapper()
@@ -150,6 +155,7 @@ class VisionEncoder(nn.Module):
 
 
 class Moondream(nn.Module):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -164,12 +170,10 @@ class Moondream(nn.Module):
         assert self.vision_language_config, (
             "Provide `image_input_type` and other vision "
             "related configurations through LLM entrypoint "
-            "or engine arguments."
-        )
+            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
-            VisionLanguageConfig.ImageInputType.PIXEL_VALUES
-        ):
+                VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
             self.vision_encoder = VisionEncoder()
         else:
             self.vision_encoder = None
@@ -188,8 +192,7 @@ class Moondream(nn.Module):
     ) -> SamplerOutput:
         if image_input is not None:
             if list(image_input.shape[1:]) != list(
-                self.vision_language_config.image_input_shape[1:]
-            ):
+                    self.vision_language_config.image_input_shape[1:]):
                 raise ValueError(
                     f"The expected image tensor shape is batch dimension "
                     f"plus "
@@ -197,8 +200,7 @@ class Moondream(nn.Module):
                     f" You supplied {image_input.shape}. "
                     f"If you are using vLLM's entrypoint, make sure your "
                     f"supplied image input is consistent with "
-                    f"image_input_shape in engine args."
-                )
+                    f"image_input_shape in engine args.")
 
             if self.vision_encoder is not None:
                 image_features = self.vision_encoder(image_input)
@@ -207,49 +209,47 @@ class Moondream(nn.Module):
 
             inputs_embeds = self.text_model.model.embed_tokens(input_ids)
             mask = input_ids == self.vision_language_config.image_token_id
-            inputs_embeds[mask] = image_features.view(-1, image_features.shape[-1])
+            inputs_embeds[mask] = image_features.view(
+                -1,
+                image_features.shape[-1],
+            )
         else:
             inputs_embeds = None
 
         hidden_states = self.text_model(
-            input_ids, positions, kv_caches, attn_metadata, inputs_embeds=inputs_embeds
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
-    def compute_logits(
-        self, hidden_states: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> torch.Tensor:
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
         return self.text_model.compute_logits(hidden_states, sampling_metadata)
 
-    def sample(
-        self, logits: torch.Tensor, sampling_metadata: SamplingMetadata
-    ) -> Optional[SamplerOutput]:
+    def sample(self, logits: torch.Tensor,
+               sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
         return self.text_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
 
-        params_map = {
-            "text_model.transformer.embd.wte.weight": "text_model.model.embed_tokens.weight",
-            "text_model.lm_head.linear.weight": "text_model.lm_head.weight",
-            "text_model.lm_head.linear.bias": "text_model.lm_head.bias",
-            "text_model.lm_head.ln.weight": "text_model.model.final_layernorm.weight",
-            "text_model.lm_head.ln.bias": "text_model.model.final_layernorm.bias",
-        }
-
         for name, loaded_weight in weights:
             param = None
 
-            if name in params_map:
-                param = params_dict[params_map[name]]
-            elif name in params_dict:
+            if name in params_dict:
                 param = params_dict[name]
             elif name.startswith("text_model."):
                 replacements = {
                     "text_model.transformer.h": "text_model.model.layers",
+                    "lm_head.ln": "model.final_layernorm",
                     "ln": "input_layernorm",
                     "mixer.Wqkv": "self_attn.qkv_proj",
                     "mixer.out_proj": "self_attn.dense",
+                    "lm_head.linear": "lm_head",
+                    "transformer.embd.wte": "model.embed_tokens",
                 }
 
                 mp = name
@@ -262,5 +262,9 @@ class Moondream(nn.Module):
             if param is None:
                 raise ValueError(f"Unmapped weight: {name}")
             else:
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param,
+                    "weight_loader",
+                    default_weight_loader,
+                )
                 weight_loader(param, loaded_weight)

@@ -251,9 +251,8 @@ class PhiForCausalLM(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids, positions, kv_caches, attn_metadata, inputs_embeds
-        )
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, inputs_embeds)
 
         return hidden_states
 
@@ -302,5 +301,6 @@ class PhiForCausalLM(nn.Module):
                 # pylint: disable=E1136
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
