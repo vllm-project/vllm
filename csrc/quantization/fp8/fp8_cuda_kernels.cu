@@ -22,7 +22,7 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 // reduction tree and the memory in scale is atomically updated.
 // So to get the right answer, *scale needs to be initialized to
 // a value <= 0.0 and we need to wait for all thread blocks to
-// finishe before consuming *scale.
+// finish before consuming *scale.
 template<typename scalar_t>
 __global__ void segmented_max_reduction(
   float* __restrict__ scale,
