@@ -62,3 +62,8 @@ skip = "./tests/prompts,./benchmarks/sonnet.txt"
 [tool.isort]
 use_parentheses = true
 skip_gitignore = true
+
+[tool.pytest.ini_options]
+addopts = [
+    "--import-mode=importlib",
+]
