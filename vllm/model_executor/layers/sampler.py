@@ -292,6 +292,9 @@ def _beam_search_sample(
         num_parent_seqs = len(seq_ids)
         beam_width = sampling_params.best_of
         seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
+        if sampling_params.temperature:
+            seq_group_logprobs /= sampling_params.temperature
+
         if is_prompt:
             # Prompt phase.
             assert num_parent_seqs == 1, (
