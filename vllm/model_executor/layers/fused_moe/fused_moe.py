@@ -268,13 +268,14 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     )
 
 
-def get_config_file_name(E: int, N: int) -> str:
+def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
-    return f"E={E},N={N},device_name={device_name}.json"
+    dtype_selector = "" if not dtype else f",dtype={dtype}"
+    return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
 
 
 @functools.lru_cache
-def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
+def get_moe_configs(E: int, N: int, dtype: Optional[str]) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -286,7 +287,7 @@ def get_moe_configs(E: int, N: int) -> Optional[Dict[int, Any]]:
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    json_file_name = get_config_file_name(E, N)
+    json_file_name = get_config_file_name(E, N, dtype)
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
@@ -384,7 +385,7 @@ def fused_moe(
         config = override_config
     else:
         # First try to load optimal config from the file
-        configs = get_moe_configs(E, w2.shape[2])
+        configs = get_moe_configs(E, w2.shape[2], "float8" if use_fp8 else None)
 
         if configs:
             # If an optimal configuration map has been found, look up the
