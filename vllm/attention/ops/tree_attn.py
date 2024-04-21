@@ -101,11 +101,13 @@ if triton.__version__ >= "2.1.0":
             is_prompt = cur_step<cur_batch_prompt_len
             generate_step = tl.where(is_prompt, 0, cur_step - cur_batch_prompt_len)
             
-            
-            tree_mask = is_prompt or  \
-                    (generate_step+offs_m[:, None]) % tree_width == 0
+            tree_mask = (is_prompt or  \
+                    ((generate_step.to(tl.int32)-offs_m[:, None]) % tree_width == 0)) and cur_step < cur_batch_ctx_len
                     
             qk = tl.where(tree_mask, qk, -3.4028234663852886e+38)
+            
+            # qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
+            #     -3.4028234663852886e+38)
             qk *= sm_scale
 
             # -- compute m_ij, p, l_ij
@@ -385,7 +387,7 @@ if triton.__version__ >= "2.1.0":
                             alibi_slopes=None):
 
         cap = torch.cuda.get_device_capability()
-        BLOCK_N = 128 if cap[0] >= 8 else 64
+        BLOCK_N = 32 if cap[0] >= 8 else 64
         BLOCK_M = triton.cdiv(tree_width, 16) * 16
         # shape constraints
         Lq = q.shape[-1]
