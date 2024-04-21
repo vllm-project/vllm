@@ -17,7 +17,7 @@ import torch
 from compare_utils import check_logprobs_close
 
 from vllm.model_executor.layers.quantization import (
-    _QUANTIZATION_CONFIG_REGISTRY)
+    QUANTIZATION_METHODS)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -29,7 +29,7 @@ capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 gptq_marlin_not_supported = (
     capability <
-    _QUANTIZATION_CONFIG_REGISTRY["gptq_marlin"].get_min_capability())
+    QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
 
 MODELS = [
     # act_order==False, group_size=channelwise
@@ -46,7 +46,7 @@ MODELS = [
 ]
 
 
-@pytest.mark.flaky(reruns=2)
+# @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
