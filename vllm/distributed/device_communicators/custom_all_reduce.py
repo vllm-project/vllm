@@ -59,6 +59,7 @@ def init_custom_ar() -> None:
             map(int, os.environ["CUDA_VISIBLE_DEVICES"].split(",")))
     else:
         device_ids = list(range(num_dev))
+    # this checks hardware and driver support for NVLink
     full_nvlink = _is_full_nvlink(device_ids)
     if world_size > 2 and not full_nvlink:
         logger.warn(
@@ -66,7 +67,7 @@ def init_custom_ar() -> None:
             " than two PCIe-only GPUs. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
         return
-    # test P2P capability
+    # test P2P capability, this checks software/cudaruntime support
     # this is expensive to compute at the first time
     # then we cache the result
     if not _can_p2p(rank, world_size):
