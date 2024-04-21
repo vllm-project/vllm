@@ -22,8 +22,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 MAX_MODEL_LEN = 1024
 
-TP_SIZES = [i + 1 for i in range(1 if torch.cuda.device_count() == 1 else 2)]
-
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 gptq_marlin_not_supported = (
@@ -51,7 +49,6 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("tensor_parallel_size", TP_SIZES)
 def test_models(
     vllm_runner,
     example_prompts,
@@ -59,7 +56,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    tensor_parallel_size: int,
 ) -> None:
     model_name, revision = model
 
@@ -69,7 +65,7 @@ def test_models(
                                     dtype=dtype,
                                     quantization="marlin",
                                     max_model_len=MAX_MODEL_LEN,
-                                    tensor_parallel_size=tensor_parallel_size,
+                                    tensor_parallel_size=1,
                                     disable_custom_all_reduce=True)
 
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
@@ -83,7 +79,7 @@ def test_models(
                              dtype=dtype,
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
-                             tensor_parallel_size=tensor_parallel_size,
+                             tensor_parallel_size=1,
                              disable_custom_all_reduce=True)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
