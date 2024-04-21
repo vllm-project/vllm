@@ -220,8 +220,8 @@ def moe_align_block_size(
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            B_scale: torch.Tensor,
-                            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                            B_scale: torch.Tensor, topk_weights: torch.Tensor,
+                            topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
@@ -275,7 +275,8 @@ def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
 
 
 @functools.lru_cache
-def get_moe_configs(E: int, N: int, dtype: Optional[str]) -> Optional[Dict[int, Any]]:
+def get_moe_configs(E: int, N: int,
+                    dtype: Optional[str]) -> Optional[Dict[int, Any]]:
     """
     Return optimized configurations for the fused MoE kernel.
 
@@ -385,7 +386,8 @@ def fused_moe(
         config = override_config
     else:
         # First try to load optimal config from the file
-        configs = get_moe_configs(E, w2.shape[2], "float8" if use_fp8 else None)
+        configs = get_moe_configs(E, w2.shape[2],
+                                  "float8" if use_fp8 else None)
 
         if configs:
             # If an optimal configuration map has been found, look up the
@@ -421,17 +423,37 @@ def fused_moe(
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
 
-    invoke_fused_moe_kernel(hidden_states, w1, intermediate_cache1, w1_scale,
-                            topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, False,
-                            topk_ids.shape[1], config, compute_type=tl.float16, use_fp8=use_fp8)
+    invoke_fused_moe_kernel(hidden_states,
+                            w1,
+                            intermediate_cache1,
+                            w1_scale,
+                            topk_weights,
+                            topk_ids,
+                            sorted_token_ids,
+                            expert_ids,
+                            num_tokens_post_padded,
+                            False,
+                            topk_ids.shape[1],
+                            config,
+                            compute_type=tl.float16,
+                            use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
-    invoke_fused_moe_kernel(intermediate_cache2, w2, intermediate_cache3, w2_scale,
-                            topk_weights, topk_ids, sorted_token_ids,
-                            expert_ids, num_tokens_post_padded, True, 1,
-                            config, compute_type=tl.float16, use_fp8=use_fp8)
+    invoke_fused_moe_kernel(intermediate_cache2,
+                            w2,
+                            intermediate_cache3,
+                            w2_scale,
+                            topk_weights,
+                            topk_ids,
+                            sorted_token_ids,
+                            expert_ids,
+                            num_tokens_post_padded,
+                            True,
+                            1,
+                            config,
+                            compute_type=tl.float16,
+                            use_fp8=use_fp8)
 
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),

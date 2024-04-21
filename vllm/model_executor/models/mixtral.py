@@ -39,8 +39,8 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8LinearMethod, per_tensor_quantize)
+from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod,
+                                                         per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -102,12 +102,14 @@ class MixtralMoE(nn.Module):
                         dtype=self.params_dtype))
 
         # Scaling factors for fp8 weights
-        self.ws_scale = nn.Parameter(
-            torch.ones(self.num_total_experts,device="cuda", dtype=torch.float32),
-            requires_grad=False)
-        self.w2s_scale = nn.Parameter(
-            torch.ones(self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False)
+        self.ws_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                device="cuda",
+                                                dtype=torch.float32),
+                                     requires_grad=False)
+        self.w2s_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                 device="cuda",
+                                                 dtype=torch.float32),
+                                      requires_grad=False)
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
@@ -135,8 +137,10 @@ class MixtralMoE(nn.Module):
             ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
             w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
             for expert in range(self.num_total_experts):
-                ws[expert,:,:], self.ws_scale[expert] = per_tensor_quantize(self.ws.data[expert,:,:])
-                w2s[expert,:,:], self.w2s_scale[expert] = per_tensor_quantize(self.w2s.data[expert,:,:])
+                ws[expert, :, :], self.ws_scale[expert] = per_tensor_quantize(
+                    self.ws.data[expert, :, :])
+                w2s[expert, :, :], self.w2s_scale[
+                    expert] = per_tensor_quantize(self.w2s.data[expert, :, :])
             self.ws = nn.Parameter(ws, requires_grad=False)
             self.w2s = nn.Parameter(w2s, requires_grad=False)
 
