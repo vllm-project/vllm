@@ -166,6 +166,8 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
+        # TODO: prefill needs edit as well, must store pre-rope keys
+
         use_attn_sinks = True
         llama_context_len = 4096
         if use_attn_sinks and attn_metadata.decode_metadata is not None:
@@ -191,32 +193,34 @@ class LlamaAttention(nn.Module):
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
                 num_past_tokens = context_lens[i] - 1
-                if num_past_tokens < llama_context_len: continue
+                # if num_past_tokens < llama_context_len: continue
+                within_context_len = num_past_tokens < llama_context_len
                 
                 past_keys = {}
                 block_table = block_tables_tensor[i]
-                start = num_past_tokens - llama_context_len + 1 + block_size
+                start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
                 # loop should have 4096 - 1 iterations
                 for abs_pos in range(start, end):
-                    # if abs_pos % 100 == 0: print("abs pos", abs_pos)
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
 
                     # rotate k based on new relative pos
                     past_key = key_cache[phys_bnum, :, offset]
-                    past_keys[abs_pos] = past_key
-                    pos = torch.tensor([abs_pos - start + block_size], device=positions.device)
+                    past_keys[abs_pos] = past_key.clone()
+                    p = abs_pos if within_context_len else abs_pos - start + block_size
+                    pos = torch.tensor([p], device=positions.device)
                     past_key = self.rotary_emb._forward_single(pos, past_key.unsqueeze(0))
                     key_cache[phys_bnum, :, offset] = past_key.squeeze(0)
 
                 original_keys.append(past_keys)
                 
-                blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
-                # block_table[0] is attention sink
-                capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
-                block_tables.append(capped_block_table)
+                if not within_context_len:
+                    blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
+                    # block_table[0] is attention sink
+                    capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
+                    block_tables.append(capped_block_table)
 
             if block_tables:
                 attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
@@ -238,11 +242,11 @@ class LlamaAttention(nn.Module):
             # put original keys back in cache
             for i in range(batch_size):
                 num_past_tokens = context_lens[i] - 1
-                if num_past_tokens < llama_context_len: continue
+                # if num_past_tokens < llama_context_len: continue
 
                 past_keys = original_keys[i]
                 block_table = original_block_tables[i]
-                start = num_past_tokens - llama_context_len + 1 + block_size
+                start = 0 if num_past_tokens < llama_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
                 for abs_pos in range(start, end):
                     logic_bnum = abs_pos // block_size
@@ -260,7 +264,8 @@ class LlamaAttention(nn.Module):
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields
             attn_metadata.decode_metadata.block_tables = original_block_tables
-            attn_metadata.decode_metadata.context_lens = torch.tensor(context_lens, dtype=torch.int, device=positions.device)
+            attn_metadata.decode_metadata.context_lens = torch.tensor(
+                context_lens, dtype=torch.int, device=positions.device)
             
             output, _ = self.o_proj(attn_output)
             return output
