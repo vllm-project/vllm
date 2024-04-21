@@ -66,6 +66,8 @@ class ModelConfig:
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode.
+        skip_tokenizer_init: If true, skip initialization of tokenizer and
+            detokenizer.
     """
 
     def __init__(
@@ -85,6 +87,7 @@ class ModelConfig:
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        skip_tokenizer_init: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -99,6 +102,7 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         self.max_logprobs = max_logprobs
+        self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
@@ -106,7 +110,8 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
-        self._verify_tokenizer_mode()
+        if not self.skip_tokenizer_init:
+            self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
