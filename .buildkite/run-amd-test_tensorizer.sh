@@ -23,10 +23,9 @@ remove_docker_container() { docker rm -f rocm_test_tensorizer || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
-apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
-
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host \
-	--name rocm_test_tensorizer rocm /bin/bash -c "apt install curl libsodium23; \
+	--name rocm_test_tensorizer rocm /bin/bash -c "apt-get update; \
+                apt-get install curl libsodium23; \
                 python3 -m pytest -v -s vllm/tests/tensorizer_loader"
 
