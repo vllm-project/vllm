@@ -656,6 +656,7 @@ class SpeculativeConfig:
         speculative_model: Optional[str],
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
+        enable_chunked_prefill: bool,
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -693,6 +694,11 @@ class SpeculativeConfig:
 
         assert (speculative_model is not None
                 and num_speculative_tokens is not None)
+
+        if enable_chunked_prefill:
+            raise ValueError(
+                "Speculative decoding and chunked prefill are "
+                "currently mutually exclusive ({enable_chunked_prefill=}).")
 
         # TODO: The user should be able to specify revision/quantization/max
         # model len for the draft model. It is not currently supported.
@@ -754,6 +760,15 @@ class SpeculativeConfig:
         """
 
         if speculative_max_model_len is not None:
+
+            if speculative_max_model_len > draft_max_model_len:
+                raise ValueError(f"{speculative_max_model_len=} cannot be "
+                                 f"larger than {draft_max_model_len=}")
+
+            if speculative_max_model_len > target_max_model_len:
+                raise ValueError(f"{speculative_max_model_len=} cannot be "
+                                 f"larger than {target_max_model_len=}")
+
             return speculative_max_model_len
 
         return min(

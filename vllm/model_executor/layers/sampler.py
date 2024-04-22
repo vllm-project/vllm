@@ -767,6 +767,43 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     that each sampled token has a "probability" of 1.0. This is required by
     speculative decoding, which depends on the sampling method being encoded
     within the probability distribution for correctness.
+
+    # Why do we only need to do this for greedy sampling?
+
+    vLLM's sampler performs the following steps for greedy or multinomial
+    (random) sampling:
+        1. Get logits from model.
+        2. Modify logits according to per-sequence sampling parameters.
+            - Multiply by temperature, top-k and top-p masking, penalize tokens
+                according to their frequency, etc.
+        3. Sample a token.
+            - Random sampling simply samples from the modified probability
+                distribution.
+            - Greedy sampling performs `argmax` to obtain the token with the
+                highest likelihood.
+    
+    Ignoring greedy sampling for a moment, we find that the computed probability
+    distribution has the following property: we can sample from it independently
+    and find that the token sampled by the Sampler has a frequency corresponding
+    to how often we see it in our sampling. In other words, for tokens sampled
+    with vLLM's random SamplingType, the computed probability distribution
+    encodes the sampling methodology completely.
+
+    Greedy sampling does not normally have this property. vLLM modifies logits
+    according to sampling params, then performs `argmax`, then returns the
+    sampled token and the computed probability distribution. If we sample from
+    the distribution, we'll find the likelihood of the greedily-sampled token
+    is not always 1.0.
+
+    Since lossless speculative decoding requires that the sampling methodology
+    be encoded within the probability distribution, we are motivated to modify
+    the probability distribution such that the sampled token has probability 1
+    when speculative decoding is used.
+
+    NOTE: Alternatively, we could use an extremely low temperature to achieve
+    greedy sampling using multinomial computation and unite the codepaths. This
+    has implications on the overall design of the sampler, e.g. how to record
+    accurate logprobs for the user, so this improvement is deferred to later.
     """
     logprobs[sample_indices, :] = -float('inf')
     logprobs[sample_indices, greedy_samples] = 0.0
