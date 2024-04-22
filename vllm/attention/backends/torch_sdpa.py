@@ -263,28 +263,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         return output.view(-1, self.num_heads * self.head_size)
 
 
-def _make_attention_mask(
-    att_bias: List[torch.Tensor],
-    seq_lens: List[int],
-    prompt_token_num: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    assert att_bias[0].dim() == 3
-    assert len(att_bias) == len(seq_lens)
-    head_size, _, _ = att_bias[0].size()
-    mask = torch.empty(head_size,
-                       prompt_token_num,
-                       prompt_token_num,
-                       dtype=dtype)
-    mask.fill_(-torch.inf)
-    start = 0
-    for seq_len, sub_mask in zip(seq_lens, att_bias):
-        end = start + seq_len
-        mask[:, start:end, start:end] = sub_mask
-        start += seq_len
-    return mask
-
-
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
