@@ -26,6 +26,6 @@ remove_docker_container
 # Run the image
 docker run --device /dev/kfd --device /dev/dri --network host \
 	--name rocm_test_tensorizer rocm /bin/bash -c "apt-get update; \
-                apt-get install curl libsodium23; \
+                apt-get install curl libsodium23 openai; \
                 python3 -m pytest -v -s vllm/tests/tensorizer_loader"
 

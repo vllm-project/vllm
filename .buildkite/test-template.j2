@@ -16,17 +16,6 @@ steps:
         - exit_status: -1  # Agent was lost
           limit: 5
 
-  - label: ":docker: build image ROCm"
-    commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_ROCm }} --progress plain --file Dockerfile.rocm ."
-      - "docker push {{ docker_image_ROCm }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-
   - wait
 
   - label: "AMD Tensorizer Test"
