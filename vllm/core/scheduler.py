@@ -1063,15 +1063,15 @@ class Scheduler:
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
-            s = time.time()
+            # s = time.time()
             result = self._schedule_chunked_prefill()
-            print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
+            # print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
             return result
         else:
-            s = time.time()
+            # s = time.time()
             result = self._schedule_default()
             # result = self._schedule_before_regression()
-            print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
+            # print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
             return result
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
