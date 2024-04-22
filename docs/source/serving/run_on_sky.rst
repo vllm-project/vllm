@@ -260,23 +260,23 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 
     envs:
         MODEL_NAME: meta-llama/Meta-Llama-3-70B-Instruct
-        ENDPOINT: x.x.x.x:3031 # Address of the API server running llama3. 
+        ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm. 
 
     resources:
         cpus: 2
 
     setup: |
-        conda activate llama3
+        conda activate vllm
         if [ $? -ne 0 ]; then
-            conda create -n llama3 python=3.10 -y
-            conda activate llama3
+            conda create -n vllm python=3.10 -y
+            conda activate vllm
         fi
 
         # Install Gradio for web UI.
         pip install gradio openai
 
     run: |
-        conda activate llama3
+        conda activate vllm
         export PATH=$PATH:/sbin
         WORKER_IP=$(hostname -I | cut -d' ' -f1)
         CONTROLLER_PORT=21001
