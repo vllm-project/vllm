@@ -26,6 +26,9 @@ def distributed_run(fn, world_size):
     for p in processes:
         p.join()
 
+    for p in processes:
+        assert p.exitcode == 0
+
 
 def update_env(fn):
     # `multiprocessing.Process` cannot accept environment variables directly
