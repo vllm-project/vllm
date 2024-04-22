@@ -657,6 +657,7 @@ class SpeculativeConfig:
         num_speculative_tokens: Optional[int],
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
+        use_v2_block_manager: bool,
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -677,6 +678,12 @@ class SpeculativeConfig:
             speculative_max_model_len (Optional[int]): The maximum model len of
                 the speculative model. Used when testing the ability to skip
                 speculation for some sequences.
+            enable_chunked_prefill (bool): Whether vLLM is configured to use
+                chunked prefill or not. Used for raising an error since its not
+                yet compatible with spec decode.
+            use_v2_block_manager (bool): Whether vLLM is configured to use the
+                v2 block manager or not. Used for raising an error since the v2
+                block manager is required with spec decode.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -698,7 +705,12 @@ class SpeculativeConfig:
         if enable_chunked_prefill:
             raise ValueError(
                 "Speculative decoding and chunked prefill are "
-                "currently mutually exclusive ({enable_chunked_prefill=}).")
+                f"currently mutually exclusive ({enable_chunked_prefill=}).")
+
+        if not use_v2_block_manager:
+            raise ValueError(
+                "Speculative decoding requires usage of the V2 "
+                "block manager. Enable it with --use-v2-block-manager.")
 
         # TODO: The user should be able to specify revision/quantization/max
         # model len for the draft model. It is not currently supported.

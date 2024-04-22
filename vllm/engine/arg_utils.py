@@ -492,6 +492,7 @@ class EngineArgs:
             num_speculative_tokens=self.num_speculative_tokens,
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            use_v2_block_manager=self.use_v2_block_manager,
         )
 
         scheduler_config = SchedulerConfig(

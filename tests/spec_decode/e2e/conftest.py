@@ -1,3 +1,5 @@
+from typing import List, Tuple
+
 import pytest
 
 from tests.conftest import cleanup
@@ -48,3 +50,17 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
             del llm
 
     return generator_outer
+
+
+def get_output_from_llm_generator(
+        llm_generator, prompts,
+        sampling_params) -> Tuple[List[str], List[List[int]]]:
+    tokens = []
+    token_ids = []
+    for llm in llm_generator():
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+        token_ids = [output.outputs[0].token_ids for output in outputs]
+        tokens = [output.outputs[0].text for output in outputs]
+        del llm
+
+    return tokens, token_ids

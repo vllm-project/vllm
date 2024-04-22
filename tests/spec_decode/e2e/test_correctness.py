@@ -29,12 +29,13 @@ greedy-equality tests for those batch sizes/prompts.
 """
 
 from itertools import cycle
-from typing import List, Tuple
 
 import pytest
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
+
+from .conftest import get_output_from_llm_generator
 
 
 @pytest.mark.parametrize(
@@ -594,67 +595,3 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        # Use a small model for a fast test.
-        "model": "JackFram/llama-68m",
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-
-        # Skip real loading for fast test.
-        "load_format": "dummy",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
-    }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            # Expect failure as spec decode not supported by
-            # Ray backend.
-            "worker_use_ray": True,
-        },
-    ])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail(test_llm_generator):
-    """Verify that speculative decoding with Ray fails.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-    ]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    with pytest.raises(AssertionError,
-                       match="Speculative decoding not yet supported for "):
-        get_output_from_llm_generator(test_llm_generator, prompts,
-                                      sampling_params)
-
-
-def get_output_from_llm_generator(
-        llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]]]:
-    tokens = []
-    token_ids = []
-    for llm in llm_generator():
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        tokens = [output.outputs[0].text for output in outputs]
-        del llm
-
-    return tokens, token_ids
