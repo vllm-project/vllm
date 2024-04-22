@@ -240,20 +240,21 @@ class NCCLCommunicator:
         result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
                                      self.unique_id, self.rank)
         assert result == 0
-        self.stream = torch.cuda.Stream(device=f"cuda:{self.local_rank}")
+        self.stream = None
 
     def all_reduce(self,
                    tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None):
-        if stream is None:
-            stream = self.stream
+        stream = stream or self.stream
+        stream_p = ctypes.c_void_p() if stream is None else ctypes.c_void_p(
+            stream.cuda_stream)
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
                                   ncclDataType_t.from_torch(tensor.dtype),
                                   ncclRedOp_t.from_torch(op), self.comm,
-                                  ctypes.c_void_p(stream.cuda_stream))
+                                  stream_p)
         assert result == 0
 
     def __del__(self):
