@@ -57,8 +57,7 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadataPerStage,
-                             PagedAttentionMetadata):
+class FlashAttentionMetadata(AttentionMetadataPerStage):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
