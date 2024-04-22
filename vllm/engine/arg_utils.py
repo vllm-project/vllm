@@ -16,6 +16,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
     tokenizer: Optional[str] = None
+    skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
@@ -93,6 +94,10 @@ class EngineArgs:
             type=str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use.')
+        parser.add_argument(
+            '--skip-tokenizer-init',
+            action='store_true',
+            help='Skip initialization of tokenizer and detokenizer')
         parser.add_argument(
             '--revision',
             type=str,
@@ -453,7 +458,7 @@ class EngineArgs:
             self.code_revision, self.tokenizer_revision, self.max_model_len,
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.skip_tokenizer_init)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
