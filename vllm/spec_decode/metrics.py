@@ -146,7 +146,8 @@ class AsyncMetricsCollector:
         emitted_tokens = self._aggregate_num_emitted_tokens.item()
         draft_tokens = self._aggregate_num_draft_tokens
 
-        max_num_emitted_tokens = self.get_max_num_emitted_tokens(draft_tokens, k)
+        max_num_emitted_tokens = self.get_max_num_emitted_tokens(
+            draft_tokens, k)
 
         if draft_tokens > 0:
             draft_acceptance_rate = accepted_tokens / draft_tokens

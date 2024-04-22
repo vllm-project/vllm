@@ -293,7 +293,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Get probabilities according to proposal method.
         proposal_probs = proposals.proposal_probs[spec_indices]
-        
+
         # Get proposed tokens.
         proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 

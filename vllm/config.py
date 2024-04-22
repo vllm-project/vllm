@@ -712,10 +712,12 @@ class SpeculativeConfig:
             max_logprobs=target_model_config.max_logprobs,
         )
 
-        draft_model_config.max_model_len = (SpeculativeConfig._maybe_override_draft_max_model_len(
-            speculative_max_model_len, draft_model_config.max_model_len, target_model_config.max_model_len,
-        ))
-
+        draft_model_config.max_model_len = (
+            SpeculativeConfig._maybe_override_draft_max_model_len(
+                speculative_max_model_len,
+                draft_model_config.max_model_len,
+                target_model_config.max_model_len,
+            ))
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(

@@ -549,13 +549,15 @@ class LLMEngine:
                 # TODO Integrate speculative metrics with Prometheus/stdout
                 # stats logger.
                 metrics = output[0].spec_decode_worker_metrics
-                logger.info("Speculative metrics: "
+                logger.info(
+                    "Speculative metrics: "
                     f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
                     f"System efficiency: {metrics.system_efficiency:.3f}, "
                     f"Number of speculative tokens: {metrics.num_spec_tokens}, "
                     f"Number of accepted tokens: {metrics.accepted_tokens}, "
                     f"Number of draft tokens tokens: {metrics.draft_tokens}, "
-                    f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
+                    f"Number of emitted tokens tokens: {metrics.emitted_tokens}."
+                )
 
         return request_outputs
 

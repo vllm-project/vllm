@@ -73,7 +73,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
         # Filter the list to ignore -1 proposals.
-        proposal_token_ids_list_without_skips = [proposals for proposals in proposal_token_ids_list if -1 not in proposals]
+        proposal_token_ids_list_without_skips = [
+            proposals for proposals in proposal_token_ids_list
+            if -1 not in proposals
+        ]
 
         (spec_indices, non_spec_indices, target_seq_group_metadata_list,
          num_scoring_tokens) = self._expand_batch(
@@ -165,7 +168,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # Map distinct sequences used to score each token
         # of shape [batch_size * k + 1] back to [batch_size, k + 1].
         expanded_batch_size, k = proposals.proposal_token_ids.shape
-        
+
         # The number of tokens in the expanded batch used for speculation is
         # equal to the total expanded batch size minus the number of samples for
         # non-speculative sequences.
@@ -174,8 +177,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         target_token_ids = target_token_ids.squeeze().reshape(
             spec_expanded_bs, k + 1)
-        target_probs = target_probs.squeeze().reshape(
-            spec_expanded_bs, k + 1, self._vocab_size)
+        target_probs = target_probs.squeeze().reshape(spec_expanded_bs, k + 1,
+                                                      self._vocab_size)
 
         all_tokens = torch.full(size=(contracted_bs, k + 1),
                                 fill_value=-1,
