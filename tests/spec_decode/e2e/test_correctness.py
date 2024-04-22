@@ -1,3 +1,33 @@
+"""The tests in this file verify end-to-end speculative decoding correctness.
+
+This docstring details important information on the testing methodology.
+
+Most of the tests rely on "greedy equality", where we expect the output of
+speculative decoding on a sequence to exactly match the output of normal non-
+speculative decoding.
+
+Since speculative decoding with rejection sampling guarantees that the output
+distribution matches the target model's output distribution (up to hardware
+numerics, see https://arxiv.org/pdf/2302.01318.pdf), we can expect greedy
+equality. This gives us good coverage of temp=0.
+
+For temp>0, we rely on unit tests on the rejection sampler to verify that the
+output distribution is the same with spec decode vs. no spec decode (this would
+be prohibitively expensive to run with a real model).
+
+NOTE: Speculative decoding's distribution equality requires that the measured
+distributions of the target model and proposal model be deterministic given the
+same input. vLLM largely guarantees this.
+
+@cadedaniel has seen cases where the output probabilities of a draft/target
+model change slightly with certain batch sizes or prompts, even with Torch
+determinism flags set. It is unclear if this is a bug in vLLM, due to non-
+determinism in on-device batched operations, a bug in vLLM's spec decode
+implementation, or the "hardware numerics" limitations. Either way, rejection
+sampling ensures the output distribution matches the target model, but it breaks
+greedy-equality tests for those batch sizes/prompts.
+"""
+
 from itertools import cycle
 from typing import List, Tuple
 
@@ -120,6 +150,11 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
 def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
+    """Verify greedy equality on a tiny model with batch size of one.
+
+    Since this test is cheaper than other e2e correctness tests, we generate
+    with a higher output_len.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -155,7 +190,6 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 @pytest.mark.parametrize(
     "test_llm_kwargs",
     [
-        # Try two different num spec tokens.
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
@@ -172,6 +206,8 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
+    """Verify greedy equality on a tiny model and large batch size.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -215,6 +251,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         max_output_len: int):
+    """Verify greedy equality on a tiny model, with a large batch size, and when
+    sampling respects the EOS token.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -256,6 +295,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
 def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
+    """Verify greedy equality on a "real" model and batch size of 1. This is
+    separate from large BS tests to make identifying the source of bugs easier.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -297,6 +339,9 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
 def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
+    """Verify greedy equality with a "real" model on a nontrivial batch size.
+    This is the closest test to a real production workload.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -341,6 +386,9 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 def test_spec_decode_e2e_greedy_correctness_with_preemption(
         baseline_llm_generator, test_llm_generator, batch_size: int,
         output_len: int):
+    """Verify greedy equality, even when some sequences are preempted mid-
+    generation.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -392,6 +440,8 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
 def test_spec_decode_different_block_size(baseline_llm_generator,
                                           test_llm_generator, batch_size: int,
                                           output_len: int):
+    """Verify greedy equality over different block sizes.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -416,6 +466,9 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+
+        # Artificially limit the draft model max model len; this forces vLLM to
+        # skip speculation once the sequences grow beyond 32-k tokens.
         "speculative_max_model_len": 32,
     },
 ])
@@ -423,14 +476,18 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
 @pytest.mark.parametrize(
     "output_len",
     [
-        # Use smaller output len for fast test.
+        # This must be a good bit larger than speculative_max_model_len so that
+        # we can test the case where all seqs are skipped, but still small to
+        # ensure fast test.
         64,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_skip_speculation(baseline_llm_generator, test_llm_generator,
                           batch_size: int, output_len: int):
-    """Verify correct output when we skip speculation.
-    Test skip 1, skip >1, skip all.
+    """Verify greedy equality when some (or all) sequences skip speculation.
+    We do this by setting the max model len of the draft model to an
+    artificially low value, such that when the sequences grow beyond it, they
+    are skipped in speculative decoding.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
@@ -472,54 +529,9 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                 output_len: int):
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-        "disable_log_stats": False,
-    }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        # Try two different tiny base models.
-        # Note that one is equal to the draft model, another isn't.
-        {
-            "model": "JackFram/llama-68m",
-        },
-        #{
-        #    "model": "JackFram/llama-160m",
-        #},
-    ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-    },
-])
-@pytest.mark.parametrize(
-    "output_len",
-    [
-        # Use long output len for the small model test.
-        #1536,
-        128,
-    ])
-@pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("seed", [1])
-def test_wip_validate_acceptance_rate(baseline_llm_generator,
-                                      test_llm_generator, batch_size: int,
-                                      output_len: int):
+    """Verify that speculative decoding produces exact equality to without spec
+    decode with many different values of k.
+    """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -533,6 +545,10 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          max_output_len,
                                          force_output_len: bool,
                                          print_tokens: bool = False):
+    """Helper method that compares the outputs of both the baseline LLM and
+    the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
+    the same when temperature is zero.
+    """
     temperature = 0.0
 
     prompts = [
