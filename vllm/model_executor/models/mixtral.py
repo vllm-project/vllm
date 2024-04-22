@@ -101,7 +101,8 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=self.params_dtype))
 
-        # Scaling factors for fp8 weights. If fp8 is not used, these parameters are ...
+        # Scaling factors for fp8 weights. If fp8 is not used, these parameters
+        # are 1.0 so no rescaling will happen.
         self.ws_scale = nn.Parameter(torch.ones(self.num_total_experts,
                                                 device="cuda",
                                                 dtype=torch.float32),
