@@ -1107,5 +1107,4 @@ class Scheduler:
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
                                  budget.remaining_token_budget())
-
         return num_new_tokens

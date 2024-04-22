@@ -667,7 +667,9 @@ class SpeculativeConfig:
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided.
-            TODO speculative_max_model_len
+            speculative_max_model_len (Optional[int]): The maximum model len of
+                the speculative model. Used when testing the ability to skip
+                speculation for some sequences.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -710,19 +712,10 @@ class SpeculativeConfig:
             max_logprobs=target_model_config.max_logprobs,
         )
 
-        # TODO docs
-        #draft_model_config.max_model_len = min(
-        #    target_model_config.max_model_len,
-        #    draft_model_config.max_model_len)
+        draft_model_config.max_model_len = (SpeculativeConfig._maybe_override_draft_max_model_len(
+            speculative_max_model_len, draft_model_config.max_model_len, target_model_config.max_model_len,
+        ))
 
-        max_model_lens = [
-            speculative_max_model_len, draft_model_config.max_model_len,
-            target_model_config.max_model_len
-        ]
-        draft_model_config.max_model_len = min([
-            max_model_len for max_model_len in max_model_lens
-            if max_model_len is not None
-        ])
 
         draft_parallel_config = (
             SpeculativeConfig.create_draft_parallel_config(
@@ -732,6 +725,32 @@ class SpeculativeConfig:
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+        )
+
+    @staticmethod
+    def _maybe_override_draft_max_model_len(
+        speculative_max_model_len: Optional[int],
+        draft_max_model_len: int,
+        target_max_model_len: int,
+    ) -> int:
+        """Determine the max sequence len for the draft model. This is usually
+        the draft_max_model_len, but may be the target_max_model_len if it is
+        less than the draft_max_model_len, or may be speculative_max_model_len
+        if it is specified.
+
+        This is necessary so that sequences do not exceed the capacity of the
+        draft model or the target model.
+
+        speculative_max_model_len is mainly used for testing that sequences can
+        skip speculation.
+        """
+
+        if speculative_max_model_len is not None:
+            return speculative_max_model_len
+
+        return min(
+            draft_max_model_len,
+            target_max_model_len,
         )
 
     @staticmethod

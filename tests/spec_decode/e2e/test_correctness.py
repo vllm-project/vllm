@@ -85,7 +85,10 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -131,7 +134,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -226,7 +232,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -264,7 +273,10 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -474,7 +486,9 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+
+        "disable_log_stats": False,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",

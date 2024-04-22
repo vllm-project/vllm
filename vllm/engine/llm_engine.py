@@ -22,7 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup)
+                           SequenceGroup, SequenceStage)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -446,26 +446,18 @@ class LLMEngine:
         output_by_sequence_group = create_output_by_sequence_group(
             sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
-        if output and output[0].spec_decode_worker_metrics is not None:
-            print(f'{output[0].spec_decode_worker_metrics}')
-
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
                                                 output_by_sequence_group):
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            # If uncomputed tokens > 0, it means prefill is chunked.
-            # We don't need to process outputs in that case.
 
-            from vllm.sequence import SequenceStage
+            # If all sequences in the sequence group are in DECODE, then we can
+            # process the output tokens. Otherwise, they are (chunked) prefill
+            # samples and should not be processed.
             stages = [seq.data._stage for seq in seq_group.seqs_dict.values()]
-            all_decode = all(
-                [stage == SequenceStage.DECODE for stage in stages])
-
-            print(f'{seq_group.get_num_uncomputed_tokens()=}')
-            print(f'{all_decode=} {stages=}')
-            if all_decode:
+            if all(stage == SequenceStage.DECODE for stage in stages):
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -553,6 +545,17 @@ class LLMEngine:
         # Log stats.
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs))
+            if output and output[0].spec_decode_worker_metrics is not None:
+                # TODO Integrate speculative metrics with Prometheus/stdout
+                # stats logger.
+                metrics = output[0].spec_decode_worker_metrics
+                logger.info("Speculative metrics: "
+                    f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+                    f"System efficiency: {metrics.system_efficiency:.3f}, "
+                    f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+                    f"Number of accepted tokens: {metrics.accepted_tokens}, "
+                    f"Number of draft tokens tokens: {metrics.draft_tokens}, "
+                    f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
 
         return request_outputs
 

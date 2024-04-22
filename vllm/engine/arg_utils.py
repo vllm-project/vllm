@@ -421,7 +421,9 @@ class EngineArgs:
         parser.add_argument('--speculative-max-model-len',
                             type=str,
                             default=EngineArgs.speculative_max_model_len,
-                            help='TODO')
+                            help='The maximum sequence length supported by the '
+                            'draft model. Sequences over this length will skip '
+                            'speculation.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=str,

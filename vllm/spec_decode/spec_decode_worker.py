@@ -238,7 +238,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_copy, k)
 
         logger.info("score proposals")
-        print(f'{proposals=}')
         proposal_scores = self.scorer.score_proposals(
             seq_group_metadata_list,
             blocks_to_swap_in,
@@ -283,14 +282,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             select_proposal_len_zero=True)
         original_indices = spec_indices + non_spec_indices
 
+        # Get probabilities of target model, excluding bonus token.
         proposal_verifier_probs = proposal_scores.probs[spec_indices, :-1]
-        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
-        proposal_probs = proposals.proposal_probs[spec_indices]
-        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
+
+        # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
-        #if -1 in proposals.proposal_token_ids:
-        #    breakpoint()
+        # Get bonus tokens from target model.
+        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+
+        # Get probabilities according to proposal method.
+        proposal_probs = proposals.proposal_probs[spec_indices]
+        
+        # Get proposed tokens.
+        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
 
         accepted_token_ids = self.rejection_sampler(
             target_probs=proposal_verifier_probs,
@@ -298,8 +303,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_probs=proposal_probs,
             draft_token_ids=proposal_token_ids,
         )
-
-        print(f'{accepted_token_ids=}')
 
         # Append output tokens from non-speculative sequences to
         # the accepted token ids tensor.
