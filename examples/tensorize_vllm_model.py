@@ -16,7 +16,8 @@ from transformers import AutoConfig, PretrainedConfig
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
+from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
+                                                         TensorizerConfig,
                                                          serialize_vllm_model)
 from vllm.model_executor.models import ModelRegistry
 
@@ -87,6 +88,15 @@ A serialized model can be used during model loading for the vLLM OpenAI
 inference server. `model_loader_extra_config` is exposed as the CLI arg
 `--model-loader-extra-config`, and accepts a JSON string literal of the
 TensorizerConfig arguments desired.
+
+In order to see all of the available arguments usable to configure 
+loading with tensorizer that are given to `TensorizerConfig`, run:
+
+`python -m examples.tensorize_vllm_model deserialize --help`
+
+under the `tensorizer options` section. These can also be used for
+deserialization in this example script, although `--tensorizer-uri` and
+`--path-to-tensors` are functionally the same in this case.
 """
 
 
@@ -153,6 +163,8 @@ def parse_args():
         required=False,
         help=("Path to a binary key to use to decrypt the model weights,"
               " if the model was serialized with encryption"))
+
+    TensorizerArgs.add_cli_args(deserialize_parser)
 
     return parser.parse_args()
 

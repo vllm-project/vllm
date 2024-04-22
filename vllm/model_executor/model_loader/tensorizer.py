@@ -171,7 +171,14 @@ class TensorizerArgs:
             'tensorizer options',
             description=('Options for configuring the behavior of the'
                          ' tensorizer deserializer when '
-                         '--load-format=tensorizer'))
+                         'load_format=tensorizer is specified when '
+                         'initializing an LLMEngine, either via the CLI '
+                         'when running the vLLM OpenAI inference server '
+                         'with a JSON string passed to '
+                         '--model-loader-extra-config or as arguments given '
+                         'to TensorizerConfig when passed to '
+                         'model_loader_extra_config in the constructor '
+                         'for LLMEngine.'))
 
         group.add_argument(
             "--tensorizer-uri",
