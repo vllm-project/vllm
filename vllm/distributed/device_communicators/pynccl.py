@@ -20,14 +20,15 @@
 # variable in the code.
 
 import ctypes
-import datetime
 import platform
+from typing import Optional
 
 # ===================== import region =====================
 import torch
 import torch.distributed as dist
-from torch.distributed import ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp
 
+from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
 from vllm.utils import find_nccl_library, nccl_integrity_check
 
@@ -195,66 +196,46 @@ class NCCLCommunicator:
 
     def __init__(
         self,
-        backend=None,
-        init_method=None,
-        timeout=datetime.timedelta(seconds=10),
-        world_size: int = -1,
-        rank: int = -1,
-        store=None,
-        group_name: str = "",
-        pg_options=None,
+        group: Optional[ProcessGroup] = None,
         local_rank: int = -1,
     ):
-        if not dist.is_initialized():
-            backend = backend or "nccl"
-            assert backend == 'nccl', (
-                "only use nccl backend for starting the NCCL communicator")
-            dist.init_process_group(backend=backend,
-                                    init_method=init_method,
-                                    timeout=timeout,
-                                    world_size=world_size,
-                                    rank=rank,
-                                    store=store,
-                                    group_name=group_name,
-                                    pg_options=pg_options)
-        self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
+        assert dist.is_initialized()
+        group = get_cpu_world_group(group) if group is None else group
+        assert dist.get_backend(group) != dist.Backend.NCCL, (
+            "NCCLCommunicator should be attached to a non-NCCL group.")
+        self.group = group
+        self.rank = dist.get_rank(group)
+        self.world_size = dist.get_world_size(group)
         if local_rank == -1:
-            local_rank = self.rank
+            local_rank = get_local_rank()
         self.local_rank = local_rank
-        # don't use these args, as they can be -1
-        # use `self.rank`, `self.local_rank` and `self.world_size` instead
-        del world_size, rank, local_rank
-        torch.cuda.set_device(self.local_rank)
         if self.rank == 0:
             self.unique_id = ncclGetUniqueId()
         else:
             self.unique_id = NcclUniqueId()
-        tensor = torch.ByteTensor(list(self.unique_id.internal)).cuda(
-            self.local_rank)
-        dist.broadcast(tensor, src=0)
-        byte_list = tensor.cpu().tolist()
+        tensor = torch.ByteTensor(list(self.unique_id.internal))
+        dist.broadcast(tensor, src=0, group=group)
+        byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
         result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
                                      self.unique_id, self.rank)
         assert result == 0
-        self.stream = None
+        self.stream = torch.cuda.Stream(device=f"cuda:{self.local_rank}")
 
     def all_reduce(self,
                    tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None):
-        stream = stream or self.stream
-        stream_p = ctypes.c_void_p() if stream is None else ctypes.c_void_p(
-            stream.cuda_stream)
+        if stream is None:
+            stream = self.stream
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
                                   ncclDataType_t.from_torch(tensor.dtype),
                                   ncclRedOp_t.from_torch(op), self.comm,
-                                  stream_p)
+                                  ctypes.c_void_p(stream.cuda_stream))
         assert result == 0
 
     def __del__(self):
