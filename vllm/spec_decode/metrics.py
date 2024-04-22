@@ -112,6 +112,7 @@ class AsyncMetricsCollector:
 
         Returns a CUDA event recording when the copy is complete.
         """
+        assert self._copy_stream is not None
         self._copy_stream.wait_stream(torch.cuda.current_stream())
 
         with torch.cuda.stream(self._copy_stream):

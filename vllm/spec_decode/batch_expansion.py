@@ -112,7 +112,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     def _expand_batch(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        proposal_token_ids_list: List[TokenId],
+        proposal_token_ids_list: List[List[TokenId]],
         proposal_lens_list: List[int],
     ) -> Tuple[List[int], List[int], List[SequenceGroupMetadata], int]:
         """Given the input sequences and potentially multiple corresponding
@@ -374,7 +374,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 [0, 1, 2]
                 [0, 1, 2, 3]
         """
-        empty_token_ids = []
+        empty_token_ids: List[TokenId] = []
 
         token_ids_to_score = [empty_token_ids]
         token_ids_to_score.extend([
