@@ -188,12 +188,12 @@ Wait until the service is ready:
 
   Services
   NAME  VERSION  UPTIME  STATUS  REPLICAS  ENDPOINT
-  vllm  1    35s   READY   2/2     xx.yy.zz.100:30001
+  vllm  1        35s     READY   2/2       xx.yy.zz.100:30001
 
   Service Replicas
-  SERVICE_NAME  ID  VERSION  IP      LAUNCHED   RESOURCES      STATUS  REGION
-  vllm      1   1    xx.yy.zz.121  18 mins ago  1x GCP({'L4': 1})  READY   us-east4
-  vllm      2   1    xx.yy.zz.245  18 mins ago  1x GCP({'L4': 1})  READY   us-east4
+  SERVICE_NAME  ID  VERSION  IP            LAUNCHED     RESOURCES          STATUS  REGION
+  vllm          1   1        xx.yy.zz.121  18 mins ago  1x GCP({'L4': 1})  READY   us-east4
+  vllm          2   1        xx.yy.zz.245  18 mins ago  1x GCP({'L4': 1})  READY   us-east4
 
 .. raw:: html
   
