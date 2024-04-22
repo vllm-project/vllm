@@ -187,14 +187,12 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 5,
-        },
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -462,16 +460,18 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
+@pytest.mark.parametrize(
+    "test_llm_kwargs",
+    [
+        {
+            "speculative_model": "JackFram/llama-68m",
+            "num_speculative_tokens": 5,
 
-        # Artificially limit the draft model max model len; this forces vLLM to
-        # skip speculation once the sequences grow beyond 32-k tokens.
-        "speculative_max_model_len": 32,
-    },
-])
+            # Artificially limit the draft model max model len; this forces vLLM
+            # to skip speculation once the sequences grow beyond 32-k tokens.
+            "speculative_max_model_len": 32,
+        },
+    ])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
