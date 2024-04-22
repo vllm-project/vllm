@@ -5,7 +5,16 @@ set -ex
 # Print ROCm version
 rocminfo
 
-# Try building the docker image
+echo "reset" > /opt/amdgpu/etc/gpu_state
+
+while true; do
+        sleep 3
+        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+                echo "GPUs state is \"clean\""
+                break
+        fi
+done
+
 docker build -t rocm -f Dockerfile.rocm .
 
 # Setup cleanup
