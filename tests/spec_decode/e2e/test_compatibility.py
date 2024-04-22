@@ -8,16 +8,9 @@ from .conftest import get_output_from_llm_generator
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
         "model": "JackFram/llama-68m",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Skip real loading for fast test.
-        "load_format": "dummy",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
 
         # Required for spec decode.
         "use_v2_block_manager": True
@@ -58,16 +51,9 @@ def test_spec_decode_xfail_ray(test_llm_generator):
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
         "model": "JackFram/llama-68m",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Skip real loading for fast test.
-        "load_format": "dummy",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
 
         # Required for spec decode.
         "use_v2_block_manager": True
@@ -104,16 +90,9 @@ def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
         "model": "meta-llama/Llama-2-7b-chat-hf",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Skip real loading for fast test.
-        "load_format": "dummy",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
 
         # Required for spec decode.
         "use_v2_block_manager": True
@@ -163,16 +142,9 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        # Use a small model for a fast test.
         "model": "JackFram/llama-68m",
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-
-        # Skip real loading for fast test.
-        "load_format": "dummy",
-
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
