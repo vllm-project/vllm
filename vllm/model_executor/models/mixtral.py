@@ -202,8 +202,8 @@ class MixtralAttention(nn.Module):
         self.sliding_window = sliding_window
 
         if isinstance(linear_method, Fp8LinearMethod):
-            # If we are using FP8, we currently do not want to
-            # quantize the attention layers until we improve
+            # FIXME(pcmoritz): If we are using FP8, we currently do
+            # not want to quantize the attention layers until we improve
             # the performance and make sure the accuracy is good.
             linear_method = None
 
