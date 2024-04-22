@@ -364,7 +364,8 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     a vLLM tensorized marker.
 
     Args:
-        tensorizer_args: The tensorizer_args to check.
+        tensorizer_config: The TensorizerConfig object containing the
+            tensorizer_uri to the serialized model.
 
     Returns:
         bool: True if the model is a vLLM model, False otherwise.

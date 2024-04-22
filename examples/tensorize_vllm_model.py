@@ -29,7 +29,8 @@ deserialize vLLM models. These models can be loaded using tensorizer
 to the GPU extremely quickly over an HTTP/HTTPS endpoint, an S3 endpoint,
 or locally. Tensor encryption and decryption is also supported, although 
 libsodium must be installed to use it. Install vllm with tensorizer support 
-using `pip install vllm[tensorizer]`.
+using `pip install vllm[tensorizer]`. To learn more about tensorizer, visit
+https://github.com/coreweave/tensorizer
 
 To serialize a model, install vLLM from source, then run something 
 like this from the root level of this repository:
