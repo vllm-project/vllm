@@ -544,20 +544,8 @@ class LLMEngine:
 
         # Log stats.
         if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
-            if output and output[0].spec_decode_worker_metrics is not None:
-                # TODO Integrate speculative metrics with Prometheus/stdout
-                # stats logger.
-                metrics = output[0].spec_decode_worker_metrics
-                logger.info(
-                    "Speculative metrics: "
-                    f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
-                    f"System efficiency: {metrics.system_efficiency:.3f}, "
-                    f"Number of speculative tokens: {metrics.num_spec_tokens}, "
-                    f"Number of accepted tokens: {metrics.accepted_tokens}, "
-                    f"Number of draft tokens tokens: {metrics.draft_tokens}, "
-                    f"Number of emitted tokens tokens: {metrics.emitted_tokens}."
-                )
+            self.stat_logger.log(
+                self._get_stats(scheduler_outputs, model_output=output))
 
         return request_outputs
 
@@ -566,9 +554,18 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger.log(self._get_stats(scheduler_outputs=None))
 
-    def _get_stats(self,
-                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
-        """Get Stats to be Logged to Prometheus."""
+    def _get_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs],
+            model_output: Optional[List[SamplerOutput]] = None) -> Stats:
+        """Get Stats to be Logged to Prometheus.
+
+        Args:
+            scheduler_outputs: Optional, used to populate metrics related to
+                the scheduled batch,
+            model_output: Optional, used to emit speculative decoding metrics
+                which are created by the workers.
+        """
         now = time.time()
 
         # KV Cache Usage in %.
@@ -625,6 +622,14 @@ class LLMEngine:
             time_to_first_tokens = time_last_iters if prompt_run else []
             time_per_output_tokens = [] if prompt_run else time_last_iters
 
+        # Spec decode, if enabled, emits specialized metrics from the worker in
+        # sampler output.
+        if model_output and (model_output[0].spec_decode_worker_metrics
+                             is not None):
+            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
+        else:
+            spec_decode_metrics = None
+
         return Stats(
             now=now,
             num_running=num_running,
@@ -637,6 +642,7 @@ class LLMEngine:
             time_to_first_tokens=time_to_first_tokens,
             time_per_output_tokens=time_per_output_tokens,
             time_e2e_requests=time_e2e_requests,
+            spec_decode_metrics=spec_decode_metrics,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
