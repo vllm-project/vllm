@@ -46,7 +46,8 @@ ignore = [
 python_version = "3.8"
 
 ignore_missing_imports = true
- check_untyped_defs = true
+check_untyped_defs = true
+follow_imports = "skip"
 
 files = "vllm"
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

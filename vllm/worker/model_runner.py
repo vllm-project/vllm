@@ -22,9 +22,9 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.multimodal import ImageFeatureData, ImagePixelData
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (ImageFeatureData, ImagePixelData, SamplerOutput,
-                           SequenceData, SequenceGroupMetadata)
+from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
