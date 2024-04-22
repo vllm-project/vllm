@@ -1,9 +1,10 @@
-from xformers import ops as xops
-import torch
 import random
-from vllm_flash_attn import flash_attn_varlen_func
-from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
+
 import pytest
+import torch
+from vllm_flash_attn import flash_attn_varlen_func
+from xformers import ops as xops
+from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
 NUM_HEADS = [8]
 NUM_QUERIES_PER_KV = [1]
