@@ -74,7 +74,6 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
     try:
         import vllm_flash_attn  # noqa: F401
     except ImportError:
-        logger.info("vllm_flash_attn is not found.")
         logger.info(
             "Cannot use FlashAttention backend because the vllm_flash_attn "
             "package is not found. `pip install vllm-flash-attn` for better "
