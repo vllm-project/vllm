@@ -1,6 +1,5 @@
 import copy
 import json
-import logging
 import math
 import os
 import re
@@ -11,13 +10,14 @@ import torch
 from torch import nn
 
 from vllm.config import LoRAConfig
+from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA, LoRAMapping, from_layer,
                               from_layer_logits_processor)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 from vllm.utils import LRUCache, is_pin_memory_available
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
 
@@ -191,6 +191,7 @@ class LoRAModel:
     def from_local_checkpoint(
         cls,
         lora_dir: str,
+        expected_lora_modules: List[str],
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
@@ -206,6 +207,22 @@ class LoRAModel:
             lora_dir, "new_embeddings.safetensors")
         new_embeddings_bin_file_path = os.path.join(lora_dir,
                                                     "new_embeddings.bin")
+        with open(lora_config_path) as f:
+            config = json.load(f)
+        target_modules = config["target_modules"]
+        unexpected_modules = []
+        for module in target_modules:
+            # Compatible with more modules, such as:layers.11.self_attn.k_proj
+            part_name = module.split(".")[-1]
+            if part_name not in expected_lora_modules:
+                unexpected_modules.append(module)
+        # loaded lora's target modules must be a subset of expected_lora_modules
+        if unexpected_modules:
+            raise ValueError(
+                f"While loading {lora_dir}, expected"
+                f" target modules in {expected_lora_modules}"
+                f" but received {unexpected_modules}."
+                f" Please verify that the loaded LoRA module is correct")
         if os.path.isfile(lora_tensor_path):
             tensors = safetensors.torch.load_file(lora_tensor_path)
         elif os.path.isfile(lora_bin_file_path):
@@ -220,8 +237,6 @@ class LoRAModel:
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path)
 
-        with open(lora_config_path) as f:
-            config = json.load(f)
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
         return cls.from_lora_tensors(

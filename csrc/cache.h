@@ -21,7 +21,8 @@ void reshape_and_cache(
   torch::Tensor& key_cache,
   torch::Tensor& value_cache,
   torch::Tensor& slot_mapping,
-  const std::string& kv_cache_dtype);
+  const std::string& kv_cache_dtype,
+  const float kv_scale);
 
 void reshape_and_cache_flash(
   torch::Tensor& key,
@@ -32,6 +33,6 @@ void reshape_and_cache_flash(
   const std::string& kv_cache_dtype);
 
 // Just for unittest
-void convert_fp8_e5m2(
+void convert_fp8(
   torch::Tensor& src_cache,
   torch::Tensor& dst_cache);

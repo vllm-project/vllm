@@ -7,7 +7,8 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 
 from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata,
+                                              AttentionMetadataPerStage)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -56,7 +57,8 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class FlashAttentionMetadata(AttentionMetadata):
+class FlashAttentionMetadata(AttentionMetadataPerStage,
+                             PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -71,10 +73,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
-    # The number of prompt tokens. Doesn't include padding.
-    num_prompt_tokens: int
-    # The number of generation tokens. Doesn't include padding.
-    num_generation_tokens: int
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
@@ -130,18 +128,27 @@ class FlashAttentionMetadata(AttentionMetadata):
 class FlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prompt_tokens -------------->|	
-    |<--prompt_0-->|<--prompt_1-->|...|<--prompt_N-1-->|
+    |<--------------- num_prefill_tokens ----------------->|	
+    |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
     Otherwise, the layout is as follows:	
-    |<------------------ num_generation_tokens (M) ----------------->|	
-    |<--generation_0-->|..........|<--generation_M-1-->|<--padding-->|
+    |<----------------- num_decode_tokens ------------------>|	
+    |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
     Currently, prompt tokens don't contain any padding.
 
     The prompts might have different lengths, while the generation tokens
     always have length 1.
+
+    If chunked prefill is enabled, prefill tokens and decode tokens can be
+    batched together in a flattened 1D query.
+
+    |<----- num_prefill_tokens ---->|<------- num_decode_tokens --------->|
+    |<-prefill_0->|...|<-prefill_N-1->|<--decode_0-->|...|<--decode_M-1-->|
+
+    Currently, cuda graph is disabled for chunked prefill, meaning there's no
+    padding between prefill and decode tokens.
     """
 
     def __init__(
@@ -178,7 +185,8 @@ class FlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: AttentionMetadata[FlashAttentionMetadata],
+        kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -191,6 +199,8 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
+
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
         query = query.view(-1, self.num_heads, self.head_size)
@@ -213,50 +223,70 @@ class FlashAttentionImpl(AttentionImpl):
                 attn_metadata.kv_cache_dtype,
             )
 
-        if attn_metadata.is_prompt:
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+
+        output = torch.empty_like(query)
+        # Query for decode. KV is not needed because it is already cached.
+        decode_query = query[num_prefill_tokens:]
+        # QKV for prefill.
+        query = query[:num_prefill_tokens]
+        key = key[:num_prefill_tokens]
+        value = value[:num_prefill_tokens]
+
+        assert query.shape[0] == num_prefill_tokens
+        assert decode_query.shape[0] == num_decode_tokens
+
+        if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or attn_metadata.block_tables.numel() == 0:
+            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                output = flash_attn_varlen_func(
+                out = flash_attn_varlen_func(
                     q=query,
                     k=key,
                     v=value,
-                    cu_seqlens_q=attn_metadata.seq_start_loc,
-                    cu_seqlens_k=attn_metadata.seq_start_loc,
-                    max_seqlen_q=attn_metadata.max_prompt_len,
-                    max_seqlen_k=attn_metadata.max_prompt_len,
+                    cu_seqlens_q=prefill_meta.seq_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_prompt_len,
+                    max_seqlen_k=prefill_meta.max_prompt_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                 )
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
-                output = flash_attn_varlen_func(
+                # FIXME(woosuk): FlashAttention does not support FP8 KV cache.
+                output[:num_prefill_tokens] = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
                     v=value_cache,
-                    cu_seqlens_q=attn_metadata.seq_start_loc,
-                    cu_seqlens_k=attn_metadata.context_lens,  # FIXME
-                    max_seqlen_q=attn_metadata.max_prompt_len,
-                    max_seqlen_k=attn_metadata.max_context_len,
+                    cu_seqlens_q=prefill_meta.seq_start_loc,
+                    cu_seqlens_k=prefill_meta.context_lens,  # FIXME
+                    max_seqlen_q=prefill_meta.max_prompt_len,
+                    max_seqlen_k=prefill_meta.max_context_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
-                    block_table=attn_metadata.block_tables,
+                    block_table=prefill_meta.block_tables,
                 )
-        else:
+
+        if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             # TODO(skrider): tune num_splits heuristic
-            output = flash_attn_with_kvcache(
+            output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 query.unsqueeze(1),
                 key_cache,
                 value_cache,
-                block_table=attn_metadata.block_tables,
-                cache_seqlens=attn_metadata.context_lens,
+                block_table=decode_meta.block_tables,
+                cache_seqlens=decode_meta.context_lens,
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
