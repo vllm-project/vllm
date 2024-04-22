@@ -18,7 +18,7 @@ steps:
 
   - label: ":docker: build image ROCm"
     commands:
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_ROCm }} --target test --progress plain --file Dockerfile.rocm ."
+      - "docker build --build-arg max_jobs=16 --tag {{ docker_image_ROCm }} --target test_amd --progress plain --file Dockerfile.rocm ."
       - "docker push {{ docker_image_ROCm }}"
     env:
       DOCKER_BUILDKIT: "1"
