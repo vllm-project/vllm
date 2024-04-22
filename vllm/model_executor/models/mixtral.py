@@ -155,13 +155,13 @@ class MixtralMoE(nn.Module):
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
-                                        self.ws_scale,
-                                        self.w2s_scale,
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
                                         inplace=True,
-                                        use_fp8=self.use_fp8)
+                                        use_fp8=self.use_fp8,
+                                        w1_scale=self.ws_scale,
+                                        w2_scale=self.w2s_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
