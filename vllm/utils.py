@@ -563,10 +563,12 @@ def find_library(lib_name: str) -> str:
     # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
     # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
     # `/sbin/ldconfig` should exist in all Linux systems.
+    # `/sbin/ldconfig` searches the library in the system
     libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
     # each line looks like the following:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
+    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
     env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
     if not locs and env_ld_library_path:
         locs = [
