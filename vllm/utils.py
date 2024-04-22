@@ -164,6 +164,17 @@ def random_uuid() -> str:
 
 
 @lru_cache(maxsize=None)
+def get_vllm_instance_id():
+    """
+    If the environment variable VLLM_INSTANCE_ID is set, return it.
+    Otherwise, return a random UUID.
+    Instance id represents an instance of the VLLM. All processes in the same
+    instance should have the same instance id.
+    """
+    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+
+
+@lru_cache(maxsize=None)
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(uname()).lower()
@@ -274,7 +285,7 @@ def get_open_port() -> int:
 
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
-        if k in os.environ:
+        if k in os.environ and os.environ[k] != v:
             logger.warning(f"Overwriting environment variable {k} "
                            f"from '{os.environ[k]}' to '{v}'")
         os.environ[k] = v

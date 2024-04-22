@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 from torch.nn.parameter import Parameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -47,6 +48,13 @@ class LinearMethodBase(ABC):
 
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
+
+    def process_weights_after_loading(self, layer: nn.Module) -> None:
+        """Process the weight after loading.
+
+        This can be used for example, to transpose weights for computation.
+        """
+        return
 
 
 class UnquantizedLinearMethod(LinearMethodBase):
