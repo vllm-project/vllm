@@ -16,20 +16,75 @@ steps:
           limit: 5
   - wait
 
-  - label: "AMD Entrypoints Test"
+  - label: "AMD Default Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_entrypoints.sh"
+    command: "bash .buildkite/run-amd-test.sh"
 
-  - label: "AMD Kernels Test"
+  - label: "AMD Regression Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_kernels.sh"
+    command: "bash .buildkite/run-amd-test_regression.sh"
 
-  - label: "AMD LoRA Test"
+  - label: "AMD Async Engine Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_lora.sh"
+    command: "bash .buildkite/run-amd-test_async_engine.sh"
+
+  - label: "AMD Basic Correctness Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_basic_correctness.sh"
+
+  - label: "AMD Core Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_core.sh"
+
+  - label: "AMD Distributed Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_distributed.sh"
+
+  - label: "AMD Engine Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_engine.sh"
+
+  - label: "AMD Examples Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_examples.sh"
+
+  - label: "AMD Llava Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_llava.sh"
+
+  - label: "AMD Prefix Caching Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_prefix_caching.sh"
+
+  - label: "AMD Logits Processor Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_logits_processor.sh"
+
+  - label: "AMD Worker Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_worker.sh"
+
+  - label: "AMD Speculative Decoding Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_speculative_decoding.sh"
+
+  - label: "AMD Tensorizer Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test_tensorizer.sh"
 
   - label: "Neuron Test"
     agents:
