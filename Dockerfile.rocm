@@ -14,7 +14,7 @@ RUN echo "Base image is $BASE_IMAGE"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
 
-ARG FA_BRANCH="3d2b6f5"
+ARG FA_BRANCH="ae7928c"
 RUN echo "FA_BRANCH is $FA_BRANCH"
 
 # whether to build flash-attention
@@ -92,13 +92,10 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
 COPY ./ /app/vllm
 
 RUN python3 -m pip install --upgrade pip numba
-RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
-    && if [ "$BUILD_FA" = "1" ]; then \
-       bash patch_xformers.rocm.sh; fi \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
     && cd ..
