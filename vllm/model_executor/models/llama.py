@@ -166,16 +166,30 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
-        # TODO: prefill needs edit as well, must store pre-rope keys
-
         use_attn_sinks = True
         llama_context_len = 4096
-        if use_attn_sinks and attn_metadata.decode_metadata is not None:
+
+        if not use_attn_sinks:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                    self.kv_scale)
+            output, _ = self.o_proj(attn_output)
+            return output
+
+        # what if metadata has both prefill and decode?
+        if attn_metadata.prefill_metadata is not None:
+            k_original = k.clone()
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                    self.kv_scale, k_original)
+            output, _ = self.o_proj(attn_output)
+            return output
+
+        elif attn_metadata.decode_metadata is not None:
             k_original = k.clone()
             # streamingLLM: use pos in cache
             positions = torch.clamp(positions, max=llama_context_len - 1)
-            q = self.rotary_emb._forward_single(positions, q)
-            k = self.rotary_emb._forward_single(positions, k)
+            q, k = self.rotary_emb(positions, q, k)
             
             # key cache reshape: [num_blocks, num_heads * head_size, block_size]
             num_blocks = kv_cache.shape[1]
@@ -246,7 +260,7 @@ class LlamaAttention(nn.Module):
 
                 past_keys = original_keys[i]
                 block_table = original_block_tables[i]
-                start = 0 if num_past_tokens < llama_context_len else num_past_tokens - llama_context_len + 1 + block_size
+                start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
                 for abs_pos in range(start, end):
                     logic_bnum = abs_pos // block_size

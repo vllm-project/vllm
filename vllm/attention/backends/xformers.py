@@ -230,6 +230,20 @@ class XFormersImpl(AttentionImpl):
                     query, key, value, prefill_meta)
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
+
+                # in prefill, rewrite all keys with original
+                use_attn_sinks = True
+                if use_attn_sinks and kv_cache is not None:
+                    key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
+                    PagedAttention.write_to_paged_cache(
+                        key_original,
+                        value,
+                        key_cache,
+                        value_cache,
+                        attn_metadata.slot_mapping,
+                        attn_metadata.kv_cache_dtype,
+                        kv_scale
+                    )
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
