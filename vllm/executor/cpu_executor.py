@@ -45,6 +45,7 @@ class CPUExecutor(ExecutorBase):
             rank=0,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
+            vision_language_config=self.vision_language_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )
