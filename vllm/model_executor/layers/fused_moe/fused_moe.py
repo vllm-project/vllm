@@ -270,7 +270,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
 
 def get_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
     device_name = torch.cuda.get_device_name().replace(" ", "_")
-    dtype_selector = "" if not dtype else f",dtype={dtype}"
+    dtype_selector = "" if not dtype else f",{dtype=}"
     return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
 
 
