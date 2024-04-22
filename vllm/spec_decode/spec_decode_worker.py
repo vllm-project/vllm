@@ -110,6 +110,32 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             device=self.device,
             vocab_size=self._vocab_size)
 
+        self._configure_model_sampler_for_spec_decode()
+
+    def _configure_model_sampler_for_spec_decode(self):
+        """Configure model sampler to emit GPU tensors. This allows spec decode
+        to keep data on device without transferring to CPU and serializing,
+        which significantly reduces overhead of rejection sampling.
+
+        NOTE(cade): This breaks abstraction boundaries pretty badly. The better
+        design is to have the "move to CPU and serialize" sampling decision be
+        done outside of the model/sampler; this way the "last-mile" worker
+        object which interfaces with the scheduler can serialize and incur the
+        performance hit as necessary. This allows us to run the worker several
+        iterations in a row without incurring the "move to CPU and serialize"
+        performance penalty.
+
+        Since this requires a large change to vLLM, we defer it to later and
+        temporarily accept this broken abstraction boundary.
+
+        NOTE(cade): This will require a special check if the proposer worker
+        does not have a sampler (e.g. ngram speculation).
+        """
+        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+         ) = True
+        (self.proposer_worker.model_runner.model.sampler.
+         include_gpu_probs_tensor) = True
+
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
 
