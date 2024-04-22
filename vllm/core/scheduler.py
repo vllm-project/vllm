@@ -298,7 +298,6 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        logger.debug(f"add_seq_group {seq_group.request_id}")
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -428,7 +427,7 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                logger.debug(f"append slot for {seq_group}")
+                # logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
@@ -1064,10 +1063,16 @@ class Scheduler:
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
         if self.scheduler_config.chunked_prefill_enabled:
-            return self._schedule_chunked_prefill()
+            s = time.time()
+            result = self._schedule_chunked_prefill()
+            print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
+            return result
         else:
-            # return self._schedule_default()
-            return self._schedule_before_regression()
+            s = time.time()
+            result = self._schedule_default()
+            # result = self._schedule_before_regression()
+            print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
+            return result
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
         """Determine whether or not we have enough space in the KV cache to
