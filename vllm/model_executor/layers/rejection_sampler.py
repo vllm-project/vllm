@@ -310,7 +310,7 @@ class RejectionSampler(nn.Module):
 
         # We disable bonus tokens because it causes corrupt KV cache for
         # proposal methods that require KV cache. We can fix it by "prefilling"
-        # the bonus token in the proposer.
+        # the bonus token in the proposer. The following issue tracks the fix.
         # https://github.com/vllm-project/vllm/issues/4212
         output_with_bonus_tokens[:, -1] = -1
 
@@ -337,20 +337,16 @@ class RejectionSampler(nn.Module):
         draft_batch_size, num_draft_probs, draft_vocab_size = draft_probs.shape
         draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
 
-        try:
-            assert draft_batch_size == target_batch_size
-            assert num_draft_probs == num_target_probs
-            assert (draft_vocab_size == target_vocab_size
-                    ), f"{draft_vocab_size=} {target_vocab_size=}"
+        assert draft_batch_size == target_batch_size
+        assert num_draft_probs == num_target_probs
+        assert (draft_vocab_size == target_vocab_size
+                ), f"{draft_vocab_size=} {target_vocab_size=}"
 
-            assert draft_token_ids_batch_size == draft_batch_size
-            assert num_draft_token_ids == num_draft_probs
+        assert draft_token_ids_batch_size == draft_batch_size
+        assert num_draft_token_ids == num_draft_probs
 
-            assert bonus_batch_size == target_batch_size
-            assert num_bonus_tokens == self._num_bonus_tokens
-        except:
-            #breakpoint()
-            raise
+        assert bonus_batch_size == target_batch_size
+        assert num_bonus_tokens == self._num_bonus_tokens
 
     def _raise_if_incorrect_dtype(
         self,

@@ -488,7 +488,6 @@ def _sample_with_torch(
         seq_group_ids, seq_groups, is_prompts, sample_indices = sample_metadata[
             sampling_type]
         if sampling_type == SamplingType.GREEDY:
-            # This merely serializes the samples.
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups, is_prompts,

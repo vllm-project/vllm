@@ -178,7 +178,8 @@ class AsyncMetricsCollector:
         """
         # Determine the number of sequences that have been speculated on. Since
         # the batch size can be variable, we divide by k.
-        total_num_spec_seqs = int(draft_tokens / k)
+        assert draft_tokens % k == 0
+        total_num_spec_seqs = draft_tokens // k
 
         # A single sequence may emit k accepted tokens and one bonus token in
         # the best case.
