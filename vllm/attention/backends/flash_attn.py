@@ -275,7 +275,7 @@ class FlashAttentionImpl(AttentionImpl):
             # Decoding run.
             # TODO(skrider): tune num_splits heuristic
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
-                query.unsqueeze(1),
+                decode_query.unsqueeze(1),
                 key_cache,
                 value_cache,
                 block_table=decode_meta.block_tables,
@@ -283,7 +283,7 @@ class FlashAttentionImpl(AttentionImpl):
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
-            )
+            ).squeeze(1)
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
