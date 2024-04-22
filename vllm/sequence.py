@@ -11,6 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalData
     from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 
@@ -379,8 +380,7 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        multi_modal_kwargs: Extra kwargs to the model that are associated with
-        multi modal data.
+        multi_modal_data: Multi modal data.
     """
 
     def __init__(
@@ -390,7 +390,7 @@ class SequenceGroup:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
+        multi_modal_data: Optional["MultiModalData"] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -403,7 +403,7 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
-        self.multi_modal_kwargs = multi_modal_kwargs or {}
+        self.multi_modal_data = multi_modal_data
 
     @property
     def prompt(self) -> str:
@@ -554,7 +554,7 @@ class SequenceGroupMetadata:
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
-        multi_modal_kwargs: Optional[Dict[str, torch.Tensor]] = None,
+        multi_modal_data: Optional["MultiModalData"] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -563,7 +563,7 @@ class SequenceGroupMetadata:
         self.block_tables = block_tables
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
-        self.multi_modal_kwargs = multi_modal_kwargs or {}
+        self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
 

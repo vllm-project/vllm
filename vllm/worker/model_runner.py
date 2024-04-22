@@ -148,6 +148,15 @@ class ModelRunner:
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
 
+        # Create processor for multi-modal data
+        if self.vision_language_config is not None:
+            self.input_processor = MM_REGISTRY.create_input_processor(
+                self.model_config,
+                self.vision_language_config,
+            )
+        else:
+            self.input_processor = None
+
         # Lazy initialization
         self.model: torch.nn.Module  # Set after load_model
         self.block_size: int  # Set after initial profiling.
@@ -309,8 +318,17 @@ class ModelRunner:
                 (prompt_len - computed_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
-            for k, v in seq_group_metadata.multi_modal_kwargs.items():
-                multi_modal_kwargs_list[k].append(v)
+            mm_data = seq_group_metadata.multi_modal_data
+            if mm_data is not None:
+                # Process multi-modal data
+                if self.input_processor is None:
+                    raise ValueError(
+                        "Multi-modal inputs are only supported by "
+                        "vision language models.")
+
+                mm_kwargs = self.input_processor(mm_data)
+                for k, v in mm_kwargs.items():
+                    multi_modal_kwargs_list[k].append(v)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -904,8 +922,8 @@ class ModelRunner:
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data, multi_modal_kwargs = _prepare_fake_inputs(
-                seq_len, self.model_config, self.vision_language_config)
+            seq_data, multi_modal_data = _prepare_fake_inputs(
+                seq_len, self.vision_language_config)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -914,7 +932,7 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                multi_modal_kwargs=multi_modal_kwargs,
+                multi_modal_data=multi_modal_data,
             )
             seqs.append(seq)
 
@@ -1188,8 +1206,7 @@ def _get_graph_batch_size(batch_size: int) -> int:
 
 
 def _prepare_fake_inputs(
-        seq_len: int, model_config: ModelConfig,
-        vision_language_config: Optional[VisionLanguageConfig]):
+        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
     """Prepare fake inputs for profile run."""
     if vision_language_config:
         prompt_tokens = [
@@ -1216,11 +1233,8 @@ def _prepare_fake_inputs(
             fake_mm_data = ImageFeatureData(values)
         else:
             raise NotImplementedError
-
-        fake_mm_kwargs = MM_REGISTRY.process(fake_mm_data, model_config,
-                                             vision_language_config)
     else:
         prompt_tokens = [0] * seq_len
-        fake_mm_kwargs = {}
+        fake_mm_data = None
 
-    return SequenceData(prompt_tokens), fake_mm_kwargs
+    return SequenceData(prompt_tokens), fake_mm_data

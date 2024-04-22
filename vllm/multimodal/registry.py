@@ -30,8 +30,9 @@ class MultiModalRootRegistry:
                 MultiModalDataProcessor[ImageFeatureData]] = None):
         return self._image_feature_registry.register(processor)
 
-    def process(self, data: MultiModalData, model_config: ModelConfig,
-                vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
+    def process_input(
+            self, data: MultiModalData, model_config: ModelConfig,
+            vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
@@ -41,7 +42,7 @@ class MultiModalRootRegistry:
             return self._image_pixel_registry \
                 .process(model_cls, data, model_config, vlm_config)
         if isinstance(data, ImageFeatureData):
-            return self._image_feature_registry\
+            return self._image_feature_registry \
                 .process(model_cls, data, model_config, vlm_config)
 
         msg = f"Unknown multi-modal data type: {type(data)}"
@@ -50,7 +51,7 @@ class MultiModalRootRegistry:
     def create_input_processor(
             self, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> MultiModalInputProcessor:
-        return functools.partial(self.process,
+        return functools.partial(self.process_input,
                                  model_config=model_config,
                                  vlm_config=vlm_config)
 

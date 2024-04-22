@@ -19,7 +19,7 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MM_REGISTRY, MultiModalData
+from vllm.multimodal import MultiModalData
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, Sequence, SequenceGroup
@@ -210,15 +210,6 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
-
-        # Create processor for multi-modal data
-        if self.vision_language_config is not None:
-            self.input_processor = MM_REGISTRY.create_input_processor(
-                self.model_config,
-                self.vision_language_config,
-            )
-        else:
-            self.input_processor = None
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
@@ -432,19 +423,9 @@ class LLMEngine:
         sampling_params.update_from_generation_config(
             self.generation_config_fields)
 
-        # Process multi-modal data
-        if multi_modal_data is None:
-            mm_kwargs = {}
-        else:
-            if self.input_processor is None:
-                raise ValueError("Multi-modal inputs are only supported by "
-                                 "vision language models.")
-
-            mm_kwargs = self.input_processor(multi_modal_data)
-
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, mm_kwargs)
+                                  arrival_time, lora_request, multi_modal_data)
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
