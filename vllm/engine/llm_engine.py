@@ -19,7 +19,7 @@ from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalData
+from vllm.multimodal import MM_REGISTRY, MultiModalData
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, Sequence, SequenceGroup
@@ -419,8 +419,8 @@ class LLMEngine:
                 "Multi-modal inputs are only supported by "
                 "vision language models.")
 
-            mm_kwargs = multi_modal_data.get_input_kwargs(
-                self.model_config, vlm_config)
+            mm_kwargs = MM_REGISTRY.process(multi_modal_data,
+                                            self.model_config, vlm_config)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,

@@ -16,6 +16,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.multimodal import MM_REGISTRY
 from vllm.sequence import SamplerOutput
 
 _KEYS_TO_MODIFY_MAPPING = {
@@ -72,6 +73,8 @@ class LlavaImageFeatureInputs(TypedDict):
 LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 
 
+@MM_REGISTRY.register_image_feature_input()
+@MM_REGISTRY.register_image_pixel_input()
 class LlavaForConditionalGeneration(nn.Module):
 
     def __init__(self,
@@ -234,10 +237,10 @@ class LlavaForConditionalGeneration(nn.Module):
         This way, the `positions` and `attn_metadata` are consistent
         with the `input_ids`.
 
-        The model takes two types of image inputs: 
+        The model takes two types of image inputs:
         PIXEL_VALUES and IMAGE_FEATURES.
         The following shows how each maps to huggingface implementation.
-        PIXEL_VALUES: 
+        PIXEL_VALUES:
         - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L353
         IMAGE_FEATURES:
         - https://github.com/huggingface/transformers/blob/07bdbeb/src/transformers/models/llava/modeling_llava.py#L430

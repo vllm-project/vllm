@@ -22,7 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import ImageFeatureData, ImagePixelData
+from vllm.multimodal import MM_REGISTRY, ImageFeatureData, ImagePixelData
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
@@ -1217,8 +1217,8 @@ def _prepare_fake_inputs(
         else:
             raise NotImplementedError
 
-        fake_mm_kwargs = fake_mm_data.get_input_kwargs(model_config,
-                                                       vision_language_config)
+        fake_mm_kwargs = MM_REGISTRY.process(fake_mm_data, model_config,
+                                             vision_language_config)
     else:
         prompt_tokens = [0] * seq_len
         fake_mm_kwargs = {}
