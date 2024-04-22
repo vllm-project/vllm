@@ -65,6 +65,7 @@ Documentation
    getting_started/neuron-installation
    getting_started/cpu-installation
    getting_started/quickstart
+   getting_started/examples/examples_index
 
 .. toctree::
    :maxdepth: 1
