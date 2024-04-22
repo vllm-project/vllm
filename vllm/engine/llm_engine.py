@@ -203,6 +203,15 @@ class LLMEngine:
                 labels=dict(model_name=model_config.model))
             self.stat_logger.info("cache_config", self.cache_config)
 
+        # Create processor for multi-modal data
+        if self.vision_language_config is not None:
+            self.input_processor = MM_REGISTRY.create_input_processor(
+                self.model_config,
+                self.vision_language_config,
+            )
+        else:
+            self.input_processor = None
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -414,13 +423,11 @@ class LLMEngine:
         if multi_modal_data is None:
             mm_kwargs = {}
         else:
-            vlm_config = self.vision_language_config
-            assert vlm_config is not None, (
-                "Multi-modal inputs are only supported by "
-                "vision language models.")
+            if self.input_processor is None:
+                raise ValueError("Multi-modal inputs are only supported by "
+                                 "vision language models.")
 
-            mm_kwargs = MM_REGISTRY.process(multi_modal_data,
-                                            self.model_config, vlm_config)
+            mm_kwargs = self.input_processor(multi_modal_data)
 
         # Create the sequence group.
         seq_group = SequenceGroup(request_id, [seq], sampling_params,

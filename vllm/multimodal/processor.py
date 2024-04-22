@@ -16,8 +16,8 @@ logger = init_logger(__name__)
 D = TypeVar('D', bound=MultiModalData)
 N = TypeVar('N', bound=Type[nn.Module])
 
-MultiModalProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
-                               Dict[str, torch.Tensor]]
+MultiModalDataProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
+                                   Dict[str, torch.Tensor]]
 """Returns a dictionary which are passed as keyword arguments to
 :meth:`torch.nn.Module.forward`.
 """
@@ -26,7 +26,8 @@ MultiModalProcessor = Callable[[D, ModelConfig, VisionLanguageConfig],
 class MultiModalProcessorBaseRegistry(ABC, Generic[D]):
 
     def __init__(self) -> None:
-        self._processors: Dict[Type[nn.Module], MultiModalProcessor[D]] = {}
+        self._processors: Dict[Type[nn.Module],
+                               MultiModalDataProcessor[D]] = {}
 
     @abstractmethod
     def _default_processor(
@@ -34,7 +35,7 @@ class MultiModalProcessorBaseRegistry(ABC, Generic[D]):
             vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
         raise NotImplementedError
 
-    def register(self, processor: Optional[MultiModalProcessor[D]] = None):
+    def register(self, processor: Optional[MultiModalDataProcessor[D]] = None):
 
         def wrapper(model_cls: N) -> N:
             if model_cls in self._processors:
