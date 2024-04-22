@@ -247,7 +247,8 @@ class StatLogger:
                         stats.spec_decode_metrics))
 
     def _format_spec_decode_metrics_str(
-            self, metrics: Optional["SpecDecodeWorkerMetrics"]) -> str:
+            self, metrics: "SpecDecodeWorkerMetrics") -> str:
+
         return ("Speculative metrics: "
                 f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
                 f"System efficiency: {metrics.system_efficiency:.3f}, "
