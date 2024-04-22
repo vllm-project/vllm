@@ -272,9 +272,14 @@ class RayGPUExecutor(ExecutorBase):
         use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers.
-        all_args and all_kwargs are used to pass heterogeneous arguments,
-        i.e. different arguments for each worker.
+        """Runs the given method on all workers. Can be used in the following
+        ways:
+
+        - args/kwargs: All workers share the same args/kwargs
+        - args/kwargs and driver_args/driver_kwargs: Driver worker has
+          different args
+        - all_args/all_kwargs: args/kwargs for each worker are specified
+          individually
         """
 
         if max_concurrent_workers:
