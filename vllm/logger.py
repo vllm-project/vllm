@@ -86,9 +86,8 @@ def init_logger(name: str) -> Logger:
 # The logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
-if VLLM_CONFIGURE_LOGGING:
+if VLLM_CONFIGURE_LOGGING or VLLM_LOGGING_CONFIG_PATH:
     _configure_vllm_root_logger()
-
 
 logger = init_logger(__name__)
 
