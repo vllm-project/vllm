@@ -16,21 +16,35 @@ _SEED_0_REPLACEMENT = 3403598558
 class SamplingMetadata:
     """Metadata for input sequences. Used in sampler.
 
+    Metadata is used for sampling (for the new token) and computing logprobs
+    (both prompt and sampled logprob).
+
     Args:
-        seq_groups: List of (seq_ids, sampling_params).
-        seq_data: Seq_id -> SequenceData.
-        prompt_lens: Lengths of prompts.
-        selected_token_indices: Token indices selected for sampling.
+        seq_groups: List of (seq_ids, sampling_params). In vLLM, each seq
+            group can have its own sampling parameters. Sorted by prefill
+            -> decode requests.
+        seq_data: Seq_id -> SequenceData. Should be equivalent to the seq_data
+            queued in a scheduler
+        prompt_lens: (num_prefill_seq_groups,) Lengths of entire prompt for
+            the prefill request. None if requests only contain decoding. The
+            length is equivalent to the number of prefill requests batched.
+        selected_token_indices: (num_query_tokens_to_logprob), Query token indices selected for sampling and
+            prompt & sample logprob calculations. E.g., if query tokens are
+            [1, 2, 3], and we want to sample 2 and 3, it will be [1, 2].
         categorized_sample_indices: SamplingType -> token indices to sample.
-        do_samples: Whether or not it should sample per seq_group. Each index
-            means each seq_group.
+            It is used to index into seleted tokens for sampling. For example,
+            if the query tokens is [1, 2, 3], assume 2 and 3 are chosen for
+            sampling and logprob ([2, 3]). If we want to sample both by greedy,
+            sampling, tensor will be {Greedy: [0, 1]}. If we want to sample only
+            the second token by random sample, it will be {Random: [1]}.
         generators: List of torch.Generators to use for seeded sampling
         perform_sampling: Whether to perform sampling. This option is used to
             make the sampling only happens in the driver worker, and disable
-            sampling in other worker processes.
-        subquery_lens: Length of query tokens. It only exists for seq groups
-            in a prefill stage (same length as prompt_lens). It could be
-            shorter than prompt_lens when prefill is chunked.
+            sampling in other worker processes. Setting this True is equivalent
+            to choose no indices for categorized_sample_indices.
+        subquery_lens: (num_prefill_seq_groups). Length of query tokens to
+            compute attention. None if all batched requests are decode.
+            The length is equivalent to the number of prefill requests batched.
     """
 
     def __init__(
@@ -40,7 +54,6 @@ class SamplingMetadata:
         prompt_lens: Optional[List[int]],
         selected_token_indices: torch.Tensor,
         categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
-        do_samples: List[bool],
         generators: Optional[List[torch.Generator]] = None,
         perform_sampling: bool = True,
         subquery_lens: Optional[List[int]] = None,
@@ -48,12 +61,11 @@ class SamplingMetadata:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
+        self.subquery_lens = subquery_lens
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
-        self.do_samples = do_samples
         self.generators = generators
         self.perform_sampling = perform_sampling
-        self.subquery_lens = subquery_lens
 
         self.num_prompts = len(prompt_lens) if prompt_lens is not None else 0
 
