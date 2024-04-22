@@ -539,12 +539,20 @@ def nccl_integrity_check(filepath):
     if the library is corrupted. if not, we will return
     the version of the library.
     """
+    import ctypes
     exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
     if exit_code != 0:
-        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
-    import ctypes
+        logger.info(
+            f"Failed to perform ldd check for NCCL library: {filepath}, "
+            f"try fallback to load {filepath} directly from system. It will depends "
+            f"on your current environment, please ensure that LD_LIBRARY_PATH"
+            f" has been set correctly."
+        )
+        try:
+            nccl = ctypes.CDLL(filepath)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load NCCL library from {filepath} . Error: {e}")
 
-    nccl = ctypes.CDLL(filepath)
     version = ctypes.c_int()
     nccl.ncclGetVersion.restype = ctypes.c_int
     nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
