@@ -200,7 +200,7 @@ class NCCLCommunicator:
         local_rank: int = -1,
     ):
         assert dist.is_initialized()
-        group = get_cpu_world_group(group) if group is None else group
+        group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "NCCLCommunicator should be attached to a non-NCCL group.")
         self.group = group
@@ -219,10 +219,14 @@ class NCCLCommunicator:
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
+        # NCCL communicator is bind to the current device, and each
+        # communicator can only bind to one unique device inside one group
+        device = torch.device(f"cuda:{self.local_rank}")
+        torch.cuda.set_device(device)
         result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
                                      self.unique_id, self.rank)
         assert result == 0
-        self.stream = torch.cuda.Stream(device=f"cuda:{self.local_rank}")
+        self.stream = torch.cuda.Stream(device=device)
 
     def all_reduce(self,
                    tensor: torch.Tensor,
