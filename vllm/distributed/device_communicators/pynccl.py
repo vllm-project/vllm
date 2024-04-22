@@ -21,14 +21,14 @@
 
 import ctypes
 import platform
-from typing import Optional
+from typing import Optional, Union
 
 # ===================== import region =====================
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
-from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
+from vllm.distributed.parallel_state import get_cpu_world_group
 from vllm.logger import init_logger
 from vllm.utils import find_nccl_library, nccl_integrity_check
 
@@ -197,8 +197,14 @@ class NCCLCommunicator:
     def __init__(
         self,
         group: Optional[ProcessGroup] = None,
-        local_rank: int = -1,
+        device: Optional[Union[int, str, torch.device]] = None,
     ):
+        """
+        NCCLCommunicator has to be bind to a specific device.
+        It is the caller's responsibility to make sure each communicator
+        is bind to a unique device.
+        By default, it will be bind to f"cuda:{local_rank}".
+        """
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
@@ -206,9 +212,6 @@ class NCCLCommunicator:
         self.group = group
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
-        if local_rank == -1:
-            local_rank = get_local_rank()
-        self.local_rank = local_rank
         if self.rank == 0:
             self.unique_id = ncclGetUniqueId()
         else:
@@ -219,14 +222,21 @@ class NCCLCommunicator:
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
-        # NCCL communicator is bind to the current device, and each
-        # communicator can only bind to one unique device inside one group
-        device = torch.device(f"cuda:{self.local_rank}")
-        torch.cuda.set_device(device)
-        result = _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
-                                     self.unique_id, self.rank)
-        assert result == 0
-        self.stream = torch.cuda.Stream(device=device)
+        if device is None:
+            local_rank = self.rank % torch.cuda.device_count()
+            device = torch.device(f"cuda:{local_rank}")
+        elif isinstance(device, int):
+            device = torch.device(f"cuda:{device}")
+        elif isinstance(device, str):
+            device = torch.device(device)
+        with device:
+            # use context manager to make sure the device is set correctly
+            # nccl communicator and stream will use this device
+            result = _c_ncclCommInitRank(ctypes.byref(self.comm),
+                                         self.world_size, self.unique_id,
+                                         self.rank)
+            assert result == 0
+            self.stream = torch.cuda.Stream()
 
     def all_reduce(self,
                    tensor: torch.Tensor,
