@@ -84,9 +84,11 @@ class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        num_lookahead_slots: int,
     ) -> SamplerOutput:
         output = await make_async(self.driver_worker.execute_model)(
-            seq_group_metadata_list=seq_group_metadata_list, )
+            seq_group_metadata_list=seq_group_metadata_list,
+            num_lookahead_slots=num_lookahead_slots)
         return output
 
     async def check_health_async(self) -> None:
