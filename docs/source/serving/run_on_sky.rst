@@ -128,7 +128,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
         model: $MODEL_NAME
         messages:
           - role: user
-          content: Hello! What is your name?
+            content: Hello! What is your name?
         max_tokens: 1
 
   resources:
