@@ -427,7 +427,6 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                # logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
