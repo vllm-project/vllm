@@ -23,12 +23,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+from vllm.model_executor.models.idefics2 import Idefics2ForConditionalGeneration
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearMethodBase
 
 _VISION_MODEL_CLASSES = [
-    LlavaForConditionalGeneration,
+    LlavaForConditionalGeneration, Idefics2ForConditionalGeneration
 ]
 
 logger = init_logger(__name__)
@@ -86,7 +87,6 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
     linear_method = _get_linear_method(model_config, load_config)
-
     return model_class(config=model_config.hf_config,
                        linear_method=linear_method,
                        **_get_model_initialization_kwargs(
