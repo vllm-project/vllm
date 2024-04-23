@@ -25,7 +25,7 @@ def _path_is_relative_to(path: Path, other: str):
     # Polyfill for Python 3.8
     # TODO: Replace w/ Path.is_relative_to when Python 3.8 is not supported
     try:
-        path.relative_to(*other)
+        path.relative_to(other)
         return True
     except ValueError:
         return False
