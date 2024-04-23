@@ -69,7 +69,7 @@ jobs:
     BUILD:
         uses: ./.github/workflows/build.yml
         with:
-            build_label: aws-avx512-192G-4-T4-64G
+            build_label: ${{ inputs.build_label }}
             timeout: ${{ inputs.timeout }}
             gitref: ${{ inputs.gitref }}
             Gi_per_thread: ${{ inputs.Gi_per_thread }}
