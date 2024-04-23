@@ -16,6 +16,7 @@ class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
     tokenizer: Optional[str] = None
+    skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
@@ -72,6 +73,7 @@ class EngineArgs:
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_max_model_len: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -93,6 +95,10 @@ class EngineArgs:
             type=str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use.')
+        parser.add_argument(
+            '--skip-tokenizer-init',
+            action='store_true',
+            help='Skip initialization of tokenizer and detokenizer')
         parser.add_argument(
             '--revision',
             type=str,
@@ -232,7 +238,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 128],
+                            choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
                             'tokens.')
 
@@ -415,16 +421,24 @@ class EngineArgs:
         parser.add_argument(
             '--speculative-model',
             type=str,
-            default=None,
+            default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
 
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
-            default=None,
+            default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
+
+        parser.add_argument(
+            '--speculative-max-model-len',
+            type=str,
+            default=EngineArgs.speculative_max_model_len,
+            help='The maximum sequence length supported by the '
+            'draft model. Sequences over this length will skip '
+            'speculation.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=str,
@@ -453,7 +467,7 @@ class EngineArgs:
             self.code_revision, self.tokenizer_revision, self.max_model_len,
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs)
+            self.max_logprobs, self.skip_tokenizer_init)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -476,6 +490,9 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_max_model_len=self.speculative_max_model_len,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+            use_v2_block_manager=self.use_v2_block_manager,
         )
 
         scheduler_config = SchedulerConfig(

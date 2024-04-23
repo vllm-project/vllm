@@ -32,6 +32,9 @@ class LLM:
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
         tokenizer_mode: The tokenizer mode. "auto" will use the fast tokenizer
             if available, and "slow" will always use the slow tokenizer.
+        skip_tokenizer_init: If true, skip initialization of tokenizer and
+            detokenizer. Expect valid prompt_token_ids and None for prompt
+            from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
         tensor_parallel_size: The number of GPUs to use for distributed
@@ -76,6 +79,7 @@ class LLM:
         model: str,
         tokenizer: Optional[str] = None,
         tokenizer_mode: str = "auto",
+        skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
@@ -96,6 +100,7 @@ class LLM:
             model=model,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
+            skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
@@ -160,6 +165,10 @@ class LLM:
         if prompts is None and prompt_token_ids is None:
             raise ValueError("Either prompts or prompt_token_ids must be "
                              "provided.")
+        if self.llm_engine.model_config.skip_tokenizer_init \
+            and prompts is not None:
+            raise ValueError("prompts must be None if skip_tokenizer_init "
+                             "is True")
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
