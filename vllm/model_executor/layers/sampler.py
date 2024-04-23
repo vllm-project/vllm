@@ -710,33 +710,17 @@ def _get_logprobs(
     for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
                                           sample_results):
         # There could be more than 1 seq_id if uses beam search.
-        seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         token_ids, _ = sample_result
-        seq_data = seq_group.seq_data[seq_ids[0]]
-        prompt_tokens = seq_data.prompt_token_ids
 
         # Find query indices for prompt logprobs.
         if (seq_group.is_prompt
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
-            subquery_len = seq_group.subquery_len
-            assert subquery_len is not None
-            # prompt has only 1 seq id.
-            assert len(seq_ids) == 1
-            seq_data = seq_group.seq_data[seq_ids[0]]
-            computed_len = seq_data.get_num_computed_tokens()
-            prompt_tokens = seq_data.prompt_token_ids
-            # Look at the logprob of next prompt token to compute prompt
-            # logprob of a current prefill token.
-            next_token_index_start = computed_len + 1
-            next_token_index_end = min(computed_len + subquery_len + 1,
-                                       len(prompt_tokens))
-            next_prompt_tokens = prompt_tokens[
-                next_token_index_start:next_token_index_end]
+            next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prefill_indices)
-            next_token_ids.extend(token_id for token_id in next_prompt_tokens)
+            next_token_ids.extend(next_prompt_tokens)
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         query_indices.extend(seq_group.sample_indices)
@@ -789,30 +773,13 @@ def _get_logprobs(
     # Go over all sequence groups in a batch at once.
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
-        seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         is_prompt = seq_group.is_prompt
 
         # Find prompt logprobs
         if (is_prompt and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            subquery_len = seq_group.subquery_len
-            assert subquery_len is not None
-            assert len(seq_ids) == 1
-
-            # Find the next prompt token.
-            seq_data = seq_group.seq_data[seq_ids[0]]
-            computed_len = seq_data.get_num_computed_tokens()
-            prompt_tokens = seq_data.prompt_token_ids
-            # +1 is needed because you are looking for the next token.
-            next_token_index_start = computed_len + 1
-            # next_token_index_end can be shorter than len(prompt_tokens) if
-            # chunked prefill is enabled.
-            next_token_index_end = min(computed_len + subquery_len + 1,
-                                       len(prompt_tokens))
-            next_prompt_tokens = prompt_tokens[
-                next_token_index_start:next_token_index_end]
-
+            next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             # Compute prompt logprobs.
             prompt_logprobs: PromptLogprobs = []
             for token_id in next_prompt_tokens:
@@ -974,3 +941,36 @@ def _build_sampler_output(
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
     )
+
+
+def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[str]:
+    """Get a list of next prompt tokens to compute logprob from a
+        given sequence group.
+
+    It is used to compute prompt logprob. Imagine you have logprob for each
+    query token. Query token needs to know the next prompt token id to compute
+    prompt logprob. This is a helper to obtain next prompt token ids.
+
+    This API has to be used only when the caller knows seq_group is in prefill
+    stage.
+
+    Returns:
+        A list of next prompt tokens to compute logprob.
+    """
+    assert seq_group.is_prompt, (
+        "Caller should ensure the sequence group is in a prefill stage.")
+    seq_ids = seq_group.seq_ids
+    subquery_len = seq_group.subquery_len
+    assert subquery_len is not None
+    # prompt has only 1 seq id.
+    assert len(seq_ids) == 1
+    seq_data = seq_group.seq_data[seq_ids[0]]
+    computed_len = seq_data.get_num_computed_tokens()
+    prompt_tokens = seq_data.prompt_token_ids
+    # +1 because we are looking for a next prompt token.
+    next_token_index_start = computed_len + 1
+    next_token_index_end = min(computed_len + subquery_len + 1,
+                               len(prompt_tokens))
+    next_prompt_tokens = prompt_tokens[
+        next_token_index_start:next_token_index_end]
+    return next_prompt_tokens
