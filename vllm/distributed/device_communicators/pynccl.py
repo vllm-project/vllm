@@ -66,7 +66,7 @@ _c_ncclGetErrorString.argtypes = [ncclResult_t]
 
 
 def NCCL_CHECK(result: ncclResult_t) -> None:
-    if result.value != 0:
+    if result != 0:
         error_str = _c_ncclGetErrorString(result)
         raise RuntimeError(f"NCCL error: {error_str}")
 
