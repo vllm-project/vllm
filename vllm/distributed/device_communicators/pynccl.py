@@ -60,6 +60,17 @@ except Exception as e:
 
 ncclResult_t = ctypes.c_int
 
+_c_ncclGetErrorString = nccl.ncclGetErrorString
+_c_ncclGetErrorString.restype = ctypes.c_char_p
+_c_ncclGetErrorString.argtypes = [ncclResult_t]
+
+
+def NCCL_CHECK(result: ncclResult_t) -> None:
+    if result.value != 0:
+        error_str = _c_ncclGetErrorString(result)
+        raise RuntimeError(f"NCCL error: {error_str}")
+
+
 # equivalent to c declaration:
 # ncclResult_t  ncclGetVersion(int *version);
 _c_ncclGetVersion = nccl.ncclGetVersion
@@ -69,8 +80,7 @@ _c_ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
 
 def ncclGetVersion() -> str:
     version = ctypes.c_int()
-    result = _c_ncclGetVersion(ctypes.byref(version))
-    assert result == 0
+    NCCL_CHECK(_c_ncclGetVersion(ctypes.byref(version)))
     # something like 21903 --> "2.19.3"
     version_str = str(version.value)
     major = version_str[0].lstrip("0")
@@ -92,8 +102,7 @@ _c_ncclGetUniqueId.argtypes = [ctypes.POINTER(NcclUniqueId)]
 
 def ncclGetUniqueId() -> NcclUniqueId:
     unique_id = NcclUniqueId()
-    result = _c_ncclGetUniqueId(ctypes.byref(unique_id))
-    assert result == 0
+    NCCL_CHECK(_c_ncclGetUniqueId(ctypes.byref(unique_id)))
     return unique_id
 
 
@@ -232,10 +241,9 @@ class NCCLCommunicator:
         with device:
             # use context manager to make sure the device is set correctly
             # nccl communicator and stream will use this device
-            result = _c_ncclCommInitRank(ctypes.byref(self.comm),
+            NCCL_CHECK(_c_ncclCommInitRank(ctypes.byref(self.comm),
                                          self.world_size, self.unique_id,
-                                         self.rank)
-            assert result == 0
+                                         self.rank))
             self.stream = torch.cuda.Stream()
 
     def all_reduce(self,
@@ -244,13 +252,12 @@ class NCCLCommunicator:
                    stream=None):
         if stream is None:
             stream = self.stream
-        result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
+        NCCL_CHECK(_c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
                                   ncclDataType_t.from_torch(tensor.dtype),
                                   ncclRedOp_t.from_torch(op), self.comm,
-                                  ctypes.c_void_p(stream.cuda_stream))
-        assert result == 0
+                                  ctypes.c_void_p(stream.cuda_stream)))
 
     def __del__(self):
         # `dist` module might have been already destroyed
