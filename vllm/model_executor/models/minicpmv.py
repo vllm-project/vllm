@@ -3,7 +3,11 @@ from functools import partial
 from typing import List, Optional
 
 import numpy as np
-import timm
+
+try:
+    import timm
+except ImportError:
+    raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 import torch.nn.functional as F
 from timm.data import IMAGENET_INCEPTION_MEAN, IMAGENET_INCEPTION_STD
@@ -114,12 +118,14 @@ class Resampler(nn.Module):
         A tensor with the shape of (grid_size**2, embed_dim)
     """
 
+    default_norm_layer = partial(nn.LayerNorm, eps=1e-6)
+
     def __init__(self,
                  grid_size,
                  embed_dim,
                  num_heads,
                  kv_dim=None,
-                 norm_layer=partial,
+                 norm_layer=default_norm_layer,
                  adaptive=False):
         super().__init__()
         self.num_queries = grid_size**2
