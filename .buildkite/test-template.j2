@@ -4,6 +4,7 @@
 
 steps:
 
+{%
   - label: ":docker: build image"
     commands:
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
@@ -15,7 +16,13 @@ steps:
         - exit_status: -1  # Agent was lost
           limit: 5
   - wait
+%}
 
+  - label: "Build wheels and images"
+    priority: -1
+    command: bash .buildkite/build-artifacts.sh
+
+{%
   - label: "AMD Test"
     agents:
       queue: amd
@@ -73,3 +80,4 @@ steps:
                   - mountPath: /dev/shm
                     name: dshm
   {% endfor %}
+%}

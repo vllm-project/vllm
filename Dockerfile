@@ -8,6 +8,10 @@ FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 RUN apt-get update -y \
     && apt-get install -y python3-pip git
 
+# Install a pinned Python versio if specified
+ARG python_package_version=python3
+RUN apt-get install -y ${python_package_version}
+
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
