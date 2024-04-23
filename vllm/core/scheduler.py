@@ -891,17 +891,26 @@ class Scheduler:
             seq_group = scheduled_seq_group.seq_group
             token_chunk_size = scheduled_seq_group.token_chunk_size
             seq_group.maybe_set_first_scheduled_time(now)
+            request_id = seq_group.request_id
+            encoder_seq = seq_group.encoder_seq
 
             # seq_id -> SequenceData
             seq_data: Dict[int, SequenceData] = {}
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
+            # encoder physical block numbers
+            encoder_block_table: List[int] = self.block_manager.encoder_block_tables[request_id]
+            # encoder SequenceData
+            encoder_seq_data: SequenceData = encoder_seq.data
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
+
+            # Access encoder blocks
+            self.block_manager.access_all_encoder_blocks_in_seq_group(seq_group, now)
 
             common_computed_block_nums = (
                 self.block_manager.get_common_computed_block_ids(
@@ -926,6 +935,8 @@ class Scheduler:
                 # `multi_modal_data` will be None.
                 multi_modal_data=seq_group.multi_modal_data
                 if scheduler_outputs.num_prefill_groups > 0 else None,
+                encoder_seq_data=encoder_seq_data,
+                encoder_block_table=encoder_block_table,
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
