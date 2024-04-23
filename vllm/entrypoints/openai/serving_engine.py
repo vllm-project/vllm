@@ -71,6 +71,7 @@ class OpenAIServing:
         self.tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
+            tokenizer_revision=engine_model_config.tokenizer_revision,
             trust_remote_code=engine_model_config.trust_remote_code,
             truncation_side="left")
 
@@ -121,7 +122,9 @@ class OpenAIServing:
                 if num_output_top_logprobs:
                     assert logprobs.top_logprobs is not None
                     logprobs.top_logprobs.append({
-                        p.decoded_token: p.logprob
+                        # Convert float("-inf") to the
+                        # JSON-serializable float that OpenAI uses
+                        p.decoded_token: max(p.logprob, -9999.0)
                         for i, p in step_top_logprobs.items()
                     } if step_top_logprobs else None)
 

@@ -107,8 +107,10 @@ _c_ncclCommInitRank.argtypes = [
     ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, NcclUniqueId, ctypes.c_int
 ]
 
+ncclDataType_t = ctypes.c_int
 
-class ncclDataType_t:
+
+class ncclDataTypeEnum:
     ncclInt8 = 0
     ncclChar = 0
     ncclUint8 = 1
@@ -147,7 +149,10 @@ class ncclDataType_t:
         raise ValueError(f"Unsupported dtype: {dtype}")
 
 
-class ncclRedOp_t(ctypes.c_int):
+ncclRedOp_t = ctypes.c_int
+
+
+class ncclRedOpTypeEnum:
     ncclSum = 0
     ncclProd = 1
     ncclMax = 2
@@ -179,8 +184,8 @@ class ncclRedOp_t(ctypes.c_int):
 _c_ncclAllReduce = nccl.ncclAllReduce
 _c_ncclAllReduce.restype = ctypes.c_int
 _c_ncclAllReduce.argtypes = [
-    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
-    ctypes.c_void_p, ctypes.c_void_p
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ncclRedOp_t,
+    ncclDataType_t, ctypes.c_void_p, ctypes.c_void_p
 ]
 
 # equivalent to c declaration:
@@ -250,8 +255,8 @@ class NCCLCommunicator:
         result = _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
                                   ctypes.c_void_p(tensor.data_ptr()),
                                   tensor.numel(),
-                                  ncclDataType_t.from_torch(tensor.dtype),
-                                  ncclRedOp_t.from_torch(op), self.comm,
+                                  ncclDataTypeEnum.from_torch(tensor.dtype),
+                                  ncclRedOpTypeEnum.from_torch(op), self.comm,
                                   ctypes.c_void_p(stream.cuda_stream))
         assert result == 0
 
