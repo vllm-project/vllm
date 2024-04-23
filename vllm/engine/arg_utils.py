@@ -77,7 +77,6 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
-    embedding_mode: bool = False
 
     guided_decoding_backend: str = 'outlines'
     # Speculative decoding configuration.
@@ -529,8 +528,7 @@ class EngineArgs:
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
             self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init, self.served_model_name,
-            self.embedding_mode)
+            self.skip_tokenizer_init, self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

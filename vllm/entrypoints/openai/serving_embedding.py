@@ -91,7 +91,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=None)
-        self._check_embedding_mode(embedding_mode)
+        self._check_embedding_mode(model_config.embedding_mode)
 
     async def create_embedding(self, request: EmbeddingRequest,
                                raw_request: Request):

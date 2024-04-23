@@ -73,8 +73,6 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
-        embedding_mode: Whether the running model is for embedding. It should
-            be used for embedding models.
     """
 
     def __init__(
@@ -97,7 +95,6 @@ class ModelConfig:
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
-        embedding_mode: Optional[bool] = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -118,7 +115,6 @@ class ModelConfig:
                                        or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
-        self.embedding_mode = embedding_mode
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
@@ -130,6 +126,7 @@ class ModelConfig:
                                                        served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+        self.embedding_mode = self._check_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -214,6 +211,11 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
+
+    def _check_embedding_mode(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        pattern = r".*Model$"
+        return any(re.match(pattern, arch) for arch in architectures)
 
     def verify_with_parallel_config(
         self,
