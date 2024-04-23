@@ -76,9 +76,21 @@ def test_load_chat_template():
 {% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
 
 
-def test_no_load_chat_template():
+def test_no_load_chat_template_filelike():
     # Testing chatml template
     template = "../../examples/does_not_exist"
+    tokenizer = MockTokenizer()
+
+    mock_serving_chat = MockServingChat(tokenizer)
+
+    with pytest.raises(ValueError, match="looks like a file path"):
+        OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                              chat_template=template)
+
+
+def test_no_load_chat_template_literallike():
+    # Testing chatml template
+    template = "{{ messages }}"
     tokenizer = MockTokenizer()
 
     mock_serving_chat = MockServingChat(tokenizer)
@@ -86,10 +98,7 @@ def test_no_load_chat_template():
                                           chat_template=template)
     template_content = tokenizer.chat_template
 
-    # Test assertions
-    assert template_content is not None
-    # Hard coded value for template_chatml.jinja
-    assert template_content == """../../examples/does_not_exist"""
+    assert template_content == template
 
 
 @pytest.mark.asyncio
