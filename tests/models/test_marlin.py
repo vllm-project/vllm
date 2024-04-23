@@ -16,13 +16,12 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization import (
-    _QUANTIZATION_CONFIG_REGISTRY)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
-marlin_not_supported = (
-    capability < _QUANTIZATION_CONFIG_REGISTRY["marlin"].get_min_capability())
+marlin_not_supported = (capability <
+                        QUANTIZATION_METHODS["marlin"].get_min_capability())
 
 
 @dataclass

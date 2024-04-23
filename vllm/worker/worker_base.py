@@ -1,12 +1,15 @@
+import datetime
 import importlib
 import os
+import tempfile
+import threading
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import update_environment_variables
+from vllm.utils import get_vllm_instance_id, update_environment_variables
 
 logger = init_logger(__name__)
 
@@ -56,7 +59,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_cache_block_size_bytes() -> int:
+    def get_cache_block_size_bytes(self) -> int:
         """Return the size of a single cache block, in bytes. Used in
         speculative decoding.
         """
@@ -71,7 +74,7 @@ class WorkerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
 
@@ -86,7 +89,7 @@ class LoraNotSupportedWorkerBase(WorkerBase):
     def remove_lora(self, lora_id: int) -> bool:
         raise ValueError(f"{type(self)} does not support LoRA")
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
 
 
@@ -115,9 +118,20 @@ class WorkerWrapperBase:
 
     def init_worker(self, *args, **kwargs):
         """
-        Actual initialization of the worker class.
+        Actual initialization of the worker class, and set up
+       function tracing if required.
         Arguments are passed to the worker class constructor.
         """
+        if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+            tmp_dir = tempfile.gettempdir()
+            filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                        f"_thread_{threading.get_ident()}_"
+                        f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+            log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                    filename)
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            enable_trace_function_call(log_path)
+
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
         self.worker = worker_class(*args, **kwargs)
