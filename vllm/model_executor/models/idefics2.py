@@ -11,7 +11,10 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from transformers import Idefics2Config
+from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 import math
+
+import inspect
 
 import torch
 from torch import nn
@@ -313,7 +316,6 @@ class Idefics2PerceiverResampler(nn.Module):
 
         return compressed_context
 
-
 class Idefics2Connector(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -345,7 +347,8 @@ class Idefics2Model(nn.Module):
 
         self.config = config
         ##SIGLIP vision encodder
-        self.vision_model = SiglipVisionModel(SiglipVisionConfig())
+        self.vision_model = SiglipVisionModel(config.vision_config)
+        self.vision_model.half()
         self.connector = Idefics2Connector(config)
         ##Mistral Language Decoder
         self.text_model = LlamaModel(config.text_config, linear_method)
@@ -365,26 +368,22 @@ class Idefics2Model(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        image_input: Optional[torch.Tensor] = None
+        pixel_values: Optional[torch.Tensor] = None
     ) -> SamplerOutput:   
+        # batch_size, num_channels, height, width = image_input.shape
+        # pixel_attention_mask = torch.ones(
+        #     size=(image_input.size(0), image_input.size(2), image_input.size(3)),
+        #     dtype=torch.bool,
+        #     device=image_input.device,
+        # )
 
-
-        if self.vision_model is not None:
-            # get image encoding
-            image_outputs = self.vision_model(image_input, output_hidden_states = True)
-            image_features = image_outputs.hidden_states
-        else:
-            image_features = None
-        # get embedding
-        vision_embedding = self.connector(image_features)
-        inputs_embeds = self.text_model.get_input_embeddings(input_ids)
-        # merge inplace for language model
-        _merge_vision_embeddings(input_ids, inputs_embeds, vision_embedding, self.vision_language_config.image_token_id)
-        input_ids = None
-        hidden_states = self.text_model(input_ids, positions, kv_caches, attn_metadata, inputs_embeds = inputs_embeds)
-
-
-        return hidden_states
+        # patch_size = self.config.vision_config.patch_size
+        # patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
+        # patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
+        # patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+        self.vision_model(pixel_values)
+        print("got here")
+        return None
     
     
 
@@ -405,9 +404,9 @@ class Idefics2ForConditionalGeneration(nn.Module):
                  config: "Idefics2Config",                 
                  vision_language_config: VisionLanguageConfig,
                  linear_method: Optional["LinearMethodBase"] = None) -> None:
+
         super().__init__()
         self.config = config
-        print(config)
         self.vision_language_config = vision_language_config
 
         assert self.vision_language_config, (
@@ -428,6 +427,7 @@ class Idefics2ForConditionalGeneration(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.text_config.vocab_size, logit_scale)
         self.sampler = Sampler()
+        print("finished init")
 
     def forward(
         self,
@@ -438,9 +438,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
         image_input: Optional[torch.Tensor] = None
     ) -> SamplerOutput:     
         print("need to implement forward")
-        raise NotImplementedError
-
-        ##TODO do some preprocessing to transfer input (from vLLM input -> huggingface expectation)
         outputs = self.model(input_ids, positions, kv_caches, attn_metadata, image_input)
         return outputs
 
@@ -459,8 +456,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        print("LOADING WEIGHT")
-        raise NotImplementedError
         # only doing this for language model part for now.
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -471,37 +466,34 @@ class Idefics2ForConditionalGeneration(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        i = 0
+        # print(params_dict.keys())
+        # print(params_dict.keys())
+        # raise NotImplemented
         for name, loaded_weight in weights:
-            i = i + 1
-            print(name)
-            # if "rotary_emb.inv_freq" in name:
-            #     print("SK")
-            #     continue
-            # for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
-            #     if key_to_modify in name:
-            #         print("HIT")
-            #         name = name.replace(key_to_modify, new_key)
-            # use_default_weight_loading = False
-            # if "vision" in name or "connector" in name:
-            #     if self.model.vision_model is not None:
-            #         use_default_weight_loading  = True
-            # else:
-            #     for (param_name, weight_name, shard_id) in stacked_params_mapping:
-            #         if weight_name not in name:
-            #             continue
-            #         name = name.replace(weight_name, param_name)
-            #         param = params_dict[name]
-            #         weight_loader = param.weight_loader
-            #         weight_loader(param, loaded_weight, shard_id)
-            #         break
-            #     else:
-            #         use_default_weight_loading = True
-            # if use_default_weight_loading:
-            #     param = params_dict[name]
-            #     weight_loader = getattr(param, "weight_loader",
-            #                             default_weight_loader)
-            #     weight_loader(param, loaded_weight)
-
-
-        raise NotImplementedError
+            loaded_weight = loaded_weight.to(dtype=torch.float16)
+            if "rotary_emb.inv_freq" in name:
+                continue
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
+            use_default_weight_loading = False
+            if "vision" in name or "connector" in name:
+                use_default_weight_loading  = True
+                if "vision" in name:
+                    name = "model.vision_" + name
+            else:
+                for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    use_default_weight_loading = True
+            if use_default_weight_loading:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
