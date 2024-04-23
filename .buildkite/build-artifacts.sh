@@ -7,7 +7,7 @@ set -ex
 
 export DOCKER_BUILDKIT=1
 docker build --build-arg max_jobs=16 \
-    --build-arg python_package_version=python3.8 \
+    --build-arg python_version=3.8 \
     --target build \
     -f Dockerfile \
     -t vllm-build \

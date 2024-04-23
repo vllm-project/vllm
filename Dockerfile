@@ -5,12 +5,17 @@
 # prepare basic build environment
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
+# Install Python
+ARG python_version=3.11
+ENV DEBIAN_FRONTEND=noninteractive
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git
-
-# Install a pinned Python versio if specified
-ARG python_package_version=python3
-RUN apt-get install -y ${python_package_version}
+    && apt-get install -y software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update -y \
+    && apt-get install -y python{python_version} python{python_version}-dev python{python_version}-venv python3-pip git \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python{python_version} 1
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
