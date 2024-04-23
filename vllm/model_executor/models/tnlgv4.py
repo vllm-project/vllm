@@ -210,23 +210,16 @@ class TLGv4SelfAttention(nn.Module):
                                 num_kv_heads=self.num_kv_heads_per_partion,
                                 )
         else:
-            self.attn = Attention(self.num_heads_per_partition,
-                    self.head_dim,
-                    self.scale,
-                    num_kv_heads=self.num_kv_heads_per_partion,
-                    blocksparse_local_blocks=self.blocksparse_num_local_blocks,
-                    blocksparse_vert_stride=self.blocksparse_vert_stride,
-                    blocksparse_block_size=self.blocksparse_block_size)
-            # self.attn = BlockSparseFlashAttention(
-            #                       self.lcoal_blocks,
-            #                       self.vert_stride,
-            #                       self.num_heads_per_partition,
-            #                       self.head_dim,
-            #                       self.scale,
-            #                       max_seqlen=self.max_position_embeddings,
-            #                       sparse_block_size=self.sparse_block_size,
-            #                       num_kv_heads=self.num_kv_heads_per_partion,
-            #                       layer_idx=layer_idx)
+            self.attn = BlockSparseFlashAttention(
+                                  self.lcoal_blocks,
+                                  self.vert_stride,
+                                  self.num_heads_per_partition,
+                                  self.head_dim,
+                                  self.scale,
+                                  max_seqlen=self.max_position_embeddings,
+                                  sparse_block_size=self.sparse_block_size,
+                                  num_kv_heads=self.num_kv_heads_per_partion,
+                                  layer_idx=layer_idx)
 
     def forward(
         self,
