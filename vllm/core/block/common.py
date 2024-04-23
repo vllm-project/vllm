@@ -99,7 +99,7 @@ class CopyOnWriteTracker:
         refcounter: RefCounter,
         allocator: BlockAllocator,
     ):
-        self._copy_on_writes = defaultdict(list)
+        self._copy_on_writes: Dict[BlockId, List[BlockId]] = defaultdict(list)
         self._refcounter = refcounter
         self._allocator = allocator
 
@@ -138,6 +138,8 @@ class CopyOnWriteTracker:
                 prev_block=block.prev_block).block_id
 
             # Track src/dst copy.
+            assert src_block_id is not None
+            assert block_id is not None
             self._copy_on_writes[src_block_id].append(block_id)
 
         return block_id
@@ -180,6 +182,6 @@ def get_all_blocks_recursively(last_block: Block) -> List[Block]:
             recurse(block.prev_block, lst)
         lst.append(block)
 
-    all_blocks = []
+    all_blocks: List[Block] = []
     recurse(last_block, all_blocks)
     return all_blocks

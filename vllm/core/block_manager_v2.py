@@ -1,5 +1,6 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
+from typing import Sequence as GenericSequence
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -205,7 +206,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # as computed.
         self.block_allocator.mark_blocks_as_computed()
 
-    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         """Determine which blocks for which we skip prefill.
 
         With prefix caching we can skip prefill for previously-generated blocks.
