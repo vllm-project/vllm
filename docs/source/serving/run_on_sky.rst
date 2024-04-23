@@ -227,30 +227,12 @@ To enable autoscaling, you could replace the `replicas` with the following confi
 
   service:
     replica_policy:
-      min_replicas: 1
-      max_replicas: 3
+      min_replicas: 2
+      max_replicas: 4
       target_qps_per_replica: 2
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
-.. raw:: html
-    
-    <details>
-    <summary>Click to see the full recipe YAML</summary>
-
-.. code-block:: yaml
-
-  service:
-    replicas: 2
-    # An actual request for readiness probe.
-    readiness_probe:
-      path: /v1/chat/completions
-      post_data:
-      model: $MODEL_NAME
-      messages:
-        - role: user
-          content: Hello! What is your name?
-    max_tokens: 1
     
 .. raw:: html
 
@@ -262,8 +244,8 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
 
   service:
     replica_policy:
-      min_replicas: 1
-      max_replicas: 3
+      min_replicas: 2
+      max_replicas: 4
       target_qps_per_replica: 2
     # An actual request for readiness probe.
     readiness_probe:
@@ -305,9 +287,10 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
       2>&1 | tee api_server.log
 
+
 .. raw:: html
-    
-    </details>
+  
+  </details>
 
 To update the service with the new config:
 
@@ -365,6 +348,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
       --port 8811 \
       --model-url http://$ENDPOINT/v1 \
       --stop-token-ids 128009,128001 | tee ~/gradio.log
+
 
 .. raw:: html
   
