@@ -415,13 +415,14 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            paged_kv_indices = paged_kv_indices,
-            paged_kv_indptr = paged_kv_indptr,
-            paged_kv_last_page_len = paged_kv_last_page_len,
-            num_qo_heads = self.model_config.get_num_attention_heads(),
-            num_kv_heads = self.model_config.get_num_kv_heads(),
-            head_dim = self.model_config.get_head_size(),
-            block_size = self.block_size
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.model_config.get_num_attention_heads(),
+            num_kv_heads=self.model_config.get_num_kv_heads(
+                self.parallel_config),
+            head_dim=self.model_config.get_head_size(),
+            # block_size = self.block_size
         )
 
         return PreparePromptMetadata(
@@ -500,7 +501,6 @@ class ModelRunner:
                     last_len = self.block_size
                 paged_kv_last_page_len.append(last_len)
 
-
         # vLLM uses cuda graph only for decoding requests.
         # See `capture_model` API for more details.
         # For decoding requests, batch_size == input_tokens.
@@ -563,14 +563,13 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            paged_kv_indices = paged_kv_indices,
-            paged_kv_indptr = paged_kv_indptr,
-            paged_kv_last_page_len = paged_kv_last_page_len,
-            num_qo_heads = self.model_config.get_num_attention_heads(),
-            num_kv_heads = self.model_config.get_num_kv_heads(),
-            head_dim = self.model_config.get_head_size(),
-            block_size = self.block_size
-        )
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            num_qo_heads=self.model_config.get_num_attention_heads(),
+            num_kv_heads=self.model_config.get_num_kv_heads(),
+            head_dim=self.model_config.get_head_size(),
+            block_size=self.block_size)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

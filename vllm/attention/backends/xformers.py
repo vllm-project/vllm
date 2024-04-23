@@ -25,8 +25,8 @@ class XFormersBackend(AttentionBackend):
         return XFormersImpl
 
     @staticmethod
-    def make_metadata(*args, **kwargs) -> "XFormersMetadata":
-        return XFormersMetadata(*args, **kwargs)
+    def make_metadata(**kwargs) -> "XFormersMetadata":
+        return XFormersMetadata.new(**kwargs)
 
     @staticmethod
     def get_kv_cache_shape(

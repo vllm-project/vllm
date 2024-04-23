@@ -59,6 +59,14 @@ class AttentionMetadataPerStage:
             for field in fields(self)
         }
 
+    @classmethod
+    def new(cls, **kwargs) -> "AttentionMetadataPerStage":
+        """Create a new instance with updated attributes."""
+        # filtering
+        cls_fields = [field.name for field in fields(cls)]
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in cls_fields}
+        return cls(**filtered_kwargs)
+
 
 T = TypeVar("T", bound=AttentionMetadataPerStage)
 
