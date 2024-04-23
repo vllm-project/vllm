@@ -340,7 +340,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
 class PhiLongScaledRotaryEmbedding(nn.Module):
     """Phi3 family of models long scaled rotary embedding.
 
-    Credits to Peng et al. github.com/jquesnelle/yarn
+    Based on the original RotaryEmbedding implementation.
     """
 
     def __init__(
