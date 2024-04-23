@@ -11,7 +11,6 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
 from .blocksparse_attenton.interface import LocalStridedBlockSparseAttn, LocalStridedBlockSparsePagedAttn
-from .phi3small_paged_attn import LocalStridedBlockSparsePagedAttn
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)

@@ -23,7 +23,7 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import Phi3SmallConfig
-from vllm.model_executor.models.phi3small_attention import BlockSparseFlashAttention
+from vllm.model_executor.models.phi3small.phi3small_attention import BlockSparseFlashAttention
 
 '''
 Further optimization TODO:
