@@ -97,17 +97,14 @@ if triton.__version__ >= "2.1.0":
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
             
-            cur_step = start_n + offs_n[None, :]
-            is_prompt = cur_step<cur_batch_prompt_len
-            generate_step = tl.where(is_prompt, 0, cur_step - cur_batch_prompt_len)
+            cur_step = start_n + offs_n[None, :] # [1, BlockN]
+            is_prompt = cur_step<cur_batch_prompt_len # [1, BlockN]
+            tree_mask = (cur_step - cur_batch_prompt_len - offs_m[:, None]) % tree_width == 0 # [1, BlockN] - [BlockM, 1] = [BlockM, BlockN]
+            tree_mask = is_prompt or tree_mask
+            mask = tree_mask and (cur_step < cur_batch_ctx_len)
             
-            tree_mask = (is_prompt or  \
-                    ((generate_step.to(tl.int32)-offs_m[:, None]) % tree_width == 0)) and cur_step < cur_batch_ctx_len
-                    
-            qk = tl.where(tree_mask, qk, -3.4028234663852886e+38)
+            qk = tl.where(mask, qk, -3.4028234663852886e+38)
             
-            # qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
-            #     -3.4028234663852886e+38)
             qk *= sm_scale
 
             # -- compute m_ij, p, l_ij
@@ -130,10 +127,7 @@ if triton.__version__ >= "2.1.0":
             # update acc
             
             cur_step = start_n + offs_n[:, None] # (BlockN, 1)
-            generate_step = cur_step - cur_batch_prompt_len
-            
-            # tree_mask = cur_step < cur_batch_prompt_len and \
-            #         (generate_step+offs_m[None, :]) % tree_width == 0
+
             v = tl.load(V_cache + off_v,
                         mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
                         other=0.0)
@@ -152,7 +146,7 @@ if triton.__version__ >= "2.1.0":
         out_ptrs = Out + off_o
         tl.store(out_ptrs,
                  acc,
-                 mask=offs_m[:, None] < 2)
+                 mask=offs_m[:, None] < tree_width)
         return
 
     @triton.jit
@@ -387,7 +381,7 @@ if triton.__version__ >= "2.1.0":
                             alibi_slopes=None):
 
         cap = torch.cuda.get_device_capability()
-        BLOCK_N = 32 if cap[0] >= 8 else 64
+        BLOCK_N = 128 if cap[0] >= 8 else 64
         BLOCK_M = triton.cdiv(tree_width, 16) * 16
         # shape constraints
         Lq = q.shape[-1]
@@ -402,46 +396,6 @@ if triton.__version__ >= "2.1.0":
         grid = (batch, head, triton.cdiv(tree_width, BLOCK_M))  # batch, head,
 
         num_warps = 8
-        # if alibi_slopes is not None:
-        #     _fwd_kernel_alibi[grid](
-        #         q,
-        #         k_cache,
-        #         v_cache,
-        #         block_table,
-        #         sm_scale,
-        #         b_seq_len,
-        #         alibi_slopes,
-        #         v_cache.shape[3],
-        #         8,
-        #         o,
-        #         block_table.stride(0),
-        #         block_table.stride(1),
-        #         q.stride(0),
-        #         q.stride(1),
-        #         q.stride(2),
-        #         o.stride(0),
-        #         o.stride(1),
-        #         o.stride(2),
-        #         k_cache.stride(0),
-        #         k_cache.stride(1),
-        #         k_cache.stride(2),
-        #         k_cache.stride(3),
-        #         k_cache.stride(
-        #             4
-        #         ),  #[num_blocks, num_kv_heads, head_size/x, block_size, x]
-        #         v_cache.stride(0),
-        #         v_cache.stride(1),
-        #         v_cache.stride(2),
-        #         v_cache.stride(
-        #             3),  #[num_blocks, num_kv_heads, head_size, block_size]
-        #         num_queries_per_kv=num_queries_per_kv,
-        #         BLOCK_M=BLOCK,
-        #         BLOCK_DMODEL=Lk,
-        #         BLOCK_N=BLOCK,
-        #         num_warps=num_warps,
-        #         num_stages=1,
-        #     )
-        #     return
 
         _fwd_kernel[grid](
             q,

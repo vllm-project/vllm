@@ -436,8 +436,9 @@ class ModelRunner:
             and max_context_len <= self.max_context_len_to_capture)
         
         def is_tree_parallel_decoding(meta_data: SequenceGroupMetadata):
-            return len(meta_data.seq_data)>1 and meta_data.sampling_params.sampling_type in \
-                    (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph
+            sampling_params = meta_data.sampling_params
+            return len(meta_data.seq_data)>1 and sampling_params.sampling_type in \
+                    (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph and sampling_params.best_of<=32
         enable_tree_attn = all(is_tree_parallel_decoding(data) for data in seq_group_metadata_list)
         if enable_tree_attn:
             prompt_lens = []
@@ -460,6 +461,7 @@ class ModelRunner:
                 prompt_len = root_seq.get_prompt_len()
                 # In Parallel Decoding with tree attention, sequences will stop when every sequence in the group has stopped.
                 seq_len = (root_seq.get_len() - prompt_len) * tree_width + prompt_len
+                # used for caculate the slot mapping
                 position = [seq_len - x for x in range(tree_width, 0, -1)]
                 # Don't support sliding_widonw currently
                 context_len = seq_len
@@ -467,14 +469,15 @@ class ModelRunner:
                 block_tables.append(block_table)
                 context_lens.append(context_len)
                 prompt_lens.append(prompt_len)
-                # I don't know what this variable is used for, so let's set it like this for now.
-                input_positions.extend(position)
                 input_tokens.extend([seq.get_last_token_id() for seq in seq_group_metadata.seq_data.values()])
                 for pos in position:
                     block_number = block_table[pos // self.block_size]
                     block_offset = pos % self.block_size
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
+                # used for caculate position embedding
+                position = [int((seq_len-prompt_len)/tree_width+prompt_len)] * tree_width
+                input_positions.extend(position)
                     
                 lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
@@ -556,7 +559,6 @@ class ModelRunner:
                 dtype=torch.int,
                 device=self.device,
             )
-        
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,

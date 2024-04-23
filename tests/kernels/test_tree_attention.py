@@ -15,10 +15,10 @@ from vllm import _custom_ops as ops
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+MAX_SEQ_LEN = 2048
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
-NUM_BLOCKS = 4321  # Arbitrary values for testing
+NUM_BLOCKS = 1024 # Arbitrary values for testing
 # only test on half and bfloat16
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
@@ -28,21 +28,16 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
 # HEAD_SIZES = [64, 80, 96, 112, 128, 256
 #               ] if not is_hip() else [64, 80, 96, 112, 128]
-HEAD_SIZES = [64]
+HEAD_SIZES = [64, 128]
 
-BLOCK_SIZES = [16]
+BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False]
 KV_CACHE_DTYPE = ["auto"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-TREEWIDTH = [8]
-
-DTYPES = [torch.bfloat16]
-NUM_HEADS = [(1, 1)]
-BLOCK_SIZES = [16]
-MAX_SEQ_LEN = 16
+TREEWIDTH = [1, 7, 31]
 
 def create_tree_attention_mask(context_len, prompt_len, tree_width, num_kv_head, dtype):
     prompt_mask = torch.zeros((num_kv_head, tree_width, prompt_len), dtype=dtype)
@@ -136,16 +131,16 @@ def ref_query_cached_kv_attention(
     output.reshape(-1, num_kv_heads, head_size)
 
 
-# @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
-# @pytest.mark.parametrize("num_heads", NUM_HEADS)
-# @pytest.mark.parametrize("head_size", HEAD_SIZES)
-# @pytest.mark.parametrize("use_alibi", USE_ALIBI)
-# @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-# @pytest.mark.parametrize("dtype", DTYPES)
-# @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
-# @pytest.mark.parametrize("seed", SEEDS)
-# @pytest.mark.parametrize("device", CUDA_DEVICES)
-# @pytest.mark.parametrize("tree_width", TREEWIDTH)
+@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("use_alibi", USE_ALIBI)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("tree_width", TREEWIDTH)
 def test_paged_attention(
     kv_cache_factory,
     num_seqs: int,
@@ -204,7 +199,14 @@ def test_paged_attention(
                                                 device)
     key_cache, value_cache = key_caches[0], value_caches[0]
 
-
+    # #key_cache = torch.randint_like(key_cache, -1, 2)
+    # #value_cache = torch.randint_like(value_cache, -1, 2)
+    # value_cache = torch.arange(value_cache.numel()).reshape(value_cache.shape).to(value_cache.dtype)
+    # #query = torch.randint_like(query, -1, 2)
+    # #value_cache = torch.ones_like(value_cache)
+    # key_cache = torch.ones_like(key_cache)
+    # query = torch.ones_like(query)
+    
     output = torch.empty_like(query)
     torch.cuda.synchronize()
     start_time = time.time()
@@ -248,8 +250,5 @@ def test_paged_attention(
         print(((a-b).abs()/(b+1e-8)).mean())
 
     diff(output, ref_output)
-    #assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
-
-
-test_paged_attention(create_kv_caches_with_random, 1, (1, 1), 32, False, 16, torch.bfloat16, 'auto', 0, 8, 'cuda')
-#test_paged_attention(create_kv_caches_with_random, 1, (4, 4), 32, False, 16, torch.half, 'auto', 1, 2, 'cuda')
+    assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+    
