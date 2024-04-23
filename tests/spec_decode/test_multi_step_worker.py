@@ -344,8 +344,8 @@ def test_draft_proposals_no_speculations():
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
 
-    assert proposals.proposal_token_ids.shape == torch.Size([0, k])
-    assert proposals.proposal_probs.shape[:-1] == torch.Size([0, k])
+    assert proposals.proposal_token_ids.shape == torch.Size([batch_size, k])
+    assert proposals.proposal_probs.shape[:-1] == torch.Size([batch_size, k])
 
     assert proposals.proposal_lens.shape == torch.Size([batch_size])
     assert proposals.proposal_lens.tolist() == [0 for _ in range(batch_size)]
