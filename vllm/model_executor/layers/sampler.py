@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.ops.sample import sample as sample_triton
-from vllm.model_executor.sampling_metadata import (SampledSeqGroup,
+from vllm.model_executor.sampling_metadata import (SequenceGroupToSample,
                                                    SamplingMetadata,
                                                    SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -116,19 +116,17 @@ def _apply_min_tokens_penalty(
     """
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []
-    start_idx = 0
+    logits_applied = 0
     for seq_group in sampling_metadata.seq_groups:
-        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
+        seq_ids = seq_group.seq_ids
+        sampling_params = seq_group.sampling_params
 
-        # handle prompt_logprobs by skipping rows in logits added for the prompt
-        # tokens (prompt logprobs are not penalized)
-        if (seq_group.is_prompt
-                and sampling_params.prompt_logprobs is not None):
-            subquery_len = seq_group.subquery_len
-            assert subquery_len is not None
-            assert len(seq_ids) == 1
-            start_idx += subquery_len - 1
+        sample_indices = seq_group.sample_indices
 
+        if len(sample_indices) == 0:
+            continue
+
+        start_idx = sample_indices[0]
         min_tokens = sampling_params.min_tokens
         if min_tokens > 0:
             seqs_to_penalize = []
@@ -147,7 +145,8 @@ def _apply_min_tokens_penalty(
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
 
-        start_idx += len(seq_ids)
+        assert len(sample_indices) == len(seq_ids)
+        logits_applied += len(sample_indices) + len(seq_group.prefill_indices)
 
     if logits_to_penalize:
         # use zip and * to group indices along each dimension
@@ -155,7 +154,7 @@ def _apply_min_tokens_penalty(
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
     # verifies that no rows in logits were missed unexpectedly
-    assert start_idx == logits.shape[0]
+    assert logits_applied == logits.shape[0]
     return logits
 
 
@@ -251,7 +250,7 @@ def _greedy_sample(
 
 
 def _random_sample(
-    selected_seq_groups: List[SampledSeqGroup],
+    selected_seq_groups: List[SequenceGroupToSample],
     random_samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # Find the maximum best_of value of the prompt phase requests.
@@ -278,7 +277,7 @@ def _random_sample(
 
 
 def _beam_search_sample(
-    selected_seq_groups: List[SampledSeqGroup],
+    selected_seq_groups: List[SequenceGroupToSample],
     logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # We sample 2 * beam_width candidates to make sure that with high
@@ -338,7 +337,7 @@ def _beam_search_sample(
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
-    seq_groups: Optional[List[SampledSeqGroup]] = None,
+    seq_groups: Optional[List[SequenceGroupToSample]] = None,
 ) -> torch.Tensor:
     if num_samples > 1:
         # This is equivalent to torch.repeat_interleaved (which also
@@ -386,6 +385,7 @@ def _sample_with_torch(
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
+
         seq_group_idx = categorized_seq_group_idx[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
         sample_metadata[sampling_type] = (seq_group_idx, seq_groups)
@@ -427,7 +427,7 @@ def _sample_with_torch(
         sample_results_dict.update(zip(seq_group_idx, sample_results))
 
     sample_results = [
-        sample_results_dict[i]
+        sample_results_dict.get(i, ([], []))
         for i in range(len(sampling_metadata.seq_groups))
     ]
     return sample_results
@@ -460,14 +460,13 @@ def _sample_with_triton_kernel(
             continue
         seq_group_idx = categorized_seq_group_ids[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
-        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_idx]
         sample_metadata[sampling_type] = (seq_group_idx, seq_groups,
                                           sample_indices,
                                           sampled_token_indices)
         if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
                              SamplingType.RANDOM_SEED):
-            for seq_group, is_prompt in zip(seq_groups, is_prompts):
-                if is_prompt:
+            for seq_group in seq_groups:
+                if seq_group.is_prompt:
                     sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
@@ -506,7 +505,7 @@ def _sample_with_triton_kernel(
         sample_results_dict.update(zip(seq_group_idx, sample_results))
 
     sample_results = [
-        sample_results_dict[i]
+        sample_results_dict.get(i, ([], []))
         for i in range(len(sampling_metadata.seq_groups))
     ]
     return sample_results
@@ -563,7 +562,9 @@ def _get_logprobs(
 
     Args:
         logprobs: (num_query_tokens_across_batch, num_vocab). Each query token's
-            logprob per vocab.
+            logprob per vocab. Assuming there are N seq groups, it is sorted by
+            prefill tokens for seq_group_1 (if prompt logprob is enabled),
+            decode tokens for seq_group_1 (if sampling is required), ...
         sampling_metadata: The sampling metadata.
         sample_results: (num_seq_groups) The tuple of (next_token_ids,
             parent_ids) for each sequence group.
@@ -571,24 +572,26 @@ def _get_logprobs(
     Returns:
         A tuple of prompt and sample logprobs per sequence group in a batch.
     """
-    # The index of query token we care.
+    # The index of query token to calculate logprobs. It includes both
+    # prompt and sample logprob indices.
     query_indices: List[int] = []
-    # Token ID to compute logprob for each query index. It should contain the
-    # next token ID.
-    next_token_indices: List[int] = []
-    # at least get one logprob for each token
+    # The next token ids to get the logprob value from.
+    next_token_ids: List[int] = []
+    # The largest requested number of logprobs. We find logprobs as many as the
+    # largest num logprobs in this API.
     largest_num_logprobs = 1
-    query_idx = 0
-    for i, (seq_group, sample_result) in enumerate(
-            zip(sampling_metadata.seq_groups, sample_results)):
+
+    # First find prompt/sample indices and next tokens to pick from logprobs.
+    for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
+                                          sample_results):
         # There could be more than 1 seq_id if uses beam search.
-        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
-        is_prompt = seq_group.is_prompt
-        next_token_ids, parent_ids = sample_result
-        num_parent_seqs = len(seq_ids)
+        seq_ids = seq_group.seq_ids
+        sampling_params = seq_group.sampling_params
+        token_ids, parent_ids = sample_result
 
         # Find query indices for prompt logprobs.
-        if (is_prompt and sampling_params.prompt_logprobs is not None):
+        if (seq_group.is_prompt
+                and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
             subquery_len = seq_group.subquery_len
@@ -605,20 +608,22 @@ def _get_logprobs(
                                        len(prompt_tokens))
             next_prompt_tokens = prompt_tokens[
                 next_token_index_start:next_token_index_end]
-            query_indices.extend(query_idx + j
-                                 for j in range(len(next_prompt_tokens)))
-            next_token_indices.extend(token_id
-                                      for token_id in next_prompt_tokens)
-            query_idx += len(next_prompt_tokens)
+            query_indices.extend(seq_group.prefill_indices)
+            next_token_ids.extend(token_id for token_id in next_prompt_tokens)
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
-        query_indices.extend(
-            [query_idx + parent_id for parent_id in parent_ids])
-        next_token_indices.extend(next_token_ids)
+        query_indices.extend(seq_group.sample_indices)
+        # print(f"SANG-TODO {seq_group.sample_indices=}")
+        # print(f"SANG-TODO {[query_idx + parent_id for parent_id in parent_ids]=}")
+        next_token_ids.extend(token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs)
-        query_idx += num_parent_seqs
+        # print(f"SANG-TODO {len(next_token_ids)=}")
+        # print(f"SANG-TODO {len(query_indices)=}")
+        # print(f"SANG-TODO {query_idx=}")
+        # print(f"SANG-TODO {logprobs.shape=}")
+        assert len(next_token_ids) == len(query_indices)
 
     # No need to calculate logprobs if no query tokens are chosen.
     if len(query_indices) == 0:
@@ -627,19 +632,18 @@ def _get_logprobs(
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
-    next_token_indices_gpu = torch.tensor(next_token_indices,
-                                          device=logprobs.device)
+    next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
 
     # logprob for selected tokens across all sequence groups.
     selected_logprobs = logprobs[[
         query_indices_gpu,
-        next_token_indices_gpu,
+        next_token_ids_gpu,
     ]]
 
     # (num_query_tokens,). Each index contains a rank of a selected token.
     ranks = _get_ranks(
         logprobs[query_indices_gpu],
-        next_token_indices_gpu,
+        next_token_ids_gpu,
     )
 
     # Logprobs of topk tokens for a batch of sequence groups.
@@ -662,37 +666,41 @@ def _get_logprobs(
     query_idx = 0
 
     # Go over all sequence groups in a batch at once.
-    for i, (seq_group, sample_result) in enumerate(
-            zip(sampling_metadata.seq_groups, sample_results)):
-        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
+    for seq_group, sample_result in zip(sampling_metadata.seq_groups,
+                                        sample_results):
+        seq_ids = seq_group.seq_ids
+        sampling_params = seq_group.sampling_params
         is_prompt = seq_group.is_prompt
 
         # Find prompt logprobs
-        # NOTE: It assumes sampleing_metadata.seq_groups are sorted by prefill
-        # -> decodes.
         if (is_prompt and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
             subquery_len = seq_group.subquery_len
             assert subquery_len is not None
             assert len(seq_ids) == 1
+
+            # Find the next prompt token.
             seq_data = seq_group.seq_data[seq_ids[0]]
             computed_len = seq_data.get_num_computed_tokens()
             prompt_tokens = seq_data.prompt_token_ids
-            # Look at the logprob of next prompt token to compute prompt
-            # logprob of a current prefill token.
+            # +1 is needed because you are looking for the next token.
             next_token_index_start = computed_len + 1
+            # next_token_index_end can be shorter than len(prompt_tokens) if
+            # chunked prefill is enabled.
             next_token_index_end = min(computed_len + subquery_len + 1,
                                        len(prompt_tokens))
             next_prompt_tokens = prompt_tokens[
                 next_token_index_start:next_token_index_end]
+
+            # Compute prompt logprobs.
             prompt_logprobs: PromptLogprobs = []
             for token_id in next_prompt_tokens:
-                # First, calculate the logprob from the sampled output.
+                # Calculate the prompt logprob of the real prompts.
                 prompt_logprobs_dict = {
                     token_id: (selected_logprobs[query_idx].item(),
                                ranks[query_idx].item())
                 }
-                # Second, add top logprobs if required.
+                # Add top K prompt logprobs.
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
                         zip(
@@ -701,7 +709,7 @@ def _get_logprobs(
                             zip(
                                 top_logprobs[
                                     top_logprob_idx, :num_logprobs].tolist(),
-                                # rank. Since top_logprob is sorted, we can
+                                # This is ranks. Since top_logprob is sorted, we can
                                 # just use a range here.
                                 range(1, num_logprobs + 1))))
                 prompt_logprobs.append({
@@ -720,11 +728,7 @@ def _get_logprobs(
             num_logprobs = 0
 
         sampled_logprobs: SampleLogprobs = []
-        # Compute logprob only when we do sampling.
-        # Next sampled token id per each parent sequence.
-        # Parent sequence > 1 if it uses beam search.
         next_token_ids, parent_seq_ids = sample_result
-        # Each sample can contain multiple tokens if beam search is enabled.
         for next_token_id, parent_seq_id in zip(next_token_ids,
                                                 parent_seq_ids):
             # First, calculate the logprob from the sampled output.
@@ -734,7 +738,7 @@ def _get_logprobs(
             }
             query_idx += 1
 
-            # Second, add top logprobs if required.
+            # Second, add top K logprobs.
             if num_logprobs >= 0:
                 sampled_logprobs_dict.update(
                     zip(
@@ -744,7 +748,7 @@ def _get_logprobs(
                             top_logprobs[
                                 top_logprob_idx +
                                 parent_seq_id, :num_logprobs].tolist(),
-                            # rank. Since top_logprob is sorted, we can just
+                            # This is rank. Since top_logprob is sorted, we can just
                             # use a range here.
                             range(1, num_logprobs + 1))))
             sampled_logprobs.append({

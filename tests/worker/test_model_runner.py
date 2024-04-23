@@ -3,6 +3,7 @@ import torch
 
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 
@@ -97,9 +98,9 @@ def test_prepare_prompt(batch_size):
     assert len(input_positions) == sum(prompt_lens)
     torch.testing.assert_close(input_tokens, input_positions)
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                 prompt_lens,
+                                                 subquery_lens=prompt_lens)
     assert len(input_tokens) == sum(prompt_lens)
     assert len(input_positions) == sum(prompt_lens)
     actual = sampling_metadata.selected_token_indices
@@ -195,9 +196,9 @@ def test_prepare_decode_cuda_graph(batch_size):
     for prompt_len in prompt_lens:
         expected_selected_token_indices.append(selected_token_start_idx)
         selected_token_start_idx += 1
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                 prompt_lens,
+                                                 subquery_lens=prompt_lens)
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,

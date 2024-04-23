@@ -12,6 +12,7 @@ from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter
 from vllm.worker.model_runner import ModelRunner
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
 class MockLogitsSampler(Sampler):
@@ -68,9 +69,9 @@ def _do_sample(
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                 prompt_lens,
+                                                 subquery_lens=prompt_lens)
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
@@ -443,7 +444,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
              "batch size")
 
         _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
-        sampling_metadata = model_runner._prepare_sample(
+        sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             prompt_lens=prompt_lens if prompt_lens else None,
             subquery_lens=prompt_lens if prompt_lens else None)
@@ -530,8 +531,9 @@ def test_sampler_mixed(seed: int, device: str):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     def test_sampling(model_runner: ModelRunner):
-        sampling_metadata = model_runner._prepare_sample(
-            seq_group_metadata_list, prompt_lens, subquery_lens=prompt_lens)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     prompt_lens,
+                                                     subquery_lens=prompt_lens)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -627,9 +629,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                 prompt_lens,
+                                                 subquery_lens=prompt_lens)
 
     sample_probs = None
 
