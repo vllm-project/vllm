@@ -1,5 +1,6 @@
 from typing import Type
 
+from vllm.model_executor.layers.quantization.aqlm import AQLMConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -9,6 +10,7 @@ from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 
 QUANTIZATION_METHODS = {
+    "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "fp8": FP8Config,
     "gptq": GPTQConfig,

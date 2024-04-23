@@ -91,7 +91,7 @@ class GPTQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_size_per_partition: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -103,6 +103,7 @@ class GPTQLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
+        output_size_per_partition = sum(output_partition_sizes)
         if (output_size_per_partition % self.quant_config.pack_factor.numerator
                 != 0):
             raise ValueError(

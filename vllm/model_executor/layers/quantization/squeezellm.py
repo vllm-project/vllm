@@ -70,7 +70,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
+                       output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.pack_factor != 0:
@@ -78,6 +78,8 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
+
+        output_size_per_partition = sum(output_partition_sizes)
         qweight = Parameter(
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
