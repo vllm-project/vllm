@@ -12,16 +12,21 @@ TEMPLATE = """
 FOR_BGMV_WIDE_NARROW(INST_BGMV_TWOSIDE, {input_dtype}, {output_dtype}, {weight_dtype})
 """.lstrip()  # noqa: E501
 
-for dtype in ["fp16", "bf16"]:
-    # NOTE(woosuk): While Punica supports mixed data types for the input,
-    # output, and weight, we only generate the kernels for the same data
-    # types to reduce the binary size.
-    input_dtype = output_dtype = weight_dtype = dtype
-    kernel_definition = TEMPLATE.format(
-        input_dtype=DTYPE_MAP[input_dtype],
-        output_dtype=DTYPE_MAP[output_dtype],
-        weight_dtype=DTYPE_MAP[weight_dtype],
-    )
-    filename = f"bgmv_{input_dtype}_{output_dtype}_{weight_dtype}.cu"
-    with open(filename, "w") as f:
-        f.write(kernel_definition)
+for input_dtype in DTYPES:
+    for output_dtype in DTYPES:
+        for weight_dtype in DTYPES:
+            if weight_dtype == "fp32":
+                # FP32 weights are not supported.
+                continue
+            if not (input_dtype == output_dtype == weight_dtype):
+                # NOTE(woosuk): While Punica supports mixed data types for the
+                # input, output, and weight, we only generate the kernels for
+                # the same data types to reduce the binary size.
+                continue
+            kernel_definition = TEMPLATE.format(
+                input_dtype=DTYPE_MAP[input_dtype],
+                output_dtype=DTYPE_MAP[output_dtype],
+                weight_dtype=DTYPE_MAP[weight_dtype])
+            filename = f"bgmv_{input_dtype}_{output_dtype}_{weight_dtype}.cu"
+            with open(filename, "w") as f:
+                f.write(kernel_definition)
