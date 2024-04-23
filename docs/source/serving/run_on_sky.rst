@@ -233,6 +233,19 @@ To enable autoscaling, you could specify additional configs in `services`:
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
 
+To update the service with the new config:
+
+.. code-block:: console
+
+  HF_TOKEN="your-huggingface-token" sky serve update vllm serving.yaml --env HF_TOKEN
+
+
+To stop the service:
+
+.. code-block:: console
+
+  sky serve down vllm
+
 
 **Optional**: Connect a GUI to the endpoint
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
