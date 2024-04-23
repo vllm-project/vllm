@@ -123,23 +123,13 @@ def test_guided_choice_completion(sample_json_schema, llm):
 
 
 @pytest.mark.skip_global_cleanup
-def test_guided_grammar(llm):
-    simple_sql_grammar = """
-start: select_statement
+def test_guided_grammar(sample_sql_statements, llm):
 
-select_statement: "SELECT" column "from" table "where" condition
-
-column: "col_1" | "col_2"
-table: "table_1" | "table_2"
-condition: column "=" number
-
-number: "1" | "2"
-"""
 
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_options=dict(guided_grammar=simple_sql_grammar))
+        guided_options=dict(guided_grammar=sample_sql_statements))
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
                  "table_1 where it is equals to 1"),
@@ -158,7 +148,7 @@ number: "1" | "2"
 
         # use Lark to parse the output, and make sure it's a valid parse tree
         from lark import Lark
-        parser = Lark(simple_sql_grammar)
+        parser = Lark(sample_sql_statements)
         parser.parse(generated_text)
 
         # remove spaces for comparison b/c we removed them in the grammar

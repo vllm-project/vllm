@@ -95,10 +95,6 @@ def get_local_guided_decoding_logits_processor(sampling_params, tokenizer):
     if not guide:
         return None
 
-    # if global_thread_pool is None:
-    #     global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-    #         max_workers=2)
-
     result = _get_cached_logits_processor(guide, tokenizer, mode)
 
     logits_processor = copy(result)
@@ -153,7 +149,7 @@ def _get_guide_and_mode_from_sampling_params(
 
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
-) -> Tuple[str, GuidedDecodingMode]:
+) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
 
     if request.guided_json:
         json = request.guided_json

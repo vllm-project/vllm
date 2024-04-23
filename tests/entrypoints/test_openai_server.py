@@ -732,18 +732,7 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     assert loaded == {"result": 2}, loaded
 
 
-async def test_guided_grammar(server, client: openai.AsyncOpenAI):
-    simple_sql_grammar = """
-start: select_statement
-
-select_statement: "SELECT" column "from" table "where" condition
-
-column: "col_1" | "col_2"
-table: "table_1" | "table_2"
-condition: column "=" number
-
-number: "1" | "2"
-"""
+async def test_guided_grammar(server, sample_sql_statements, client: openai.AsyncOpenAI):
 
     completion = await client.completions.create(
         model=MODEL_NAME,
@@ -751,13 +740,13 @@ number: "1" | "2"
                 "table_1 where it is equals to 1"),
         temperature=1.0,
         max_tokens=500,
-        extra_body=dict(guided_grammar=simple_sql_grammar))
+        extra_body=dict(guided_grammar=sample_sql_statements))
 
     content = completion.choices[0].text
 
     # use Lark to parse the output, and make sure it's a valid parse tree
     from lark import Lark
-    parser = Lark(simple_sql_grammar)
+    parser = Lark(sample_sql_statements)
     parser.parse(content)
 
     # remove spaces for comparison b/c we removed them in the grammar

@@ -99,6 +99,9 @@ class SamplingParams:
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
+        guided_options: Allow guided decoding parameters (i.e. guided_json, guided_regex).
+            Input is a dictionary with form dict(guided_json = "JSON_STRUCTURE").
+            Can only use one guided option for each sampling params. Defaults to None.
     """
 
     def __init__(

@@ -471,3 +471,17 @@ def sample_guided_choice():
         "Python", "Java", "JavaScript", "C++", "C#", "PHP", "TypeScript",
         "Ruby", "Swift", "Kotlin"
     ]
+
+@pytest.fixture
+def sample_sql_statements():
+        return  ("""
+start: select_statement
+
+select_statement: "SELECT" column "from" table "where" condition
+
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+
+number: "1" | "2"
+""")
