@@ -297,7 +297,6 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        logger.debug(f"add_seq_group {seq_group.request_id}")
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -396,12 +395,12 @@ class Scheduler:
             # We can have up to 1 running prefill at any given time in running
             # queue, which means we can guarantee chunk size is at least 1.
             assert num_running_tokens != 0
-            num_running_seqs = seq_group.get_max_num_running_seqs()
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
+                num_running_seqs = seq_group.get_max_num_running_seqs()
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
@@ -427,7 +426,6 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                logger.debug(f"append slot for {seq_group}")
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
@@ -441,7 +439,13 @@ class Scheduler:
                                                token_chunk_size=1))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
-                budget.add_num_seqs(seq_group.request_id, num_running_seqs)
+                # OPTIMIZATION:  Note that get_max_num_running_seqs is
+                # expensive. For the default scheduling chase where
+                # enable_chunking is False, num_seqs are updated before running
+                # this method, so we don't have to update it again here.
+                if enable_chunking:
+                    num_running_seqs = seq_group.get_max_num_running_seqs()
+                    budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
@@ -659,7 +663,7 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group, num_new_tokens)
+            self._allocate_and_set_running(seq_group)
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -762,9 +766,7 @@ class Scheduler:
             blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
-            num_lookahead_slots=(prefills.num_lookahead_slots +
-                                 running_scheduled.num_lookahead_slots +
-                                 swapped_in.num_lookahead_slots),
+            num_lookahead_slots=running_scheduled.num_lookahead_slots,
         )
 
     def _schedule_chunked_prefill(self):
@@ -850,9 +852,7 @@ class Scheduler:
             blocks_to_copy=merge_dicts(running_scheduled.blocks_to_copy,
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
-            num_lookahead_slots=(prefills.num_lookahead_slots +
-                                 running_scheduled.num_lookahead_slots +
-                                 swapped_in.num_lookahead_slots),
+            num_lookahead_slots=running_scheduled.num_lookahead_slots,
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -956,8 +956,7 @@ class Scheduler:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup,
-                                  num_new_tokens: int) -> None:
+    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
