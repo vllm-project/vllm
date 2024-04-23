@@ -289,16 +289,16 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # TODO: document.
         # TODO: sync with is_metadata.
         # For loading scales.
-        param_shard_splitter = getattr(param, "shard_splitter", None)
-        if output_dim is not None and param_shard_splitter is not None:
+        shard_indexer = getattr(param, "shard_indexer", None)
+        if output_dim is not None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support output_dim != None and "
-                "shard_splitter != None for a parameter. Please open an issue."
+                "shard_indexer != None for a parameter. Please open an issue."
             )
-        if loaded_shard_id is None and param_shard_splitter is not None:
+        if loaded_shard_id is None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support loaded_shard_id == None and "
-                "shard_splitter != None for a parameter. Please open an issue."
+                "shard_indexer != None for a parameter. Please open an issue."
             )
         
         if loaded_shard_id is None:
@@ -361,8 +361,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         
         # TODO: sync with is_metadata UX.
         # If a param_shard_splitter is defined by the LinearMethod, use it.
-        elif param_shard_splitter is not None:
-            param_data, loaded_weight = param_shard_splitter(
+        elif shard_indexer is not None:
+            param_data, loaded_weight = shard_indexer(
                 param_data, loaded_weight, loaded_shard_id)
         
         else:
@@ -448,16 +448,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         is_metadata = getattr(param, "is_metadata", False)
         
         # TODO: sync with is_metadata UX
-        param_shard_splitter = getattr(param, "shard_splitter", None)
-        if output_dim is not None and param_shard_splitter is not None:
+        shard_indexer = getattr(param, "shard_indexer", None)
+        if output_dim is not None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support output_dim != None and "
-                "shard_splitter != None for a parameter. Please open an issue."
+                "shard_indexer != None for a parameter. Please open an issue."
             )
-        if loaded_shard_id is None and param_shard_splitter is not None:
+        if loaded_shard_id is None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support loaded_shard_id == None and "
-                "shard_splitter != None for a parameter. Please open an issue."
+                "shard_indexer != None for a parameter. Please open an issue."
             )
 
         if loaded_shard_id is None:
@@ -534,8 +534,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                                            shard_size)
         # TODO: sync with QKV
         # If a param_shard_splitter is defined by the LinearMethod, use it.
-        elif param_shard_splitter is not None:
-            param_data, loaded_weight = param_shard_splitter(
+        elif shard_indexer is not None:
+            param_data, loaded_weight = shard_indexer(
                 param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
