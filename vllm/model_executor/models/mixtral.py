@@ -96,7 +96,7 @@ class MixtralMoE(nn.Module):
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=self.params_dtype)) if self.use_fp8 else None
+                        dtype=self.params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
@@ -104,16 +104,15 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=self.params_dtype)) if self.use_fp8 else None
 
-        # Scaling factors for fp8 weights. If fp8 is not used, these parameters
-        # are 1.0 so no rescaling will happen.
+        # Scaling factors for fp8 weights.
         self.ws_scale = nn.Parameter(torch.ones(self.num_total_experts,
                                                 device="cuda",
                                                 dtype=torch.float32),
-                                     requires_grad=False)
+                                     requires_grad=False) if self.use_fp8 else None
         self.w2s_scale = nn.Parameter(torch.ones(self.num_total_experts,
                                                  device="cuda",
                                                  dtype=torch.float32),
-                                      requires_grad=False)
+                                      requires_grad=False) if self.use_fp8 else None
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
