@@ -362,7 +362,6 @@ def main(args: argparse.Namespace):
         )
 
     elif args.dataset_name == "sharegpt":
-
         input_requests = sample_sharegpt_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
