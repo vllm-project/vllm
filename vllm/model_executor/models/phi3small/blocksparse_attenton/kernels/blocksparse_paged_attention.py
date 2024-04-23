@@ -1,9 +1,6 @@
 import triton
 import triton.language as tl
 import torch
-import math
-from vllm.model_executor.models.phi3small_utils import _get_sparse_attn_mask, dense_to_crow_col
-from functools import lru_cache
 
 
 def blocksparse_flash_attn_varlen_fwd_with_blocktable(
@@ -74,6 +71,7 @@ def blocksparse_flash_attn_varlen_fwd_with_blocktable(
         else:
             start_local_head_idx = n_heads + 1 # is_local will always be false
             grid = (batches, n_heads, 1)
+
 
     _fwd_kernel_batch_inference_with_blocktable[grid](
     q, k, v, out, m,
@@ -459,133 +457,6 @@ def _fwd_kernel_batch_inference_with_blocktable(
 
         M += off_z * stride_mt + off_h * stride_mh
         tl.store(M + offs_m * stride_mh, m_i, mask=offs_m < 1)
-
-
-
-@lru_cache
-class LocalStridedBlockSparseAttnInferenceBT(torch.nn.Module):
-    '''
-    Support both varlen or fixed-len (with left or right paddings
-    The `forward` method will dispatch to `self.varlen_attn` and `self.fixedlen_attn`
-        if k.dim() == 4: `self.fixedlen_attn`
-        if k.dim() == 3: `self.varlen_attn`
-    Please checkout the docstring of the method to use.
-
-    NOTE:
-    1. Currently does not support autograd
-
-    '''
-    def __init__(self, n_heads, max_seqlen,
-                 local_blocks, vert_stride, block_size,
-                device=None, dtype=torch.bfloat16, homo_head=False,
-                active_head_range=None,
-                vllm_block_size=None,
-                mode='split'):
-        super().__init__()
-        device = device or torch.cuda.current_device()
-        self.max_seqlen = max_seqlen
-        self.block_size = block_size
-        self.local_blocks = local_blocks
-        self.vert_stride = vert_stride
-        sparse_layout, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
-                                                BLOCK=block_size,
-                                                local_blocks=local_blocks, vert_stride=vert_stride,
-                                                homo_head=homo_head, return_dense=False)
-        self.mode = mode
-        if mode in ('split', 'remote-only'):
-            sparse_layout, sparse_pattern = self.get_remote_sparse_layout(n_heads, max_seqlen, dtype, device,
-                                                                    block_size, local_blocks, vert_stride,
-                                                                    homo_head=homo_head, return_dense=False)
-        # import ipdb; ipdb.set_trace()
-
-        if (not homo_head) and (active_head_range is not None):
-            assert isinstance(active_head_range, tuple)
-            assert len(active_head_range) == 2, '"active_head_range" should be a tuple of start/end index of the heads.'
-            h_start, h_end = active_head_range
-            sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
-            sparse_pattern = sparse_pattern[h_start:h_end]
-
-        self.sparse_layout = sparse_layout
-        self.sparse_pattern = sparse_pattern
-
-        self.vllm_block_size = None
-        if vllm_block_size:
-            self.set_vllm_block_size(vllm_block_size)
-
-    def set_vllm_block_size(self, vllm_block_size):
-        if self.vllm_block_size is not None:
-            raise ValueError('vllm_block_size has been set')
-
-        self.vllm_block_size = vllm_block_size
-        sparse_block_size = self.block_size
-        kernel_block_size = vllm_block_size
-
-        assert sparse_block_size % kernel_block_size == 0
-        # self.block_size = self.vllm_block_size
-        if sparse_block_size // kernel_block_size > 1:
-            _mul = sparse_block_size // kernel_block_size
-            # need to consider if block_m and block_n are different
-            sparse_pattern = torch.kron(self.sparse_pattern, self.sparse_pattern.new_ones(_mul, _mul))
-            num_sparse_blocks = sparse_pattern.size(-1)
-            block_causal_mask = torch.arange(0, num_sparse_blocks)[:, None] >= torch.arange(0, num_sparse_blocks)[None]
-            sparse_pattern *= block_causal_mask.type_as(sparse_pattern)
-            sparse_layout = dense_to_crow_col(sparse_pattern)
-            self.sparse_layout = sparse_layout
-            self.sparse_pattern = self.sparse_pattern
-
-    @lru_cache
-    def get_remote_sparse_layout(self, n_heads, max_seqlen, dtype, device, block_size, local_blocks, vert_stride,
-                            homo_head=False, return_dense=False):
-        _, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
-                                                BLOCK=block_size,
-                                                local_blocks=local_blocks, vert_stride=vert_stride,
-                                                homo_head=homo_head, return_dense=False)
-    
-        _, sparse_pattern_local, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
-                                                BLOCK=block_size,
-                                                local_blocks=local_blocks, vert_stride=max_seqlen + 1,
-                                                homo_head=homo_head, return_dense=return_dense)
-        sparse_pattern_strides = sparse_pattern - sparse_pattern_local
-    
-        sparse_layout_strides = dense_to_crow_col(sparse_pattern_strides)
-        return sparse_layout_strides, sparse_pattern_strides
-
-        # sparse_pattern =
-
-    def forward(self, q, k, v, block_tables, context_lens, sm_scale=None, kv_scale=1.0):
-        '''
-        q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
-                Support grouped attention, with `q[:, i*r:(i*r + r)]`
-                is correspondent to `k[:, i]`, where `r` is the q/k ratio.
-        sm_scale: softmax scale, default to 1/sqrt(head_size).
-
-        return: tensor of shape as q.
-        '''
-        if self.sparse_layout[0].size(0) != 1:
-            assert q.size(1) == self.sparse_layout[0].size(0)
-
-        sm_scale = sm_scale or 1. / math.sqrt(q.size(-1))
-
-        if self.vllm_block_size is None:
-            self.set_vllm_block_size(v.size(-1))
-
-        # TODO: auto extend length to next_power_of_2
-        assert block_tables.size(1) * self.vllm_block_size <= self.max_seqlen
-
-        return blocksparse_flash_attn_varlen_fwd_with_blocktable(q, k, v,
-                    block_tables,
-                    context_lens,
-                    sm_scale,
-                    self.sparse_layout,
-                    sparse_block_size=self.block_size,
-                    vllm_block_size=self.vllm_block_size,
-                    num_local_blocks=self.local_blocks,
-                    mode=self.mode,
-                    max_seqlen=self.max_seqlen,
-                    kv_scale=kv_scale)
- 
-    def backward(self, *args):
-        raise NotImplementedError('> backward is not supported.')
 
 
 if __name__ == '__main__':

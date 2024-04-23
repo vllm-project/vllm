@@ -10,8 +10,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
-from .phi3small_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
-from .phi3small_paged_attn import LocalStridedBlockSparseAttnInferenceBT
+from .blocksparse_attenton.interface import LocalStridedBlockSparseAttn, LocalStridedBlockSparsePagedAttn
+from .phi3small_paged_attn import LocalStridedBlockSparsePagedAttn
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
@@ -214,10 +214,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         active_head_range = (tp_rank * self.num_heads, (tp_rank + 1) * self.num_heads)
 
         total_num_heads = num_heads * tp_size
-        self.bs_attn = LocalStridedBlockSparseAttnInference(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+        self.bs_attn = LocalStridedBlockSparseAttn(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
 
         if self.use_triton_paged_attn:
-            self.bs_paged_attn = LocalStridedBlockSparseAttnInferenceBT(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
 
     def forward(
         self,
