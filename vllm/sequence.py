@@ -508,6 +508,11 @@ class SequenceGroup:
         return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
+        # Optimization. We don't need to call get_seqs if we don't need to
+        # filter by states.
+        if status is None:
+            return len(self.seqs_dict)
+
         return len(self.get_seqs(status))
 
     def num_unfinished_seqs(self) -> int:
