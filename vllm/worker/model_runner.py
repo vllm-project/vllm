@@ -236,6 +236,9 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         multi_modal_input_list: List[torch.Tensor] = []
+        paged_kv_indices: List[int] = []
+        paged_kv_indptr: List[int] = [0]
+        paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -318,6 +321,13 @@ class ModelRunner:
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
+            paged_kv_indices.extend(block_table)
+            paged_kv_indptr.append(len(block_table))
+            last_len = seq_data.get_len() % self.block_size
+            if last_len == 0:
+                last_len = self.block_size
+            paged_kv_last_page_len.append(last_len)
+
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
             # For example, if the prompt len is 10, sliding window is 8, and
@@ -405,6 +415,13 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
+            paged_kv_indices = paged_kv_indices,
+            paged_kv_indptr = paged_kv_indptr,
+            paged_kv_last_page_len = paged_kv_last_page_len,
+            num_qo_heads = self.model_config.get_num_attention_heads(),
+            num_kv_heads = self.model_config.get_num_kv_heads(),
+            head_dim = self.model_config.get_head_size(),
+            block_size = self.block_size
         )
 
         return PreparePromptMetadata(
@@ -432,6 +449,9 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
+        paged_kv_indices: List[int] = []
+        paged_kv_indptr: List[int] = [0]
+        paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
@@ -472,6 +492,14 @@ class ModelRunner:
                                              self.block_size)
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
+
+                paged_kv_indices.extend(block_table)
+                paged_kv_indptr.append(len(block_table))
+                last_len = seq_data.get_len() % self.block_size
+                if last_len == 0:
+                    last_len = self.block_size
+                paged_kv_last_page_len.append(last_len)
+
 
         # vLLM uses cuda graph only for decoding requests.
         # See `capture_model` API for more details.
@@ -535,6 +563,13 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
+            paged_kv_indices = paged_kv_indices,
+            paged_kv_indptr = paged_kv_indptr,
+            paged_kv_last_page_len = paged_kv_last_page_len,
+            num_qo_heads = self.model_config.get_num_attention_heads(),
+            num_kv_heads = self.model_config.get_num_kv_heads(),
+            head_dim = self.model_config.get_head_size(),
+            block_size = self.block_size
         )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
