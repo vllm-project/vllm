@@ -1,5 +1,6 @@
 import codecs
 import time
+from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
 
 from fastapi import Request
@@ -18,6 +19,16 @@ from vllm.outputs import RequestOutput
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def _path_is_relative_to(path: Path, other: str):
+    # Polyfill for Python 3.8
+    # TODO: Replace w/ Path.is_relative_to when Python 3.8 is not supported
+    try:
+        path.relative_to(*other)
+        return True
+    except ValueError:
+        return False
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -319,23 +330,31 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _load_chat_template(self, chat_template):
+        tokenizer = self.tokenizer
+        assert tokenizer is not None
+
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
-                    self.tokenizer.chat_template = f.read()
-            except OSError:
+                    tokenizer.chat_template = f.read()
+            except OSError as e:
+                path = Path(chat_template)
+                if path.is_absolute() or _path_is_relative_to(path, ''):
+                    msg = (f"The supplied chat template ({chat_template}) "
+                           f"looks like a file path, but it failed to be "
+                           f"opened. Reason: {e}")
+                    raise ValueError(msg) from e
+
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
-                self.tokenizer.chat_template = codecs.decode(
+                tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
 
             logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
-            )
-        elif self.tokenizer.chat_template is not None:
+                f"Using supplied chat template:\n{tokenizer.chat_template}")
+        elif tokenizer.chat_template is not None:
             logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
-            )
+                f"Using default chat template:\n{tokenizer.chat_template}")
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")
