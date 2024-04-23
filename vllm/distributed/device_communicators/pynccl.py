@@ -261,6 +261,12 @@ class NCCLCommunicator:
                    tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None):
+        # nccl communicator created on a specific device
+        # will only work on tensors on the same device
+        # otherwise it will cause "illegal memory access"
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = self.stream
         NCCL_CHECK(
