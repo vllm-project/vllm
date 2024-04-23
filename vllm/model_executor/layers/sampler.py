@@ -583,8 +583,6 @@ def _get_logprobs(
     next_token_indices: List[int] = []
     # at least get one logprob for each token
     largest_num_logprobs = 1
-    # We iterate a batch. Each request (seq_group) in a batch can contain one
-    # or more query tokens. It is used to track the index.
     query_idx = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
@@ -635,6 +633,7 @@ def _get_logprobs(
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_indices_gpu = torch.tensor(next_token_indices,
                                           device=logprobs.device)
+
     # logprob for selected tokens across all sequence groups.
     selected_logprobs = logprobs[[
         query_indices_gpu,
@@ -704,6 +703,8 @@ def _get_logprobs(
                             zip(
                                 top_logprobs[
                                     top_logprob_idx, :num_logprobs].tolist(),
+                                # rank. Since top_logprob is sorted, we can
+                                # just use a range here.
                                 range(1, num_logprobs + 1))))
                 prompt_logprobs.append({
                     token_id: Logprob(*logprob_rank)
@@ -746,6 +747,8 @@ def _get_logprobs(
                             top_logprobs[
                                 top_logprob_idx +
                                 parent_seq_id, :num_logprobs].tolist(),
+                            # rank. Since top_logprob is sorted, we can just
+                            # use a range here.
                             range(1, num_logprobs + 1))))
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_rank)
