@@ -56,6 +56,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+
       - name: Set up Linux Env
         if: ${{ runner.os == 'Linux' }}
         run: |
