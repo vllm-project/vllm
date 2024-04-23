@@ -5,6 +5,7 @@ from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.fp8 import FP8Config
+from vllm.model_executor.layers.quantization.fp8_static import FP8StaticConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
@@ -13,6 +14,7 @@ QUANTIZATION_METHODS = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
     "fp8": FP8Config,
+    "fp8_static": FP8StaticConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
     "marlin": MarlinConfig,

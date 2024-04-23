@@ -285,6 +285,22 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         is_metadata = getattr(param, "is_metadata", False)
+        
+        # TODO: document.
+        # TODO: sync with is_metadata.
+        # For loading scales.
+        param_shard_splitter = getattr(param, "shard_splitter", None)
+        if output_dim is not None and param_shard_splitter is not None:
+            raise NotImplementedError(
+                "We do not currently support output_dim != None and "
+                "shard_splitter != None for a parameter. Please open an issue."
+            )
+        if loaded_shard_id is None and param_shard_splitter is not None:
+            raise NotImplementedError(
+                "We do not currently support loaded_shard_id == None and "
+                "shard_splitter != None for a parameter. Please open an issue."
+            )
+        
         if loaded_shard_id is None:
             # Loaded weight is already packed.
             if output_dim is None:
@@ -342,6 +358,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
+        
+        # TODO: sync with is_metadata UX.
+        # If a param_shard_splitter is defined by the LinearMethod, use it.
+        elif param_shard_splitter is not None:
+            param_data, loaded_weight = param_shard_splitter(
+                param_data, loaded_weight, loaded_shard_id)
+        
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -423,6 +446,19 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
         is_metadata = getattr(param, "is_metadata", False)
+        
+        # TODO: sync with is_metadata UX
+        param_shard_splitter = getattr(param, "shard_splitter", None)
+        if output_dim is not None and param_shard_splitter is not None:
+            raise NotImplementedError(
+                "We do not currently support output_dim != None and "
+                "shard_splitter != None for a parameter. Please open an issue."
+            )
+        if loaded_shard_id is None and param_shard_splitter is not None:
+            raise NotImplementedError(
+                "We do not currently support loaded_shard_id == None and "
+                "shard_splitter != None for a parameter. Please open an issue."
+            )
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.
@@ -496,6 +532,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
+        # TODO: sync with QKV
+        # If a param_shard_splitter is defined by the LinearMethod, use it.
+        elif param_shard_splitter is not None:
+            param_data, loaded_weight = param_shard_splitter(
+                param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -592,6 +633,11 @@ class RowParallelLinear(torch.nn.Module):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
+        # TODO: canon
+        # This is for loading scales for fp8, which have no dims.
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

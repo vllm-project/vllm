@@ -10,7 +10,14 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
+print(capability)
 
+@pytest.mark.skipif(
+    capability < QUANTIZATION_METHODS["fp8_static"].get_min_capability(),
+    reason="FP8 is not supported on this GPU type.")
+def test_load_static_model(vllm_runner) -> None:
+    llm = vllm_runner("FriendliAI/Llama-2-7b-chat-hf-fp8", quantization="fp8_static")
+    print(llm)
 
 @pytest.mark.skipif(
     capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
