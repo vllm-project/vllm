@@ -23,6 +23,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
@@ -119,6 +120,24 @@ class ServerRunner:
 @pytest.fixture(scope="session")
 def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
+
+
+@pytest.fixture(scope="session")
+def embedding_server(zephyr_lora_files):
+    ray.init()
+    server_runner = ServerRunner.remote([
+        "--model",
+        EMBEDDING_MODEL_NAME,
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--enforce-eager",
+    ])
+    ray.get(server_runner.ready.remote())
+    yield server_runner
+    ray.shutdown()
 
 
 @pytest.fixture(scope="session")
@@ -459,6 +478,45 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
         choice = chunk.choices[0]
         texts[choice.index] += choice.text
     assert texts[0] == texts[1]
+
+
+@pytest.mark.parametrize(
+    # just test 1 lora hereafter
+    "model_name",
+    [EMBEDDING_MODEL_NAME],
+)
+async def test_embedding(embedding_server, client: openai.AsyncOpenAI,
+                         model_name: str):
+    input = [
+        "The chef prepared a delicious meal.",
+    ]
+
+    # test single embedding
+    embeddings = await client.embeddings.create(
+        model=model_name,
+        input=input,
+        encoding_format="float",
+    )
+    assert embeddings.id is not None
+    assert embeddings.data is not None and len(embeddings.data) == 1
+    assert len(embeddings.data[0].embedding) == 4096
+    assert embeddings.usage.completion_tokens == 0
+    assert embeddings.usage.prompt_tokens == 9
+    assert embeddings.usage.total_tokens == 9
+
+    # test using token IDs
+    input = [1, 1, 1, 1, 1]
+    embeddings = await client.embeddings.create(
+        model=model_name,
+        input=input,
+        encoding_format="float",
+    )
+    assert embeddings.id is not None
+    assert embeddings.data is not None and len(embeddings.data) == 1
+    assert len(embeddings.data[0].embedding) == 4096
+    assert embeddings.usage.completion_tokens == 0
+    assert embeddings.usage.prompt_tokens == 5
+    assert embeddings.usage.total_tokens == 5
 
 
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
