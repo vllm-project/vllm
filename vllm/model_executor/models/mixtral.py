@@ -96,13 +96,13 @@ class MixtralMoE(nn.Module):
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=self.params_dtype)) if self.use_fp8 else None
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=self.params_dtype)) if self.use_fp8 else None
 
         # Scaling factors for fp8 weights. If fp8 is not used, these parameters
         # are 1.0 so no rescaling will happen.
@@ -207,7 +207,8 @@ class MixtralAttention(nn.Module):
         if isinstance(linear_method, Fp8LinearMethod):
             print_warning_once(
                 "For Mixtral FP8 quantization, we currently do not quantize "
-                "the attention layers until their FP8 performance is improved.")
+                "the attention layers until their FP8 performance is improved."
+            )
             linear_method = None
 
         self.qkv_proj = QKVParallelLinear(
