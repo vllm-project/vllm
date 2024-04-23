@@ -717,19 +717,20 @@ async def test_guided_choice_chat_logprobs(server, sample_guided_choice,
 
 
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
-    resp = await client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{
-            "role":
-            "user",
-            "content": ('what is 1+1? please respond with a JSON object, '
-                        'the format is {"result": 2}')
-        }],
-        response_format={"type": "json_object"})
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role":
+                "user",
+                "content": ('what is 1+1? please respond with a JSON object, '
+                            'the format is {"result": 2}')
+            }],
+            response_format={"type": "json_object"})
 
-    content = resp.choices[0].message.content
-    loaded = json.loads(content)
-    assert loaded == {"result": 2}, loaded
+        content = resp.choices[0].message.content
+        loaded = json.loads(content)
+        assert loaded == {"result": 2}, loaded
 
 
 async def test_guided_grammar(server, sample_sql_statements, client: openai.AsyncOpenAI):
