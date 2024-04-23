@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.ops.sample import sample as sample_triton
-from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+from vllm.model_executor.sampling_metadata import (SampledSeqGroup,
+                                                   SamplingMetadata,
                                                    SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
@@ -116,21 +117,23 @@ def _apply_min_tokens_penalty(
     # list of indices in logits that will be set to -inf
     logits_to_penalize = []
     start_idx = 0
-    for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        seq_ids, sampling_params = seq_group
+    for seq_group in sampling_metadata.seq_groups:
+        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
 
         # handle prompt_logprobs by skipping rows in logits added for the prompt
         # tokens (prompt logprobs are not penalized)
-        if (i < sampling_metadata.num_prompts
+        if (seq_group.is_prompt
                 and sampling_params.prompt_logprobs is not None):
+            subquery_len = seq_group.subquery_len
+            assert subquery_len is not None
             assert len(seq_ids) == 1
-            start_idx += sampling_metadata.subquery_lens[i] - 1
+            start_idx += subquery_len - 1
 
         min_tokens = sampling_params.min_tokens
         if min_tokens > 0:
             seqs_to_penalize = []
             for i, seq_id in enumerate(seq_ids):
-                seq_data = sampling_metadata.seq_data[seq_id]
+                seq_data = seq_group.seq_data[seq_id]
                 if len(seq_data.output_token_ids) < min_tokens:
                     seqs_to_penalize.append(i)
 
@@ -236,7 +239,7 @@ def _greedy_sample(
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
-        seq_ids, _ = seq_group
+        seq_ids = seq_group.seq_ids
         num_parent_seqs = len(seq_ids)
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
@@ -248,16 +251,16 @@ def _greedy_sample(
 
 
 def _random_sample(
-    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-    is_prompts: List[bool],
+    selected_seq_groups: List[SampledSeqGroup],
     random_samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # Find the maximum best_of value of the prompt phase requests.
     random_samples = random_samples.cpu()
     sample_idx = 0
     results = []
-    for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
-        seq_ids, sampling_params = seq_group
+    for seq_group in selected_seq_groups:
+        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
+        is_prompt = seq_group.is_prompt
         num_parent_seqs = len(seq_ids)
         if is_prompt:
             # Prompt phase.
@@ -275,9 +278,7 @@ def _random_sample(
 
 
 def _beam_search_sample(
-    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
-    is_prompts: List[bool],
-    seq_data: Dict[int, SequenceData],
+    selected_seq_groups: List[SampledSeqGroup],
     logprobs: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     # We sample 2 * beam_width candidates to make sure that with high
@@ -291,33 +292,34 @@ def _beam_search_sample(
     # other sampling methods.
     sample_idx = 0
     results = []
-    for seq_group, is_prompt in zip(selected_seq_groups, is_prompts):
-        seq_ids, sampling_params = seq_group
+    for seq_group in selected_seq_groups:
+        is_prompt = seq_group.is_prompt
+        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
         num_parent_seqs = len(seq_ids)
         beam_width = sampling_params.best_of
-        seq_group_logprobs = logprobs[sample_idx:sample_idx +
-                                        num_parent_seqs]
+        seq_group_logprobs = logprobs[sample_idx:sample_idx + num_parent_seqs]
         if is_prompt:
             # Prompt phase.
             assert num_parent_seqs == 1, (
                 "Prompt input should have only one seq.")
             parent_ids = [0] * (2 * beam_width)
             _, next_token_ids = torch.topk(seq_group_logprobs[0],
-                                            2 * beam_width)
+                                           2 * beam_width)
             next_token_ids = next_token_ids.tolist()
         else:
             # Generation phase.
             cumulative_logprobs = [
-                seq_data[seq_id].cumulative_logprob for seq_id in seq_ids
+                seq_group.seq_data[seq_id].cumulative_logprob
+                for seq_id in seq_ids
             ]
             cumulative_logprobs = torch.tensor(
                 cumulative_logprobs,
                 dtype=torch.float,
                 device=seq_group_logprobs.device)
             seq_group_logprobs = (seq_group_logprobs +
-                                    cumulative_logprobs.unsqueeze(dim=1))
+                                  cumulative_logprobs.unsqueeze(dim=1))
             _, topk_ids = torch.topk(seq_group_logprobs.flatten(),
-                                        2 * beam_width)
+                                     2 * beam_width)
             topk_ids = topk_ids.tolist()
             vocab_size = seq_group_logprobs.size(-1)
             parent_ids = [i // vocab_size for i in topk_ids]
@@ -336,8 +338,7 @@ def _beam_search_sample(
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,
-    seq_groups: Optional[List[Tuple[List[int], SamplingParams]]] = None,
-    generators: Optional[List[torch.Generator]] = None,
+    seq_groups: Optional[List[SampledSeqGroup]] = None,
 ) -> torch.Tensor:
     if num_samples > 1:
         # This is equivalent to torch.repeat_interleaved (which also
@@ -353,9 +354,11 @@ def _multinomial(
         q.exponential_()
     else:
         sample_idx = 0
-        for (seq_ids, _), generator in zip(seq_groups, generators):
+        for seq_group in seq_groups:
+            seq_ids = seq_group.seq_ids
             next_sample_idx = sample_idx + len(seq_ids) * num_samples
-            q[sample_idx:next_sample_idx].exponential_(generator=generator)
+            q[sample_idx:next_sample_idx].exponential_(
+                generator=seq_group.generator)
             sample_idx = next_sample_idx
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
@@ -365,12 +368,12 @@ def _sample_with_torch(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> List[Tuple[List[int], List[int]]]:
-    categorized_seq_group_ids = {t: [] for t in SamplingType}
+    categorized_seq_group_idx = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        _, sampling_params = seq_group
+        sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
-        categorized_seq_group_ids[sampling_type].append(i)
+        categorized_seq_group_idx[sampling_type].append(i)
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
@@ -383,24 +386,21 @@ def _sample_with_torch(
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
-        seq_group_ids = categorized_seq_group_ids[sampling_type]
-        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
-        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
-        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
-                                          is_prompts)
+        seq_group_idx = categorized_seq_group_idx[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
+        sample_metadata[sampling_type] = (seq_group_idx, seq_groups)
         if sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[sample_indices.long()],
                                           dim=-1)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             max_best_of_in_batch = 1
-            for seq_group, is_prompt in zip(seq_groups, is_prompts):
-                if is_prompt:
-                    _, sampling_params = seq_group
+            for seq_group in seq_groups:
+                if seq_group.is_prompt:
+                    sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
-                "generators": sampling_metadata.generators,
             }
             multinomial_samples[sampling_type] = _multinomial(
                 probs[sample_indices.long()], max_best_of_in_batch,
@@ -415,17 +415,16 @@ def _sample_with_torch(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        (seq_group_ids, seq_groups, is_prompts) = sample_metadata[sampling_type]
+        (seq_group_idx, seq_groups) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            sample_results = _random_sample(seq_groups, is_prompts,
+            sample_results = _random_sample(seq_groups,
                                             multinomial_samples[sampling_type])
         elif sampling_type == SamplingType.BEAM:
-            sample_results = _beam_search_sample(seq_groups, is_prompts,
-                                                 sampling_metadata.seq_data,
+            sample_results = _beam_search_sample(seq_groups,
                                                  beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_ids, sample_results))
+        sample_results_dict.update(zip(seq_group_idx, sample_results))
 
     sample_results = [
         sample_results_dict[i]
@@ -443,7 +442,7 @@ def _sample_with_triton_kernel(
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
-        _, sampling_params = seq_group
+        sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
         categorized_seq_group_ids[sampling_type].append(i)
 
@@ -459,17 +458,17 @@ def _sample_with_triton_kernel(
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
-        seq_group_ids = categorized_seq_group_ids[sampling_type]
-        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
-        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
-        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
-                                          is_prompts, sample_indices,
+        seq_group_idx = categorized_seq_group_ids[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
+        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_idx]
+        sample_metadata[sampling_type] = (seq_group_idx, seq_groups,
+                                          sample_indices,
                                           sampled_token_indices)
         if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
                              SamplingType.RANDOM_SEED):
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
-                    _, sampling_params = seq_group
+                    sampling_params = seq_group.sampling_params
                     max_best_of_in_batch = max(max_best_of_in_batch,
                                                sampling_params.best_of)
         elif sampling_type == SamplingType.BEAM:
@@ -493,19 +492,18 @@ def _sample_with_triton_kernel(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+        (seq_group_idx, seq_groups, sample_indices,
          sampled_token_indices) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(
                 seq_groups, sampled_tokens[sampled_token_indices][:, 0])
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(
-                seq_groups, is_prompts, sampled_tokens[sampled_token_indices])
+                seq_groups, sampled_tokens[sampled_token_indices])
         elif sampling_type == SamplingType.BEAM:
-            sample_results = _beam_search_sample(seq_groups, is_prompts,
-                                                 sampling_metadata.seq_data,
+            sample_results = _beam_search_sample(seq_groups,
                                                  beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_ids, sample_results))
+        sample_results_dict.update(zip(seq_group_idx, sample_results))
 
     sample_results = [
         sample_results_dict[i]
@@ -563,9 +561,6 @@ def _get_logprobs(
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample lobprobs and prompt logprobs.
 
-    All metadata here has flattened query tokens in a batch. There could be one
-    or more query tokens per each request (seq_group).
-
     Args:
         logprobs: (num_query_tokens_across_batch, num_vocab). Each query token's
             logprob per vocab.
@@ -587,19 +582,20 @@ def _get_logprobs(
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
         # There could be more than 1 seq_id if uses beam search.
-        seq_ids, sampling_params = seq_group
+        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
+        is_prompt = seq_group.is_prompt
         next_token_ids, parent_ids = sample_result
         num_parent_seqs = len(seq_ids)
 
         # Find query indices for prompt logprobs.
-        if (i < sampling_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
+        if (is_prompt and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.prompt_logprobs)
-            subquery_len = sampling_metadata.subquery_lens[i]
+            subquery_len = seq_group.subquery_len
+            assert subquery_len is not None
             # prompt has only 1 seq id.
-            assert len(seq_ids) == 0
-            seq_data = sampling_metadata.seq_data[seq_ids[0]]
+            assert len(seq_ids) == 1
+            seq_data = seq_group.seq_data[seq_ids[0]]
             computed_len = seq_data.get_num_computed_tokens()
             prompt_tokens = seq_data.prompt_token_ids
             # Look at the logprob of next prompt token to compute prompt
@@ -621,7 +617,7 @@ def _get_logprobs(
         next_token_indices.extend(next_token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
-                                        sampling_params.logprobs)
+                                       sampling_params.logprobs)
         query_idx += num_parent_seqs
 
     # No need to calculate logprobs if no query tokens are chosen.
@@ -668,16 +664,18 @@ def _get_logprobs(
     # Go over all sequence groups in a batch at once.
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
-        seq_ids, sampling_params = seq_group
+        seq_ids, sampling_params = seq_group.seq_ids, seq_group.sampling_params
+        is_prompt = seq_group.is_prompt
 
         # Find prompt logprobs
         # NOTE: It assumes sampleing_metadata.seq_groups are sorted by prefill
         # -> decodes.
-        if (i < sampling_metadata.num_prompts
-                and sampling_params.prompt_logprobs is not None):
+        if (is_prompt and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            subquery_len = sampling_metadata.subquery_lens[i]
-            seq_data = sampling_metadata.seq_data[seq_ids[0]]
+            subquery_len = seq_group.subquery_len
+            assert subquery_len is not None
+            assert len(seq_ids) == 1
+            seq_data = seq_group.seq_data[seq_ids[0]]
             computed_len = seq_data.get_num_computed_tokens()
             prompt_tokens = seq_data.prompt_token_ids
             # Look at the logprob of next prompt token to compute prompt
@@ -731,8 +729,8 @@ def _get_logprobs(
                                                 parent_seq_ids):
             # First, calculate the logprob from the sampled output.
             sampled_logprobs_dict = {
-                next_token_id: (selected_logprobs[query_idx].item(),
-                                ranks[query_idx].item())
+                next_token_id:
+                (selected_logprobs[query_idx].item(), ranks[query_idx].item())
             }
             query_idx += 1
 
@@ -740,9 +738,8 @@ def _get_logprobs(
             if num_logprobs >= 0:
                 sampled_logprobs_dict.update(
                     zip(
-                        top_token_ids[
-                            top_logprob_idx +
-                            parent_seq_id, :num_logprobs].tolist(),
+                        top_token_ids[top_logprob_idx +
+                                      parent_seq_id, :num_logprobs].tolist(),
                         zip(
                             top_logprobs[
                                 top_logprob_idx +
@@ -752,8 +749,7 @@ def _get_logprobs(
                             range(1, num_logprobs + 1))))
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_rank)
-                for token_id, logprob_rank in
-                sampled_logprobs_dict.items()
+                for token_id, logprob_rank in sampled_logprobs_dict.items()
             })
         top_logprob_idx += len(seq_ids)
         result_sample_logprobs.append(sampled_logprobs)
@@ -772,7 +768,7 @@ def _build_sampler_output(
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
                                        sample_logprobs):
-        seq_ids, _ = seq_group
+        seq_ids = seq_group.seq_ids
         next_token_ids, parent_ids = sample_result
         seq_outputs = []
         for parent_id, next_token_id, logprobs in zip(parent_ids,
