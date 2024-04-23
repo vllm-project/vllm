@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 
 class MockLogitsProcessor(LogitsProcessor):

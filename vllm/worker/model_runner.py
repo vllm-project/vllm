@@ -20,11 +20,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
 from vllm.utils import (CudaMemoryProfiler, is_hip, is_pin_memory_available,
-                        make_tensor_with_pad, maybe_expand_dim)
+                        make_tensor_with_pad)
 
 logger = init_logger(__name__)
 

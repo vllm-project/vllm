@@ -6,13 +6,12 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.layers.ops.sample import sample as sample_triton
-from vllm.model_executor.sampling_metadata import (SequenceGroupToSample,
-                                                   SamplingMetadata,
-                                                   SamplingTensors)
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors,
+                                                   SequenceGroupToSample)
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
-                           SamplerOutput, SequenceData, SequenceGroupOutput,
-                           SequenceOutput)
+                           SamplerOutput, SequenceGroupOutput, SequenceOutput)
 
 
 class Sampler(nn.Module):
@@ -122,7 +121,7 @@ def _apply_min_tokens_penalty(
         sampling_params = seq_group.sampling_params
 
         sample_indices = seq_group.sample_indices
-
+        logits_applied += len(sample_indices) + len(seq_group.prefill_indices)
         if len(sample_indices) == 0:
             continue
 
@@ -145,15 +144,15 @@ def _apply_min_tokens_penalty(
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
 
-        assert len(sample_indices) == len(seq_ids)
-        logits_applied += len(sample_indices) + len(seq_group.prefill_indices)
-
     if logits_to_penalize:
         # use zip and * to group indices along each dimension
         # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
     # verifies that no rows in logits were missed unexpectedly
+    # print(f"SANG-TODO {logits_applied=}")
+    # print(f"SANG-TODO {logits.shape[0]=}")
+    # SANG-TODO
     assert logits_applied == logits.shape[0]
     return logits
 
@@ -613,16 +612,10 @@ def _get_logprobs(
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         query_indices.extend(seq_group.sample_indices)
-        # print(f"SANG-TODO {seq_group.sample_indices=}")
-        # print(f"SANG-TODO {[query_idx + parent_id for parent_id in parent_ids]=}")
         next_token_ids.extend(token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs)
-        # print(f"SANG-TODO {len(next_token_ids)=}")
-        # print(f"SANG-TODO {len(query_indices)=}")
-        # print(f"SANG-TODO {query_idx=}")
-        # print(f"SANG-TODO {logprobs.shape=}")
         assert len(next_token_ids) == len(query_indices)
 
     # No need to calculate logprobs if no query tokens are chosen.
@@ -709,8 +702,8 @@ def _get_logprobs(
                             zip(
                                 top_logprobs[
                                     top_logprob_idx, :num_logprobs].tolist(),
-                                # This is ranks. Since top_logprob is sorted, we can
-                                # just use a range here.
+                                # This is ranks. Since top_logprob is sorted,
+                                # we can just use a range here.
                                 range(1, num_logprobs + 1))))
                 prompt_logprobs.append({
                     token_id: Logprob(*logprob_rank)
@@ -748,8 +741,8 @@ def _get_logprobs(
                             top_logprobs[
                                 top_logprob_idx +
                                 parent_seq_id, :num_logprobs].tolist(),
-                            # This is rank. Since top_logprob is sorted, we can just
-                            # use a range here.
+                            # This is rank. Since top_logprob is sorted, we
+                            # can just use a range here.
                             range(1, num_logprobs + 1))))
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_rank)

@@ -6,9 +6,9 @@ import torch
 
 from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SequenceData
-from vllm.utils import is_pin_memory_available, async_tensor_h2d, maybe_expand_dim
-from vllm.sequence import (SequenceData, SequenceGroupMetadata)
+from vllm.sequence import SequenceData, SequenceGroupMetadata
+from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
+                        maybe_expand_dim)
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -56,8 +56,8 @@ class SamplingMetadata:
         prompt_lens: (num_prefill_seq_groups,) Lengths of entire prompt for
             the prefill request. None if requests only contain decoding. The
             length is equivalent to the number of prefill requests batched.
-        selected_token_indices: (num_query_tokens_to_logprob), Query token indices to process for
-            sampling or logprob calculation.
+        selected_token_indices: (num_query_tokens_to_logprob), Query token
+            indices to process for sampling or logprob calculation.
         categorized_sample_indices: SamplingType -> token indices to sample.
             Each token indices is 2D tensor of (num_indices, num_indices) where
             the first item means the sample index within the returned logit,
@@ -148,8 +148,10 @@ class SamplingMetadata:
                 # The output logits will be pruned by selected_token_indices
                 # chosen from this logic.
                 if sampling_params.prompt_logprobs is not None:
-                    selected_token_end_idx = selected_token_start_idx + subquery_len
-                    # If we need sampling, the last num_samples indexes are for sampling.
+                    selected_token_end_idx = (selected_token_start_idx +
+                                              subquery_len)
+                    # If we need sampling, the last num_samples indexes are
+                    # for sampling.
                     if do_sample:
                         selected_token_end_idx -= num_samples
 
@@ -158,21 +160,27 @@ class SamplingMetadata:
                         range(selected_token_start_idx,
                               selected_token_end_idx))
 
-                # Add sample indices for sampling and sample logprob if we need sampling.
+                # Add sample indices for sampling and sample logprob if
+                # we need sampling.
                 if do_sample:
-                    prefill_sample_indice = selected_token_start_idx + subquery_len - num_samples
+                    prefill_sample_indice = (selected_token_start_idx +
+                                             subquery_len - num_samples)
                     selected_token_indices.append(prefill_sample_indice)
                     selected_token_start_idx += subquery_len
 
-                # Second, find indices to sample. The index here is applied after
-                # logits are pruned by selected_token_start_idx.
+                # Second, find indices to sample. The index here is applied
+                # after logits are pruned by selected_token_start_idx.
                 if sampling_params.prompt_logprobs is not None:
-                    # Update prefill indices for this seq_group if prompt logprob is required.
+                    # Update prefill indices for this seq_group if
+                    # prompt logprob is required.
+                    categorized_sample_indices_end_idx = (
+                        categorized_sample_indices_start_idx + subquery_len)
+                    if do_sample:
+                        categorized_sample_indices_end_idx -= num_samples
+
                     prefill_indices = list(
-                        range(
-                            categorized_sample_indices_start_idx,
-                            categorized_sample_indices_start_idx +
-                            subquery_len - num_samples))
+                        range(categorized_sample_indices_start_idx,
+                              categorized_sample_indices_end_idx))
                     # NOTE: prompt token positions do not need sample, skip
                     categorized_sample_indices_start_idx += subquery_len
                     if do_sample:
@@ -198,8 +206,9 @@ class SamplingMetadata:
             else:
                 if do_sample:
                     num_seqs = len(seq_ids)
-                    sample_indices = range(selected_token_start_idx,
-                                           selected_token_start_idx + num_seqs)
+                    sample_indices = list(
+                        range(selected_token_start_idx,
+                              selected_token_start_idx + num_seqs))
                     selected_token_indices.extend(sample_indices)
                     selected_token_start_idx += num_seqs
 
