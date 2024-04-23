@@ -338,6 +338,8 @@ class LLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        decoder_prompt: Optional[str] = None,
+        decoder_prompt_token_ids: Optional[List[int]] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
