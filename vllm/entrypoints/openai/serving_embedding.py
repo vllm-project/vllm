@@ -90,6 +90,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         generators = []
         try:
             prompt_is_tokens, prompts = parse_prompt_format(request.input)
+            pooling_params = request.to_pooling_params()
 
             for i, prompt in enumerate(prompts):
                 if prompt_is_tokens:

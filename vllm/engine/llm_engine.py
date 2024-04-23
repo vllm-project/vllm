@@ -22,10 +22,11 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
                           RequestOutputFactory)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput,
-                           EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           MultiModalData, SamplerOutput, Sequence,
+                           EmbeddingSequenceGroupOutput, ExecuteModelRequest, MultiModalData,
+                           PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceStatus,
                            SequenceGroupMetadata)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -358,7 +359,7 @@ class LLMEngine:
         self,
         request_id: str,
         prompt: Optional[str],
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -374,7 +375,8 @@ class LLMEngine:
             request_id: The unique ID of the request.
             prompt: The prompt string. Can be None if prompt_token_ids is
                 provided.
-            sampling_params: The sampling parameters for text generation.
+            params: Parameters for sampling or pooling. SamplingParams
+                for text generation. PoolingParams for pooling.
             prompt_token_ids: The token IDs of the prompt. If None, we
                 use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
@@ -408,13 +410,6 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
-        max_logprobs = self.get_model_config().max_logprobs
-        if (sampling_params.logprobs
-                and sampling_params.logprobs > max_logprobs) or (
-                    sampling_params.prompt_logprobs
-                    and sampling_params.prompt_logprobs > max_logprobs):
-            raise ValueError(f"Cannot request more than "
-                             f"{max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.time()
         prompt_token_ids = self.encode_request(
@@ -436,6 +431,50 @@ class LLMEngine:
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        eos_token_id, lora_request)
 
+        # Create a SequenceGroup based on SamplingParams or PoolingParams
+        if isinstance(params, SamplingParams):
+            seq_group = self._create_sequence_group_with_sampling(
+                request_id,
+                seq,
+                params,
+                arrival_time,
+                lora_request,
+                multi_modal_data,
+            )
+        elif isinstance(params, PoolingParams):
+            seq_group = self._create_sequence_group_with_pooling(
+                request_id,
+                seq,
+                params,
+                arrival_time,
+                lora_request,
+                multi_modal_data,
+            )
+        else:
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
+
+        # Add the sequence group to the scheduler.
+        self.scheduler.add_seq_group(seq_group)
+
+    def _create_sequence_group_with_sampling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        sampling_params: SamplingParams,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with SamplingParams."""
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
+
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
@@ -447,11 +486,35 @@ class LLMEngine:
             self.generation_config_fields)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, multi_modal_data)
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  sampling_params=sampling_params,
+                                  lora_request=lora_request,
+                                  multi_modal_data=multi_modal_data)
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        return seq_group
+
+    def _create_sequence_group_with_pooling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        pooling_params: PoolingParams,
+        arrival_time: Optional[float] = None,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoolingParams."""
+        # Defensive copy of PoolingParams, which are used by the pooler
+        pooling_params = pooling_params.clone()
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  lora_request=lora_request,
+                                  multi_modal_data=multi_modal_data,
+                                  pooling_params=pooling_params)
+        return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -504,7 +567,7 @@ class LLMEngine:
 
     def _process_model_outputs(
         self,
-        output: List[SamplerOutput],
+        output: List[Union[SamplerOutput, PoolerOutput]],
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -592,7 +655,7 @@ class LLMEngine:
             >>> while True:
             >>>     if example_inputs:
             >>>         req_id, prompt, sampling_params = example_inputs.pop(0)
-            >>>         engine.add_request(str(req_id), prompt, sampling_params)
+            >>>         engine.add_request(str(req_id),prompt,sampling_params)
             >>>
             >>>     # continue the request processing
             >>>     request_outputs = engine.step()

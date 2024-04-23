@@ -8,6 +8,7 @@ from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import (CompletionOutput, CompletionRequestOutput,
                           EmbeddingRequestOutput, RequestOutput)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 __version__ = "0.4.2"
@@ -25,4 +26,5 @@ __all__ = [
     "AsyncLLMEngine",
     "AsyncEngineArgs",
     "initialize_ray_cluster",
+    "PoolingParams",
 ]
