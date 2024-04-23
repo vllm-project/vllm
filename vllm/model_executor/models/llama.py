@@ -166,11 +166,27 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
-        use_attn_sinks = True
+        use_attn_sinks = False
         llama_context_len = 4096
+        norm = lambda x: torch.linalg.norm(x).item()
 
         if not use_attn_sinks:
             q, k = self.rotary_emb(positions, q, k)
+            
+            if kv_cache is not None and attn_metadata.decode_metadata is not None:
+                num_blocks = kv_cache.shape[1]
+                key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads * self.head_dim, -1)
+                block_size = key_cache.shape[-1]
+                
+                block_table = attn_metadata.decode_metadata.block_tables[0]
+                pos = positions[0] - 1
+                logic_bnum = pos // block_size
+                phys_bnum = block_table[logic_bnum]
+                offset = pos % block_size
+
+                past_key = key_cache[phys_bnum, :, offset]
+                print(f"read key@{pos} blocknum={phys_bnum}\t", norm(past_key))
+            
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                     self.kv_scale)
             output, _ = self.o_proj(attn_output)
@@ -222,6 +238,7 @@ class LlamaAttention(nn.Module):
 
                     # rotate k based on new relative pos
                     past_key = key_cache[phys_bnum, :, offset]
+                    if abs_pos==end-1: print(f"read key@{abs_pos}\t", norm(past_key))
                     past_keys[abs_pos] = past_key.clone()
                     p = abs_pos if within_context_len else abs_pos - start + block_size
                     pos = torch.tensor([p], device=positions.device)
@@ -267,13 +284,6 @@ class LlamaAttention(nn.Module):
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
                     key_cache[phys_bnum, :, offset] = past_keys[abs_pos]
-
-                # put current key back in cache
-                # slot_map has length num_tokens, but is num_tokens==batch_size (num_seqs) ???
-                slot = attn_metadata.slot_mapping[i].item()
-                phys_bnum = slot // block_size
-                offset = slot % block_size
-                key_cache[phys_bnum, :, offset] = k_original.squeeze(0)
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields
@@ -281,15 +291,6 @@ class LlamaAttention(nn.Module):
             attn_metadata.decode_metadata.context_lens = torch.tensor(
                 context_lens, dtype=torch.int, device=positions.device)
             
-            output, _ = self.o_proj(attn_output)
-            return output
-
-        else:
-            k_original = None
-            q, k = self.rotary_emb(positions, q, k)
-        
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                    self.kv_scale, k_original)
             output, _ = self.o_proj(attn_output)
             return output
 

@@ -190,6 +190,9 @@ class XFormersImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        
+        use_attn_sinks = False
+        value_copy = value.clone() if use_attn_sinks else None
 
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -203,6 +206,11 @@ class XFormersImpl(AttentionImpl):
                                                 attn_metadata.slot_mapping,
                                                 attn_metadata.kv_cache_dtype,
                                                 kv_scale)
+            if attn_metadata.decode_metadata is not None:
+                pos = attn_metadata.decode_metadata.context_lens[0] - 1
+                block_table = attn_metadata.decode_metadata.block_tables[0]
+                phys_bnum = block_table[pos // 16]
+                print(f"write key@{pos} blocknum={phys_bnum}\t", torch.linalg.norm(key).item())
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -232,8 +240,7 @@ class XFormersImpl(AttentionImpl):
                 output[:num_prefill_tokens] = out
 
                 # in prefill, rewrite all keys with original
-                use_attn_sinks = True
-                if use_attn_sinks and kv_cache is not None:
+                if use_attn_sinks and kv_cache is not None and key_original is not None:
                     key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
                     PagedAttention.write_to_paged_cache(
                         key_original,
@@ -280,22 +287,20 @@ class XFormersImpl(AttentionImpl):
                 kv_scale,
             )
 
-            # attention sinks: revert key in cache to pre-rotated state
-            # this causes "CUBLAS_STATUS_EXECUTION_FAILED when calling cublasGemmEx"
-            # so this logic is moved inside llama forward
-            use_attn_sinks = False
-            if use_attn_sinks:
-                if kv_cache is not None:
-                    key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
-                    PagedAttention.write_to_paged_cache(
-                        key_original,
-                        value,
-                        key_cache,
-                        value_cache,
-                        attn_metadata.slot_mapping,
-                        attn_metadata.kv_cache_dtype,
-                        kv_scale
-                    )
+            # attention sinks: revert cur key in cache to pre-rotated state
+            if use_attn_sinks and kv_cache is not None:
+                pos = attn_metadata.decode_metadata.context_lens[0] - 1
+                print(f"write key@{pos}\t", torch.linalg.norm(key_original).item())
+                key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
+                PagedAttention.write_to_paged_cache(
+                    key_original,
+                    value_copy,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    attn_metadata.kv_cache_dtype,
+                    kv_scale
+                )
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)

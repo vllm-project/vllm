@@ -4,7 +4,7 @@ from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
 from transformers import AutoTokenizer
 
 
-MAX_GEN_TOKENS = 100
+MAX_GEN_TOKENS = 20
 
 
 def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
