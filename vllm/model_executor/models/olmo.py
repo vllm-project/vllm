@@ -47,11 +47,12 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -71,7 +72,7 @@ class OlmoAttention(nn.Module):
     def __init__(
         self,
         config: OLMoConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -95,7 +96,7 @@ class OlmoAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             bias=config.include_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         # Rotary embeddings.
@@ -119,7 +120,7 @@ class OlmoAttention(nn.Module):
             config.d_model,
             config.d_model,
             bias=config.include_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(
@@ -149,7 +150,7 @@ class OlmoMLP(nn.Module):
     def __init__(
         self,
         config: OLMoConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -166,7 +167,7 @@ class OlmoMLP(nn.Module):
             config.d_model,
             [self.hidden_size // 2] * 2,
             bias=config.include_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         # Activation function.
@@ -179,7 +180,7 @@ class OlmoMLP(nn.Module):
             int(self.act.output_multiplier * self.hidden_size),
             config.d_model,
             bias=config.include_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(
@@ -207,13 +208,13 @@ class OlmoBlock(nn.Module):
 
     def __init__(self,
                  config: OLMoConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         # Attention block.
-        self.attn = OlmoAttention(config, linear_method)
+        self.attn = OlmoAttention(config, quant_config)
 
         # MLP block.
-        self.mlp = OlmoMLP(config, linear_method)
+        self.mlp = OlmoMLP(config, quant_config)
 
     def forward(
         self,
@@ -236,7 +237,7 @@ class OlmoModel(nn.Module):
 
     def __init__(self,
                  config: OLMoConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
 
@@ -252,7 +253,7 @@ class OlmoModel(nn.Module):
             ))
 
         blocks = [
-            OlmoBlock(config, linear_method) for i in range(config.n_layers)
+            OlmoBlock(config, quant_config) for i in range(config.n_layers)
         ]
         if self.config.block_group_size > 1:
             raise NotImplementedError("Block group size > 1 not supported yet")
@@ -266,7 +267,7 @@ class OlmoModel(nn.Module):
                     config.d_model,
                     config.embedding_size or config.vocab_size,
                     bias=config.include_bias,
-                    linear_method=linear_method,
+                    quant_config=quant_config,
                 )
             })
 
@@ -307,11 +308,11 @@ class OLMoForCausalLM(nn.Module):
 
     def __init__(self,
                  config: OLMoConfig,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.model = OlmoModel(config, linear_method)
+        self.quant_config = quant_config
+        self.model = OlmoModel(config, quant_config)
         self.lm_head_weight = (self.model.transformer.wte.weight
                                if config.weight_tying else
                                self.model.transformer.ff_out.weight)
