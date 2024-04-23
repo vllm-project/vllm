@@ -9,7 +9,7 @@ from vllm.model_executor.layers.ops.sample import sample as sample_triton
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
                                                    SamplingTensors,
                                                    SequenceGroupToSample)
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceGroupOutput, SequenceOutput)
 
@@ -83,7 +83,6 @@ class Sampler(nn.Module):
         # Sample the next tokens.
         sample_results = _sample(probs, logprobs, sampling_metadata,
                                  sampling_tensors)
-        print(f"SANG-TODO {sample_results=}")
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
         return _build_sampler_output(sample_results, sampling_metadata,
@@ -270,8 +269,8 @@ def _random_sample(
 
     Args:
         selected_seq_groups: A list of sequence groups batched.
-        random_samples: (num_selected_samples,) A tensor of samples. The length of
-            samples could be smaller than selected_seq_groups if
+        random_samples: (num_selected_samples,) A tensor of samples. The
+            length of samples could be smaller than selected_seq_groups if
             seq_group.do_sample is False.
     Returns:
         Tuple of (next_token_ids, parent_ids). The length of returned list is
@@ -633,6 +632,8 @@ def _get_logprobs(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         token_ids, _ = sample_result
+        seq_data = seq_group.seq_data[seq_ids[0]]
+        prompt_tokens = seq_data.prompt_token_ids
 
         # Find query indices for prompt logprobs.
         if (seq_group.is_prompt
@@ -655,8 +656,6 @@ def _get_logprobs(
                 next_token_index_start:next_token_index_end]
             query_indices.extend(seq_group.prefill_indices)
             next_token_ids.extend(token_id for token_id in next_prompt_tokens)
-            print(f"SANG-TODO {prompt_tokens=}")
-            print(f"SANG-TODO {next_prompt_tokens=}")
         # Find query indices for logprob.
         # If sampling is not required, there's no reason to compute logprobs.
         query_indices.extend(seq_group.sample_indices)
@@ -664,11 +663,6 @@ def _get_logprobs(
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
                                        sampling_params.logprobs)
-        print(f"SANG-TODO {seq_group.sample_indices=}")
-        print(f"SANG-TODO {seq_group.prefill_indices=}")
-        print(f"SANG-TODO {len(next_token_ids)=}")
-        print(f"SANG-TODO {len(query_indices)=}")
-        print(f"SANG-TODO {logprobs.shape=}")
         assert len(next_token_ids) == len(query_indices)
 
     # No need to calculate logprobs if no query tokens are chosen.
@@ -685,7 +679,6 @@ def _get_logprobs(
         query_indices_gpu,
         next_token_ids_gpu,
     ]]
-    print(f"SANG-TODO {selected_logprobs=}")
 
     # (num_query_tokens,). Each index contains a rank of a selected token.
     ranks = _get_ranks(
@@ -777,8 +770,7 @@ def _get_logprobs(
         sampled_logprobs: SampleLogprobs = []
         next_token_ids, parent_seq_ids = sample_result
 
-        for next_token_id, parent_seq_id in zip(next_token_ids,
-                                                parent_seq_ids):
+        for next_token_id in next_token_ids:
             # First, calculate the logprob from the sampled output.
             sampled_logprobs_dict = {
                 next_token_id:

@@ -84,12 +84,7 @@ def test_get_prompt_logprobs(
         # The first prompt logprob is always None, so we compare it from 1:.
         vllm_prompt_logprobs = vllm_result.prompt_logprobs[1:]
         for i, vllm_prompt_logprob_dict in enumerate(vllm_prompt_logprobs):
-            print("SANAG-TODO", i)
-            breakpoint()
             for token_id, logprob in vllm_prompt_logprob_dict.items():
-                print("SANG-TODO token_id", token_id)
-                print("SANG-TODO expected: ",
-                      hf_logprob[0][i][token_id].item())
                 torch.testing.assert_close(logprob.logprob,
                                            hf_logprob[0][i][token_id].item(),
                                            atol=1e-2,

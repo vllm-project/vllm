@@ -167,7 +167,7 @@ class SamplingMetadata:
                     prefill_sample_indice = (selected_token_start_idx +
                                              subquery_len - num_samples)
                     selected_token_indices.append(prefill_sample_indice)
-                    selected_token_start_idx += subquery_len
+                selected_token_start_idx += subquery_len
 
                 # Second, find indices to sample. The index here is applied
                 # after logits are pruned by selected_token_start_idx.
@@ -189,7 +189,6 @@ class SamplingMetadata:
 
                 if do_sample:
                     # Update sample indices for this seq_group.
-                    print(f"SANG-TODO {categorized_sample_indices_start_idx=}")
                     sample_indices = list(
                         range(
                             categorized_sample_indices_start_idx,
@@ -244,7 +243,6 @@ class SamplingMetadata:
                                       is_prompt=is_prompt,
                                       prefill_indices=list(prefill_indices),
                                       sample_indices=list(sample_indices)))
-
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -368,20 +366,23 @@ class SamplingTensors:
                 # their logprobs
                 subquery_len = seq_group.subquery_len
                 assert subquery_len is not None
-                temperatures += [temperature] * (subquery_len - 1)
-                top_ps += [top_p] * (subquery_len - 1)
-                top_ks += [top_k] * (subquery_len - 1)
-                min_ps += [min_p] * (subquery_len - 1)
-                presence_penalties += [0] * (subquery_len - 1)
-                frequency_penalties += [0] * (subquery_len - 1)
-                repetition_penalties += [1] * (subquery_len - 1)
-                prompt_tokens.extend([] for _ in range(subquery_len - 1))
-                output_tokens.extend([] for _ in range(subquery_len - 1))
-            for seq_id in seq_ids:
-                seq_data = seq_group.seq_data[seq_id]
-                prompt_tokens.append(seq_data.prompt_token_ids)
-                output_tokens.append(seq_data.output_token_ids)
+                prefill_lens = len(seq_group.prefill_indices)
+                temperatures += [temperature] * prefill_lens
+                top_ps += [top_p] * prefill_lens
+                top_ks += [top_k] * prefill_lens
+                min_ps += [min_p] * prefill_lens
+                presence_penalties += [0] * prefill_lens
+                frequency_penalties += [0] * prefill_lens
+                repetition_penalties += [1] * prefill_lens
+                prompt_tokens.extend([] for _ in range(prefill_lens))
+                output_tokens.extend([] for _ in range(prefill_lens))
             if seq_group.do_sample:
+                sample_lens = len(seq_group.sample_indices)
+                assert sample_lens == len(seq_ids)
+                for seq_id in seq_ids:
+                    seq_data = seq_group.seq_data[seq_id]
+                    prompt_tokens.append(seq_data.prompt_token_ids)
+                    output_tokens.append(seq_data.output_token_ids)
                 temperatures += [temperature] * len(seq_ids)
                 top_ps += [top_p] * len(seq_ids)
                 top_ks += [top_k] * len(seq_ids)
