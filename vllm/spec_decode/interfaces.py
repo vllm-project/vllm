@@ -24,9 +24,9 @@ class SpeculativeProposals:
 
     def __repr__(self):
         return (f"SpeculativeProposals("
-                f"proposal_token_ids={self.proposal_token_ids.shape}, "
+                f"proposal_token_ids={self.proposal_token_ids}, "
                 f"proposal_probs={self.proposal_probs.shape}, "
-                f"proposal_lens={self.proposal_lens.shape})")
+                f"proposal_lens={self.proposal_lens})")
 
 
 @dataclass

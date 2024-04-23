@@ -83,6 +83,7 @@ class GPUExecutor(ExecutorBase):
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
             cache_config=self.cache_config,
+            # TODO allow draft-model specific load config.
             load_config=self.load_config,
             local_rank=0,
             rank=0,

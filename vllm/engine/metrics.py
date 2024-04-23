@@ -1,12 +1,15 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Protocol
+from typing import TYPE_CHECKING, Dict, List, Optional, Protocol
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
                                disable_created_metrics)
 
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 logger = init_logger(__name__)
 
@@ -117,6 +120,8 @@ class Stats:
     time_to_first_tokens: List[float]
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
+
+    spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
 
 class SupportsMetricsInfo(Protocol):
@@ -235,3 +240,19 @@ class StatLogger:
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
+
+            if stats.spec_decode_metrics is not None:
+                logger.info(
+                    self._format_spec_decode_metrics_str(
+                        stats.spec_decode_metrics))
+
+    def _format_spec_decode_metrics_str(
+            self, metrics: "SpecDecodeWorkerMetrics") -> str:
+
+        return ("Speculative metrics: "
+                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+                f"System efficiency: {metrics.system_efficiency:.3f}, "
+                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+                f"Number of accepted tokens: {metrics.accepted_tokens}, "
+                f"Number of draft tokens tokens: {metrics.draft_tokens}, "
+                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
