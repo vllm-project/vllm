@@ -144,7 +144,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = 1
+        x = 1 if is_xpu() else (16 // kv_cache.element_size())
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
