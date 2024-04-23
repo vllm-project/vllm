@@ -443,7 +443,7 @@ class Scheduler:
                 # expensive. For the default scheduling chase where
                 # enable_chunking is False, num_seqs are updated before running
                 # this method, so we don't have to update it again here.
-                if not enable_chunking:
+                if enable_chunking:
                     num_running_seqs = seq_group.get_max_num_running_seqs()
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
