@@ -399,6 +399,7 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data associated with the request.
+        encoder_seq: Optional, the single encoder sequence.
     """
 
     def __init__(
@@ -409,6 +410,7 @@ class SequenceGroup:
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        encoder_seq: Optional[Sequence] = None
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -422,6 +424,7 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.multi_modal_data = multi_modal_data
+        self.encoder_seq = encoder_seq
 
     @property
     def prompt(self) -> str:
@@ -559,6 +562,8 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data.
+        encoder_seq_data: Optional, the sequence data for the single encoder prompt.
+        encoder_block_table: Optional, the block table for the single encoder prompt.
     """
 
     def __init__(
@@ -573,6 +578,8 @@ class SequenceGroupMetadata:
         computed_block_nums: Optional[List[int]] = None,
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        encoder_seq_data: Optional[SequenceData] = None,
+        encoder_block_table: Optional[Dict[int, List[int]]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -583,6 +590,8 @@ class SequenceGroupMetadata:
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
+        self.encoder_seq_data = encoder_seq_data
+        self.encoder_block_table = encoder_block_table
         self._token_chunk_size = token_chunk_size
 
         if self._token_chunk_size is None:
