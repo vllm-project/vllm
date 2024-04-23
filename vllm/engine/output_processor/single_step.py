@@ -61,7 +61,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         assert len(outputs) == 1
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
-        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
+        if prompt_logprobs is not None and seq_group.sampling_params.detokenize and self.detokenizer:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             if not seq_group.prompt_logprobs:
@@ -113,7 +113,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            if seq_group.sampling_params.detokenize:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
             else:
