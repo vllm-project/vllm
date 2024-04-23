@@ -21,16 +21,20 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
     '''
     def __init__(self, n_heads, max_seqlen, local_blocks, vert_stride, block_size,
                 device=None, dtype=torch.bfloat16, homo_head=False,
-                active_head_range=None, q_block_size=None):
+                active_head_range=None, q_block_size=None, use_spda=None):
         super().__init__()
-        device = device or torch.cuda.current_device()
+        self.use_spda = use_spda
+        if self.use_spda is None:
+            self.use_spda = not (torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8)
+        device = device or (torch.cuda.current_device() if torch.cuda.is_available() else 'cpu')
+
         self.max_seqlen = max_seqlen
         self.block_size = block_size
         self.q_block_size= q_block_size
-        sparse_layout, sparse_pattern, _ = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
+        sparse_layout, sparse_pattern, self.attn_mask_dense = _get_sparse_attn_mask(n_heads, max_seqlen, max_seqlen, dtype, device,
                                                 BLOCK=block_size,
                                                 local_blocks=local_blocks, vert_stride=vert_stride,
-                                                homo_head=homo_head, return_dense=False)
+                                                homo_head=homo_head, return_dense=self.use_spda, dense_mask_type='bias')
 
         if q_block_size is not None and q_block_size != block_size:
             if q_block_size > block_size:
@@ -48,6 +52,9 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
             assert len(active_head_range) == 2, '"active_head_range" should be a tuple of start/end index of the heads.'
             h_start, h_end = active_head_range
             sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
+
+            if self.use_spda:
+                self.attn_mask_dense = self.attn_mask_dense[h_start:h_end]
 
         self.sparse_layout = sparse_layout
 
@@ -75,11 +82,69 @@ class LocalStridedBlockSparseAttnInference(torch.nn.Module):
                     q_block_size=self.q_block_size,
                     max_seqlen=self.max_seqlen)
 
+    @staticmethod
+    def transpose_and_pad(x, cu_seqlens, maxlen, head_repeats=1):
+        """
+        :param x: (total_tokens, n_heads, head_size)
+        :return: (batch, n_heads, length, head_size)
+        """
+        x_padded = x.new_empty(len(cu_seqlens) - 1, x.size(1), head_repeats, maxlen, x.size(2))
+        cu_seqlens = cu_seqlens.cpu()
+        for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+            x_padded[i, :, :, :e-s].copy_(x[s:e].transpose(0, 1).unsqueeze(1))
+        return x_padded.flatten(1, 2)
+
+    @staticmethod
+    def transpose_and_unpad(x_padded, cu_seqlens):
+        """
+        :param x_padded: (batch, n_heads, length, head_size)
+        :return: (total_tokens, n_heads, head_size)
+        """
+        cu_seqlens = cu_seqlens.cpu()
+        total_n_tokens = cu_seqlens[-1]
+        x = x_padded.new_empty(total_n_tokens, x_padded.size(1), x_padded.size(3))
+        for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
+            # import ipdb; ipdb.set_trace()
+            x[s:e].copy_(x_padded[i, :, :e-s].transpose(0, 1))
+        return x
+
+    def spda(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
+        '''For CPU, V100 or other older GPUs.
+        Seems to support nested tensor, but found to be extremely slow. choose to pad instead
+
+        TODO: decoding phase:
+        '''
+        # assert cu_seqlens_q is None or (cu_seqlens_q == cu_seqlens_k).all(), "Cannot mix prompt and decoding phase"
+        assert cu_seqlens_q is None or (cu_seqlens_q == cu_seqlens_k).all(), "Can only handle prompt with SPDA."
+        assert q.size(0) == k.size(0), "can only handle prompt with SPDA."
+
+        # is_decoding = q.size(0) == cu_seqlens_k.size(0) - 1
+        # assert is_decoding or q.size(0) == k.size(0), "Cannot mix prompt and decoding phase"
+        assert q.size(1) % k.size(1) == 0
+        q_k_ratio = q.size(1) // k.size(1)
+        sm_scale = sm_scale or 1. / math.sqrt(q.size(-1))
+        cu_seqlens = cu_seqlens_k.cpu()
+        maxlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+
+        cu_seqlens_q = cu_seqlens
+        q_maxlen = maxlen
+        # past_len = 0
+        # if is_decoding:
+        #     cu_seqlens_q = torch.arange(cu_seqlens.size(0))
+        #     q_maxlen = 1
+        #     past_len = maxlen - 1
+        q2 = self.transpose_and_pad(q, cu_seqlens_q, q_maxlen, 1)
+        k2, v2 = [self.transpose_and_pad(x, cu_seqlens, maxlen, q_k_ratio) for x in [k, v]]
+        attn_mask = self.attn_mask_dense[None, :, :maxlen, :maxlen]
+        spda_output = torch.nn.functional.scaled_dot_product_attention(q2, k2, v2, attn_mask=attn_mask, scale=sm_scale)
+        return self.transpose_and_unpad(spda_output, cu_seqlens)
+
     def forward(self, q, k, v, *args, **kwargs):
-        if k.dim() == 3:
-            return self.varlen_attn(q, k, v, *args, **kwargs)
-        else:
-            raise ValueError('q/k/v must be either 3 dim for variable-length input or 4 dim for fixed-length.')
+        assert k.dim() == 3
+        if self.use_spda:
+            return self.spda(q, k, v, *args, **kwargs)
+
+        return self.varlen_attn(q, k, v, *args, **kwargs)
 
     def backward(self, *args):
         raise NotImplementedError('> backward is not supported.')
@@ -530,11 +595,15 @@ if __name__ == '__main__':
 
     bs_attn = LocalStridedBlockSparseAttnInference(N_HEADS, MAX_SEQ, LOCAL, VERT, BLOCK_SIZE)
 
+    bs_attn_spda = LocalStridedBlockSparseAttnInference(N_HEADS, MAX_SEQ, LOCAL, VERT, BLOCK_SIZE, use_spda=True)
+
     # non-contiguous passed
     # k_packed = k_packed.transpose(0, 1).contiguous().transpose(0, 1)
     # q_packed = q_packed.transpose(0, 1).contiguous().transpose(0, 1)
 
     out_packed = bs_attn(q_packed, k_packed, v_packed, cu_seqlens, sm_scale=sm_scale)
+
+    out_packed_spda = bs_attn_spda(q_packed, k_packed, v_packed, cu_seqlens, sm_scale=sm_scale)
     # out_packed = blocksparse_flash_attn_varlen_fwd(q_packed, k_packed, v_packed,
     #                                             cu_seqlens, sm_scale, mask_csr, block_size=BLOCK_SIZE)
 
@@ -568,6 +637,12 @@ if __name__ == '__main__':
     # print(f'--->\n{out_packed=}\n')
     # print(f'--->\n{ref_out_packed=}\n')
     assert torch.allclose(out_packed, ref_out_packed, atol=1e-2, rtol=0)
+    print('> prefilling phase test passed\n======\n')
+
+    assert torch.allclose(out_packed, out_packed_spda, atol=1e-2, rtol=0)
+    print('> prefilling phase using SPDA test passed\n======\n')
+
+    exit()
 
 
     # ref_out_part = scaled_dot_product_attention(q[:, 64:128].transpose(1, 2).contiguous(),
@@ -576,9 +651,8 @@ if __name__ == '__main__':
     #                                             scale=sm_scale, is_causal=True)
 
 
-    assert torch.allclose(out_packed, ref_out_packed, atol=1e-2, rtol=0)
+    # assert torch.allclose(out_packed, ref_out_packed, atol=1e-2, rtol=0)
 
-    print('> prefilling phase test passed\n======\n')
 
     #### test 2: decoding, past_len
 

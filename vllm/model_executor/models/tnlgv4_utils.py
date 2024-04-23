@@ -83,14 +83,22 @@ def _get_sparse_attn_mask_homo_head(q_len, N_CTX, dtype, device, BLOCK=128, loca
         return (block_mask_dense_output.crow_indices(), block_mask_dense_output.col_indices()), block_mask_dense, None
 
 
+def binary_mask_to_bias(mask_dense):
+    mask_dense = 1 - mask_dense
+    mask_dense.masked_fill_(mask_dense.bool(), -torch.inf)
+    return mask_dense
+
+
 @lru_cache
-def _get_sparse_attn_mask(n_heads, q_len, N_CTX, dtype, device, BLOCK=128, local_blocks=4, vert_stride=4, homo_head=True, return_dense=False):
+def _get_sparse_attn_mask(n_heads, q_len, N_CTX, dtype, device, BLOCK=128, local_blocks=4, vert_stride=4, homo_head=True, return_dense=False, dense_mask_type='binary'):
     '''
+    :param dense_mask_type: "binary" (0 for skip token, 1 for others) or "bias" (-inf for skip token, 0 or others)
     :return: a tuple of 3:
         - tuple of crow_indices, col_indices representation of CSR format.
         - block dense mask
         - all token dense mask (be aware that it can be OOM if it is too big) if `return_dense==True`, otherwise, None
     '''
+    assert dense_mask_type in ('binary', 'bias')
     if homo_head:
         with torch.no_grad():
             (crow, col), block_mask_dense, mask_dense = _get_sparse_attn_mask_homo_head(q_len, N_CTX, dtype, device, BLOCK, local_blocks, vert_stride, return_dense)
@@ -98,6 +106,8 @@ def _get_sparse_attn_mask(n_heads, q_len, N_CTX, dtype, device, BLOCK=128, local
             col = col[None].expand(n_heads, col.shape[0])
             if return_dense:
                 mask_dense = mask_dense[None].expand(n_heads, *mask_dense.shape)
+                if dense_mask_type == 'bias':
+                    mask_dense = binary_mask_to_bias(mask_dense)
             return (crow, col), block_mask_dense, mask_dense
 
     with torch.no_grad():
@@ -114,6 +124,9 @@ def _get_sparse_attn_mask(n_heads, q_len, N_CTX, dtype, device, BLOCK=128, local
         mask_dense = torch.kron(block_mask_dense, block_mask_dense.new_ones((BLOCK, BLOCK)))
         causal_mask = torch.tril(torch.ones(N_CTX, N_CTX)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[..., -q_len:, :N_CTX] * causal_mask[None]
+        if dense_mask_type == 'bias':
+            mask_dense = binary_mask_to_bias(mask_dense)
+
         return dense_to_crow_col(block_mask_dense_output), block_mask_dense, mask_dense
     else:
         return dense_to_crow_col(block_mask_dense_output), block_mask_dense, None
