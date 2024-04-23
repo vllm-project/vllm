@@ -350,6 +350,7 @@ class Scheduler:
         curr_loras: Optional[Set[int]],
         policy: Policy,
         enable_chunking: bool = False,
+        update_num_seqs_token_budget: bool = True,
     ) -> Tuple[deque, SchedulerRunningOutputs]:
         """Schedule sequence groups that are running.
 
@@ -367,6 +368,10 @@ class Scheduler:
                 chunked number of tokens are scheduled  if
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
+            update_num_seqs_token_budget: Do not update token_budget's num seq
+                groups. This flag is for optimization. If we know the caller
+                updates add_num_seqs, setting it to False will skip calling
+                this method which can improve performance.
     
         Returns:
             A tuple of remaining running queue (should be always 0) after
@@ -396,12 +401,12 @@ class Scheduler:
             # We can have up to 1 running prefill at any given time in running
             # queue, which means we can guarantee chunk size is at least 1.
             assert num_running_tokens != 0
-            num_running_seqs = seq_group.get_max_num_running_seqs()
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
                 budget.subtract_num_batched_tokens(seq_group.request_id,
                                                    num_running_tokens)
+                num_running_seqs = seq_group.get_max_num_running_seqs()
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
@@ -440,7 +445,9 @@ class Scheduler:
                                                token_chunk_size=1))
                 budget.add_num_batched_tokens(seq_group.request_id,
                                               num_running_tokens)
-                budget.add_num_seqs(seq_group.request_id, num_running_seqs)
+                if update_num_seqs_token_budget:
+                    num_running_seqs = seq_group.get_max_num_running_seqs()
+                    budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
@@ -719,7 +726,8 @@ class Scheduler:
                 budget,
                 curr_loras,
                 fcfs_policy,
-                enable_chunking=False)
+                enable_chunking=False,
+                update_num_seqs_token_budget=False)
 
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
@@ -1068,10 +1076,10 @@ class Scheduler:
             return result
         else:
             # s = time.time()
-            result = self._schedule_default()
-            # result = self._schedule_before_regression()
+            return self._schedule_default()
+            # return self._schedule_before_regression()
             # print(f"scheduler iter takes {(time.time() - s) * 1000} ms")
-            return result
+            # return result
 
     def _can_append_slots(self, seq_group: SequenceGroup) -> bool:
         """Determine whether or not we have enough space in the KV cache to
