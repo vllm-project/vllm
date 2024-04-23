@@ -115,12 +115,12 @@ class OpenAIServingChat(OpenAIServing):
         first_iteration = True
 
         # Send response for each token for each request.n (index)
+        assert request.n is not None
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
         try:
             async for res in result_generator:
-                res: RequestOutput
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).

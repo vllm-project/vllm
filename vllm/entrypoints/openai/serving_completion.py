@@ -185,6 +185,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         num_prompts: int,
     ) -> AsyncGenerator[str, None]:
+        assert request.n is not None
         previous_texts = [""] * request.n * num_prompts
         previous_num_tokens = [0] * request.n * num_prompts
         has_echoed = [False] * request.n * num_prompts
@@ -202,6 +203,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
 
+                    assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
                         # only return the prompt
                         delta_text = res.prompt
@@ -279,7 +281,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
     ) -> CompletionResponse:
-        choices = []
+        choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
         for final_res in final_res_batch:
@@ -289,6 +291,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             for output in final_res.outputs:
+                assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
                     token_ids = prompt_token_ids
                     top_logprobs = prompt_logprobs

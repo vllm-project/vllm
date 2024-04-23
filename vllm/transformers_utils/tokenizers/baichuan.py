@@ -114,9 +114,9 @@ class BaichuanTokenizer(PreTrainedTokenizer):
         token = self.sp_model.IdToPiece(index)
         return token
 
-    def convert_tokens_to_string(self, tokens):
+    def convert_tokens_to_string(self, tokens: List[str]):
         """Converts a sequence of tokens (string) in a single string."""
-        current_sub_tokens = []
+        current_sub_tokens: List[str] = []
         out_string = ""
         prev_is_special = False
         for i, token in enumerate(tokens):

@@ -30,6 +30,7 @@ def is_initialized() -> bool:
 def set_pynccl_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
     try:
+        assert comm is not None
         comm.stream = stream
         yield
     finally:
@@ -52,6 +53,7 @@ def init_process_group(world_size: int,
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
     assert input_.is_cuda, f"{input_} should be a cuda tensor"
+    assert comm is not None
     comm.all_reduce(input_, op)
 
 
@@ -62,8 +64,9 @@ def destroy_process_group() -> None:
 
 def get_world_size() -> int:
     """Returns the world size."""
+    assert comm is not None
     return comm.world_size
 
 
-def get_nccl_backend():
+def get_nccl_backend() -> Optional["NCCLCommunicator"]:
     return comm

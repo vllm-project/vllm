@@ -89,6 +89,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         This is blocking.
         """
         self._ensure_queue_initialized()
+        assert self._idle_actors is not None
 
         if self._idle_actors.empty():
             raise RuntimeError("No idle actors available.")
@@ -120,6 +121,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         This is non-blocking.
         """
         self._ensure_queue_initialized()
+        assert self._idle_actors is not None
 
         actor = await self._idle_actors.get()
         try:
