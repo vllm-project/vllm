@@ -711,9 +711,8 @@ def _get_logprobs(
                                           sample_results):
         # There could be more than 1 seq_id if uses beam search.
         sampling_params = seq_group.sampling_params
-        token_ids, _ = sample_result
 
-        # Find query indices for prompt logprobs.
+        # Update indices and tokens for prompt logprobs
         if (seq_group.is_prompt
                 and sampling_params.prompt_logprobs is not None):
             largest_num_logprobs = max(largest_num_logprobs,
@@ -721,9 +720,10 @@ def _get_logprobs(
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prefill_indices)
             next_token_ids.extend(next_prompt_tokens)
-        # Find query indices for logprob.
-        # If sampling is not required, there's no reason to compute logprobs.
+
+        # Update indices and tokens for sample logprobs
         query_indices.extend(seq_group.sample_indices)
+        token_ids, _ = sample_result
         next_token_ids.extend(token_ids)
         if sampling_params.logprobs is not None:
             largest_num_logprobs = max(largest_num_logprobs,
@@ -739,13 +739,13 @@ def _get_logprobs(
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
     next_token_ids_gpu = torch.tensor(next_token_ids, device=logprobs.device)
 
-    # logprob for selected tokens across all sequence groups.
+    # (num_selected_tokens,). Each index contains a logprob for selected
+    # tokens.
     selected_logprobs = logprobs[[
         query_indices_gpu,
         next_token_ids_gpu,
     ]]
-
-    # (num_query_tokens,). Each index contains a rank of a selected token.
+    # (num_selected_tokens,). Each index contains a rank of a selected token.
     ranks = _get_ranks(
         logprobs[query_indices_gpu],
         next_token_ids_gpu,
@@ -764,30 +764,30 @@ def _get_logprobs(
     selected_logprobs = selected_logprobs.cpu()
     ranks = ranks.cpu()
 
-    # Gather results
+    # Find prompt/sample logprobs.
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
     result_sample_logprobs: List[SampleLogprobs] = []
+    # Used to track selected logprobs.
     top_logprob_idx = 0
     query_idx = 0
 
-    # Go over all sequence groups in a batch at once.
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
         sampling_params = seq_group.sampling_params
         is_prompt = seq_group.is_prompt
 
         # Find prompt logprobs
+        prompt_logprobs: Optional[PromptLogprobs] = None
         if (is_prompt and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
-            # Compute prompt logprobs.
-            prompt_logprobs: PromptLogprobs = []
             for token_id in next_prompt_tokens:
-                # Calculate the prompt logprob of the real prompts.
+                # Calculate the prompt logprob of the real prompt tokens.
                 prompt_logprobs_dict = {
                     token_id: (selected_logprobs[query_idx].item(),
                                ranks[query_idx].item())
                 }
+
                 # Add top K prompt logprobs.
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
@@ -806,9 +806,7 @@ def _get_logprobs(
                 })
                 top_logprob_idx += 1
                 query_idx += 1
-            result_prompt_logprobs.append(prompt_logprobs)
-        else:
-            result_prompt_logprobs.append(None)
+        result_prompt_logprobs.append(prompt_logprobs)
 
         # Find sample logprobs
         num_logprobs = sampling_params.logprobs
