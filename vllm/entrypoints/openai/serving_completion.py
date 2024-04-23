@@ -185,6 +185,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
 
+                    assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
                         # only return the prompt
                         delta_text = res.prompt
@@ -272,6 +273,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             for output in final_res.outputs:
+                assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
                     token_ids = prompt_token_ids
                     top_logprobs = prompt_logprobs

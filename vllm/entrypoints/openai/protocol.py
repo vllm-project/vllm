@@ -153,6 +153,7 @@ class ChatCompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -214,7 +215,7 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    n: Optional[int] = 1
+    n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
@@ -290,6 +291,7 @@ class CompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))

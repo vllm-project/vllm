@@ -106,7 +106,7 @@ class TorchSDPABackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: TorchSDPAMetadata,
+        attn_metadata: TorchSDPAMetadata,  # type: ignore
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
@@ -136,6 +136,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                                                 kv_scale)
 
         if attn_metadata.is_prompt:
+            assert attn_metadata.prompt_lens is not None
             if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
                 if self.num_kv_heads != self.num_heads:
                     key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
