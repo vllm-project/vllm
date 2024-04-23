@@ -14,8 +14,8 @@ RUN apt-get update -y \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt-get update -y \
-    && apt-get install -y python{python_version} python{python_version}-dev python{python_version}-venv python3-pip git \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python{python_version} 1
+    && apt-get install -y python${python_version} python${python_version}-dev python${python_version}-venv python3-pip git \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${python_version} 1
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
