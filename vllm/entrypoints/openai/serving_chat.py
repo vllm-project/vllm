@@ -1,6 +1,5 @@
 import codecs
 import time
-from pathlib import Path
 from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
 
 from fastapi import Request
@@ -19,16 +18,6 @@ from vllm.outputs import RequestOutput
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
-
-
-def _path_is_relative_to(path: Path, other: str):
-    # Polyfill for Python 3.8
-    # TODO: Replace w/ Path.is_relative_to when Python 3.8 is not supported
-    try:
-        path.relative_to(other)
-        return True
-    except ValueError:
-        return False
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -337,8 +326,8 @@ class OpenAIServingChat(OpenAIServing):
                 with open(chat_template, "r") as f:
                     tokenizer.chat_template = f.read()
             except OSError as e:
-                path = Path(chat_template)
-                if path.is_absolute() or _path_is_relative_to(path, ''):
+                JINJA_CHARS = "{}\n"
+                if not any(c in chat_template for c in JINJA_CHARS):
                     msg = (f"The supplied chat template ({chat_template}) "
                            f"looks like a file path, but it failed to be "
                            f"opened. Reason: {e}")
