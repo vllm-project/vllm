@@ -32,11 +32,10 @@ for input_dtype in DTYPES:
                     # output and weight dtypes are different, we only generate
                     # the kernels the same dtypes to reduce the binary size.
                     continue
-            else:
-                # NOTE(woosuk): While Punica supports the case where the input
-                # and output both are either fp16 or bf16, we only generate the
-                # kernels for the case where at least one of them is fp32 to
-                # reduce the binary size.
+            elif not (input_dtype == output_dtype == weight_dtype):
+                # NOTE(woosuk): While Punica supports mixed data types for
+                # input, output, and weight, we only generate the kernels with
+                # the same data types to reduce the binary size.
                 continue
 
             kernel_definition = TEMPLATE.format(

@@ -62,7 +62,8 @@ inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
     if (!std::is_same<in_T, W_T>::value) {
       return false;
     }
-  } else {
+  } else if (!(std::is_same<in_T, W_T>::value &&
+               std::is_same<out_T, W_T>::value)) {
     return false;
   }
 
