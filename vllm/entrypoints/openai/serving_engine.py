@@ -297,8 +297,7 @@ class OpenAIServing:
     ) -> List[Union[InputString, InputTokens]]:
         if isinstance(input_or_inputs, str):
             # case 1: a string
-            elem = input_or_inputs
-            return [InputString(text=elem, is_tokens=False)]
+            return [InputString(text=input_or_inputs, is_tokens=False)]
 
         if isinstance(input_or_inputs, list):
             if len(input_or_inputs) == 0:
