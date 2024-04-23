@@ -112,6 +112,7 @@ class ModelRunner:
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        speculative_length: int = 0, 
     ):
         self.model_config = model_config
         self.parallel_config = parallel_config
@@ -119,6 +120,7 @@ class ModelRunner:
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.speculative_length = speculative_length
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
@@ -218,7 +220,12 @@ class ModelRunner:
 
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
-        return (self.max_context_len_to_capture + block_size - 1) // block_size
+        k = self.speculative_length
+        if k : # able speculative decoding w/ lookahead 
+            return self.max_context_len_to_capture // block_size + max(k // block_size, 1)
+        else:
+            return (self.max_context_len_to_capture + block_size - 1) // block_size 
+                       
 
     def _prepare_prompt(
         self,
@@ -404,7 +411,7 @@ class ModelRunner:
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=False,
+            use_cuda_graph=True,
         )
 
         return PreparePromptMetadata(
