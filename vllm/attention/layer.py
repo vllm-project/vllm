@@ -28,12 +28,16 @@ class Attention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        blocksparse_local_blocks: int = 16,
+        blocksparse_vert_stride: int = 8,
+        blocksparse_block_size: int = 64,
     ) -> None:
         super().__init__()
         self.backend = get_attn_backend(torch.get_default_dtype())
         impl_cls = self.backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window)
+                             alibi_slopes, sliding_window,blocksparse_local_blocks,
+                             blocksparse_vert_stride, blocksparse_block_size)
 
     def forward(
         self,
@@ -44,5 +48,4 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
-        return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 kv_scale)
+        return self.impl.forward(query, key, value, kv_cache, attn_metadata, kv_scale)

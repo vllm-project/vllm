@@ -110,6 +110,9 @@ __device__ void paged_attention_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
   const float kv_scale) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
@@ -121,6 +124,10 @@ __device__ void paged_attention_kernel(
     return;
   }
 
+  // const int blocksparse_local_blocks = 16;
+  // const int blocksparse_vert_stride = 8;
+  // const int blocksparse_block_size = 64;
+  const int blocksparse_head_sliding_step = 1;
   const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   const int num_blocks_per_partition = USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_context_blocks;
 
@@ -199,10 +206,31 @@ __device__ void paged_attention_kernel(
   // Each thread group in a warp fetches a key from the block, and computes
   // dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
+  const int num_blocksparse_blocks = DIVIDE_ROUND_UP(num_context_blocks, 4);
+  const bool is_sparse =  (blocksparse_vert_stride != 1);
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // (e.g., kv_block_stride).
+    if (is_sparse) {
+      const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      const bool is_remote = ((block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride == 0);
+      const bool is_local = (block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks);
+      if (!is_remote && !is_local) {
+        for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
+          const int physical_block_offset = (thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
+          const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
+
+          if (thread_group_offset == 0) {
+            // Store the partial reductions to shared memory.
+            // NOTE(woosuk): It is required to zero out the masked logits.
+            logits[token_idx - start_token_idx] = -FLT_MAX;
+            // printf("=========skip block_idx: %d, block_seq_id: %d, num_blocksparse_blocks: %d, num_context_blocks: %d, head_idx: %d, context_len: %d, local_mult: %d, local_sum: %d, local_exp: %d, local_exp_mod: %d, \n", block_idx, block_seq_id, num_blocksparse_blocks, num_context_blocks, head_idx, context_len, local_mult, local_sum, local_exp, local_judge);
+          }
+        }
+      continue;
+      }
+    }
     const int64_t physical_block_number = static_cast<int64_t>(block_table[block_idx]);
 
     // Load a key to registers.
@@ -334,6 +362,12 @@ __device__ void paged_attention_kernel(
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // (e.g., kv_block_stride).
+    if (is_sparse) {
+      int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      if (!((block_seq_id + head_idx * blocksparse_head_sliding_step + 1) % blocksparse_vert_stride == 0) && !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
+        continue;
+      }
+    }
     const int64_t physical_block_number = static_cast<int64_t>(block_table[block_idx]);
     const int physical_block_offset = (lane % NUM_V_VECS_PER_ROW) * V_VEC_SIZE;
     const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
@@ -463,11 +497,15 @@ __global__ void paged_attention_v1_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
   const float kv_scale) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE>(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
     out, q, k_cache, v_cache, num_kv_heads, scale, block_tables, context_lens,
-    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, kv_scale);
+    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, 
+    blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size, kv_scale);
 }
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
@@ -495,11 +533,15 @@ __global__ void paged_attention_v2_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
   const float kv_scale) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, PARTITION_SIZE>(
     exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
     block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
-    q_stride, kv_block_stride, kv_head_stride, kv_scale);
+    q_stride, kv_block_stride, kv_head_stride, blocksparse_local_blocks,
+    blocksparse_vert_stride, blocksparse_block_size,kv_scale);
 }
 
 // Grid: (num_heads, num_seqs).
@@ -622,6 +664,9 @@ __global__ void paged_attention_v2_reduce_kernel(
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
+    blocksparse_local_blocks,                                                                 \
+    blocksparse_vert_stride,                                                                  \
+    blocksparse_block_size,                                                                   \
     kv_scale);
 
 // TODO(woosuk): Tune NUM_THREADS.
@@ -642,6 +687,9 @@ void paged_attention_v1_launcher(
   torch::Tensor& context_lens,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int blocksparse_local_blocks,
+  int blocksparse_vert_stride,
+  int blocksparse_block_size,
   float kv_scale) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
@@ -650,6 +698,7 @@ void paged_attention_v1_launcher(
   int q_stride = query.stride(0);
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
+
 
   int thread_group_size = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   assert(head_size % thread_group_size == 0);
@@ -718,6 +767,9 @@ void paged_attention_v1_launcher(
     context_lens,                                                            \
     max_context_len,                                                         \
     alibi_slopes,                                                            \
+    blocksparse_local_blocks,                                                \
+    blocksparse_vert_stride,                                                 \
+    blocksparse_block_size,                                                  \
     kv_scale);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -751,6 +803,9 @@ void paged_attention_v1(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
+  int blocksparse_local_blocks,
+  int blocksparse_vert_stride,
+  int blocksparse_block_size,
   float kv_scale) {
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Float) {
@@ -796,6 +851,9 @@ void paged_attention_v1(
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
+    blocksparse_local_blocks,                                                                 \
+    blocksparse_vert_stride,                                                                  \
+    blocksparse_block_size,                                                                   \
     kv_scale);                                                                                \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>           \
   <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                                   \
@@ -827,6 +885,9 @@ void paged_attention_v2_launcher(
   torch::Tensor& context_lens,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int blocksparse_local_blocks,
+  int blocksparse_vert_stride,
+  int blocksparse_block_size,
   float kv_scale) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
@@ -912,6 +973,9 @@ void paged_attention_v2_launcher(
     context_lens,                                                                \
     max_context_len,                                                             \
     alibi_slopes,                                                                \
+    blocksparse_local_blocks,                                                    \
+    blocksparse_vert_stride,                                                     \
+    blocksparse_block_size,                                                      \
     kv_scale);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -948,6 +1012,9 @@ void paged_attention_v2(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
+  int blocksparse_local_blocks,
+  int blocksparse_vert_stride,
+  int blocksparse_block_size,
   float kv_scale) {
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Float) {
