@@ -1,6 +1,6 @@
 import math
 from functools import partial
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
 
@@ -19,10 +19,9 @@ from torchvision.transforms import InterpolationMode
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 # from .configuration_minicpm import MiniCPMVConfig
@@ -461,6 +460,8 @@ class MiniCPMV(nn.Module):
 
     def modify_input_ids(self, input_ids, place_holder, im_start_token_id,
                          im_end_token_id):
+        if len(torch.where(input_ids == im_end_token_id)[0]) == 0:
+            return [], input_ids
         place_holder = torch.tensor(place_holder + [5]).to(
             device=input_ids.device, dtype=input_ids.dtype)
         start_idx = 0
@@ -546,7 +547,7 @@ class MiniCPMV(nn.Module):
                           positions=positions,
                           kv_caches=kv_caches,
                           attn_metadata=attn_metadata,
-                          inputs_embeds=vllm_embeddings)
+                          input_embeds=vllm_embeddings)
         return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -561,11 +562,7 @@ class MiniCPMV(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -575,8 +572,7 @@ class MiniCPMV(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             #     for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
             #         if key_to_modify in name:
             #             name = name.replace(key_to_modify, new_key)
