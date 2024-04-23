@@ -320,7 +320,7 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
 .. code-block:: yaml
 
   envs:
-    MODEL_NAME: meta-llama/Meta-Llama-3-70B-Instruct
+    MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
     ENDPOINT: x.x.x.x:3031 # Address of the API server running vllm. 
 
   resources:
@@ -339,7 +339,6 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
   run: |
     conda activate vllm
     export PATH=$PATH:/sbin
-    WORKER_IP=$(hostname -I | cut -d' ' -f1)
 
     echo 'Starting gradio server...'
     git clone https://github.com/vllm-project/vllm.git || true
