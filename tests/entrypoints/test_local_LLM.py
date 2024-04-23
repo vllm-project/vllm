@@ -6,9 +6,8 @@ import jsonschema
 import pytest
 
 from vllm.entrypoints.llm import LLM
-from vllm.sampling_params import SamplingParams
-
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import SamplingParams
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -124,7 +123,6 @@ def test_guided_choice_completion(sample_json_schema, llm):
 
 @pytest.mark.skip_global_cleanup
 def test_guided_grammar(sample_sql_statements, llm):
-
 
     sampling_params = SamplingParams(
         temperature=0.8,

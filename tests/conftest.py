@@ -9,10 +9,10 @@ from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor,
                           LlavaForConditionalGeneration)
 
-from vllm.entrypoints.llm import LLM
-from vllm.sampling_params import SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
+from vllm.entrypoints.llm import LLM
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -472,9 +472,10 @@ def sample_guided_choice():
         "Ruby", "Swift", "Kotlin"
     ]
 
+
 @pytest.fixture
 def sample_sql_statements():
-        return  ("""
+    return ("""
 start: select_statement
 
 select_statement: "SELECT" column "from" table "where" condition

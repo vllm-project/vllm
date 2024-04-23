@@ -2,7 +2,6 @@ from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
-
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
 from vllm.sampling_params import LogitsProcessor
@@ -16,7 +15,8 @@ async def get_guided_decoding_logits_processor(
         return await get_outlines_guided_decoding_logits_processor(
             request, tokenizer)
     if guided_decoding_backend == 'lm-format-enforcer':
-        ## Import moved inside function to avoide circular import with vllm.entrypoints.LLM.py
+        ## Import moved inside function to avoide circular
+        ## import with vllm.entrypoints.LLM.py
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (
             get_lm_format_enforcer_guided_decoding_logits_processor)
         return await get_lm_format_enforcer_guided_decoding_logits_processor(

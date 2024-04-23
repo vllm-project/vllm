@@ -733,7 +733,8 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
         assert loaded == {"result": 2}, loaded
 
 
-async def test_guided_grammar(server, sample_sql_statements, client: openai.AsyncOpenAI):
+async def test_guided_grammar(server, sample_sql_statements,
+                              client: openai.AsyncOpenAI):
 
     completion = await client.completions.create(
         model=MODEL_NAME,

@@ -5,7 +5,7 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Tuple, Union, Dict
+from typing import Dict, Tuple, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase

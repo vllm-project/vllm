@@ -7,13 +7,13 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.guided_decoding.outlines_decoding import (
+    get_local_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
-
-from vllm.model_executor.guided_decoding.outlines_decoding import get_local_guided_decoding_logits_processor
 
 
 class LLM:
@@ -131,6 +131,15 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
+    def get_guided_processor(self, params: SamplingParams):
+        guided_logits_processor = get_local_guided_decoding_logits_processor(
+            params, self.get_tokenizer())
+        if guided_logits_processor:
+            if params.logits_processors is None:
+                params.logits_processors = []
+            params.logits_processors.append(guided_logits_processor)
+        return params
+
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
@@ -171,13 +180,10 @@ class LLM:
             and prompts is not None:
             raise ValueError("prompts must be None if skip_tokenizer_init "
                              "is True")
+
         if isinstance(prompts, str):
             # Convert a single prompt to a list.
             prompts = [prompts]
-        if (prompts is not None and prompt_token_ids is not None
-                and len(prompts) != len(prompt_token_ids)):
-            raise ValueError("The lengths of prompts and prompt_token_ids "
-                             "must be the same.")
 
         if prompts is not None:
             num_requests = len(prompts)
@@ -187,12 +193,27 @@ class LLM:
 
         if sampling_params is None:
             # Use default sampling params.
-            sampling_params = SamplingParams()
+            sampling_params = [SamplingParams()] * num_requests
+        elif isinstance(sampling_params, list):
+            if len(sampling_params) != num_requests:
+                raise ValueError("The lengths of prompts and sampling_params "
+                                 "must be the same.")
+            else:
+                guided_processor_added_sampling_params = []
+                for params in sampling_params:
+                    guided_processor_added_sampling_params.append(
+                        self.get_guided_processor(params))
+                sampling_params = guided_processor_added_sampling_params
+        elif isinstance(sampling_params, SamplingParams):
+            params = self.get_guided_processor(sampling_params)
+            sampling_params = [params] * num_requests
 
-        elif isinstance(sampling_params,
-                        list) and len(sampling_params) != num_requests:
-            raise ValueError("The lengths of prompts and sampling_params "
+        print(sampling_params)
+        if (prompts is not None and prompt_token_ids is not None
+                and len(prompts) != len(prompt_token_ids)):
+            raise ValueError("The lengths of prompts and prompt_token_ids "
                              "must be the same.")
+
         if multi_modal_data:
             multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
@@ -203,13 +224,6 @@ class LLM:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
 
-        guided_decode_logits_processor = get_local_guided_decoding_logits_processor(
-            sampling_params, self.get_tokenizer())
-        if guided_decode_logits_processor:
-            if sampling_params.logits_processors is None:
-                sampling_params.logits_processors = []
-            sampling_params.logits_processors.append(
-                guided_decode_logits_processor)
         for i in range(num_requests):
             prompt = prompts[i] if prompts is not None else None
             token_ids = None if prompt_token_ids is None else prompt_token_ids[

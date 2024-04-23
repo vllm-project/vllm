@@ -1,6 +1,7 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
+
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
