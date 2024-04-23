@@ -227,7 +227,7 @@ To enable autoscaling, you could replace the `replicas` with the following confi
 
   service:
     replica_policy:
-      min_replicas: 0
+      min_replicas: 1
       max_replicas: 3
       target_qps_per_replica: 2
 
@@ -262,7 +262,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
 
   service:
     replica_policy:
-      min_replicas: 0
+      min_replicas: 1
       max_replicas: 3
       target_qps_per_replica: 2
     # An actual request for readiness probe.
