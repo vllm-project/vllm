@@ -489,6 +489,9 @@ class SequenceGroup:
             seq for seq in self.seqs_dict.values() if seq.status == status
         ]
 
+    def get_encoder_seq(self) -> Sequence:
+        return self.encoder_seq
+
     def get_unfinished_seqs(self) -> List[Sequence]:
         return [
             seq for seq in self.seqs_dict.values() if not seq.is_finished()

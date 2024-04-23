@@ -244,12 +244,21 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 Device.CPU, block_size, num_cpu_blocks)
         # Mapping: seq_id -> BlockTable.
         self.block_tables: Dict[int, BlockTable] = {}
+        # Mapping: req_id -> BlockTable
+        # Note that each SequenceGroup has a unique
+        # request ID
+        self.encoder_block_tables: Dict[int, BlockTable] = {}
+
+    def get_seq_num_required_blocks(self, seq: Sequence) -> int:
+        return len(seq.logical_token_blocks)  
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        num_required_blocks = len(seq.logical_token_blocks)
+
+        decoder_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
+        encoder_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_encoder_seq())
+        num_required_blocks = decoder_num_required_blocks+encoder_num_required_blocks
 
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -265,9 +274,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate_decoder(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
-        # prompt.
+        # decoder prompt.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         # Allocate new physical token blocks that will store the prompt tokens.
@@ -290,9 +299,41 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 block.ref_count = seq_group.num_seqs()
             block_table.append(block)
 
-        # Assign the block table for each sequence.
+        # Assign the decoder block table for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
+
+    def allocate_encoder(self, seq_group: SequenceGroup) -> None:
+        # NOTE: Here we assume that all sequences in the group have the same
+        # encoder prompt.
+        seq = seq_group.get_encoder_seq()
+
+        # Allocate new physical token blocks that will store the prompt tokens.
+        num_prompt_blocks = len(seq.logical_token_blocks)
+
+        block_table: BlockTable = []
+        for logical_idx in range(num_prompt_blocks):
+            if (self.block_sliding_window is not None
+                    and logical_idx >= self.block_sliding_window):
+                block = block_table[logical_idx % self.block_sliding_window]
+                # Set the reference counts of the token blocks.
+                block.ref_count = seq_group.num_seqs()
+            elif self.enable_caching:
+                block = self.gpu_allocator.allocate(
+                    seq.hash_of_block(logical_idx),
+                    seq.num_hashed_tokens_of_block(logical_idx))
+            else:
+                block = self.gpu_allocator.allocate()
+                # Set the reference counts of the token blocks.
+                block.ref_count = seq_group.num_seqs()
+            block_table.append(block)
+
+        # Assign the encoder block table for the SequenceGroup.
+        self.encoder_block_tables[seq_group.request_id] = block_table
+
+    def allocate(self, seq_group: SequenceGroup) -> None:
+        self.allocate_decoder(seq_group)
+        self.allocate_encoder(seq_group)
 
     def can_append_slots(self,
                          seq_group: SequenceGroup,
@@ -563,6 +604,18 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             # Update the last accessed time of all the blocks accessed
             # in this step.
             block_table = self.block_tables[seq.seq_id]
+            for block in block_table:
+                block.last_accessed = access_time
+
+    def access_all_encoder_blocks_in_seq_group(
+        self,
+        seq_group: SequenceGroup,
+        access_time: float,
+    ) -> None:
+        if self.enable_caching:
+            # Update the last accessed time of all the blocks accessed
+            # in this step.
+            block_table = self.encoder_block_tables[seq_group.request_id]
             for block in block_table:
                 block.last_accessed = access_time
 
