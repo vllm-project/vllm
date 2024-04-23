@@ -28,7 +28,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
-from vllm.distributed.parallel_state import get_cpu_world_group
+from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
 from vllm.utils import find_nccl_library, nccl_integrity_check
 
@@ -214,10 +214,13 @@ class NCCLCommunicator:
         device: Optional[Union[int, str, torch.device]] = None,
     ):
         """
-        NCCLCommunicator has to be bind to a specific device.
+        Args:
+            group: the process group to work on. If None, it will use the
+                default process group.
+            device: the device to bind the NCCLCommunicator to. If None,
+                it will be bind to f"cuda:{local_rank}".
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
-        By default, it will be bind to f"cuda:{local_rank}".
         """
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
@@ -237,7 +240,7 @@ class NCCLCommunicator:
             self.unique_id.internal[i] = byte
         self.comm = ctypes.c_void_p()
         if device is None:
-            local_rank = self.rank % torch.cuda.device_count()
+            local_rank = get_local_rank()
             device = torch.device(f"cuda:{local_rank}")
         elif isinstance(device, int):
             device = torch.device(f"cuda:{device}")
