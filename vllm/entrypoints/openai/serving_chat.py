@@ -331,7 +331,6 @@ class OpenAIServingChat(OpenAIServing):
 
     def _load_chat_template(self, chat_template):
         tokenizer = self.tokenizer
-        assert tokenizer is not None
 
         if chat_template is not None:
             try:
