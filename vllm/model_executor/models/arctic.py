@@ -1,4 +1,4 @@
-"""Inference-only Yak model."""
+"""Inference-only Arctic model."""
 from typing import Iterable, List, Optional, Tuple
 import os
 import time
@@ -6,7 +6,7 @@ import time
 import torch
 from torch import nn
 
-from transformers import YakConfig
+from transformers import ArcticConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 # from vllm.model_executor.layers.attention import Attention
@@ -28,7 +28,7 @@ from vllm.sequence import SamplerOutput
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.quantization.yq import YakQuantizedParameter, YQLinearMethod
+from vllm.model_executor.layers.quantization.deepspeedfp import DeepSpeedFPQuantizedParameter, DeepSpeedFPLinearMethod
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.logger import init_logger
 
@@ -38,14 +38,14 @@ use_dummy = os.environ.get("USE_DUMMY", False)
 use_dummy = bool(use_dummy)
 
 
-class YakMLP(nn.Module):
-    def __init__(self, config: YakConfig,
+class ArcticMLP(nn.Module):
+    def __init__(self, config: ArcticConfig,
                  layer_id: int,
                  expert_id: int = -1,
                  is_residual_mlp: bool = False,
                  linear_method: Optional[LinearMethodBase] = None,
                  reduce_results: bool = True):
-        super(YakMLP, self).__init__()
+        super(ArcticMLP, self).__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
         self.layer_id = layer_id
@@ -74,19 +74,19 @@ class YakMLP(nn.Module):
         return hidden_states
 
 
-class YakMoE(nn.Module):
-    """Model-parallel implementation of Yak MoE Layer.
+class ArcticMoE(nn.Module):
+    """Model-parallel implementation of Arctic MoE Layer.
 
-    Note that Yak has *every other* layer to be an MoE (different from Mixtral).
+    Note that Arctic has *every other* layer to be an MoE (different from Mixtral).
     """
 
-    def __init__(self, config: YakConfig,
+    def __init__(self, config: ArcticConfig,
                  layer_id: int,
                  tp_size: Optional[int] = None,
                  params_dtype: Optional[torch.dtype] = None,
                  linear_method: Optional[LinearMethodBase] = None,
                  reduce_results: bool = True):
-        super(YakMoE, self).__init__()
+        super(ArcticMoE, self).__init__()
 
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
@@ -96,7 +96,7 @@ class YakMoE(nn.Module):
         self.intermediate_size = config.intermediate_size // self.tp_size
 
         self.is_moe_layer = (layer_id+1) % config.moe_layer_frequency == 0
-        self.is_quant = isinstance(linear_method, YQLinearMethod)
+        self.is_quant = isinstance(linear_method, DeepSpeedFPLinearMethod)
         self.reduce_results = reduce_results
         # Some other parameters
         if params_dtype is None:
@@ -104,8 +104,8 @@ class YakMoE(nn.Module):
         self.params_dtype = params_dtype
 
         if not self.is_moe_layer:
-            self.mlp = YakMLP(config, layer_id=layer_id, linear_method=linear_method,
-                              reduce_results=reduce_results)
+            self.mlp = ArcticMLP(config, layer_id=layer_id, linear_method=linear_method,
+                                 reduce_results=reduce_results)
         else:
             self.gate = ReplicatedLinear(self.hidden_size,
                                          self.num_experts,
@@ -115,7 +115,7 @@ class YakMoE(nn.Module):
 
             # Create it on CPU and later quantize it to GPU.
             if self.is_quant:
-                self.ws = YakQuantizedParameter(
+                self.ws = DeepSpeedFPQuantizedParameter(
                     torch.empty(self.num_experts,
                                 2 * self.intermediate_size,
                                 self.hidden_size,
@@ -123,7 +123,7 @@ class YakMoE(nn.Module):
                     requires_grad=False,
                     quantization=linear_method.quant_config,
                 )
-                self.w2s = YakQuantizedParameter(
+                self.w2s = DeepSpeedFPQuantizedParameter(
                     torch.empty(self.num_experts,
                                 self.hidden_size,
                                 self.intermediate_size,
@@ -209,9 +209,9 @@ class YakMoE(nn.Module):
         return final_hidden_states
 
 
-class YakAttention(nn.Module):
+class ArcticAttention(nn.Module):
     def __init__(self, 
-                 config: YakConfig, 
+                 config: ArcticConfig, 
                  layer_idx: Optional[int] = None,
                  linear_method: Optional[LinearMethodBase] = None):
         super().__init__()
@@ -283,10 +283,10 @@ class YakAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-class YakDecoderLayer(nn.Module):
+class ArcticDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: YakConfig,
+        config: ArcticConfig,
         layer_idx: int,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
@@ -295,18 +295,18 @@ class YakDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         is_moe_layer = (layer_idx+1) % config.moe_layer_frequency == 0
         self.use_residual = config.use_residual and is_moe_layer
-        self.self_attn = YakAttention(config, layer_idx, linear_method=linear_method)
-        self.block_sparse_moe = YakMoE(config,
-                                       layer_id=layer_idx, 
-                                       linear_method=linear_method,
-                                       reduce_results=(not self.use_residual))
+        self.self_attn = ArcticAttention(config, layer_idx, linear_method=linear_method)
+        self.block_sparse_moe = ArcticMoE(config,
+                                          layer_id=layer_idx, 
+                                          linear_method=linear_method,
+                                          reduce_results=(not self.use_residual))
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         if self.use_residual:
             self.residual_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.residual_mlp = YakMLP(config, layer_id=layer_idx, is_residual_mlp=True,
+            self.residual_mlp = ArcticMLP(config, layer_id=layer_idx, is_residual_mlp=True,
                                        reduce_results=False)
 
     def forward(
@@ -343,10 +343,10 @@ class YakDecoderLayer(nn.Module):
         return hidden_states
 
 
-class YakModel(nn.Module):
+class ArcticModel(nn.Module):
     def __init__(
         self,
-        config: YakConfig,
+        config: ArcticConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -358,7 +358,7 @@ class YakModel(nn.Module):
             org_num_embeddings=self.vocab_size
         )
         self.layers = nn.ModuleList([
-            YakDecoderLayer(config, 
+            ArcticDecoderLayer(config, 
                             layer_idx,
                             linear_method=linear_method)
             for layer_idx in range(config.num_hidden_layers)
@@ -382,15 +382,15 @@ class YakModel(nn.Module):
         return hidden_states
 
 
-class YakForCausalLM(nn.Module):
+class ArcticForCausalLM(nn.Module):
     def __init__(
         self, 
-        config: YakConfig,
+        config: ArcticConfig,
         linear_method: Optional[LinearMethodBase] = None,
         **kwargs
     ) -> None:
         super().__init__()
-        self.model = YakModel(config, linear_method)
+        self.model = ArcticModel(config, linear_method)
         self.config = config
         self.linear_method = linear_method
         self.vocab_size = config.vocab_size
@@ -512,10 +512,10 @@ class YakForCausalLM(nn.Module):
                                                     default_weight_loader)
                             weight_loader(param, loaded_weight)
 
-        # For yak, we run a post quantization, because the weights are saved in 16 bits.
+        # For Arctic, we run a post quantization, because the weights are saved in 16 bits.
         # Iterate in order of largest to smallest params to reduce fragmentation issues.
         for name, param in sorted(self.named_parameters(), key=lambda v: -v[1].numel()):
-            if hasattr(param, "is_yak") and param.is_yak == True:
+            if hasattr(param, "is_arctic") and param.is_arctic == True:
                 # do quantization after loading and moe to GPU
                 assert param.device.type != "cuda"
                 param.data = param.cuda()

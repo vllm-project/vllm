@@ -11,9 +11,9 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
-yak_model_path = "/checkpoint/yak"
-llm = LLM(model=yak_model_path, 
-          quantization="yq",
+arctic_model_path = "/checkpoint/arctic"
+llm = LLM(model=arctic_model_path, 
+          quantization="deepspeedfp",
           tensor_parallel_size=8)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

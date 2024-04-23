@@ -53,7 +53,7 @@ def parse_args():
                         help="Tensor parallelism",
                         default='1')
     parser.add_argument('--model', type=str, required=True, help="path to the model")
-    parser.add_argument('--quantization', type=str, default="yq", help="quantization method")
+    parser.add_argument('--quantization', type=str, default="deepspeedfp", help="quantization method")
 
     args, _ = parser.parse_known_args()
     return args

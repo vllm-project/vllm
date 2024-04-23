@@ -1,19 +1,17 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import torch.nn as nn 
 
-from vllm._C import ops
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 
-class YQConfig(QuantizationConfig):
-    """Config for YQ."""
+class DeepSpeedFPConfig(QuantizationConfig):
+    """Config for DeepSpeed FP quantizer. It supports fp6 and fp8."""
 
     def __init__(
         self,
@@ -33,11 +31,11 @@ class YQConfig(QuantizationConfig):
         if self.weight_bits not in [6, 8]:
             raise ValueError(
                 "Currently, only 6-bit or 8-bit weight quantization are "
-                f"supported for Yak quantizaiton, but got {self.weight_bits} bits."
+                f"supported for DeepSpeed FP quantizaiton, but got {self.weight_bits} bits."
             )
 
     def __repr__(self) -> str:
-        return (f"YQConfig(weight_bits={self.weight_bits}), "
+        return (f"DeepSpeedFPConfig(weight_bits={self.weight_bits}), "
                 f"group_size={self.group_size}, "
                 f"rounding={self.rounding}, "
                 f"mantissa_bits={self.mantissa_bits}, "
@@ -45,16 +43,16 @@ class YQConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "yq"
+        return "DeepSpeedFP"
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "YQConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "DeepSpeedFPConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits=weight_bits, group_size=group_size)
 
-    def get_linear_method(self) -> "YQLinearMethod":
-        return YQLinearMethod(self)
+    def get_linear_method(self) -> "DeepSpeedFPLinearMethod":
+        return DeepSpeedFPLinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -76,15 +74,14 @@ class YQConfig(QuantizationConfig):
         ]
 
 
-class YQLinearMethod(LinearMethodBase):
-    """Linear method for Yak.
+class DeepSpeedFPLinearMethod(LinearMethodBase):
+    """Linear method for DeepSpeedFP quantizer.
 
     Args:
-        quant_config: the Yak quantization config.
+        quant_config: the DeepSpeedFP quantization config.
     """
 
-    def __init__(self, quant_config: YQConfig):
-        print(f"Inside YQLinearMethod init: {quant_config}")
+    def __init__(self, quant_config: DeepSpeedFPConfig):
         self.quant_config = quant_config
         self.weight = None
         self.q_weight = None
@@ -105,7 +102,7 @@ class YQLinearMethod(LinearMethodBase):
         del output_size
         group_size = self.quant_config.group_size
         orig_numel = input_size_per_partition * output_size_per_partition
-        weight = YakQuantizedParameter(
+        weight = DeepSpeedFPQuantizedParameter(
             torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
@@ -140,9 +137,9 @@ class YQLinearMethod(LinearMethodBase):
             return self.quantizer.quantize(weight.data, return_meta_tensor=return_meta_tensor)
 
 
-class YakQuantizedParameter(nn.Parameter):
+class DeepSpeedFPQuantizedParameter(nn.Parameter):
     """
-    Yak parameter class that implements weight quantization via deepspeed. Weights
+    DeepSpeedFP quantized parameter class that implements weight quantization via deepspeed. Weights
     are stored in quantized form on GPUs, and can be dequantized on-the-fly when
     needed by the model. The weights are actually quantized during any `.to(device)`
     if `device` is a cuda device.
@@ -151,11 +148,11 @@ class YakQuantizedParameter(nn.Parameter):
         cls,
         data,
         requires_grad: bool = False,  # quantized weights should be frozen by default
-        quantization: YQConfig = None,
+        quantization: DeepSpeedFPConfig = None,
         quantizer=None,  # HF expects this argument.
     ):
         if quantization is None:
-            quantization = YQConfig()
+            quantization = DeepSpeedFPConfig()
         self = torch.Tensor._make_subclass(cls, data, requires_grad)
         self.quant_config = quantization
         self.data = data
@@ -233,9 +230,9 @@ class YakQuantizedParameter(nn.Parameter):
         return tensor
 
     @property
-    def is_yak(self):
+    def is_arctic(self):
         return True
 
     def cuda_parameter(self, device=None, non_blocking=False):
         a = self.to(device="cuda" if device is None else device, non_blocking=non_blocking)
-        return torch.Tensor._make_subclass(YakQuantizedParameter, a, self.requires_grad)
+        return torch.Tensor._make_subclass(DeepSpeedFPQuantizedParameter, a, self.requires_grad)

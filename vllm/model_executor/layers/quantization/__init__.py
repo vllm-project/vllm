@@ -6,7 +6,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
-from vllm.model_executor.layers.quantization.yq import YQConfig
+from vllm.model_executor.layers.quantization.deepspeedfp import DeepSpeedFPConfig
 
 
 _QUANTIZATION_CONFIG_REGISTRY = {
@@ -14,7 +14,7 @@ _QUANTIZATION_CONFIG_REGISTRY = {
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
     "marlin": MarlinConfig,
-    "yq": YQConfig
+    "deepspeedfp": DeepSpeedFPConfig
 }
 
 
