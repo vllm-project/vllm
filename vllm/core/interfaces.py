@@ -35,9 +35,10 @@ class BlockSpaceManager(ABC):
             from vllm.core.block_manager_v2 import BlockSpaceManagerV2
             return BlockSpaceManagerV2
 
-        if version == "v3":
-            from vllm.core.block_manager_v3 import BlockSpaceManagerV3
-            return BlockSpaceManagerV3
+        if version == "embedding":
+            from vllm.core.embedding_model_block_manager import (
+                EmbeddingModelBlockSpaceManager)
+            return EmbeddingModelBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")
 

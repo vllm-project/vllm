@@ -274,7 +274,7 @@ class Scheduler:
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
         if self.scheduler_config.embedding_mode:
-            version = "v3"
+            version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
@@ -973,6 +973,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 do_sample=do_sample,
+                pooling_params=seq_group.pooling_params,
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
