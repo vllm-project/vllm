@@ -430,12 +430,14 @@ class SamplingTensors:
         # Note that the performance will be very bad without
         # pinned memory.
         pin_memory = is_pin_memory_available()
-        prompt_max_len = max(len(tokens) for tokens in prompt_tokens)
+        prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
+                             default=0)
         prompt_padded_tokens = [
             tokens + [vocab_size] * (prompt_max_len - len(tokens))
             for tokens in prompt_tokens
         ]
-        output_max_len = max(len(tokens) for tokens in output_tokens)
+        output_max_len = max([len(tokens) for tokens in output_tokens],
+                             default=0)
         output_padded_tokens = [
             tokens + [vocab_size] * (output_max_len - len(tokens))
             for tokens in output_tokens
