@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.utils import random_uuid
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -51,36 +51,6 @@ def request_output_to_embedding_response(
         data=data,
         usage=usage,
     )
-
-
-def merge_async_iterators(*iterators):
-    """Merge multiple asynchronous iterators into a single iterator.
-
-    This method handle the case where some iterators finish before others.
-    When it yields, it yields a tuple (i, item) where i is the index of the
-    iterator that yields the item.
-    """
-    queue = asyncio.Queue()
-
-    finished = [False] * len(iterators)
-
-    async def producer(i, iterator):
-        async for item in iterator:
-            await queue.put((i, item))
-        finished[i] = True
-
-    _tasks = [
-        asyncio.create_task(producer(i, iterator))
-        for i, iterator in enumerate(iterators)
-    ]
-
-    async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            yield item
-        await asyncio.gather(*_tasks)
-
-    return consumer()
 
 
 class OpenAIServingEmbedding(OpenAIServing):

@@ -30,14 +30,14 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
-        pass
+        return True
 
     def append_slots(
         self,
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> Dict[int, List[int]]:
-        pass
+        return {}
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
@@ -48,17 +48,17 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:
-        pass
+        return {}
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        pass
+        return {}
 
     def free(self, seq: Sequence) -> None:
         # No operation on free
-        pass
+        return
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         return []

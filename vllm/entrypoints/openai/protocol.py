@@ -1,13 +1,14 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -364,11 +365,21 @@ class CompletionRequest(OpenAIBaseModel):
 
 
 class EmbeddingRequest(BaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/embeddings
     model: str
     input: Union[List[int], List[List[int]], str, List[str]]
     encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
     dimensions: Optional[int] = None
     user: Optional[str] = None
+
+    # doc: begin-embedding-pooling-params
+    additional_data: Optional[Any] = None
+
+    # doc: end-embedding-pooling-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
 
 
 class LogProbs(OpenAIBaseModel):
