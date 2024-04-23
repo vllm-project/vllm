@@ -221,17 +221,89 @@ After the service is READY, you can find a single endpoint for the service and a
       "stop_token_ids": [128009,  128001]
     }'
 
-To enable autoscaling, you could specify additional configs in `services`:
+To enable autoscaling, you could replace the `replicas` with the following configs in `service`:
 
 .. code-block:: yaml
 
-  services:
+  service:
     replica_policy:
       min_replicas: 0
       max_replicas: 3
-    target_qps_per_replica: 2
+      target_qps_per_replica: 2
 
 This will scale the service up to when the QPS exceeds 2 for each replica.
+
+.. raw:: html
+    
+    <details>
+    <summary>Click to see the full recipe YAML</summary>
+
+.. code-block:: yaml
+
+  service:
+    replicas: 2
+    # An actual request for readiness probe.
+    readiness_probe:
+      path: /v1/chat/completions
+      post_data:
+      model: $MODEL_NAME
+      messages:
+        - role: user
+          content: Hello! What is your name?
+    max_tokens: 1
+    
+.. raw:: html
+
+  <details>
+  <summary>Click to see the full recipe YAML</summary>
+
+
+.. code-block:: yaml
+
+  service:
+    replica_policy:
+      min_replicas: 0
+      max_replicas: 3
+      target_qps_per_replica: 2
+    # An actual request for readiness probe.
+    readiness_probe:
+      path: /v1/chat/completions
+      post_data:
+        model: $MODEL_NAME
+        messages:
+          - role: user
+            content: Hello! What is your name?
+        max_tokens: 1
+
+  resources:
+    accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
+    use_spot: True
+    disk_size: 512  # Ensure model checkpoints can fit.
+    disk_tier: best
+    ports: 8081  # Expose to internet traffic.
+
+  envs:
+    MODEL_NAME: meta-llama/Meta-Llama-3-8B-Instruct
+    HF_TOKEN: <your-huggingface-token>  # Change to your own huggingface token, or use --env to pass.
+
+  setup: |
+    conda create -n vllm python=3.10 -y
+    conda activate vllm
+
+    pip install vllm==0.4.0.post1
+    # Install Gradio for web UI.
+    pip install gradio openai
+    pip install flash-attn==2.5.7
+
+  run: |
+    conda activate vllm
+    echo 'Starting vllm api server...'
+    python -u -m vllm.entrypoints.openai.api_server \
+      --port 8081 \
+      --model $MODEL_NAME \
+      --trust-remote-code \
+      --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
+      2>&1 | tee api_server.log
 
 To update the service with the new config:
 
