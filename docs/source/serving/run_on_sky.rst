@@ -305,6 +305,10 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
       --tensor-parallel-size $SKYPILOT_NUM_GPUS_PER_NODE \
       2>&1 | tee api_server.log
 
+.. raw:: html
+    
+    </details>
+
 To update the service with the new config:
 
 .. code-block:: console
