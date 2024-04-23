@@ -12,9 +12,9 @@ capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
 
 
-# @pytest.mark.skipif(
-#     capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
-#     reason="FP8 is not supported on this GPU type.")
+@pytest.mark.skipif(
+    capability < QUANTIZATION_METHODS["fp8"].get_min_capability(),
+    reason="FP8 is not supported on this GPU type.")
 def test_load_fp16_model(vllm_runner) -> None:
     llm = vllm_runner("facebook/opt-125m", quantization="fp8")
 
