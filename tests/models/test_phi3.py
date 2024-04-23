@@ -57,7 +57,7 @@ for output in outputs:
 
 
 # -----
-exit()
+# exit()
 
 prompts = ['The president of Microsoft is ' * 300, 'Wikipedia\n' * 10 + 'Wikipedia is a']
 prompts.append('''

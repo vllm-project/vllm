@@ -22,14 +22,11 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs import TLGv4Config
-# from .triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op, BlockSparseParams
-from vllm.model_executor.models.tnlgv4_attention import BlockSparseFlashAttention
-# from vllm.model_executor.models.tnlgv4_ops import fused_gegelu
+from vllm.transformers_utils.configs import Phi3SmallConfig
+from vllm.model_executor.models.phi3small_attention import BlockSparseFlashAttention
 
 '''
 Further optimization TODO:
-0. model name should be tlv4, not tnlgv4.
 
 1. fused matmul + activation (this seems to affect quantization)
 2. test if gegelu vs triton version
@@ -88,10 +85,10 @@ def gegelu(input, limit: Optional[float] = None):
     return out_gelu * (a_linear + 1)
 
 
-class TLGv4MLP(nn.Module):
+class Phi3SmallMLP(nn.Module):
     def __init__(
         self,
-        config: TLGv4Config,
+        config: Phi3SmallConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -121,8 +118,8 @@ class TLGv4MLP(nn.Module):
         return x
 
 
-class TLGv4SelfAttention(nn.Module):
-    def __init__(self, config: TLGv4Config, layer_idx: Optional[int] = None) -> None:
+class Phi3SmallSelfAttention(nn.Module):
+    def __init__(self, config: Phi3SmallConfig, layer_idx: Optional[int] = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -199,10 +196,11 @@ class TLGv4SelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.blocksparse_vert_stride = config.blocksparse_vert_stride
 
-        # TLGv4.8
+        # Phi3Small.8
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
+        # use_dense_attn = False
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,
@@ -249,12 +247,12 @@ class TLGv4SelfAttention(nn.Module):
         return output
 
 
-class TLGv4DecoderLayer(nn.Module):
-    def __init__(self, config: TLGv4Config, layer_idx: int, linear_method: Optional[LinearMethodBase] = None,):
+class Phi3SmallDecoderLayer(nn.Module):
+    def __init__(self, config: Phi3SmallConfig, layer_idx: int, linear_method: Optional[LinearMethodBase] = None,):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = TLGv4SelfAttention(config, layer_idx)
-        self.mlp = TLGv4MLP(config)
+        self.self_attn = Phi3SmallSelfAttention(config, layer_idx)
+        self.mlp = Phi3SmallMLP(config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -284,9 +282,9 @@ class TLGv4DecoderLayer(nn.Module):
         return hidden_states
 
 
-class TLGv4Model(nn.Module):
+class Phi3SmallModel(nn.Module):
 
-    def __init__(self, config:TLGv4Config, linear_method: Optional[LinearMethodBase] = None,):
+    def __init__(self, config:Phi3SmallConfig, linear_method: Optional[LinearMethodBase] = None,):
         super().__init__()
         self.config = config
 
@@ -295,12 +293,9 @@ class TLGv4Model(nn.Module):
             config.hidden_size
             )
 
-        # NOTE: we don't need this?
-        self.embedding_dropout = nn.Dropout(config.embedding_dropout_prob)
-
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
 
-        self.layers = nn.ModuleList([TLGv4DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([Phi3SmallDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
 
         self.final_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
@@ -332,13 +327,13 @@ class TLGv4Model(nn.Module):
         return hidden_states
 
 
-class TLGv4ForCausalLM(nn.Module):
+class Phi3SmallForCausalLM(nn.Module):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config, linear_method: Optional[LinearMethodBase] = None,):
         super().__init__()
         self.config = config
-        self.model = TLGv4Model(config)
+        self.model = Phi3SmallModel(config)
         self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
         self.lm_head = ParallelLMHead(

@@ -2,7 +2,7 @@ import triton
 import triton.language as tl
 import torch
 import math
-from vllm.model_executor.models.tnlgv4_utils import _get_sparse_attn_mask, dense_to_crow_col
+from vllm.model_executor.models.phi3small_utils import _get_sparse_attn_mask, dense_to_crow_col
 from functools import lru_cache
 
 
@@ -594,7 +594,7 @@ if __name__ == '__main__':
     from flash_attn import flash_attn_varlen_func
     from torch.nn.functional import scaled_dot_product_attention
     from triton_flash_blocksparse_attn import get_local_strided_sparse_attention_op
-    from tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+    from vllm.model_executor.models.phi3small_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
 
     q_seqlens = torch.tensor([0, 61, 65, 7193, 118, 1371], dtype=torch.int32, device='cuda')  # first one always 0, not a sample
     # q_seqlens = torch.tensor([0, 67], dtype=torch.int32, device='cuda')
@@ -752,7 +752,7 @@ if __name__ == '__test__':
     # print(f'{(output - ref_output).abs().max()=}')
 
 
-    from vllm.model_executor.models.tnlgv4_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
+    from vllm.model_executor.models.phi3small_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
 
     k2 = torch.cat([k[block_tables[i]].permute(0, 3, 1, 2, 4).contiguous().reshape(-1, 8, 128)[:context_lens[i]]
                         for i in range(context_lens.size(0))

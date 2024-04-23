@@ -38,7 +38,7 @@ SPECIAL_TOKENS = {
     "<|im_end|>": 100265,   
 }
 
-class TLGv4Tokenizer(PreTrainedTokenizer):
+class Phi3SmallTokenizer(PreTrainedTokenizer):
     vocab_files_names = {
         "vocab_file": "cl100k_base.tiktoken"
     }
