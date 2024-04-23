@@ -103,10 +103,15 @@ class WorkerWrapperBase:
 
     def __init__(self,
                  worker_module_name=None,
-                 worker_class_name=None) -> None:
+                 worker_class_name=None,
+                 trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
         self.worker = None
+        if trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
     @staticmethod
     def update_environment_variables(envs: Dict[str, str]) -> None:

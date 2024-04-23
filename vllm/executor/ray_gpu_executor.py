@@ -100,6 +100,7 @@ class RayGPUExecutor(ExecutorBase):
             )(RayWorkerWrapper).remote(
                 worker_module_name="vllm.worker.worker",
                 worker_class_name="Worker",
+                trust_remote_code=self.model_config.trust_remote_code,
             )
 
             worker_ip = ray.get(worker.get_node_ip.remote())
@@ -110,6 +111,7 @@ class RayGPUExecutor(ExecutorBase):
                 self.driver_worker = RayWorkerWrapper(
                     worker_module_name="vllm.worker.worker",
                     worker_class_name="Worker",
+                    trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
                 # Else, added to the list of workers.
