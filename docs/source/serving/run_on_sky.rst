@@ -327,11 +327,8 @@ It is also possible to access the Llama-3 service with a separate GUI frontend, 
     cpus: 2
 
   setup: |
+    conda create -n vllm python=3.10 -y
     conda activate vllm
-    if [ $? -ne 0 ]; then
-      conda create -n vllm python=3.10 -y
-      conda activate vllm
-    fi
 
     # Install Gradio for web UI.
     pip install gradio openai
