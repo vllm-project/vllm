@@ -12,7 +12,8 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
-from vllm.multimodal import ImageFeatureData, ImagePixelData, MultiModalData
+from vllm.multimodal import MultiModalData
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_DIR = os.path.dirname(__file__)

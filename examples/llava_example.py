@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 
 from vllm import LLM
-from vllm.multimodal import ImageFeatureData, ImagePixelData
+from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 
 # The assets are located at `s3://air-example-data-2/vllm_opensource_llava/`.
 

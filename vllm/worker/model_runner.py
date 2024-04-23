@@ -7,7 +7,6 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
@@ -22,7 +21,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MM_REGISTRY, ImageFeatureData, ImagePixelData
+from vllm.multimodal import MM_REGISTRY
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
@@ -914,16 +913,24 @@ class ModelRunner:
         # To exercise the worst scenario for GPU memory consumption,
         # the number of seqs (batch_size) is chosen to maximize the number
         # of images processed.
-        if self.vision_language_config:
+        model_config = self.model_config
+        vlm_config = self.vision_language_config
+
+        if vlm_config:
             max_num_seqs = min(
                 max_num_seqs,
-                int(max_num_batched_tokens /
-                    self.vision_language_config.image_feature_size))
+                int(max_num_batched_tokens / vlm_config.image_feature_size))
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
                        (group_id < max_num_batched_tokens % max_num_seqs))
-            seq_data, multi_modal_data = _prepare_fake_inputs(
-                seq_len, self.vision_language_config)
+
+            if vlm_config is None:
+                seq_data = SequenceData([0] * seq_len)
+                multi_modal_data = None
+            else:
+                seq_data, multi_modal_data = MM_REGISTRY \
+                    .dummy_data_for_profiling(seq_len, model_config, vlm_config)
+
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -1203,38 +1210,3 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
-
-
-def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
-    """Prepare fake inputs for profile run."""
-    if vision_language_config:
-        prompt_tokens = [
-            vision_language_config.image_token_id
-        ] * vision_language_config.image_feature_size + [0] * (
-            seq_len - vision_language_config.image_feature_size)
-
-        if vision_language_config.image_processor is None:
-            values_dtype = torch.float16
-        else:
-            values_dtype = torch.uint8
-
-        values = torch.zeros(vision_language_config.image_input_shape,
-                             dtype=values_dtype)
-
-        config_input_type = vision_language_config.image_input_type
-        ImageInputType = VisionLanguageConfig.ImageInputType
-
-        if config_input_type == ImageInputType.PIXEL_VALUES:
-            values_arr = values.squeeze(dim=0).permute((1, 2, 0)).numpy()
-            image = Image.fromarray(values_arr, mode="RGB")
-            fake_mm_data = ImagePixelData(image)
-        elif config_input_type == ImageInputType.IMAGE_FEATURES:
-            fake_mm_data = ImageFeatureData(values)
-        else:
-            raise NotImplementedError
-    else:
-        prompt_tokens = [0] * seq_len
-        fake_mm_data = None
-
-    return SequenceData(prompt_tokens), fake_mm_data
