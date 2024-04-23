@@ -491,7 +491,7 @@ class XPUModelRunner():
             decode_metadata=None,
             max_context_len=None,
             context_lens=None,
-            block_tables=torch.tensor([]),
+            block_tables=torch.tensor([], device=self.device, dtype=torch.int),
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
         )
