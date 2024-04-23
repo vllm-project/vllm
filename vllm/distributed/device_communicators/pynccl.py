@@ -243,12 +243,14 @@ class NCCLCommunicator:
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
+        # now `device` is a `torch.device` object
+        assert isinstance(device, torch.device)
         with device:
             # use context manager to make sure the device is set correctly
             # nccl communicator and stream will use this device
-            NCCL_CHECK(_c_ncclCommInitRank(ctypes.byref(self.comm),
-                                         self.world_size, self.unique_id,
-                                         self.rank))
+            NCCL_CHECK(
+                _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
+                                    self.unique_id, self.rank))
             self.stream = torch.cuda.Stream()
 
     def all_reduce(self,
@@ -257,12 +259,13 @@ class NCCLCommunicator:
                    stream=None):
         if stream is None:
             stream = self.stream
-        NCCL_CHECK(_c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
-                                  ctypes.c_void_p(tensor.data_ptr()),
-                                  tensor.numel(),
-                                  ncclDataTypeEnum.from_torch(tensor.dtype),
-                                  ncclRedOpTypeEnum.from_torch(op), self.comm,
-                                  ctypes.c_void_p(stream.cuda_stream)))
+        NCCL_CHECK(
+            _c_ncclAllReduce(ctypes.c_void_p(tensor.data_ptr()),
+                             ctypes.c_void_p(tensor.data_ptr()),
+                             tensor.numel(),
+                             ncclDataTypeEnum.from_torch(tensor.dtype),
+                             ncclRedOpTypeEnum.from_torch(op), self.comm,
+                             ctypes.c_void_p(stream.cuda_stream)))
 
     def __del__(self):
         # `dist` module might have been already destroyed
