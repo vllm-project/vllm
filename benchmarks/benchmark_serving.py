@@ -58,7 +58,7 @@ def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
-    fixed_output_len: Optional[int],
+    fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int]]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
@@ -359,6 +359,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
 
     elif args.dataset_name == "sharegpt":
