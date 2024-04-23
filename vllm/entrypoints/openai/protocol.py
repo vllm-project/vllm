@@ -140,6 +140,11 @@ class ChatCompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "of the server for this specific request."))
 
     # doc: end-chat-completion-extra-params
 
