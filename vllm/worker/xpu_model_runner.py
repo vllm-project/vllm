@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from vllm.attention import get_attn_backend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams, SamplingType
@@ -32,6 +32,7 @@ class XPUModelRunner():
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
+        vision_language_config: Optional[VisionLanguageConfig],
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
@@ -42,6 +43,7 @@ class XPUModelRunner():
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.load_config = load_config
+        self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
 
         # model_config can be None in tests/samplers/test_sampler.py.
@@ -65,13 +67,14 @@ class XPUModelRunner():
         self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               load_config=self.load_config,
-                               device_config=self.device_config,
-                               vision_language_config=None,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            model_config=self.model_config,
+            load_config=self.load_config,
+            device_config=self.device_config,
+            vision_language_config=self.vision_language_config,
+            lora_config=self.lora_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config)
 
     @property
     def vocab_size(self) -> int:
@@ -130,16 +133,18 @@ class XPUModelRunner():
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata,
-               SamplingMetadata]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
+               Optional[torch.Tensor]]:
+        multi_modal_input = None
         if self.is_driver_worker:
             # NOTE: We assume that all sequences in the group are all prompts or
             # all decodes.
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, attn_metadata,
-                 prompt_lens) = self._prepare_prompt(seq_group_metadata_list)
+                (input_tokens, input_positions, attn_metadata, prompt_lens,
+                 multi_modal_input
+                 ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
@@ -172,12 +177,8 @@ class XPUModelRunner():
                 perform_sampling=False,
             )
 
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            sampling_metadata,
-        )
+        return (input_tokens, input_positions, attn_metadata,
+                sampling_metadata, multi_modal_input)
 
     def _prepare_decode(
         self,
@@ -366,7 +367,8 @@ class XPUModelRunner():
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        (input_tokens, input_positions, attn_metadata, sampling_metadata
+        (input_tokens, input_positions, attn_metadata, sampling_metadata,
+         multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         model_executable = self.model
@@ -376,6 +378,8 @@ class XPUModelRunner():
             "kv_caches": kv_caches,
             "attn_metadata": attn_metadata,
         }
+        if self.vision_language_config:
+            execute_model_kwargs.update({"image_input": multi_modal_input})
 
         hidden_states = model_executable(**execute_model_kwargs)
 
@@ -396,12 +400,14 @@ class XPUModelRunner():
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
+               Optional[torch.Tensor]]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         prompt_lens: List[int] = []
+        multi_modal_input_list: List[torch.Tensor] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -421,6 +427,10 @@ class XPUModelRunner():
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prompt_len)))
+
+            if seq_group_metadata.multi_modal_data:
+                multi_modal_input_list.append(
+                    seq_group_metadata.multi_modal_data.data)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -450,6 +460,15 @@ class XPUModelRunner():
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
+        if multi_modal_input_list:
+            assert self.vision_language_config, (
+                "Multi-modal inputs are only supported by "
+                "vision language models.")
+            multi_modal_input = torch.cat(multi_modal_input_list,
+                                          dim=0).to(self.device)
+        else:
+            multi_modal_input = None
+
         num_prompt_tokens = len(input_tokens)
 
         input_tokens = torch.tensor(input_tokens,
@@ -476,9 +495,5 @@ class XPUModelRunner():
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (
-            input_tokens,
-            input_positions,
-            attn_metadata,
-            prompt_lens,
-        )
+        return (input_tokens, input_positions, attn_metadata, prompt_lens,
+                multi_modal_input)
