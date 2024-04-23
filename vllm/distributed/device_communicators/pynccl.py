@@ -68,6 +68,7 @@ _c_ncclGetErrorString.argtypes = [ncclResult_t]
 def NCCL_CHECK(result: ncclResult_t) -> None:
     if result != 0:
         error_str = _c_ncclGetErrorString(result)
+        error_str = error_str.decode("utf-8")
         raise RuntimeError(f"NCCL error: {error_str}")
 
 
