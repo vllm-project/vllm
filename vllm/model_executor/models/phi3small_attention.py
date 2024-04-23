@@ -4,12 +4,11 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from torch import nn
-from flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 
 from .phi3small_flash_blocksparse_attn_batch_inference import LocalStridedBlockSparseAttnInference
 from .phi3small_paged_attn import LocalStridedBlockSparseAttnInferenceBT
@@ -104,9 +103,55 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class BlocksparseFlashAttentionMetadata(FlashAttentionMetadata):
-    pass
-    """For future extention"""
+class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+    """Metadata for FlashAttentionBackend.
+
+    NOTE: Any python object stored here is not updated when it is
+    cuda-graph replayed. If you have values that need to be changed
+    dynamically, it should be stored in tensor. The tensor has to be
+    updated from `CUDAGraphRunner.forward` API.
+    """
+    # Currently, input sequences can only contain all prompts
+    # or all decoding. True if all sequences are prompts.
+    is_prompt: bool
+    # (batch_size,). The prompt length per sequence. None if it is a decoding.
+    prompt_lens: Optional[List[int]]
+    # prompt_lens stored as a tensor.
+    prompt_lens_tensor: Optional[torch.Tensor]
+    # The number of prompt tokens. Doesn't include padding.
+    num_prompt_tokens: int
+    # The number of generation tokens. Doesn't include padding.
+    num_generation_tokens: int
+
+    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seqlen ----------------------|
+    #                                   |- subquery_len -|
+
+    # WARNING(sang): context_len has different definition depending on if it is
+    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
+    # When it is for decoding, it includes a new token.
+
+    # Maximum subquery length in the batch.
+    max_subquery_len: Optional[int]
+    # Maximum prompt length in the batch.
+    max_prompt_len: Optional[int]
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    subquery_start_loc: Optional[torch.Tensor]
+    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
+    # the batch, used to index into sequence. E.g., if the sequence length is
+    # [4, 6], it is [0, 4, 10].
+    seq_start_loc: Optional[torch.Tensor]
+
+    # Whether or not if cuda graph is enabled.
+    # Cuda-graph is currently enabled for decoding only.
+    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
+    use_cuda_graph: bool
 
 
 class BlocksparseFlashAttentionImpl(AttentionImpl):
