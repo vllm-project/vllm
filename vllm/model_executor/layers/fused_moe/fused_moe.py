@@ -137,7 +137,7 @@ def fused_moe_kernel(
                     other=0.0)
         # We accumulate along the K dimension.
         if use_fp8:
-            accumulator = tl.dot(a, b, acc=accumulator, allow_tf32=True)
+            accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
