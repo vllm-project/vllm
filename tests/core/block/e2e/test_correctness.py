@@ -230,6 +230,76 @@ def test_lookahead_greedy_equality_with_preemption(baseline_llm_generator,
     assert baseline_token_ids == test_token_ids
 
 
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [
+        {
+            # Use a small model for a fast test.
+            "model": "facebook/opt-125m",
+
+            # skip cuda graph creation for fast test.
+            "enforce_eager": True,
+            "enable_chunked_prefill": True,
+            "max_num_batched_tokens": 2,
+            "max_num_seqs": 2,
+        },
+    ])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [
+    {
+        "use_v2_block_manager": False,
+    },
+])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "use_v2_block_manager": True,
+        "num_lookahead_slots": 0,
+    },
+    {
+        "use_v2_block_manager": True,
+        "num_lookahead_slots": 5,
+    },
+])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("seed", [1])
+def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
+                                          test_llm_generator, batch_size):
+    """Verify that chunked prefill works with BlockManagerV2, with and without
+    lookahead scheduling.
+    """
+    output_len = 32
+    temperature = 0.0
+
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
+
+    sampling_params = SamplingParams(
+        max_tokens=output_len,
+        ignore_eos=True,
+        temperature=temperature,
+    )
+
+    print('Getting token ids with BlockManagerV1')
+    baseline_token_ids = get_token_ids_from_llm_generator(
+        baseline_llm_generator, prompts, sampling_params)
+
+    print('Getting token ids with BlockManagerV2')
+    test_token_ids = get_token_ids_from_llm_generator(test_llm_generator,
+                                                      prompts, sampling_params)
+
+    for expected_token_ids, actual_token_ids in zip(baseline_token_ids,
+                                                    test_token_ids):
+        assert expected_token_ids == actual_token_ids
+
+    assert baseline_token_ids == test_token_ids
+
+
 def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
     for llm in llm_generator:
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)

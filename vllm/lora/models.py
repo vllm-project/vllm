@@ -212,7 +212,9 @@ class LoRAModel:
         target_modules = config["target_modules"]
         unexpected_modules = []
         for module in target_modules:
-            if module not in expected_lora_modules:
+            # Compatible with more modules, such as:layers.11.self_attn.k_proj
+            part_name = module.split(".")[-1]
+            if part_name not in expected_lora_modules:
                 unexpected_modules.append(module)
         # loaded lora's target modules must be a subset of expected_lora_modules
         if unexpected_modules:

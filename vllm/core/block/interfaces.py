@@ -52,8 +52,7 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block],
-                         device: Device) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
@@ -98,8 +97,7 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(BlockAllocator):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block],
-                         device: Device) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
