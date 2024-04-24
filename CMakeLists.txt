@@ -212,23 +212,11 @@ define_gpu_extension_target(
 
 set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp16_fp16.cu"
   "csrc/punica/bgmv/bgmv_bf16_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp32_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp16_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp32_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp32_fp16.cu"
   "csrc/punica/punica_ops.cc")
 
 #
