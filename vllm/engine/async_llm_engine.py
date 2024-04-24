@@ -671,7 +671,7 @@ class AsyncLLMEngine:
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None
     ) -> AsyncIterator[EmbeddingRequestOutput]:
-        """Generate outputs for a request.
+        """Generate outputs for a request from an embedding model.
 
         Generate outputs for a request. This method is a coroutine. It adds the
         request into the waiting queue of the LLMEngine and streams the outputs
