@@ -457,9 +457,17 @@ def get_rope(
     is_neox_style: bool = True,
     rope_scaling: Optional[Dict[str, Any]] = None,
 ) -> RotaryEmbedding:
+    if rope_scaling is not None:
+        # Transforms every value that is a list into a tuple for caching calls
+        rope_scaling_tuple = {
+            k: tuple(v) if isinstance(v, list) else v
+            for k, v in rope_scaling.items()
+        }
+        rope_scaling_args = tuple(rope_scaling_tuple.items())
+    else:
+        rope_scaling_args = None
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           (v for v in rope_scaling.items()
-            if not isinstance(v, list)) if rope_scaling is not None else None)
+           rope_scaling_args)
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
     if rope_scaling is None:
