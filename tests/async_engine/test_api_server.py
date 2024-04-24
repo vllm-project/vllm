@@ -25,23 +25,30 @@ def _query_server_long(prompt: str) -> dict:
 
 
 @pytest.fixture
-def api_server():
+def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
+               worker_use_ray: bool):
     script_path = Path(__file__).parent.joinpath(
         "api_server_async_engine.py").absolute()
-    uvicorn_process = subprocess.Popen([
-        sys.executable,
-        "-u",
-        str(script_path),
-        "--model",
-        "facebook/opt-125m",
-        "--host",
-        "127.0.0.1",
-    ])
+    commands = [
+        sys.executable, "-u",
+        str(script_path), "--model", "facebook/opt-125m", "--host",
+        "127.0.0.1", "--tokenizer-pool-size",
+        str(tokenizer_pool_size)
+    ]
+    if engine_use_ray:
+        commands.append("--engine-use-ray")
+    if worker_use_ray:
+        commands.append("--worker-use-ray")
+    uvicorn_process = subprocess.Popen(commands)
     yield
     uvicorn_process.terminate()
 
 
-def test_api_server(api_server):
+@pytest.mark.parametrize("tokenizer_pool_size", [0, 2])
+@pytest.mark.parametrize("worker_use_ray", [False, True])
+@pytest.mark.parametrize("engine_use_ray", [False, True])
+def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
+                    engine_use_ray: bool):
     """
     Run the API server and test it.
 

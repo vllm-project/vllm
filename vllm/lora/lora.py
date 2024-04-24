@@ -1,7 +1,8 @@
 from typing import List, Optional
 
 import torch
-from vllm.utils import in_wsl
+
+from vllm.utils import is_pin_memory_available
 
 
 class LoRALayerWeights:
@@ -32,7 +33,7 @@ class LoRALayerWeights:
     def optimize(self) -> "LoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
-            return
+            return self
         self.lora_b *= self.scaling
         self.scaling = 1
         return self
@@ -64,7 +65,7 @@ class LoRALayerWeights:
             dtype: torch.dtype,
             device: torch.device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
-        pin_memory = str(device) == "cpu" and not in_wsl()
+        pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros([input_dim, rank],
                              dtype=dtype,
                              device=device,
