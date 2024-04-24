@@ -63,6 +63,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
 // Quantization ops
 #ifndef USE_ROCM
+  ops.def("aqlm_gemm", &aqlm_gemm, "Quantized GEMM for AQLM");
+  ops.def("aqlm_dequant", &aqlm_dequant, "Decompression method for AQLM");
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
   ops.def("marlin_gemm", &marlin_gemm, "Marlin Optimized Quantized GEMM for GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
@@ -71,6 +73,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
+  ops.def("scaled_fp8_quant", &scaled_fp8_quant, "Compute FP8 quantized tensor and scaling factor");
   ops.def(
     "moe_align_block_size",
     &moe_align_block_size,
