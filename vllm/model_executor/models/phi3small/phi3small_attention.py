@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
+import os
 from torch import nn
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -26,6 +27,30 @@ class BlockSparseFlashAttention(nn.Module):
     1. Store the input key and value tensors in the KV cache.
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
+
+    NOTE: You can use set PHI3SMALL_USE_TRITON_PAGED_ATTN=1 to use the Triton paged attn instead of vllm cuda paged attn.
+
+    Arguments
+    =========
+
+    local_blocks: number of blocks for local attention, i.e., number of local attended tokens / `sparse_block_size`
+    vert_stride: attend to one block per every `vert_stride` blocks.
+    num_heads: num of heads per tensor-paralllel rank, i.e., total num of heads / TP_SIZE.
+    head_size:
+    scale: softmax scale.
+    num_kv_heads: num of kv heads per tensor-parallel rank, i.e., total num of KV heads / TP_SIZE
+    max_seqlen: target sequence length. Used to construct attention mask
+    sparse_block_size: block size used for blocksparse attention. This is the block_size used in `local_blocks`, `vert_stride`.
+    layer_idx: idx starts from 0
+    use_triton_paged_attn: If to use customized Triton paged attn kernel for blocksparse-attention during decoding phase.
+        By default it is False, but you can activate this by setting environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
+    homo_head: if to use the same veritcal stride offset for all heads, i.e., attend to the same block of tokens on all heads.
+            By default, it is False, i.e., attention on the non-local blocks depends on the `head_idx`, that is on
+            blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % vert_stride == 0`
+            where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
+                  `block_idx = position_id // sparse_block_size`.
+            See `.blocksparse_attn.utils:get_sparse_attn_mask` for more detail.
+    **kwargs: not used, only for API compatability.
     """
 
     def __init__(
@@ -39,18 +64,32 @@ class BlockSparseFlashAttention(nn.Module):
         max_seqlen: int = 8192,
         sparse_block_size: int = 64,
         layer_idx: int = 0,
-        use_triton_paged_attn: bool = False,
+        use_triton_paged_attn: Optional[bool] = None,
+        homo_head: bool = False,
         **kwargs
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.local_blocks = local_blocks
         self.vert_stride = vert_stride
+        self.homo_head = homo_head
+
+        if use_triton_paged_attn is None:
+            use_triton_paged_attn = bool(int(os.environ.get('PHI3SMALL_USE_TRITON_PAGED_ATTN', '0')))
+
         self.use_triton_paged_attn = use_triton_paged_attn
         self.backend = BlocksparseFlashAttentionBackend
         impl_cls = self.backend.get_impl_cls()
-        self.impl = impl_cls(local_blocks, vert_stride, num_heads, head_size, scale, num_kv_heads,
-                             max_seqlen=max_seqlen, sparse_block_size=sparse_block_size, layer_idx=layer_idx)
+        self.impl = impl_cls(local_blocks,
+                             vert_stride,
+                             num_heads,
+                             head_size,
+                             scale, num_kv_heads,
+                             homo_head=homo_head,
+                             max_seqlen=max_seqlen,
+                             sparse_block_size=sparse_block_size,
+                             layer_idx=layer_idx,
+                             use_triton_paged_attn=use_triton_paged_attn)
 
     def forward(
         self,
@@ -168,6 +207,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
     The prompts might have different lengths, while the generation tokens
     always have length 1.
+
     """
 
     def __init__(
@@ -183,6 +223,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         layer_idx: int = 0,
         use_triton_paged_attn: bool = False,
+        homo_head: bool=False,
         **kwargs, # for compatibiliy
     ) -> None:
         self.layer_idx = layer_idx
@@ -193,6 +234,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.vert_stride = vert_stride
         self.sparse_block_size = sparse_block_size
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.homo_head = homo_head
+
         self.use_triton_paged_attn = use_triton_paged_attn
 
         if alibi_slopes is not None:
@@ -218,6 +261,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                                                    local_blocks,
                                                    vert_stride,
                                                    sparse_block_size,
+                                                   homo_head=self.homo_head,
                                                    active_head_range=active_head_range)
 
         if self.use_triton_paged_attn:
@@ -226,6 +270,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                                                                   local_blocks,
                                                                   vert_stride,
                                                                   sparse_block_size,
+                                                                  homo_head=self.homo_head,
                                                                   active_head_range=active_head_range)
 
     def forward(
