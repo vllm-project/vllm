@@ -331,7 +331,14 @@ class OpenAIServingChat(OpenAIServing):
             try:
                 with open(chat_template, "r") as f:
                     tokenizer.chat_template = f.read()
-            except OSError:
+            except OSError as e:
+                JINJA_CHARS = "{}\n"
+                if not any(c in chat_template for c in JINJA_CHARS):
+                    msg = (f"The supplied chat template ({chat_template}) "
+                           f"looks like a file path, but it failed to be "
+                           f"opened. Reason: {e}")
+                    raise ValueError(msg) from e
+
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
                 tokenizer.chat_template = codecs.decode(
