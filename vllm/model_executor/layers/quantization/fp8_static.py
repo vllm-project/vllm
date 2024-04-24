@@ -22,7 +22,7 @@ class FP8StaticConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 89
+        return 90
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -130,49 +130,99 @@ class Fp8LinearMethod(LinearMethodBase):
         # print(f"----- loaded_weight: {loaded_weight}")
         return param[self.shard_id_as_int(shard_id)], loaded_weight
 
+    # def apply_weights(
+    #     self,
+    #     layer: torch.nn.Module,
+    #     x: torch.Tensor,
+    #     bias: Optional[torch.Tensor] = None
+    # ) -> torch.Tensor:        
+    #     logical_widths = layer.logical_widths
+    #     q_weight = layer.weight
+    #     w_scales = layer.weight_scale
+    #     in_scales = layer.in_scale
+
+    #     output = torch.zeros(x.shape[0], q_weight.shape[0], dtype=x.dtype, device="cuda")
+    #     start_offset = 0
+    #     for _, (logical_width, w_scale, in_scale) in enumerate(zip(logical_widths, w_scales, in_scales)):
+    #         end_offset = start_offset + logical_width
+    #         weight_dq = self._dequantize(q_weight[start_offset:end_offset, :], w_scale, x.dtype)
+    #         x_dq = self._fake_quantize_static(x, in_scale)
+
+    #         # print(f"x_dq[0,0]: {x_dq[0,0]} // weight_dq[0,0]: {weight_dq[0,0]}")
+    #         # output[:, start_offset:end_offset] = torch.nn.functional.linear(x_dq, weight_dq)
+    #         output[:, start_offset:end_offset] = torch.nn.functional.linear(x, weight_dq)
+    #         start_offset = end_offset
+        
+    #     assert end_offset == output.shape[1]
+    #     return output
+    
     def apply_weights(
         self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:        
-        logical_widths = layer.logical_widths
-        q_weight = layer.weight
-        w_scales = layer.weight_scale
-        in_scales = layer.in_scale
-
-        output = torch.zeros(x.shape[0], q_weight.shape[0], dtype=x.dtype, device="cuda")
+        layer,
+        x,
+        bias=None
+    ):
+        # print(sum(x))
+        # assert False
+        # qinput, x_scale = per_tensor_quantize(x)
+        # print(qinput)
+        # assert False
+        output = torch.zeros(x.shape[0], layer.weight.shape[0], dtype=x.dtype, device="cuda")
         start_offset = 0
-        for _, (logical_width, w_scale, in_scale) in enumerate(zip(logical_widths, w_scales, in_scales)):
+        print("\n----")
+        
+        for _, (logical_width, w_scale, in_scale) in enumerate(zip(layer.logical_widths, layer.weight_scale, layer.in_scale)):
             end_offset = start_offset + logical_width
-            weight_dq = self._dequantize(q_weight[start_offset:end_offset, :], w_scale, x.dtype)
-            x_dq = self._fake_quantize_static(x, in_scale)
+            print(f"(start,end) = ({start_offset}, {end_offset})")
 
-            # print(f"x_dq[0,0]: {x_dq[0,0]} // weight_dq[0,0]: {weight_dq[0,0]}")
-            # output[:, start_offset:end_offset] = torch.nn.functional.linear(x_dq, weight_dq)
-            output[:, start_offset:end_offset] = torch.nn.functional.linear(x, weight_dq)
+            q_weight = layer.weight[start_offset:end_offset, :].t()
+            q_input = self._quantize(x, inv_scale=in_scale)
+            x_scale = in_scale
+            # print(f"in_scale: {in_scale}")
+            # print(f"w_scale: {w_scale}")
+            # print(f"input: {x}")
+            # print(f"q_input: {q_input}")
+            # print(f"q_weight: {q_weight}")
+            # q_input, x_scale = per_tensor_quantize(x)
+            
+            assert not torch.isnan(q_input[0,0])
+
+            out, _ = torch._scaled_mm(
+                q_input,
+                q_weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale.float(),
+                scale_b=w_scale.float(),
+                bias=bias,
+            )
+            print(f"out.norm(): {out.norm()}")
+            output[:, start_offset:end_offset] = out
             start_offset = end_offset
         
         assert end_offset == output.shape[1]
-        return output
-    
-    def _quantize(self, x: torch.Tensor, inv_scale: torch.tensor):
-        finfo = torch.finfo(torch.float8_e4m3fn)
-        return (x / inv_scale).clamp(min=finfo.min, max=finfo.max)
+        # print(output.sum(dim=0).shape)
+        # print(output.sum(dim=1).shape)
         
-    def _dequantize(self, xq: torch.Tensor, inv_scale: torch.tensor, dtype: torch.dtype):
-        return (xq.to(dtype) * inv_scale)
+        # print(output.norm(), output.norm(dim=0), output.norm(dim=1))
+        return output
+
+    def _quantize(self, tensor: torch.Tensor, inv_scale: torch.tensor):
+        finfo = torch.finfo(torch.float8_e4m3fn)
+        qtensor = (tensor / inv_scale).clamp(min=finfo.min, max=finfo.max)
+        return qtensor.to(torch.float8_e4m3fn)
+        
+    # def _dequantize(self, xq: torch.Tensor, inv_scale: torch.tensor, dtype: torch.dtype):
+    #     return (xq.to(dtype) * inv_scale)
     
-    def _fake_quantize_static(self, x: torch.Tensor, inv_scale: torch.Tensor):
-        xq = self._quantize(x, inv_scale)
-        xdq = self._dequantize(xq, inv_scale, x.dtype)
-        # print(f"----- inv_scale: {inv_scale} // x[0,0]: {x[0,0]} // xq[0,0]: {xq[0,0]} // xdq[0,0]: {xdq[0,0]}")
-        return xdq
+    # def _fake_quantize_static(self, x: torch.Tensor, inv_scale: torch.Tensor):
+    #     xq = self._quantize(x, inv_scale)
+    #     xdq = self._dequantize(xq, inv_scale, x.dtype)
+    #     # print(f"----- inv_scale: {inv_scale} // x[0,0]: {x[0,0]} // xq[0,0]: {xq[0,0]} // xdq[0,0]: {xdq[0,0]}")
+    #     return xdq
 
 
-def per_tensor_quantize(tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
+def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
     """Quantize a tensor using per-tensor static scaling factor.
-
     Args:
         tensor: The input tensor.
     """
@@ -181,12 +231,17 @@ def per_tensor_quantize(tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
     # Since .abs() creates a new tensor, we use aminmax to get
     # the min and max first and then calculate the absmax.
     min_val, max_val = tensor.aminmax()
+    print(min_val)
+    print(max_val)
     amax = min_val.abs().max(max_val.abs())
+    print(amax)
     scale = finfo.max / amax.clamp(min=1e-12)
+    print(scale)
     # scale and clamp the tensor to bring it to
     # the representative range of float8 data type
     # (as default cast is unsaturated)
     qweight = (tensor * scale).clamp(min=finfo.min, max=finfo.max)
+    print(qweight)
     # Return both float8 data and the inverse scale (as float),
     # as both required as inputs to torch._scaled_mm
     qweight = qweight.to(torch.float8_e4m3fn)
