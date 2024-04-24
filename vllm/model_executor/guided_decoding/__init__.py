@@ -17,7 +17,7 @@ async def get_guided_decoding_logits_processor(
     if guided_decoding_backend == 'lm-format-enforcer':
         ## Import moved inside function to avoide circular
         ## import with vllm.entrypoints.LLM.py
-        from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (
+        from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_lm_format_enforcer_guided_decoding_logits_processor)
         return await get_lm_format_enforcer_guided_decoding_logits_processor(
             request, tokenizer)
