@@ -113,8 +113,9 @@ class PagedAttention:
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
         if tree_width > 1:
             tree_attention_fwd(query, output, key_cache, value_cache,
-                               block_tables, context_lens, prompt_lens, tree_width, alibi_slopes)
-            
+                               block_tables, context_lens, prompt_lens,
+                               tree_width, alibi_slopes)
+
         elif use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(

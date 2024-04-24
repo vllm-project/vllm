@@ -429,17 +429,20 @@ class ModelRunner:
 
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
-        
+
         use_captured_graph = (
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
-        
+
         def is_tree_parallel_decoding(meta_data: SequenceGroupMetadata):
             sampling_params = meta_data.sampling_params
             return len(meta_data.seq_data)>1 and sampling_params.sampling_type in \
                     (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph and sampling_params.best_of<=32
-        enable_tree_attn = all(is_tree_parallel_decoding(data) for data in seq_group_metadata_list)
+
+        enable_tree_attn = all(
+            is_tree_parallel_decoding(data)
+            for data in seq_group_metadata_list)
         if enable_tree_attn:
             prompt_lens = []
             tree_width = seq_group_metadata_list[0].sampling_params.best_of
@@ -456,21 +459,25 @@ class ModelRunner:
 
             # Parallel decoding with tree attention
             if enable_tree_attn:
-                root_seq = seq_group_metadata.seq_data[seq_group_metadata.root_seq_id]
+                root_seq = seq_group_metadata.seq_data[
+                    seq_group_metadata.root_seq_id]
                 prompt_len = root_seq.get_prompt_len()
                 # In Parallel Decoding with tree attention, sequences will stop when every sequence in the group has stopped.
-                seq_len = (root_seq.get_len() - prompt_len) * tree_width + prompt_len
+                seq_len = (root_seq.get_len() -
+                           prompt_len) * tree_width + prompt_len
                 # used for caculate the slot mapping
                 position = [seq_len - x for x in range(tree_width, 0, -1)]
                 # Don't support sliding_widonw currently
                 context_len = seq_len
-                block_table = seq_group_metadata.block_tables[seq_group_metadata.root_seq_id]
+                block_table = seq_group_metadata.block_tables[
+                    seq_group_metadata.root_seq_id]
                 block_tables.append(block_table)
                 context_lens.append(context_len)
                 prompt_lens.append(prompt_len)
-                seq_group_input_token = [0]*tree_width
+                seq_group_input_token = [0] * tree_width
                 for seq in seq_group_metadata.seq_data.values():
-                    seq_group_input_token[seq.inner_id] = seq.get_last_token_id()
+                    seq_group_input_token[
+                        seq.inner_id] = seq.get_last_token_id()
                 input_tokens.extend(seq_group_input_token)
                 for pos in position:
                     block_number = block_table[pos // self.block_size]
@@ -478,12 +485,14 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
                 # used for caculate position embedding
-                position = [int((seq_len-prompt_len)/tree_width+prompt_len)] * tree_width
+                position = [
+                    int((seq_len - prompt_len) / tree_width + prompt_len)
+                ] * tree_width
                 input_positions.extend(position)
-                    
+
                 lora_index_mapping.append(lora_id)
                 lora_prompt_mapping.append(lora_id)
-                
+
             else:
                 for seq_id in seq_ids:
                     seq_data = seq_group_metadata.seq_data[seq_id]
@@ -508,7 +517,7 @@ class ModelRunner:
 
                     if self.sliding_window is not None:
                         sliding_window_blocks = (self.sliding_window //
-                                                self.block_size)
+                                                 self.block_size)
                         block_table = block_table[-sliding_window_blocks:]
                     block_tables.append(block_table)
 
@@ -534,8 +543,8 @@ class ModelRunner:
                                     device=self.device)
         if enable_tree_attn:
             prompt_lens_tensor = torch.tensor(prompt_lens,
-                                        dtype=torch.long,
-                                        device=self.device)
+                                              dtype=torch.long,
+                                              device=self.device)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -574,8 +583,7 @@ class ModelRunner:
             context_lens=context_lens,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            tree_width=tree_width
-        )
+            tree_width=tree_width)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

@@ -50,7 +50,7 @@ if triton.__version__ >= "2.1.0":
 
         cur_batch_ctx_len = tl.load(B_Ctxlen + cur_batch)
         cur_batch_in_all_start_index = cur_batch * tree_width
-        cur_batch_prompt_len = tl.load(prompt_lens+cur_batch)
+        cur_batch_prompt_len = tl.load(prompt_lens + cur_batch)
 
         block_start_loc = BLOCK_M * start_m
 
@@ -62,10 +62,7 @@ if triton.__version__ >= "2.1.0":
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
             cur_head * stride_qh + offs_d[None, :] * stride_qd)
 
-        q = tl.load(
-            Q + off_q,
-            mask=offs_m[:, None] < tree_width,
-            other=0.0)
+        q = tl.load(Q + off_q, mask=offs_m[:, None] < tree_width, other=0.0)
 
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
@@ -96,21 +93,23 @@ if triton.__version__ >= "2.1.0":
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
-            
-            cur_step = start_n + offs_n[None, :] # [1, BlockN]
-            is_prompt = cur_step<cur_batch_prompt_len # [1, BlockN]
-            tree_mask = (cur_step - cur_batch_prompt_len - offs_m[:, None]) % tree_width == 0 # [1, BlockN] - [BlockM, 1] = [BlockM, BlockN]
+
+            cur_step = start_n + offs_n[None, :]  # [1, BlockN]
+            is_prompt = cur_step < cur_batch_prompt_len  # [1, BlockN]
+            tree_mask = (
+                cur_step - cur_batch_prompt_len - offs_m[:, None]
+            ) % tree_width == 0  # [1, BlockN] - [BlockM, 1] = [BlockM, BlockN]
             tree_mask = is_prompt or tree_mask
             mask = tree_mask and (cur_step < cur_batch_ctx_len)
-            
+
             qk = tl.where(mask, qk, -3.4028234663852886e+38)
-            
+
             qk *= sm_scale
 
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)
             p = tl.exp(qk - m_ij[:, None])
-            
+
             l_ij = tl.sum(p, 1)
             # -- update m_i and l_i
             m_i_new = tl.maximum(m_i, m_ij)
@@ -125,8 +124,8 @@ if triton.__version__ >= "2.1.0":
             acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
-            
-            cur_step = start_n + offs_n[:, None] # (BlockN, 1)
+
+            cur_step = start_n + offs_n[:, None]  # (BlockN, 1)
 
             v = tl.load(V_cache + off_v,
                         mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
@@ -142,11 +141,9 @@ if triton.__version__ >= "2.1.0":
         off_o = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
             cur_head * stride_oh + offs_d[None, :] * stride_od)
-        
+
         out_ptrs = Out + off_o
-        tl.store(out_ptrs,
-                 acc,
-                 mask=offs_m[:, None] < tree_width)
+        tl.store(out_ptrs, acc, mask=offs_m[:, None] < tree_width)
         return
 
     @triton.jit
@@ -371,14 +368,14 @@ if triton.__version__ >= "2.1.0":
 
     @torch.inference_mode()
     def tree_attention_fwd(q,
-                            o,
-                            k_cache,
-                            v_cache,
-                            block_table,
-                            context_len,
-                            prompt_len,
-                            tree_width,
-                            alibi_slopes=None):
+                           o,
+                           k_cache,
+                           v_cache,
+                           block_table,
+                           context_len,
+                           prompt_len,
+                           tree_width,
+                           alibi_slopes=None):
 
         cap = torch.cuda.get_device_capability()
         BLOCK_N = 128 if cap[0] >= 8 else 64

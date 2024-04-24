@@ -18,7 +18,7 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 MAX_SEQ_LEN = 2048
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
-NUM_BLOCKS = 1024 # Arbitrary values for testing
+NUM_BLOCKS = 1024  # Arbitrary values for testing
 # only test on half and bfloat16
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
@@ -39,9 +39,13 @@ CUDA_DEVICES = [
 ]
 TREEWIDTH = [1, 7, 31]
 
-def create_tree_attention_mask(context_len, prompt_len, tree_width, num_kv_head, dtype):
-    prompt_mask = torch.zeros((num_kv_head, tree_width, prompt_len), dtype=dtype)
-    none_mask_value = torch.arange(context_len-prompt_len).repeat(tree_width, 1) - torch.arange(tree_width)[:, None]
+
+def create_tree_attention_mask(context_len, prompt_len, tree_width,
+                               num_kv_head, dtype):
+    prompt_mask = torch.zeros((num_kv_head, tree_width, prompt_len),
+                              dtype=dtype)
+    none_mask_value = torch.arange(context_len - prompt_len).repeat(
+        tree_width, 1) - torch.arange(tree_width)[:, None]
     none_mask_value = none_mask_value % tree_width
     none_mask_value = none_mask_value == 0
 
@@ -51,6 +55,7 @@ def create_tree_attention_mask(context_len, prompt_len, tree_width, num_kv_head,
     generate_mask[none_mask_value] = 0
     generate_mask = generate_mask.unsqueeze(0).repeat(num_kv_head, 1, 1)
     return torch.concat([prompt_mask, generate_mask], dim=2)
+
 
 def ref_masked_attention(
     query: torch.Tensor,
@@ -68,19 +73,15 @@ def ref_masked_attention(
     return out
 
 
-def ref_query_cached_kv_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    num_queries_per_kv: int,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
-    scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-    prompt_lens: torch.Tensor,
-    tree_width: int
-) -> None:
+def ref_query_cached_kv_attention(output: torch.Tensor, query: torch.Tensor,
+                                  num_queries_per_kv: int,
+                                  key_cache: torch.Tensor,
+                                  value_cache: torch.Tensor,
+                                  block_tables: torch.Tensor,
+                                  context_lens: torch.Tensor, scale: float,
+                                  alibi_slopes: Optional[torch.Tensor],
+                                  prompt_lens: torch.Tensor,
+                                  tree_width: int) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
     head_size = value_cache.shape[2]
@@ -116,7 +117,11 @@ def ref_query_cached_kv_attention(
             keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
             values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
 
-        mask = create_tree_attention_mask(context_len, prompt_len, tree_width, num_query_heads, dtype=torch.float)
+        mask = create_tree_attention_mask(context_len,
+                                          prompt_len,
+                                          tree_width,
+                                          num_query_heads,
+                                          dtype=torch.float)
         alibi_bias = None
         if alibi_slopes is not None:
             # Create the ALiBi bias used in the paged attention kernel.
@@ -161,7 +166,10 @@ def test_paged_attention(
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
-    query = torch.empty(num_seqs*tree_width, num_query_heads, head_size, dtype=dtype)
+    query = torch.empty(num_seqs * tree_width,
+                        num_query_heads,
+                        head_size,
+                        dtype=dtype)
     query.uniform_(-scale, scale)
 
     assert num_query_heads % num_kv_heads == 0
@@ -206,49 +214,29 @@ def test_paged_attention(
     # #value_cache = torch.ones_like(value_cache)
     # key_cache = torch.ones_like(key_cache)
     # query = torch.ones_like(query)
-    
+
     output = torch.empty_like(query)
     torch.cuda.synchronize()
     start_time = time.time()
-    tree_attention_fwd(
-        query,
-        output,
-        key_cache,
-        value_cache,
-        block_tables,
-        context_lens,
-        prompt_lens,
-        tree_width,
-        alibi_slopes
-    )
+    tree_attention_fwd(query, output, key_cache, value_cache, block_tables,
+                       context_lens, prompt_lens, tree_width, alibi_slopes)
     torch.cuda.synchronize()
     #print("tree attention duration:", time.time()-start_time)
 
-
     ref_output = torch.empty_like(query)
-    ref_query_cached_kv_attention(
-        ref_output,
-        query,
-        num_queries_per_kv,
-        key_cache,
-        value_cache,
-        block_tables,
-        context_lens,
-        scale,
-        alibi_slopes,
-        prompt_lens,
-        tree_width
-    )
+    ref_query_cached_kv_attention(ref_output, query, num_queries_per_kv,
+                                  key_cache, value_cache, block_tables,
+                                  context_lens, scale, alibi_slopes,
+                                  prompt_lens, tree_width)
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
     atol = 1e-4
     rtol = 2e-2
-    
+
     def diff(a, b):
-        print(((a-b).abs()/(b+1e-8)).mean())
+        print(((a - b).abs() / (b + 1e-8)).mean())
 
     diff(output, ref_output)
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
-    

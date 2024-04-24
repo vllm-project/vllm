@@ -927,8 +927,7 @@ class Scheduler:
                 # `multi_modal_data` will be None.
                 multi_modal_data=seq_group.multi_modal_data
                 if scheduler_outputs.num_prefill_groups > 0 else None,
-                root_seq_id=seq_group.root_seq_id
-            )
+                root_seq_id=seq_group.root_seq_id)
             seq_group_metadata_list.append(seq_group_metadata)
 
         # Now that the batch has been created, we can assume all blocks in the

@@ -472,12 +472,11 @@ class LLMEngine:
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
-
-        # In tree parallel decoding, all sequences within a sequence group 
-        # are always inferred simultaneously, which results in the generation 
+        # In tree parallel decoding, all sequences within a sequence group
+        # are always inferred simultaneously, which results in the generation
         # of some extra tokens that need to be appended.
         root_seq = seq_group.find(seq_group.root_seq_id)
-        for _ in range(len(seq_group.seqs_dict)-len(parent_seqs)):
+        for _ in range(len(seq_group.seqs_dict) - len(parent_seqs)):
             root_seq._append_tokens_to_blocks([0])
 
         # Process the child samples for each parent sequence

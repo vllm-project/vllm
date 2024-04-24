@@ -287,15 +287,17 @@ class Sequence:
     ) -> None:
         assert token_id in logprobs
         seq_group = self.seq_group
-        
+
         def calc(seq_group):
-            num_token = 0     
-            for block in seq_group.find(seq_group.root_seq_id).logical_token_blocks:
+            num_token = 0
+            for block in seq_group.find(
+                    seq_group.root_seq_id).logical_token_blocks:
                 num_token += block.num_tokens
             return num_token
-        
+
         # allocate block for root seq if sampling type is RANDOM_SEED and generate multiple sequence per prompt
-        if self.seq_id != seq_group.root_seq_id and seq_group.sampling_params.sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+        if self.seq_id != seq_group.root_seq_id and seq_group.sampling_params.sampling_type in (
+                SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             buffer_seq = seq_group.find(self.seq_group.root_seq_id)
         else:
             buffer_seq = self
@@ -562,7 +564,7 @@ class SequenceGroup:
     def is_prefill(self) -> bool:
         # Every sequences should be in the same stage.
         return self.get_seqs()[0].is_prefill()
-    
+
     def get_root(self) -> Sequence:
         return self.find(self.root_seq_id)
 
