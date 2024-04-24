@@ -71,6 +71,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist
 
+# one liner to check that the size of the dist is <100MB, this is used as a test
+# case in CI system because PyPI limits the size of the wheel <100MB.
+RUN du -sm dist | awk '{if ($1 > 100) exit 1}' || exit 1
+
 # the `vllm_nccl` package must be installed from source distribution
 # pip is too smart to store a wheel in the cache, and other CI jobs
 # will directly use the wheel from the cache, which is not what we want.
