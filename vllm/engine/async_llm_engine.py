@@ -605,8 +605,8 @@ class AsyncLLMEngine:
             multi_modal_data: Multi modal data per request.
 
         Yields:
-            The output `RequestOutput` or `EmbeddingRequestOutput` objects
-            from the LLMEngine for the request.
+            The output `CompletionRequestOutput` objects from the LLMEngine
+            for the request.
 
         Details:
             - If the engine is not running, start the background loop,
@@ -688,8 +688,8 @@ class AsyncLLMEngine:
             multi_modal_data: Multi modal data per request.
 
         Yields:
-            The output `RequestOutput` or `EmbeddingRequestOutput` objects
-            from the LLMEngine for the request.
+            The output `EmbeddingRequestOutput` objects from the LLMEngine 
+            for the request.
 
         Details:
             - If the engine is not running, start the background loop,

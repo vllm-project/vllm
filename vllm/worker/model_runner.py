@@ -1175,6 +1175,6 @@ def _is_block_tables_empty(block_tables: Union[None, Dict]):
     if block_tables is None:
         return True
     if isinstance(block_tables, dict) and all(
-            not value for value in block_tables.values()):
+            value is None for value in block_tables.values()):
         return True
     return False
