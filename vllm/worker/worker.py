@@ -46,7 +46,7 @@ class Worker(WorkerBase):
         vision_language_config: Optional[VisionLanguageConfig] = None,
         is_driver_worker: bool = False,
         speculative_length: int = 5,
-        ) -> None:
+    ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -80,7 +80,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            speculative_length=speculative_length, 
+            speculative_length=speculative_length,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -284,7 +284,7 @@ def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
-    local_rank: int=-1, 
+    local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank,

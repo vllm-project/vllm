@@ -45,7 +45,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            is_driver_worker=True, 
+            is_driver_worker=True,
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
@@ -135,7 +135,7 @@ class GPUExecutor(ExecutorBase):
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            num_lookahead_slots=num_lookahead_slots, 
+            num_lookahead_slots=num_lookahead_slots,
         )
         return output
 

@@ -85,8 +85,8 @@ class PrepareDecodeMetadata(NamedTuple):
             lora_index_mapping=[],
             lora_prompt_mapping=[],
             lora_requests=set(),
-            slot_mapping=[], 
-            )
+            slot_mapping=[],
+        )
 
 
 # How batches are constructed.
@@ -484,10 +484,10 @@ class ModelRunner:
         # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
-        use_captured_graph = (not self.model_config.enforce_eager
-                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-                              and max_context_len
-                              <= self.max_context_len_to_capture)
+        use_captured_graph = (
+            not self.model_config.enforce_eager
+            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+            and max_context_len <= self.max_context_len_to_capture)
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -632,8 +632,7 @@ class ModelRunner:
                                                   pin_memory=self.pin_memory)
 
         categorized_sample_indices = {
-            t:
-            maybe_expand_dim(
+            t: maybe_expand_dim(
                 async_tensor_h2d(seq_ids,
                                  dtype=torch.int,
                                  target_device=self.device,
@@ -680,7 +679,7 @@ class ModelRunner:
                 lora_prompt_mapping,
                 lora_requests,
                 multi_modal_input,
-                slot_mapping, 
+                slot_mapping,
             ) = self._prepare_prompt(prefill_reqs)
             (
                 decode_input_tokens,
