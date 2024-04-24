@@ -182,8 +182,8 @@ class MixtralMoE(nn.Module):
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
                                         w2_scale=self.w2s_scale,
-                                        a1_scale=self.a1_scale,
-                                        a2_scale=self.a2_scale)
+                                        a1_scale=self.as_scale,
+                                        a2_scale=self.a2s_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
