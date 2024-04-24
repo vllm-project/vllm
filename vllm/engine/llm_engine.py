@@ -26,8 +26,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (ExecuteModelRequest, EmbeddingSequenceGroupOutput, MultiModalData,
                            PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceStatus,
-                           SequenceGroupMetadata)
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)

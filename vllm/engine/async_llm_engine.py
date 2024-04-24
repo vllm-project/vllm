@@ -656,7 +656,6 @@ class AsyncLLMEngine:
                 prompt,
                 sampling_params,
                 prompt_token_ids,
-                None,  # No arrival time
                 lora_request,
                 multi_modal_data,
         ):
@@ -737,7 +736,6 @@ class AsyncLLMEngine:
                 prompt,
                 pooling_params,
                 prompt_token_ids,
-                None,
                 lora_request,
                 multi_modal_data,
         ):
@@ -749,15 +747,12 @@ class AsyncLLMEngine:
         prompt: Optional[str],
         params: Union[SamplingParams, PoolingParams],
         prompt_token_ids: Optional[List[int]] = None,
-        arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncIterator[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
-        # Preprocess the request and set default arrival time if not provided
-        if arrival_time is None:
-            arrival_time = time.time()
+        arrival_time = time.time()
 
         stream = await self.add_request(
             request_id,

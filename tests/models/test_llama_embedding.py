@@ -20,10 +20,7 @@ def compare_embeddings(embeddings1, embeddings2):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-# @pytest.mark.skip(
-#     "Two problems: 1. Failing correctness tests. 2. RuntimeError: expected "
-#     "scalar type BFloat16 but found Half (only in CI).")
+@pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     hf_runner,
     vllm_runner,

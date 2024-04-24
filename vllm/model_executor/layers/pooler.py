@@ -3,7 +3,8 @@ from enum import IntEnum
 import torch
 import torch.nn as nn
 
-from vllm.attention import AttentionMetadata
+from vllm.model_executor.pooling_metadata import (PoolingMetadata,
+                                                  PoolingTensors)
 from vllm.sequence import EmbeddingSequenceGroupOutput, PoolerOutput
 
 
@@ -33,10 +34,11 @@ class Pooler(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_metadata: AttentionMetadata,
+        pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         """Pools specific information from hidden states based on metadata."""
-        prompt_lens = attention_metadata.prefill_metadata.prompt_lens_tensor
+        prompt_lens = PoolingTensors.from_pooling_metadata(
+            pooling_metadata, hidden_states.device).prompt_lens
 
         if self.pooling_type == PoolingType.LAST:
             last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1

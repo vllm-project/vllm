@@ -1,4 +1,4 @@
-from typing import List, Optional, Iterable, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -9,6 +9,7 @@ from vllm.config import LoRAConfig
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 
 
@@ -47,9 +48,9 @@ class LlamaEmbeddingModel(nn.Module):
     def pooler(
         self,
         hidden_states: torch.Tensor,
-        attention_metadata: AttentionMetadata,
+        pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, attention_metadata)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)

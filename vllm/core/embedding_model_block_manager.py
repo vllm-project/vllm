@@ -37,7 +37,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         seq: Sequence,
         num_lookahead_slots: int,
     ) -> Dict[int, List[int]]:
-        return {}
+        return None
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
@@ -48,20 +48,20 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:
-        return {}
+        return None
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
     def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
-        return {}
+        return None
 
     def free(self, seq: Sequence) -> None:
         # No operation on free
         return
 
     def get_block_table(self, seq: Sequence) -> List[int]:
-        return []
+        return None
 
     def get_num_free_gpu_blocks(self) -> int:
         return 1
@@ -78,7 +78,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
 
     def get_common_computed_block_ids(self,
                                       seq_group: SequenceGroup) -> List[int]:
-        return []
+        return None
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         pass

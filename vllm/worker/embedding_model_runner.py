@@ -77,7 +77,7 @@ class EmbeddingModelRunner(ModelRunner):
         hidden_states = model_executable(**execute_model_kwargs)
 
         return self.model.pooler(hidden_states=hidden_states,
-                                 attention_metadata=attn_metadata)
+                                 pooling_metadata=pooling_metadata)
 
     def prepare_input_tensors(
         self,

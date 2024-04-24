@@ -8,7 +8,8 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionRequestOutput, EmbeddingRequestOutput
+from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
@@ -147,7 +148,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
-    ) -> List[CompletionRequestOutput]:
+    ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
         NOTE: This class automatically batches the given prompts, considering
@@ -168,7 +169,7 @@ class LLM:
             multi_modal_data: Multi modal data.
 
         Returns:
-            A list of `CompletionRequestOutput` objects containing the
+            A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
         if sampling_params is None:

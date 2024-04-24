@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _GB = 1 << 30
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 
 class ModelConfig:
@@ -214,8 +216,8 @@ class ModelConfig:
 
     def _check_embedding_mode(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
-        pattern = r".*Model$"
-        return any(re.match(pattern, arch) for arch in architectures)
+        return any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def verify_with_parallel_config(
         self,
@@ -619,8 +621,9 @@ class SchedulerConfig:
                 # and TTFT on A100. Note it is not optimized for throughput.
                 self.max_num_batched_tokens = 512
             elif embedding_mode:
-                # For embedding, choose 32768 for higher throughput
-                self.max_num_batched_tokens = max(max_model_len, 32768)
+                # For embedding, choose specific value for higher throughput
+                self.max_num_batched_tokens = max(
+                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.

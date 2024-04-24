@@ -1,6 +1,10 @@
+from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
+import torch
+
 from vllm.pooling_params import PoolingParams
+from vllm.utils import is_pin_memory_available
 
 
 class PoolingMetadata:
@@ -30,3 +34,36 @@ class PoolingMetadata:
                 f"seq_groups={self.seq_groups}, "
                 f"seq_data={self.seq_data}, "
                 f"prompt_lens={self.prompt_lens}, ")
+
+
+@dataclass
+class PoolingTensors:
+    """Tensors for pooling."""
+
+    prompt_lens: torch.Tensor
+
+    @classmethod
+    def from_pooling_metadata(
+        cls,
+        pooling_metadata: "PoolingMetadata",
+        device: torch.device,
+    ) -> "PoolingTensors":
+        """
+        Create PoolingTensors from PoolingMetadata.
+
+        Args:
+            pooling_metadata: PoolingMetadata instance to convert.
+            device: Device to store the tensors.
+        """
+        # Convert prompt lengths to tensor
+        pin_memory = is_pin_memory_available()
+
+        prompt_lens_t = torch.tensor(
+            pooling_metadata.prompt_lens,
+            device="cpu",
+            dtype=torch.long,
+            pin_memory=pin_memory,
+        )
+
+        return cls(prompt_lens=prompt_lens_t.to(device=device,
+                                                non_blocking=True), )

@@ -123,8 +123,15 @@ def zephyr_lora_files():
 
 
 @pytest.fixture(scope="session")
-def embedding_server(zephyr_lora_files):
+def ray_context():
+    # Initialize Ray once for the entire session
     ray.init()
+    yield
+    ray.shutdown()
+
+
+@pytest.fixture(scope="session")
+def embedding_server(ray_context, zephyr_lora_files):
     server_runner = ServerRunner.remote([
         "--model",
         EMBEDDING_MODEL_NAME,
@@ -137,12 +144,10 @@ def embedding_server(zephyr_lora_files):
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
-    ray.shutdown()
 
 
 @pytest.fixture(scope="session")
-def server(zephyr_lora_files):
-    ray.init()
+def server(ray_context, zephyr_lora_files):
     server_runner = ServerRunner.remote([
         "--model",
         MODEL_NAME,
@@ -166,7 +171,6 @@ def server(zephyr_lora_files):
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
-    ray.shutdown()
 
 
 @pytest.fixture(scope="module")
@@ -481,12 +485,11 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.parametrize(
-    # just test 1 lora hereafter
     "model_name",
     [EMBEDDING_MODEL_NAME],
 )
-async def test_embedding(embedding_server, client: openai.AsyncOpenAI,
-                         model_name: str):
+async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
+                                model_name: str):
     input = [
         "The chef prepared a delicious meal.",
     ]
@@ -517,6 +520,42 @@ async def test_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 5
     assert embeddings.usage.total_tokens == 5
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [EMBEDDING_MODEL_NAME],
+)
+async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
+                               model_name: str):
+    # test List[str]
+    inputs = [
+        "The cat sat on the mat.", "A feline was resting on a rug.",
+        "Stars twinkle brightly in the night sky."
+    ]
+    embeddings = await client.embeddings.create(
+        model=model_name,
+        input=inputs,
+        encoding_format="float",
+    )
+    assert embeddings.id is not None
+    assert embeddings.data is not None and len(embeddings.data) == 3
+    assert len(embeddings.data[0].embedding) == 4096
+
+    # test List[List[int]]
+    inputs = [[4, 5, 7, 9, 20], [15, 29, 499], [24, 24, 24, 24, 24],
+              [25, 32, 64, 77]]
+    embeddings = await client.embeddings.create(
+        model=model_name,
+        input=inputs,
+        encoding_format="float",
+    )
+    assert embeddings.id is not None
+    assert embeddings.data is not None and len(embeddings.data) == 4
+    assert len(embeddings.data[0].embedding) == 4096
+    assert embeddings.usage.completion_tokens == 0
+    assert embeddings.usage.prompt_tokens == 17
+    assert embeddings.usage.total_tokens == 17
 
 
 async def test_logits_bias(server, client: openai.AsyncOpenAI):

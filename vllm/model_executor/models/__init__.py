@@ -119,6 +119,10 @@ class ModelRegistry:
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 
+    @staticmethod
+    def is_embedding_model(model_arch: str) -> bool:
+        return model_arch in _EMBEDDING_MODELS
+
 
 __all__ = [
     "ModelRegistry",
