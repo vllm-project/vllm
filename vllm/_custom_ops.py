@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -151,6 +151,14 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 size_n: int, size_k: int) -> torch.Tensor:
     return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                 size_n, size_k)
+
+
+# fp8
+def scaled_fp8_quant(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    vllm_ops.scaled_fp8_quant(output, input, scale)
+    return output, scale
 
 
 # moe
