@@ -281,7 +281,12 @@ class LlamaModel(nn.Module):
         else:
             hidden_states = self.get_input_embeddings(input_ids)
         
-        print("embeddings: {hidden_states}")
+        is_warmup = kv_caches[0] is None
+
+        if not is_warmup: 
+            # print(f"embeddings: {hidden_states[0]}")
+            pass
+
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -292,9 +297,11 @@ class LlamaModel(nn.Module):
                 attn_metadata,
                 residual,
             )
-            print(f"idx: {i}: {hidden_states}")
+            if not is_warmup:
+                pass
+                print(f"idx: {i}: {hidden_states}")
         hidden_states, _ = self.norm(hidden_states, residual)
-        print(hidden_states)
+        # print("------------")
         return hidden_states
 
 

@@ -149,32 +149,12 @@ class Fp8LinearMethod(LinearMethodBase):
             x_dq = self._fake_quantize_static(x, in_scale)
 
             # print(f"x_dq[0,0]: {x_dq[0,0]} // weight_dq[0,0]: {weight_dq[0,0]}")
-            output[:, start_offset:end_offset] = torch.nn.functional.linear(x_dq, weight_dq)
+            # output[:, start_offset:end_offset] = torch.nn.functional.linear(x_dq, weight_dq)
+            output[:, start_offset:end_offset] = torch.nn.functional.linear(x, weight_dq)
             start_offset = end_offset
         
         assert end_offset == output.shape[1]
-        # print(output)
-        # print(output.dtype)
         return output
-
-    def _quantize_dynamic(self, x: torch.Tensor):
-        finfo = torch.finfo(torch.float8_e4m3fn)
-        min_val, max_val = x.aminmax()
-        amax = min_val.abs().max(max_val.abs())
-        scale = finfo.max / amax.clamp(min=1e-12)
-
-        # print(finfo.max)
-        # print(amax)
-        # print(finfo.max / amax.clamp(min=1e-12))
-        # assert False
-        # scale and clamp the tensor to bring it to
-        # the representative range of float8 data type
-        # (as default cast is unsaturated)
-        qweight = (x * scale).clamp(min=finfo.min, max=finfo.max)
-        # Return both float8 data and the inverse scale (as float),
-        # as both required as inputs to torch._scaled_mm
-        # print(scale)
-        return qweight, scale.float().reciprocal()
     
     def _quantize(self, x: torch.Tensor, inv_scale: torch.tensor):
         finfo = torch.finfo(torch.float8_e4m3fn)
@@ -185,12 +165,8 @@ class Fp8LinearMethod(LinearMethodBase):
     
     def _fake_quantize_static(self, x: torch.Tensor, inv_scale: torch.Tensor):
         xq = self._quantize(x, inv_scale)
-        # xq, inv_scale = self._dynamic_quantize(x)
-        # print(inv_scale)
         xdq = self._dequantize(xq, inv_scale, x.dtype)
-
         # print(f"----- inv_scale: {inv_scale} // x[0,0]: {x[0,0]} // xq[0,0]: {xq[0,0]} // xdq[0,0]: {xdq[0,0]}")
-
         return xdq
 
 
