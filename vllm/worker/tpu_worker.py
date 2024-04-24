@@ -64,7 +64,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        num_tpu_blocks = 100
+        num_tpu_blocks = 1000
         return num_tpu_blocks, 0
 
     def initialize_cache(
