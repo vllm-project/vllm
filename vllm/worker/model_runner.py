@@ -63,8 +63,7 @@ class PreparePromptMetadata(NamedTuple):
             lora_prompt_mapping=[],
             lora_requests=set(),
             multi_modal_input=None,
-            slot_mapping=[],
-        )
+            slot_mapping=[], )
 
 
 class PrepareDecodeMetadata(NamedTuple):
@@ -85,8 +84,7 @@ class PrepareDecodeMetadata(NamedTuple):
             lora_index_mapping=[],
             lora_prompt_mapping=[],
             lora_requests=set(),
-            slot_mapping=[],
-        )
+            slot_mapping=[], )
 
 
 # How batches are constructed.
@@ -100,7 +98,6 @@ class BatchType(IntEnum):
 
 
 class ModelRunner:
-
     def __init__(
         self,
         model_config: ModelConfig,
@@ -109,11 +106,10 @@ class ModelRunner:
         device_config: DeviceConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-        vision_language_config: Optional[VisionLanguageConfig] = None,
-        speculative_length: int = 0, 
-    ):
+        kv_cache_dtype: Optional[str]="auto",
+        is_driver_worker: bool=False,
+        vision_language_config: Optional[VisionLanguageConfig]=None,
+        speculative_length: int=0, ):
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -124,10 +120,10 @@ class ModelRunner:
 
         # model_config can be None in tests/samplers/test_sampler.py.
         # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
+        self.sliding_window = (model_config.get_sliding_window() if
+                               model_config is not None else None)
+        self.device_config = (device_config if device_config is not None else
+                              DeviceConfig())
         self.device = self.device_config.device
 
         # Set after load_model.
@@ -135,11 +131,12 @@ class ModelRunner:
 
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool: Optional[Tuple[
-            int, int]] = None  # Set during graph capture.
+            int, int
+        ]] = None  # Set during graph capture.
 
         self.max_context_len_to_capture = (
-            self.model_config.max_context_len_to_capture
-            if self.model_config is not None else 0)
+            self.model_config.max_context_len_to_capture if
+            self.model_config is not None else 0)
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
@@ -168,22 +165,23 @@ class ModelRunner:
                 lora_config=self.lora_config,
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-            )
+                scheduler_config=self.scheduler_config, )
 
         self.model_memory_usage = m.consumed_memory
         logger.info(f"Loading model weights took "
                     f"{self.model_memory_usage / float(2**30):.4f} GB")
 
         if self.lora_config:
-            assert hasattr(self.model, "supported_lora_modules"
-                           ) and self.model.supported_lora_modules, (
-                               "Model does not support LoRA")
+            assert hasattr(
+                self.model,
+                "supported_lora_modules") and self.model.supported_lora_modules, (
+                    "Model does not support LoRA")
             assert hasattr(
                 self.model,
                 "embedding_modules"), "Model does not have embedding_modules"
-            assert hasattr(self.model, "embedding_padding_modules"
-                           ), "Model does not have embedding_padding_modules"
+            assert hasattr(
+                self.model,
+                "embedding_padding_modules"), "Model does not have embedding_padding_modules"
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens, self.vocab_size,
@@ -222,15 +220,13 @@ class ModelRunner:
         block_size = self.block_size
         k = self.speculative_length
         max_context_len = self.max_context_len_to_capture
-        if k : # able speculative decoding w/ lookahead 
+        if k:  # able speculative decoding w/ lookahead
             return max_context_len // block_size + max(k // block_size, 1)
-        return (max_context_len + block_size - 1) // block_size 
-                       
+        return (max_context_len + block_size - 1) // block_size
 
     def _prepare_prompt(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> PreparePromptMetadata:
+        self, seq_group_metadata_list:
+        List[SequenceGroupMetadata], ) -> PreparePromptMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -254,10 +250,9 @@ class ModelRunner:
             seq_id = seq_ids[0]
 
             computed_block_nums = seq_group_metadata.computed_block_nums
-            if (self.scheduler_config is not None
-                    and self.scheduler_config.chunked_prefill_enabled
-                    and not (computed_block_nums is None
-                             or computed_block_nums == [])):
+            if (self.scheduler_config is not None and
+                self.scheduler_config.chunked_prefill_enabled and not (
+                    computed_block_nums is None or computed_block_nums == [])):
                 raise RuntimeError(
                     "chunked prefill cannot be used with prefix caching "
                     "now.")
@@ -309,9 +304,10 @@ class ModelRunner:
 
             lora_index_mapping += [lora_id] * (prompt_len - computed_len)
             lora_prompt_mapping.extend(
-                [lora_id] *
-                (prompt_len - computed_len
-                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+                [lora_id
+                 ] * (prompt_len - computed_len
+                      if seq_group_metadata.sampling_params.prompt_logprobs
+                      else 1))
 
             if seq_group_metadata.multi_modal_data:
                 multi_modal_input_list.append(
@@ -371,8 +367,7 @@ class ModelRunner:
             max_len=max_prompt_block_table_len,
             pad=0,
             dtype=torch.int,
-            device=self.device,
-        )
+            device=self.device, )
 
         # Query length can be shorter than key (i.e., prompt) when prefill
         # is chunked or prefix cached.
@@ -411,8 +406,7 @@ class ModelRunner:
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=True,
-        )
+            use_cuda_graph=True, )
 
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -424,13 +418,11 @@ class ModelRunner:
             lora_prompt_mapping=lora_prompt_mapping,
             lora_requests=lora_requests,
             multi_modal_input=multi_modal_input,
-            slot_mapping=slot_mapping,
-        )
+            slot_mapping=slot_mapping, )
 
     def _prepare_decode(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> PrepareDecodeMetadata:
+        self, seq_group_metadata_list:
+        List[SequenceGroupMetadata], ) -> PrepareDecodeMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -486,9 +478,9 @@ class ModelRunner:
         batch_size = len(input_tokens)
         max_context_len = max(context_lens)
         use_captured_graph = (
-            not self.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_context_len <= self.max_context_len_to_capture)
+            not self.model_config.enforce_eager and
+            batch_size <= _BATCH_SIZES_TO_CAPTURE[-1] and
+            max_context_len <= self.max_context_len_to_capture)
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -527,8 +519,7 @@ class ModelRunner:
                 max_len=max_block_table_len,
                 pad=0,
                 dtype=torch.int,
-                device=self.device,
-            )
+                device=self.device, )
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
@@ -541,8 +532,7 @@ class ModelRunner:
             seq_start_loc=None,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=use_captured_graph,
-        )
+            use_cuda_graph=use_captured_graph, )
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,
@@ -550,21 +540,18 @@ class ModelRunner:
             lora_index_mapping=lora_index_mapping,
             lora_prompt_mapping=lora_prompt_mapping,
             lora_requests=lora_requests,
-            slot_mapping=slot_mapping,
-        )
+            slot_mapping=slot_mapping, )
 
     def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
-    ) -> SamplingMetadata:
+        self, seq_group_metadata_list: List[SequenceGroupMetadata],
+        prompt_lens: List[int], subquery_lens:
+        Optional[List[int]], ) -> SamplingMetadata:
         seq_groups: List[Tuple[List[int], SamplingParams]] = []
         selected_token_indices: List[int] = []
         generators: List[torch.Generator] = []
         selected_token_start_idx = 0
-        categorized_sample_indices: Dict[SamplingType,
-                                         List[Tuple[int, int]]] = {
+        categorized_sample_indices: Dict[SamplingType, List[Tuple[int, int]]
+                                         ] = {
                                              t: []
                                              for t in SamplingType
                                          }
@@ -605,8 +592,8 @@ class ModelRunner:
             else:
                 num_seqs = len(seq_ids)
                 selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
+                    range(selected_token_start_idx, selected_token_start_idx +
+                          num_seqs))
                 selected_token_start_idx += num_seqs
 
                 categorized_sample_indices[
@@ -637,7 +624,9 @@ class ModelRunner:
                 async_tensor_h2d(seq_ids,
                                  dtype=torch.int,
                                  target_device=self.device,
-                                 pin_memory=self.pin_memory), 2, 2)
+                                 pin_memory=self.pin_memory),
+                2,
+                2)
             for t, seq_ids in categorized_sample_indices.items()
         }
 
@@ -651,13 +640,11 @@ class ModelRunner:
             prompt_lens=prompt_lens,
             selected_token_indices=selected_token_indices,
             categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
+            generators=generators, )
         return sampling_metadata
 
     def prepare_input_tensors(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        self, seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
@@ -671,29 +658,17 @@ class ModelRunner:
 
             # Prepare input tensors.
             (
-                input_tokens,
-                input_positions,
-                prefill_attn_metadata,
-                prompt_lens,
-                subquery_lens,
-                lora_index_mapping,
-                lora_prompt_mapping,
-                lora_requests,
-                multi_modal_input,
-                slot_mapping,
-            ) = self._prepare_prompt(prefill_reqs)
+                input_tokens, input_positions, prefill_attn_metadata,
+                prompt_lens, subquery_lens, lora_index_mapping,
+                lora_prompt_mapping, lora_requests, multi_modal_input,
+                slot_mapping, ) = self._prepare_prompt(prefill_reqs)
             (
-                decode_input_tokens,
-                decode_input_positions,
-                decode_attn_metadata,
-                decode_lora_index_mapping,
-                decode_lora_prompt_mapping,
-                decode_lora_requests,
-                decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens)
+                decode_input_tokens, decode_input_positions,
+                decode_attn_metadata, decode_lora_index_mapping,
+                decode_lora_prompt_mapping, decode_lora_requests,
+                decode_slot_mapping, ) = self._prepare_decode(decode_reqs)
+            sampling_metadata = self._prepare_sample(
+                seq_group_metadata_list, prompt_lens, subquery_lens)
 
             if not self.scheduler_config.chunked_prefill_enabled:
                 assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -723,17 +698,15 @@ class ModelRunner:
 
             if self.lora_config:
                 lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
+                    lora_index_mapping, lora_prompt_mapping, )
             else:
                 lora_mapping = None
 
             # Broadcast the metadata.
             # If batch contains both prefill and decode, it sends 2 broadcasts.
             # If it only contains 1 type, it triggers a single broadcast.
-            if (prefill_attn_metadata is not None
-                    and decode_attn_metadata is not None):
+            if (prefill_attn_metadata is not None and
+                decode_attn_metadata is not None):
                 batch_type = BatchType.MIXED
             elif prefill_attn_metadata is not None:
                 batch_type = BatchType.PREFILL
@@ -799,8 +772,7 @@ class ModelRunner:
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
                 generators=None,
-                perform_sampling=False,
-            )
+                perform_sampling=False, )
 
             # if it is a mixed batch, decode attn_metadata is broadcasted
             # separately.
@@ -816,8 +788,7 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
+            kv_cache_dtype=self.kv_cache_dtype, )
 
         return (input_tokens, input_positions, attn_metadata,
                 sampling_metadata, lora_requests, lora_mapping,
@@ -825,10 +796,8 @@ class ModelRunner:
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        kv_caches: List[torch.Tensor],
-    ) -> Optional[SamplerOutput]:
+        self, seq_group_metadata_list: List[SequenceGroupMetadata], kv_caches:
+        List[torch.Tensor], ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
@@ -864,8 +833,7 @@ class ModelRunner:
         # Sample the next token.
         output = self.model.sample(
             logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+            sampling_metadata=sampling_metadata, )
         return output
 
     @torch.inference_mode()
@@ -887,8 +855,7 @@ class ModelRunner:
                 dummy_lora_request = LoRARequest(
                     lora_name=f"warmup_{lora_id}",
                     lora_int_id=lora_id,
-                    lora_local_path="/not/a/real/path",
-                )
+                    lora_local_path="/not/a/real/path", )
                 self.lora_manager.add_dummy_lora(dummy_lora_request,
                                                  rank=LORA_WARMUP_RANK)
                 dummy_lora_requests.append(dummy_lora_request)
@@ -924,8 +891,7 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                multi_modal_data=fake_multi_modal_input,
-            )
+                multi_modal_data=fake_multi_modal_input, )
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
@@ -940,8 +906,8 @@ class ModelRunner:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.remove_all_loras()
 
-    def set_active_loras(self, lora_requests: Set[LoRARequest],
-                         lora_mapping: LoRAMapping) -> None:
+    def set_active_loras(self, lora_requests: Set[LoRARequest], lora_mapping:
+                         LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         self.lora_manager.set_active_loras(lora_requests, lora_mapping)
@@ -1028,8 +994,7 @@ class ModelRunner:
                     seq_start_loc=None,
                     context_lens=context_lens[:batch_size],
                     block_tables=block_tables[:batch_size],
-                    use_cuda_graph=True,
-                )
+                    use_cuda_graph=True, )
                 attn_metadata = AttentionMetadata(
                     num_prefills=0,
                     num_prefill_tokens=0,
@@ -1037,14 +1002,11 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                )
+                    kv_cache_dtype=self.kv_cache_dtype, )
 
                 if self.lora_config:
                     lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
-                    )
+                        [0] * batch_size, [0] * batch_size, )
                     self.set_active_loras(set(), lora_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model)
@@ -1053,8 +1015,7 @@ class ModelRunner:
                     input_positions[:batch_size],
                     kv_caches,
                     attn_metadata,
-                    memory_pool=self.graph_memory_pool,
-                )
+                    memory_pool=self.graph_memory_pool, )
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
 
@@ -1079,7 +1040,6 @@ class ModelRunner:
 
 
 class CUDAGraphRunner:
-
     def __init__(self, model: nn.Module):
         self.model = model
         self.input_buffers: Dict[str, torch.Tensor] = {}
@@ -1093,26 +1053,16 @@ class CUDAGraphRunner:
         return self._graph
 
     def capture(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        memory_pool,
-        **kwargs,
-    ) -> None:
+        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_caches:
+        List[torch.Tensor], attn_metadata: AttentionMetadata, memory_pool,
+        **kwargs, ) -> None:
         assert self._graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
         with _maybe_pynccl():
             self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                **kwargs,
-            )
+                input_ids, positions, kv_caches, attn_metadata, **kwargs, )
         torch.cuda.synchronize()
 
         # Capture the graph.
@@ -1122,12 +1072,7 @@ class CUDAGraphRunner:
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
             with _maybe_pynccl():
                 hidden_states = self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    attn_metadata,
-                    **kwargs,
-                )
+                    input_ids, positions, kv_caches, attn_metadata, **kwargs, )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
@@ -1143,13 +1088,9 @@ class CUDAGraphRunner:
         return
 
     def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        **kwargs,
-    ) -> torch.Tensor:
+        self, input_ids: torch.Tensor, positions: torch.Tensor, kv_caches:
+        List[torch.Tensor], attn_metadata: AttentionMetadata,
+        **kwargs, ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
 
@@ -1159,9 +1100,11 @@ class CUDAGraphRunner:
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
         self.input_buffers["context_lens"].copy_(
-            attn_metadata.decode_metadata.context_lens, non_blocking=True)
+            attn_metadata.decode_metadata.context_lens,
+            non_blocking=True)
         self.input_buffers["block_tables"].copy_(
-            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+            attn_metadata.decode_metadata.block_tables,
+            non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
@@ -1198,7 +1141,7 @@ def _get_graph_batch_size(batch_size: int) -> int:
 
 
 def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
+    seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
     """Prepare fake inputs for profile run."""
     if vision_language_config:
         prompt_tokens = [

@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 
 
 class GPUExecutor(ExecutorBase):
-
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
 
@@ -45,8 +44,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
-        )
+            is_driver_worker=True, )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
@@ -55,7 +53,7 @@ class GPUExecutor(ExecutorBase):
         """
         assert self.speculative_config is not None
         self.speculative_length = self.speculative_config.num_speculative_tokens
-        
+
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
         from vllm.worker.worker import Worker
@@ -76,8 +74,7 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
-            speculative_length=self.speculative_length
-        )
+            speculative_length=self.speculative_length)
 
         draft_worker = MultiStepWorker(
             model_config=self.speculative_config.draft_model_config,
@@ -93,11 +90,11 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
-            speculative_length=self.speculative_length
-        )
+            speculative_length=self.speculative_length)
 
         spec_decode_worker = SpecDecodeWorker.from_workers(
-            proposer_worker=draft_worker, scorer_worker=target_worker)
+            proposer_worker=draft_worker,
+            scorer_worker=target_worker)
 
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
@@ -125,20 +122,16 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        num_lookahead_slots: int,
-    ) -> List[SamplerOutput]:
+        self, seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]], num_lookahead_slots:
+        int, ) -> List[SamplerOutput]:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
-            num_lookahead_slots=num_lookahead_slots,
-        )
+            num_lookahead_slots=num_lookahead_slots, )
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -160,13 +153,12 @@ class GPUExecutor(ExecutorBase):
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 
-    async def execute_model_async(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
+    async
+
+    def execute_model_async(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]], ) -> SamplerOutput:
         output = await make_async(self.driver_worker.execute_model)(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
