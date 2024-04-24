@@ -25,6 +25,7 @@ YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
+ISORT_VERSION=$(isort --vn)
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -37,6 +38,7 @@ tool_version_check() {
 tool_version_check "yapf" $YAPF_VERSION "$(grep yapf requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "mypy" "$MYPY_VERSION" "$(grep mypy requirements-dev.txt | cut -d'=' -f3)"
+tool_version_check "isort" "$ISORT_VERSION" "$(grep isort requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-dev.txt | cut -d'=' -f3)"
 
 YAPF_FLAGS=(
@@ -91,9 +93,25 @@ fi
 echo 'vLLM yapf: Done'
 
 # Run mypy
-# TODO(zhuohan): Enable mypy
-# echo 'vLLM mypy:'
-# mypy
+echo 'vLLM mypy:'
+mypy vllm/attention --config-file pyproject.toml
+mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/distributed --config-file pyproject.toml
+mypy vllm/entrypoints --config-file pyproject.toml
+mypy vllm/executor --config-file pyproject.toml
+mypy vllm/usage --config-file pyproject.toml
+mypy vllm/*.py --config-file pyproject.toml
+mypy vllm/transformers_utils --config-file pyproject.toml
+mypy vllm/engine  --config-file pyproject.toml
+mypy vllm/worker --config-file pyproject.toml
+mypy vllm/spec_decode --config-file pyproject.toml
+mypy vllm/model_executor/*.py  --config-file pyproject.toml
+# mypy vllm/lora/*.py --config-file pyproject.toml
+
+
+CODESPELL_EXCLUDES=(
+    '--skip' '*docs/source/_build/**'
+)
 
 # check spelling of specified files
 spell_check() {
@@ -101,7 +119,7 @@ spell_check() {
 }
 
 spell_check_all(){
-  codespell --toml pyproject.toml
+  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
 }
 
 # Spelling  check of files that differ from main branch.
@@ -116,7 +134,7 @@ spell_check_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell
+             codespell "${CODESPELL_EXCLUDES[@]}"
     fi
 }
 
@@ -174,6 +192,46 @@ else
    lint_changed
 fi
 
+# check spelling of specified files
+isort_check() {
+    isort "$@"
+}
+
+isort_check_all(){
+  isort .
+}
+
+# Spelling  check of files that differ from main branch.
+isort_check_changed() {
+    # The `if` guard ensures that the list of filenames is not empty, which
+    # could cause ruff to receive 0 positional arguments, making it hang
+    # waiting for STDIN.
+    #
+    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+    # exist on both branches.
+    MERGEBASE="$(git merge-base origin/main HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+             isort
+    fi
+}
+
+# Run Isort
+# This flag runs spell check of individual files. --files *must* be the first command line
+# arg to use this option.
+if [[ "$1" == '--files' ]]; then
+   isort_check "${@:2}"
+   # If `--all` is passed, then any further arguments are ignored and the
+   # entire python directory is linted.
+elif [[ "$1" == '--all' ]]; then
+   isort_check_all
+else
+   # Check spelling only of the files that changed in last commit.
+   isort_check_changed
+fi
+echo 'vLLM isort: Done'
+
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'
     echo 'Changes not staged for commit:'
@@ -182,5 +240,3 @@ if ! git diff --quiet &>/dev/null; then
 
     exit 1
 fi
-
-

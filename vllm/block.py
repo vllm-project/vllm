@@ -5,6 +5,8 @@ from vllm.utils import Device
 
 _BLANK_TOKEN_ID = -1
 
+DEFAULT_LAST_ACCESSED_TIME = -1
+
 
 class LogicalTokenBlock:
     """A block that stores a contiguous chunk of tokens from left to right.
@@ -55,17 +57,27 @@ class PhysicalTokenBlock:
         device: Device,
         block_number: int,
         block_size: int,
+        block_hash: int,
+        num_hashed_tokens: int,
     ) -> None:
         self.device = device
         self.block_number = block_number
         self.block_size = block_size
+        self.block_hash = block_hash
+        self.num_hashed_tokens = num_hashed_tokens
 
         self.ref_count = 0
+        self.last_accessed = DEFAULT_LAST_ACCESSED_TIME
+
+        self.computed = False
 
     def __repr__(self) -> str:
         return (f'PhysicalTokenBlock(device={self.device}, '
                 f'block_number={self.block_number}, '
-                f'ref_count={self.ref_count})')
+                f'num_hashed_tokens={self.num_hashed_tokens}, '
+                f'ref_count={self.ref_count}, '
+                f'last_accessed={self.last_accessed}, '
+                f'computed={self.computed})')
 
 
 # Mapping: logical block number -> physical block.

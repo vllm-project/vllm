@@ -1,15 +1,17 @@
 """A layer that samples the next tokens from the model's outputs."""
+import itertools
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.parallel_utils.communication_op import (
-    tensor_model_parallel_gather)
-from vllm.model_executor.sampling_metadata import SamplingMetadata, SamplingTensors
+from vllm.model_executor.layers.ops.sample import sample as sample_triton
+from vllm.model_executor.sampling_metadata import (SamplingMetadata,
+                                                   SamplingTensors)
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import (PromptLogprobs, SampleLogprobs, SamplerOutput,
-                           SequenceData, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
+                           SamplerOutput, SequenceData, SequenceGroupOutput,
+                           SequenceOutput)
 
 
 class Sampler(nn.Module):
@@ -25,53 +27,33 @@ class Sampler(nn.Module):
     6. Sample the next tokens.
     Here, each sequence group within the batch can have different sampling
     parameters (e.g., sampling method, temperature, top-p, top-k, etc.).
+
+    The structure of the logits tensor is coupled with the seq_groups in
+    sampling_metadata. Typically, each sequence in each seq_group has one row in
+    logits for the next token to be sampled; however, for a seq_group with a
+    prompt request with the prompt_logprobs sampling parameter, there are rows
+    in logits for each token in the input prompt.
     """
 
-    def __init__(self,
-                 vocab_size: int,
-                 org_vocab_size: Optional[int] = None) -> None:
+    def __init__(self):
         super().__init__()
-        self.vocab_size = vocab_size
-        # original vocabulary size (without LoRA).
-        self.org_vocab_size = org_vocab_size or vocab_size
 
-    def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
-                    embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
-        # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
-        if embedding_bias is not None:
-            logits += embedding_bias
-        logits = tensor_model_parallel_gather(logits)
-        # Remove paddings in vocab (if any).
-        if logits is not None:
-            logits = logits[:, :self.org_vocab_size]
-        return logits
+        # Whether or not the SamplerOutput should have on-device tensors
+        # containing the sampled token ids and probabilities. This is used by
+        # speculative decoding.
+        self.include_gpu_probs_tensor = False
 
     def forward(
         self,
-        embedding: torch.Tensor,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[SamplerOutput]:
-        # Get the hidden states that we use for sampling.
-        hidden_states = _prune_hidden_states(hidden_states, sampling_metadata)
-
-        # Get the logits for the next tokens.
-        logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
-        # Only perform sampling in the driver worker.
-        # Note: `_get_logits` is still distributed across TP workers because
-        # the `embedding` weight is distributed across TP workers.
-        # TODO(zhuohan): Change the get_logits part to a separate stage.
-        if not sampling_metadata.perform_sampling:
-            return None
-
         assert logits is not None
         _, vocab_size = logits.shape
 
-        # Apply logits processors (if any).
-        logits = _apply_logits_processors(logits, sampling_metadata)
+        # Apply min_tokens penalty which sets stop tokens to -inf if min_tokens
+        # have not been generated yet
+        logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
         # Prepare sampling tensors with pinned memory to avoid blocking.
         (sampling_tensors, do_penalties, do_top_p_top_k,
@@ -105,21 +87,45 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results = _sample(probs, logprobs, sampling_metadata)
+        sample_results, maybe_sampled_tokens_tensor = _sample(
+            probs,
+            logprobs,
+            sampling_metadata,
+            sampling_tensors,
+            include_gpu_probs_tensor=self.include_gpu_probs_tensor,
+            modify_greedy_probs=self._should_modify_greedy_probs_inplace,
+        )
+
+        if self.include_gpu_probs_tensor:
+            assert maybe_sampled_tokens_tensor is not None
+            sampled_tokens_tensor = maybe_sampled_tokens_tensor
+            on_device_tensors = (probs, sampled_tokens_tensor)
+        else:
+            on_device_tensors = None
+
         # Get the logprobs query results.
         prompt_logprobs, sample_logprobs = _get_logprobs(
             logprobs, sampling_metadata, sample_results)
-        return _build_sampler_output(sample_results, sampling_metadata,
-                                     prompt_logprobs, sample_logprobs)
+        return _build_sampler_output(sample_results,
+                                     sampling_metadata,
+                                     prompt_logprobs,
+                                     sample_logprobs,
+                                     on_device_tensors=on_device_tensors)
 
+    @property
+    def _should_modify_greedy_probs_inplace(self) -> bool:
+        """Whether or not the sampler should modify the probability distribution
+        of greedily-sampled tokens such that multinomial sampling would sample
+        the greedily-sampled token.
 
-def _prune_hidden_states(
-    hidden_states: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> torch.Tensor:
-    hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
+        In other words, if True then we set the probability of the greedily-
+        sampled token to 1.
+
+        This is used by speculative decoding, which requires that the sampling
+        method be encoded into the probability distribution.
+        """
+        # Modify greedy probs if include_gpu_probs_tensor is set.
+        return self.include_gpu_probs_tensor
 
 
 def _get_bin_counts_and_mask(
@@ -139,27 +145,50 @@ def _get_bin_counts_and_mask(
     return bin_counts, mask
 
 
-def _apply_logits_processors(
+def _apply_min_tokens_penalty(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    logits_row_idx = 0
-    found_logits_processors = False
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        logits_processors = sampling_params.logits_processors
-        if logits_processors:
-            found_logits_processors = True
-            for seq_id in seq_ids:
-                logits_row = logits[logits_row_idx]
-                token_ids = sampling_metadata.seq_data[seq_id].output_token_ids
-                for logits_processor in logits_processors:
-                    logits_row = logits_processor(token_ids, logits_row)
-                logits[logits_row_idx] = logits_row
-                logits_row_idx += 1
-        else:
-            logits_row_idx += len(seq_ids)
-    if found_logits_processors:
-        assert logits_row_idx == logits.shape[0]
+    # list of indices in logits that will be set to -inf
+    logits_to_penalize = []
+    start_idx = 0
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        seq_ids, sampling_params = seq_group
+
+        # handle prompt_logprobs by skipping rows in logits added for the prompt
+        # tokens (prompt logprobs are not penalized)
+        if (i < sampling_metadata.num_prompts
+                and sampling_params.prompt_logprobs is not None):
+            assert len(seq_ids) == 1
+            start_idx += sampling_metadata.prompt_lens[i] - 1
+
+        min_tokens = sampling_params.min_tokens
+        if min_tokens > 0:
+            seqs_to_penalize = []
+            for i, seq_id in enumerate(seq_ids):
+                seq_data = sampling_metadata.seq_data[seq_id]
+                if len(seq_data.output_token_ids) < min_tokens:
+                    seqs_to_penalize.append(i)
+
+            if seqs_to_penalize:
+                # convert to the index into logits
+                seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
+                # use set() to remove any duplicates
+                token_ids_to_penalize = set(sampling_params.stop_token_ids +
+                                            [sampling_params.eos_token_id])
+                # itertools.product pairs each seq index with every token id
+                logits_to_penalize.extend(
+                    itertools.product(seqs_to_penalize, token_ids_to_penalize))
+
+        start_idx += len(seq_ids)
+
+    if logits_to_penalize:
+        # use zip and * to group indices along each dimension
+        # eg. [ (1,2), (1,3), (5,6) ] -> ( (1,1,5), (2,3,6) )
+        logits[tuple(zip(*logits_to_penalize))] = -float("inf")
+
+    # verifies that no rows in logits were missed unexpectedly
+    assert start_idx == logits.shape[0]
     return logits
 
 
@@ -366,11 +395,13 @@ def _multinomial(
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
 
-def _sample(
+def _sample_with_torch(
     probs: torch.Tensor,
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-) -> List[Tuple[List[int], List[int]]]:
+    include_gpu_probs_tensor: bool,
+    modify_greedy_probs: bool,
+) -> Tuple[List[Tuple[List[int], List[int]]], Optional[torch.Tensor]]:
     categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
@@ -382,10 +413,19 @@ def _sample(
     sample_metadata = {}
     multinomial_samples = {}
 
+    # Create output tensor for sampled token ids.
+    if include_gpu_probs_tensor:
+        sampled_token_ids_tensor = torch.empty(logprobs.shape[0],
+                                               1,
+                                               dtype=torch.long,
+                                               device=logprobs.device)
+    else:
+        sampled_token_ids_tensor = None
+
     # Counterintiutively, having two loops here is actually faster.
     # The first loop can run without waiting on GPU<->CPU sync.
     for sampling_type in SamplingType:
-        sample_indices = categorized_sample_indices[sampling_type]
+        sample_indices = categorized_sample_indices[sampling_type][:, 0]
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
@@ -394,26 +434,53 @@ def _sample(
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
         sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
                                           is_prompts, sample_indices)
+        long_sample_indices = sample_indices.long()
+
         if sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[sample_indices], dim=-1)
+            greedy_samples = torch.argmax(logprobs[long_sample_indices],
+                                          dim=-1)
+
+            if include_gpu_probs_tensor:
+                # Store sampled tokens in output tensor.
+                sampled_token_ids_tensor[
+                    long_sample_indices] = greedy_samples.unsqueeze(-1)
+
+            if modify_greedy_probs:
+                # If required, modify the probabilities such that sampling from
+                # the modified distribution would always sample the argmax
+                # token id.
+                _modify_greedy_probs_inplace(logprobs, probs,
+                                             long_sample_indices,
+                                             greedy_samples)
+
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
-            max_best_of = 1
+            max_best_of_in_batch = 1
             for seq_group, is_prompt in zip(seq_groups, is_prompts):
                 if is_prompt:
                     _, sampling_params = seq_group
-                    max_best_of = max(max_best_of, sampling_params.best_of)
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
             seeded_args = {} if sampling_type == SamplingType.RANDOM else {
                 "seq_groups": seq_groups,
                 "generators": sampling_metadata.generators,
             }
+
             multinomial_samples[sampling_type] = _multinomial(
-                probs[sample_indices], max_best_of, **seeded_args)
+                probs[long_sample_indices], max_best_of_in_batch,
+                **seeded_args)
+
+            if include_gpu_probs_tensor:
+                # Store sampled tokens in output tensor.
+                sampled_token_ids_tensor[
+                    long_sample_indices] = multinomial_samples[sampling_type]
+
         elif sampling_type == SamplingType.BEAM:
             beam_search_logprobs = logprobs[sample_indices]
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
 
     # GPU<->CPU sync happens in the loop below.
+    # This also converts the sample output to Python objects.
 
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
@@ -435,7 +502,124 @@ def _sample(
         sample_results_dict[i]
         for i in range(len(sampling_metadata.seq_groups))
     ]
+    return sample_results, sampled_token_ids_tensor
+
+
+def _sample_with_triton_kernel(
+    probs: torch.Tensor,
+    logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata,
+    sampling_tensors: SamplingTensors,
+) -> List[Tuple[List[int], List[int]]]:
+    categorized_seq_group_ids = {t: [] for t in SamplingType}
+    categorized_sample_indices = sampling_metadata.categorized_sample_indices
+    for i, seq_group in enumerate(sampling_metadata.seq_groups):
+        _, sampling_params = seq_group
+        sampling_type = sampling_params.sampling_type
+        categorized_seq_group_ids[sampling_type].append(i)
+
+    sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
+    sample_metadata = {}
+    max_best_of_in_batch = 1
+
+    # Counterintiutively, having two loops here is actually faster.
+    # The first loop can run without waiting on GPU<->CPU sync.
+    for sampling_type in SamplingType:
+        sample_indices = categorized_sample_indices[sampling_type][:, 0]
+        sampled_token_indices = categorized_sample_indices[sampling_type][:, 1]
+        num_tokens = len(sample_indices)
+        if num_tokens == 0:
+            continue
+        seq_group_ids = categorized_seq_group_ids[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_ids]
+        is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_ids]
+        sample_metadata[sampling_type] = (seq_group_ids, seq_groups,
+                                          is_prompts, sample_indices,
+                                          sampled_token_indices)
+        if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
+                             SamplingType.RANDOM_SEED):
+            for seq_group, is_prompt in zip(seq_groups, is_prompts):
+                if is_prompt:
+                    _, sampling_params = seq_group
+                    max_best_of_in_batch = max(max_best_of_in_batch,
+                                               sampling_params.best_of)
+        elif sampling_type == SamplingType.BEAM:
+            beam_search_logprobs = logprobs[sample_indices]
+        else:
+            raise ValueError(f"Unsupported sampling type: {sampling_type}")
+
+    sampled_tokens, _, _ = sample_triton(
+        probs=probs,
+        seeds=sampling_tensors.sampling_seeds,
+        max_best_of=max_best_of_in_batch,
+        sample_indices=sampling_tensors.sample_indices,
+        logprobs=logprobs,
+        # don't save logprobs because we have logic for that below
+        # TODO: use this instead of the CPU-based logic below
+        save_logprobs=False,
+    )
+
+    # GPU<->CPU sync happens in the loop below.
+
+    for sampling_type in SamplingType:
+        if sampling_type not in sample_metadata:
+            continue
+        (seq_group_ids, seq_groups, is_prompts, sample_indices,
+         sampled_token_indices) = sample_metadata[sampling_type]
+        if sampling_type == SamplingType.GREEDY:
+            sample_results = _greedy_sample(
+                seq_groups, sampled_tokens[sampled_token_indices][:, 0])
+        elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
+            sample_results = _random_sample(
+                seq_groups, is_prompts, sampled_tokens[sampled_token_indices])
+        elif sampling_type == SamplingType.BEAM:
+            sample_results = _beam_search_sample(seq_groups, is_prompts,
+                                                 sampling_metadata.seq_data,
+                                                 beam_search_logprobs)
+        sample_results_dict.update(zip(seq_group_ids, sample_results))
+
+    sample_results = [
+        sample_results_dict[i]
+        for i in range(len(sampling_metadata.seq_groups))
+    ]
     return sample_results
+
+
+def _sample(
+    probs: torch.Tensor, logprobs: torch.Tensor,
+    sampling_metadata: SamplingMetadata, sampling_tensors: SamplingTensors,
+    include_gpu_probs_tensor: bool, modify_greedy_probs: bool
+) -> Tuple[List[Tuple[List[int], List[int]]], Optional[torch.Tensor]]:
+    return _sample_with_torch(
+        probs,
+        logprobs,
+        sampling_metadata,
+        include_gpu_probs_tensor=include_gpu_probs_tensor,
+        modify_greedy_probs=modify_greedy_probs,
+    )
+
+    # TODO: Enable once Triton kernel & associated code is faster.
+    # return _sample_with_triton_kernel(probs, logprobs, sampling_metadata,
+    #                                   sampling_tensors)
+
+
+def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+    """
+    This function calculates the ranks of the chosen tokens in a logprob tensor.
+
+    Args:
+        x (torch.Tensor): 2D logprob tensor of shape (N, M)
+                        where N is the no. of tokens and M is the vocab dim.
+        indices (torch.Tensor): List of chosen token indices.
+
+    Returns:
+        torch.Tensor: 1D tensor of shape (N,) where N is the no. of tokens.
+                    Each element in the returned tensor represents the rank 
+                    of the chosen token in the input logprob tensor.
+    """
+    vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
+             indices]
+    return (x > vals[:, None]).long().sum(1).add_(1)
 
 
 def _get_logprobs(
@@ -447,7 +631,8 @@ def _get_logprobs(
     # Prepare query indices
     batched_logprobs_query_seq_indices: List[int] = []
     batched_logprobs_query_token_indices: List[int] = []
-    largest_num_logprobs = 0
+    # at least get one logprob for each token
+    largest_num_logprobs = 1
     sample_idx = 0
     for i, (seq_group, sample_result) in enumerate(
             zip(sampling_metadata.seq_groups, sample_results)):
@@ -475,11 +660,20 @@ def _get_logprobs(
         sample_idx += num_parent_seqs
     assert sample_idx == logprobs.size(0)
 
+    batched_logprobs_query_seq_indices_gpu = torch.tensor(
+        batched_logprobs_query_seq_indices, device=logprobs.device)
+    batched_logprobs_query_token_indices_gpu = torch.tensor(
+        batched_logprobs_query_token_indices, device=logprobs.device)
+
     # Batched query for logprobs of selected token
     batched_logprobs_query_result = logprobs[[
-        batched_logprobs_query_seq_indices,
-        batched_logprobs_query_token_indices
+        batched_logprobs_query_seq_indices_gpu,
+        batched_logprobs_query_token_indices_gpu
     ]]
+
+    batched_ranks_query_result = _get_ranks(
+        logprobs[batched_logprobs_query_seq_indices_gpu],
+        batched_logprobs_query_token_indices_gpu)
 
     # Batched query for logprobs of topk tokens
     if largest_num_logprobs > 0:
@@ -492,6 +686,7 @@ def _get_logprobs(
         top_logprobs, top_token_ids = None, None
 
     batched_logprobs_query_result = batched_logprobs_query_result.cpu()
+    batched_ranks_query_result = batched_ranks_query_result.cpu()
 
     # Gather results
     result_prompt_logprobs: List[Optional[PromptLogprobs]] = []
@@ -507,20 +702,27 @@ def _get_logprobs(
         if (i < sampling_metadata.num_prompts
                 and sampling_params.prompt_logprobs is not None):
             num_logprobs = sampling_params.prompt_logprobs
-            prompt_len = sampling_metadata.prompt_lens[i]
             prompt_tokens = sampling_metadata.seq_data[
                 seq_ids[0]].prompt_token_ids
             group_prompt_logprobs: PromptLogprobs = [None]
             for token_id in prompt_tokens[1:]:
                 prompt_logprobs_dict = {
                     token_id:
-                    batched_logprobs_query_result[query_result_idx].item()
+                    (batched_logprobs_query_result[query_result_idx].item(),
+                     batched_ranks_query_result[query_result_idx].item())
                 }
                 if num_logprobs > 0:
                     prompt_logprobs_dict.update(
-                        zip(top_token_ids[sample_idx, :num_logprobs].tolist(),
-                            top_logprobs[sample_idx, :num_logprobs].tolist()))
-                group_prompt_logprobs.append(prompt_logprobs_dict)
+                        zip(
+                            top_token_ids[sample_idx, :num_logprobs].tolist(),
+                            zip(
+                                top_logprobs[
+                                    sample_idx, :num_logprobs].tolist(),
+                                range(1, num_logprobs + 1))))
+                group_prompt_logprobs.append({
+                    token_id: Logprob(*logprob_rank)
+                    for token_id, logprob_rank in prompt_logprobs_dict.items()
+                })
                 sample_idx += 1
                 query_result_idx += 1
             result_prompt_logprobs.append(group_prompt_logprobs)
@@ -535,21 +737,78 @@ def _get_logprobs(
         for next_token_id, parent_id in zip(next_token_ids, parent_ids):
             sample_logprobs_dict = {
                 next_token_id:
-                batched_logprobs_query_result[query_result_idx].item()
+                (batched_logprobs_query_result[query_result_idx].item(),
+                 batched_ranks_query_result[query_result_idx].item())
             }
             query_result_idx += 1
-            if num_logprobs > 0:
+            if num_logprobs >= 0:
                 sample_logprobs_dict.update(
                     zip(
                         top_token_ids[sample_idx +
                                       parent_id, :num_logprobs].tolist(),
-                        top_logprobs[sample_idx +
-                                     parent_id, :num_logprobs].tolist()))
-            group_sample_logprobs.append(sample_logprobs_dict)
+                        zip(
+                            top_logprobs[sample_idx +
+                                         parent_id, :num_logprobs].tolist(),
+                            range(1, num_logprobs + 1))))
+            group_sample_logprobs.append({
+                token_id: Logprob(*logprob_rank)
+                for token_id, logprob_rank in sample_logprobs_dict.items()
+            })
         result_sample_logprobs.append(group_sample_logprobs)
         sample_idx += len(seq_ids)
 
     return result_prompt_logprobs, result_sample_logprobs
+
+
+def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
+                                 sample_indices: torch.Tensor,
+                                 greedy_samples: torch.Tensor) -> None:
+    """Modify the probability distributions of the greedily-sampled tokens such
+    that each sampled token has a "probability" of 1.0. This is required by
+    speculative decoding, which depends on the sampling method being encoded
+    within the probability distribution for correctness.
+
+    # Why do we only need to do this for greedy sampling?
+
+    vLLM's sampler performs the following steps for greedy or multinomial
+    (random) sampling:
+        1. Get logits from model.
+        2. Modify logits according to per-sequence sampling parameters.
+            - Multiply by temperature, top-k and top-p masking, penalize tokens
+                according to their frequency, etc.
+        3. Sample a token.
+            - Random sampling simply samples from the modified probability
+                distribution.
+            - Greedy sampling performs `argmax` to obtain the token with the
+                highest likelihood.
+    
+    Ignoring greedy sampling for a moment, we find that the computed probability
+    distribution has the following property: we can sample from it independently
+    and find that the token sampled by the Sampler has a frequency corresponding
+    to how often we see it in our sampling. In other words, for tokens sampled
+    with vLLM's random SamplingType, the computed probability distribution
+    encodes the sampling methodology completely.
+
+    Greedy sampling does not normally have this property. vLLM modifies logits
+    according to sampling params, then performs `argmax`, then returns the
+    sampled token and the computed probability distribution. If we sample from
+    the distribution, we'll find the likelihood of the greedily-sampled token
+    is not always 1.0.
+
+    Since lossless speculative decoding requires that the sampling methodology
+    be encoded within the probability distribution, we are motivated to modify
+    the probability distribution such that the sampled token has probability 1
+    when speculative decoding is used.
+
+    NOTE: Alternatively, we could use an extremely low temperature to achieve
+    greedy sampling using multinomial computation and unite the codepaths. This
+    has implications on the overall design of the sampler, e.g. how to record
+    accurate logprobs for the user, so this improvement is deferred to later.
+    """
+    logprobs[sample_indices, :] = -float('inf')
+    logprobs[sample_indices, greedy_samples] = 0.0
+    probs[sample_indices, :] = 0
+    probs[sample_indices, greedy_samples] = 1.0
 
 
 def _build_sampler_output(
@@ -557,7 +816,17 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
+    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor]],
 ) -> SamplerOutput:
+    """Construct Python objects with the output of sampling.
+
+    Args:
+        on_device_tensors: Tuple containing on-device tensors with the
+            probabilities used in sampling and the sampled token ids. This
+            allows post-processing without copies to CPU/serialization, e.g. in
+            speculative decoding rejection sampling.
+    """
+
     sampler_output = []
     for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
@@ -573,4 +842,15 @@ def _build_sampler_output(
                 SequenceOutput(seq_ids[parent_id], next_token_id, logprobs))
         sampler_output.append(
             SequenceGroupOutput(seq_outputs, group_prompt_logprobs))
-    return sampler_output
+
+    # If not specified, store None values in SamplerOutput.
+    if on_device_tensors is not None:
+        sampled_token_probs, sampled_token_ids = on_device_tensors
+    else:
+        sampled_token_probs, sampled_token_ids = (None, None)
+
+    return SamplerOutput(
+        outputs=sampler_output,
+        sampled_token_probs=sampled_token_probs,
+        sampled_token_ids=sampled_token_ids,
+    )
