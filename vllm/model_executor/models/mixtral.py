@@ -122,7 +122,7 @@ class MixtralMoE(nn.Module):
             requires_grad=False) if self.use_fp8 else None
 
         # Scaling factors for FP8 activations
-        need_act_scales = not self.use_fp8 or linear_method.quant_config.act_scaling == "static"
+        need_act_scales = self.use_fp8 and linear_method.quant_config.act_scaling == "static"
         self.as_scale = nn.Parameter(
             torch.zeros(1, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
