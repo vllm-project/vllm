@@ -28,9 +28,10 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
-# {token_id -> logprob} per each prompt token.
+# {token_id -> logprob} per each sequence group. None if the corresponding
+# sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
-# {token_id -> logprob} for each sampled token.
+# {token_id -> logprob} for each sequence group.
 SampleLogprobs = List[Dict[int, Logprob]]
 
 

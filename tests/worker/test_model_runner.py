@@ -2,8 +2,8 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
-from vllm.vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 
