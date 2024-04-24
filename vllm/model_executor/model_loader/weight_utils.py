@@ -136,13 +136,13 @@ def get_quant_config(model_config: ModelConfig,
         hf_folder = model_name_or_path
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
+    possible_config_filenames = quant_cls.get_config_filenames()
 
     quant_config_files = [
         f for f in config_files if any(
             f.endswith(x) for x in possible_config_filenames)
     ]
 
-    possible_config_filenames = quant_cls.get_config_filenames()
     # If the quantization config is optional and not provided, use the default config.
     if quant_cls.getattr("config_file_optional", False) and not quant_config_files:
         return quant_cls()
