@@ -83,9 +83,12 @@ def test_logits_processors(seed: int, device: str):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                 prompt_lens,
-                                                 subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory)
     logits_processor_output = logits_processor(
         embedding=None,
         hidden_states=input_tensor,

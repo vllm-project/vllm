@@ -55,6 +55,7 @@ def _do_sample(
     sampler: MockLogitsSampler,
     model_runner: ModelRunner,
     sampling_params: SamplingParams,
+    device: str,
 ):
     seq_group_metadata_list = []
     prompt_lens = []
@@ -69,9 +70,12 @@ def _do_sample(
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                 prompt_lens,
-                                                 subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=device,
+        pin_memory=model_runner.pin_memory)
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
@@ -86,7 +90,7 @@ def test_sampler_all_greedy(seed: int, device: str):
 
     sampling_params = SamplingParams(temperature=0)
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -112,7 +116,7 @@ def test_sampler_all_random(seed: int, device: str):
         n=random.randint(1, 10),
     )
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -138,7 +142,7 @@ def test_sampler_all_random_seed(seed: int, device: str):
         seed=random.randint(0, 10000),
     )
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -161,10 +165,10 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
         seed=random.randint(0, 10000),
     )
     first_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                      model_runner, sampling_params)
+                                      model_runner, sampling_params, device)
 
     second_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                       model_runner, sampling_params)
+                                       model_runner, sampling_params, device)
 
     assert first_sampler_output == second_sampler_output
 
@@ -184,7 +188,8 @@ def test_sampler_all_beam(seed: int, device: str):
         best_of=2,
         use_beam_search=True,
     )
-    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params)
+    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params,
+               device)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
@@ -447,7 +452,9 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             prompt_lens=prompt_lens if prompt_lens else None,
-            subquery_lens=prompt_lens if prompt_lens else None)
+            subquery_lens=prompt_lens if prompt_lens else None,
+            device=device,
+            pin_memory=model_runner.pin_memory)
         # the logits tensor is modified in-place by the sampler
         _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
@@ -531,9 +538,12 @@ def test_sampler_mixed(seed: int, device: str):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     def test_sampling(model_runner: ModelRunner):
-        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            prompt_lens,
+            subquery_lens=prompt_lens,
+            device=device,
+            pin_memory=model_runner.pin_memory)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -629,9 +639,12 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
-                                                 prompt_lens,
-                                                 subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=device,
+        pin_memory=model_runner.pin_memory)
 
     sample_probs = None
 
