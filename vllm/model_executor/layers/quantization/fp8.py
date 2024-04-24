@@ -13,6 +13,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 class FP8Config(QuantizationConfig):
     """Config class for FP8."""
 
+    config_file_optional = True
+
     def __init__(
         self,
         act_scaling: str="dynamic",
