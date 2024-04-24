@@ -367,7 +367,6 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
                 "`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
 
         self.head_size = head_size
-        self.base = base
         self.max_position_embeddings = max_position_embeddings
         self.original_max_position_embeddings = original_max_position_embeddings
         self.base = base
