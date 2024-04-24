@@ -727,4 +727,5 @@ class AsyncLLMEngine:
                 raise RuntimeError("Engine is dead.") from e
         else:
             await self.engine.check_health_async()
-        logger.debug(f"Health check took {time.perf_counter()-t}s")
+        logger_data = {"perf_counter": f"{time.perf_counter()-t}"}
+        logger.debug(f"Health check took {time.perf_counter()-t}s", extra=logger_data)

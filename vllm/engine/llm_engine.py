@@ -261,8 +261,12 @@ class LLMEngine:
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
+            logger_data = {
+                "num_gpu_blocks": num_gpu_blocks,
+                "num_gpu_blocks_override": num_gpu_blocks_override,
+            }
             logger.info(f"Overriding {num_gpu_blocks=} with "
-                        f"{num_gpu_blocks_override=}")
+                        f"{num_gpu_blocks_override=}", extra=logger_data)
             num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
