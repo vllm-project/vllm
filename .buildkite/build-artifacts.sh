@@ -10,6 +10,7 @@ docker build --build-arg max_jobs=16 \
     --build-arg python_version=3.8 \
     --target build \
     -f Dockerfile \
+    --progress plain \
     -t vllm-build \
     .
 

@@ -79,6 +79,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 ENV SCCACHE_GCS_BUCKET=vllm-build-artifacts
 ENV SCCACHE_GCS_RW_MODE=READ_WRITE
 ENV SCCACHE_GCS_KEY_PREFIX=sccache/docker-build/
+RUN sccache --show-stats
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist
 
