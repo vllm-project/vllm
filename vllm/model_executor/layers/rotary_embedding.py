@@ -367,13 +367,10 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
                 "`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
 
         self.head_size = head_size
-        self.rotary_dim = rotary_dim
         self.base = base
-        self.is_neox_style = is_neox_style
-
         self.max_position_embeddings = max_position_embeddings
         self.original_max_position_embeddings = original_max_position_embeddings
-
+        self.base = base
         self.short_factor = short_factor
         self.long_factor = long_factor
         self.short_mscale = short_mscale
@@ -402,7 +399,7 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
     def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
         inv_freq = 1.0 / (rescale_factors * (self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
+            0, self.head_size, 2, dtype=torch.float) / self.head_size)))
         return inv_freq
 
     def _compute_cos_sin_cache(
@@ -437,24 +434,16 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
         self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(
             idx.device)
         idx = torch.add(idx, offsets) if offsets is not None else idx
-
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 
         cos, sin = cos_sin.chunk(2, dim=-1)
-        cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-        sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        cos = cos.repeat(1, 2).unsqueeze(-2)
+        sin = sin.repeat(1, 2).unsqueeze(-2)
 
         query = query * cos + _rotate_neox(query) * sin
         key = key * cos + _rotate_neox(key) * sin
 
-        # Remove batch dimension if it's one
-        if query.shape[0] == 1:
-            query.squeeze_(0)
-            key.squeeze_(0)
-
-        query = query.flatten(-2)
-        key = key.flatten(-2)
-        return query, key
+        return query.flatten(-2), key.flatten(-2)
 
 
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
