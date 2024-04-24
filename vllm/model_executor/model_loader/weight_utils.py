@@ -147,7 +147,7 @@ def get_quant_config(model_config: ModelConfig,
         f for f in config_files if any(
             f.endswith(x) for x in possible_config_filenames)
     ]
-    if len(quant_config_files) == 0:
+    if len(quant_config_files) == 0 and "<optional>" not in possible_config_filenames:
         raise ValueError(
             f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:
