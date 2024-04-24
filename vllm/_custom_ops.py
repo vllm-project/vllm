@@ -154,13 +154,15 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # fp8
-def scaled_fp8_quant(input: torch.Tensor, scale: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+def static_scaled_fp8_quant(input: torch.Tensor, scale: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-    if scale:
-        vllm_ops.static_scaled_fp8_quant(output, input, scale)
-    else:
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
+    vllm_ops.static_scaled_fp8_quant(output, input, scale)
+    return output
+
+def dynamic_scaled_fp8_quant(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+    vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
     return output, scale
 
 

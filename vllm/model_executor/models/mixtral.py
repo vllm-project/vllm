@@ -77,9 +77,7 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
-        # FIXME(pcmoritz): Make this more general to support different
-        # quantization schemes
-        self.use_fp8 = isinstance(linear_method, Fp8LinearMethod)
+        self.linear_method = linear_method
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -111,18 +109,20 @@ class MixtralMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
+        use_fp8 = isinstance(linear_method, Fp8LinearMethod)
+
         # Scaling factors for FP8 weights
         self.ws_scale = nn.Parameter(
             torch.ones(
                 self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
+            requires_grad=False) if use_fp8 else None
         self.w2s_scale = nn.Parameter(
             torch.ones(
                 self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
+            requires_grad=False) if use_fp8 else None
 
         # Scaling factors for FP8 activations
-        need_act_scales = self.use_fp8 and linear_method.quant_config.act_scaling == "static"
+        need_act_scales = use_fp8 and linear_method.quant_config.act_scaling == "static"
         self.as_scale = nn.Parameter(
             torch.zeros(1, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
@@ -156,7 +156,7 @@ class MixtralMoE(nn.Module):
             print("loaded scale", weight_name, param_data)
 
     def process_weights_after_loading(self):
-        if self.use_fp8:
+        if isinstance(self.linear_method, Fp8LinearMethod):
             ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
             w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
             for expert in range(self.num_total_experts):
@@ -179,7 +179,7 @@ class MixtralMoE(nn.Module):
                                         self.top_k,
                                         renormalize=True,
                                         inplace=True,
-                                        use_fp8=self.use_fp8,
+                                        linear_method=self.linear_method,
                                         w1_scale=self.ws_scale,
                                         w2_scale=self.w2s_scale,
                                         a1_scale=self.as_scale,
