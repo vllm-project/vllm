@@ -133,11 +133,15 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
             "model": "JackFram/llama-160m",
         },
     ])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [
+    {
+        "gpu_memory_utilization":0.5,
+    }])
 @pytest.mark.parametrize("test_llm_kwargs", [
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
+        "gpu_memory_utilization":0.5,
     },
 ])
 @pytest.mark.parametrize(
@@ -540,6 +544,45 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                                          force_output_len=True)
 
 
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{  
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+    }]) 
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+{
+    # Identical models.
+    "model": "JackFram/llama-68m",
+    "speculative_model": "JackFram/llama-68m",
+    "num_speculative_tokens": 5,
+},
+{
+    # Distinct models.
+    "model": "JackFram/llama-160m",
+    "speculative_model": "JackFram/llama-68m",
+    "num_speculative_tokens": 5,
+}
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{
+}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "enforce_eager": False,
+}])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("output_len", [128])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_cuda_graph(baseline_llm_generator, test_llm_generator, batch_size, output_len):
+    run_greedy_equality_correctness_test(
+        baseline_llm_generator,
+        test_llm_generator,
+        batch_size,
+        max_output_len=output_len,
+        force_output_len=True,
+    )
+
+
 def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
@@ -581,7 +624,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
     (baseline_batch_tokens,
      baseline_batch_token_ids) = get_output_from_llm_generator(
          baseline_llm_generator, prompts, sampling_params)
-
+    
     assert len(baseline_batch_token_ids) == len(prompts)
     assert len(spec_batch_token_ids) == len(prompts)
 
