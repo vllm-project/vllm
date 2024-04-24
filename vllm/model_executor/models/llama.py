@@ -208,30 +208,39 @@ class LlamaAttention(nn.Module):
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
                 num_past_tokens = context_lens[i] - 1
-                # if num_past_tokens < llama_context_len: continue
                 within_context_len = num_past_tokens < llama_context_len
                 
-                past_keys = {}
+                past_keys = {} # logic bnum => block of keys
                 block_table = block_tables_tensor[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
+                abs_pos = start
                 # loop should have 4096 - 1 iterations if not within_context_len
-                for abs_pos in range(start, end):
+                while abs_pos < end:
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
-                    offset = abs_pos % block_size
+                    offset_start = abs_pos % block_size
+                    offset_end = block_size if end - abs_pos > block_size else end - abs_pos
+                    num_tokens = offset_end - offset_start
+
+                    # past_key shape: [num_heads, head_size/x, num_tokens, x]
+                    past_key = key_cache[phys_bnum, :, :, offset_start : offset_end, :]
+                    past_keys[logic_bnum] = past_key.clone()
 
                     # rotate k based on new relative pos
-                    past_key = key_cache[phys_bnum, :, :, offset, :]
-                    past_keys[abs_pos] = past_key.clone()
                     p = abs_pos if within_context_len else abs_pos - start + block_size
-                    pos = torch.tensor([p], device=positions.device)
+                    pos = [p + off for off in range(num_tokens)] # sus
+                    pos = torch.tensor(pos, device=positions.device)
 
-                    # would reshape(-1) work for rope?
-                    past_key = self.rotary_emb._forward_single(pos, past_key.reshape(-1).unsqueeze(0))
-                    # this reshape is also sus
-                    key_cache[phys_bnum, :, :, offset, :] = past_key.squeeze(0).reshape(
-                        key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
+                    # sus reshapes
+                    past_key = past_key.permute((2, 0, 1, 3)).reshape(num_tokens, -1)
+                    past_key = self.rotary_emb._forward_single(pos, past_key)
+                    past_key = past_key.reshape(num_tokens, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
+                    key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_key.permute((1, 2, 0, 3))
+                    
+                    # rotary emb kernel has almost 2x speedup BUT it's incorrect for some reason
+                    
+                    abs_pos += num_tokens
 
                 original_keys.append(past_keys)
                 
@@ -267,11 +276,16 @@ class LlamaAttention(nn.Module):
                 block_table = original_block_tables[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
-                for abs_pos in range(start, end):
+                abs_pos = start
+                while abs_pos < end:
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
-                    offset = abs_pos % block_size
-                    key_cache[phys_bnum, :, :, offset, :] = past_keys[abs_pos]
+                    offset_start = abs_pos % block_size
+                    offset_end = block_size if end - abs_pos > block_size else end - abs_pos
+                    num_tokens = offset_end - offset_start
+                    
+                    key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_keys[logic_bnum]
+                    abs_pos += num_tokens
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields

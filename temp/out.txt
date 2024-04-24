@@ -1,1 +1,450 @@
-[CompletionOutput(index=0, text='\n\nThis paper describes the Paxos algorithm for achieving consensus in a distributed system. The algorithm uses a proposer, acceptors, and learners to achieve consensus. The algorithm uses a natural number called the “number of accept', token_ids=[13, 13, 4013, 5650, 16612, 278, 349, 1165, 359, 5687, 363, 3657, 15387, 1136, 8841, 297, 263, 13235, 1788, 29889, 450, 5687, 3913, 263, 9551, 261, 29892, 3544, 943, 29892, 322, 5110, 414, 304, 6176, 1136, 8841, 29889, 450, 5687, 3913, 263, 5613, 1353, 2000, 278, 1346, 4537, 310, 3544], cumulative_logprob=-29.871888215385752, logprobs=None, finish_reason=length, stop_reason=None)]
+INFO 04-24 22:48:47 pynccl.py:58] Loading nccl from library /root/.config/vllm/nccl/cu12/libnccl.so.2.18.1
+INFO 04-24 22:48:48 llm_engine.py:81] Initializing an LLM engine (v0.4.0.post1) with config: model='lmsys/vicuna-7b-v1.5', speculative_config=None, tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, seed=0)
+INFO 04-24 22:48:48 selector.py:77] Cannot use FlashAttention backend because the flash_attn package is not found. Please install it for better performance.
+INFO 04-24 22:48:48 selector.py:33] Using XFormers backend.
+INFO 04-24 22:48:50 weight_utils.py:194] Using model weights format ['*.bin']
+INFO 04-24 22:48:58 model_runner.py:164] Loading model weights took 12.5523 GB
+	execute_model: token id: tensor([0, 0, 0,  ..., 0, 0, 0], device='cuda:0'), positions: tensor([ 0,  1,  2,  ..., 13, 14, 15], device='cuda:0')
+INFO 04-24 22:48:59 gpu_executor.py:81] # GPU blocks: 3394, # CPU blocks: 512
+max model len 4096
+	execute_model: token id: tensor([    1,  2266,   338,  ...,   363,   592, 29973], device='cuda:0'), positions: tensor([   0,    1,    2,  ..., 4065, 4066, 4067], device='cuda:0')
+		FREE BLOCKS 3139
+INFO 04-24 22:49:01 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([13], device='cuda:0'), positions: tensor([4068], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([13], device='cuda:0'), positions: tensor([4069], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([4013], device='cuda:0'), positions: tensor([4070], device='cuda:0')
+		FREE BLOCKS 3139
+INFO 04-24 22:49:07 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5650], device='cuda:0'), positions: tensor([4071], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([16612], device='cuda:0'), positions: tensor([4072], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4073], device='cuda:0')
+		FREE BLOCKS 3139
+INFO 04-24 22:49:13 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([349], device='cuda:0'), positions: tensor([4074], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([1165], device='cuda:0'), positions: tensor([4075], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([359], device='cuda:0'), positions: tensor([4076], device='cuda:0')
+		FREE BLOCKS 3139
+INFO 04-24 22:49:20 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4077], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([363], device='cuda:0'), positions: tensor([4078], device='cuda:0')
+		FREE BLOCKS 3139
+	execute_model: token id: tensor([3657], device='cuda:0'), positions: tensor([4079], device='cuda:0')
+		FREE BLOCKS 3139
+INFO 04-24 22:49:26 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([15387], device='cuda:0'), positions: tensor([4080], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([1136], device='cuda:0'), positions: tensor([4081], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([8841], device='cuda:0'), positions: tensor([4082], device='cuda:0')
+		FREE BLOCKS 3138
+INFO 04-24 22:49:32 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([297], device='cuda:0'), positions: tensor([4083], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4084], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([13235], device='cuda:0'), positions: tensor([4085], device='cuda:0')
+		FREE BLOCKS 3138
+INFO 04-24 22:49:38 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1788], device='cuda:0'), positions: tensor([4086], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4087], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4088], device='cuda:0')
+		FREE BLOCKS 3138
+INFO 04-24 22:49:45 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4089], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([3913], device='cuda:0'), positions: tensor([4090], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4091], device='cuda:0')
+		FREE BLOCKS 3138
+INFO 04-24 22:49:51 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([9551], device='cuda:0'), positions: tensor([4092], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([261], device='cuda:0'), positions: tensor([4093], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([29892], device='cuda:0'), positions: tensor([4094], device='cuda:0')
+		FREE BLOCKS 3138
+INFO 04-24 22:49:57 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([3544], device='cuda:0'), positions: tensor([4095], device='cuda:0')
+		FREE BLOCKS 3138
+	execute_model: token id: tensor([943], device='cuda:0'), positions: tensor([4096], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([29892], device='cuda:0'), positions: tensor([4097], device='cuda:0')
+		FREE BLOCKS 3137
+INFO 04-24 22:50:03 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([322], device='cuda:0'), positions: tensor([4098], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([5110], device='cuda:0'), positions: tensor([4099], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([414], device='cuda:0'), positions: tensor([4100], device='cuda:0')
+		FREE BLOCKS 3137
+INFO 04-24 22:50:10 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4101], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([6176], device='cuda:0'), positions: tensor([4102], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([1136], device='cuda:0'), positions: tensor([4103], device='cuda:0')
+		FREE BLOCKS 3137
+INFO 04-24 22:50:16 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([8841], device='cuda:0'), positions: tensor([4104], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4105], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4106], device='cuda:0')
+		FREE BLOCKS 3137
+INFO 04-24 22:50:22 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4107], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([3913], device='cuda:0'), positions: tensor([4108], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4109], device='cuda:0')
+		FREE BLOCKS 3137
+INFO 04-24 22:50:28 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5613], device='cuda:0'), positions: tensor([4110], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([1353], device='cuda:0'), positions: tensor([4111], device='cuda:0')
+		FREE BLOCKS 3137
+	execute_model: token id: tensor([2000], device='cuda:0'), positions: tensor([4112], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:50:35 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4113], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([1346], device='cuda:0'), positions: tensor([4114], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([4537], device='cuda:0'), positions: tensor([4115], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:50:41 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([310], device='cuda:0'), positions: tensor([4116], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([3544], device='cuda:0'), positions: tensor([4117], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([943], device='cuda:0'), positions: tensor([4118], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:50:47 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([30024], device='cuda:0'), positions: tensor([4119], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4120], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([9801], device='cuda:0'), positions: tensor([4121], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:50:53 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([393], device='cuda:0'), positions: tensor([4122], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([871], device='cuda:0'), positions: tensor([4123], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([697], device='cuda:0'), positions: tensor([4124], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:51:00 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4125], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4126], device='cuda:0')
+		FREE BLOCKS 3136
+	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4127], device='cuda:0')
+		FREE BLOCKS 3136
+INFO 04-24 22:51:06 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4128], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4129], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4130], device='cuda:0')
+		FREE BLOCKS 3135
+INFO 04-24 22:51:12 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([3913], device='cuda:0'), positions: tensor([4131], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4132], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([13638], device='cuda:0'), positions: tensor([4133], device='cuda:0')
+		FREE BLOCKS 3135
+INFO 04-24 22:51:18 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1136], device='cuda:0'), positions: tensor([4134], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([8841], device='cuda:0'), positions: tensor([4135], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([9608], device='cuda:0'), positions: tensor([4136], device='cuda:0')
+		FREE BLOCKS 3135
+INFO 04-24 22:51:25 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4137], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([6755], device='cuda:0'), positions: tensor([4138], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4139], device='cuda:0')
+		FREE BLOCKS 3135
+INFO 04-24 22:51:31 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4140], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4141], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([960], device='cuda:0'), positions: tensor([4142], device='cuda:0')
+		FREE BLOCKS 3135
+INFO 04-24 22:51:37 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4143], device='cuda:0')
+		FREE BLOCKS 3135
+	execute_model: token id: tensor([24963], device='cuda:0'), positions: tensor([4144], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([411], device='cuda:0'), positions: tensor([4145], device='cuda:0')
+		FREE BLOCKS 3134
+INFO 04-24 22:51:43 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4146], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([325], device='cuda:0'), positions: tensor([4147], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4148], device='cuda:0')
+		FREE BLOCKS 3134
+INFO 04-24 22:51:50 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4149], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([29892], device='cuda:0'), positions: tensor([4150], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([769], device='cuda:0'), positions: tensor([4151], device='cuda:0')
+		FREE BLOCKS 3134
+INFO 04-24 22:51:56 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1432], device='cuda:0'), positions: tensor([4152], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([24963], device='cuda:0'), positions: tensor([4153], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([411], device='cuda:0'), positions: tensor([4154], device='cuda:0')
+		FREE BLOCKS 3134
+INFO 04-24 22:52:02 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1353], device='cuda:0'), positions: tensor([4155], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([302], device='cuda:0'), positions: tensor([4156], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([393], device='cuda:0'), positions: tensor([4157], device='cuda:0')
+		FREE BLOCKS 3134
+INFO 04-24 22:52:09 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4158], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4159], device='cuda:0')
+		FREE BLOCKS 3134
+	execute_model: token id: tensor([756], device='cuda:0'), positions: tensor([4160], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:15 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4161], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([325], device='cuda:0'), positions: tensor([4162], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4163], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:21 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4164], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4165], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([7344], device='cuda:0'), positions: tensor([4166], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:27 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([29879], device='cuda:0'), positions: tensor([4167], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([15332], device='cuda:0'), positions: tensor([4168], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([322], device='cuda:0'), positions: tensor([4169], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:33 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([301], device='cuda:0'), positions: tensor([4170], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([20193], device='cuda:0'), positions: tensor([4171], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([4426], device='cuda:0'), positions: tensor([4172], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:40 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4173], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([739], device='cuda:0'), positions: tensor([4174], device='cuda:0')
+		FREE BLOCKS 3133
+	execute_model: token id: tensor([3913], device='cuda:0'), positions: tensor([4175], device='cuda:0')
+		FREE BLOCKS 3133
+INFO 04-24 22:52:46 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([19012], device='cuda:0'), positions: tensor([4176], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([7274], device='cuda:0'), positions: tensor([4177], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4178], device='cuda:0')
+		FREE BLOCKS 3132
+INFO 04-24 22:52:52 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([9801], device='cuda:0'), positions: tensor([4179], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([393], device='cuda:0'), positions: tensor([4180], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([3544], device='cuda:0'), positions: tensor([4181], device='cuda:0')
+		FREE BLOCKS 3132
+INFO 04-24 22:52:58 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([943], device='cuda:0'), positions: tensor([4182], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([437], device='cuda:0'), positions: tensor([4183], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([451], device='cuda:0'), positions: tensor([4184], device='cuda:0')
+		FREE BLOCKS 3132
+INFO 04-24 22:53:05 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([3544], device='cuda:0'), positions: tensor([4185], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([901], device='cuda:0'), positions: tensor([4186], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([1135], device='cuda:0'), positions: tensor([4187], device='cuda:0')
+		FREE BLOCKS 3132
+INFO 04-24 22:53:11 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([697], device='cuda:0'), positions: tensor([4188], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([24963], device='cuda:0'), positions: tensor([4189], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([411], device='cuda:0'), positions: tensor([4190], device='cuda:0')
+		FREE BLOCKS 3132
+INFO 04-24 22:53:17 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1353], device='cuda:0'), positions: tensor([4191], device='cuda:0')
+		FREE BLOCKS 3132
+	execute_model: token id: tensor([302], device='cuda:0'), positions: tensor([4192], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([515], device='cuda:0'), positions: tensor([4193], device='cuda:0')
+		FREE BLOCKS 3131
+INFO 04-24 22:53:24 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4194], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([2323], device='cuda:0'), positions: tensor([4195], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([9551], device='cuda:0'), positions: tensor([4196], device='cuda:0')
+		FREE BLOCKS 3131
+INFO 04-24 22:53:30 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([261], device='cuda:0'), positions: tensor([4197], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([322], device='cuda:0'), positions: tensor([4198], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([372], device='cuda:0'), positions: tensor([4199], device='cuda:0')
+		FREE BLOCKS 3131
+INFO 04-24 22:53:36 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([3913], device='cuda:0'), positions: tensor([4200], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([3544], device='cuda:0'), positions: tensor([4201], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([7274], device='cuda:0'), positions: tensor([4202], device='cuda:0')
+		FREE BLOCKS 3131
+INFO 04-24 22:53:42 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4203], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([9801], device='cuda:0'), positions: tensor([4204], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([393], device='cuda:0'), positions: tensor([4205], device='cuda:0')
+		FREE BLOCKS 3131
+INFO 04-24 22:53:49 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5110], device='cuda:0'), positions: tensor([4206], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([414], device='cuda:0'), positions: tensor([4207], device='cuda:0')
+		FREE BLOCKS 3131
+	execute_model: token id: tensor([508], device='cuda:0'), positions: tensor([4208], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:53:55 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([10201], device='cuda:0'), positions: tensor([4209], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([5110], device='cuda:0'), positions: tensor([4210], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4211], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:54:01 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4212], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([393], device='cuda:0'), positions: tensor([4213], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4214], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:54:07 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4215], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4216], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4217], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:54:14 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4218], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4219], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([4780], device='cuda:0'), positions: tensor([4220], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:54:20 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4221], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([2334], device='cuda:0'), positions: tensor([4222], device='cuda:0')
+		FREE BLOCKS 3130
+	execute_model: token id: tensor([29892], device='cuda:0'), positions: tensor([4223], device='cuda:0')
+		FREE BLOCKS 3130
+INFO 04-24 22:54:26 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([372], device='cuda:0'), positions: tensor([4224], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([871], device='cuda:0'), positions: tensor([4225], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([6858], device='cuda:0'), positions: tensor([4226], device='cuda:0')
+		FREE BLOCKS 3129
+INFO 04-24 22:54:32 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4227], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([731], device='cuda:0'), positions: tensor([4228], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([766], device='cuda:0'), positions: tensor([4229], device='cuda:0')
+		FREE BLOCKS 3129
+INFO 04-24 22:54:38 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([12090], device='cuda:0'), positions: tensor([4230], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([1353], device='cuda:0'), positions: tensor([4231], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([287], device='cuda:0'), positions: tensor([4232], device='cuda:0')
+		FREE BLOCKS 3129
+INFO 04-24 22:54:45 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1819], device='cuda:0'), positions: tensor([4233], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([322], device='cuda:0'), positions: tensor([4234], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4235], device='cuda:0')
+		FREE BLOCKS 3129
+INFO 04-24 22:54:51 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([982], device='cuda:0'), positions: tensor([4236], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([363], device='cuda:0'), positions: tensor([4237], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4238], device='cuda:0')
+		FREE BLOCKS 3129
+INFO 04-24 22:54:57 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([9551], device='cuda:0'), positions: tensor([4239], device='cuda:0')
+		FREE BLOCKS 3129
+	execute_model: token id: tensor([261], device='cuda:0'), positions: tensor([4240], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([304], device='cuda:0'), positions: tensor([4241], device='cuda:0')
+		FREE BLOCKS 3128
+INFO 04-24 22:55:03 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([1073], device='cuda:0'), positions: tensor([4242], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4243], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([1353], device='cuda:0'), positions: tensor([4244], device='cuda:0')
+		FREE BLOCKS 3128
+INFO 04-24 22:55:10 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([310], device='cuda:0'), positions: tensor([4245], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([278], device='cuda:0'), positions: tensor([4246], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([9939], device='cuda:0'), positions: tensor([4247], device='cuda:0')
+		FREE BLOCKS 3128
+INFO 04-24 22:55:16 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4248], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([372], device='cuda:0'), positions: tensor([4249], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([756], device='cuda:0'), positions: tensor([4250], device='cuda:0')
+		FREE BLOCKS 3128
+INFO 04-24 22:55:22 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.5 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.8%, CPU KV cache usage: 0.0%
+	execute_model: token id: tensor([7972], device='cuda:0'), positions: tensor([4251], device='cuda:0')
+		FREE BLOCKS 3128
+	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4252], device='cuda:0')
+		FREE BLOCKS 3128
+
+OUTPUT: (186 tokens)
+
+
+This paper describes the Paxos algorithm for achieving consensus in a distributed system. The algorithm uses a proposer, acceptors, and learners to achieve consensus. The algorithm uses a natural number called the “number of acceptors” to ensure that only one value is chosen. The algorithm uses the majority consensus protocol to choose a value. If a proposal with value v is chosen, then every proposal with number n that is chosen has value v. The algorithm maintains safety and liveness properties. It uses prepare requests to ensure that acceptors do not accept more than one proposal with number n from a single proposer and it uses accept requests to ensure that learners can eventually learn the value that is chosen. The algorithm is easy to implement, it only requires a set disjoint numbered values and a way for the proposer to know the number of the highest value it has proposed. 
+
+[CompletionOutput(index=0, text='\n\nThis paper describes the Paxos algorithm for achieving consensus in a distributed system. The algorithm uses a proposer, acceptors, and learners to achieve consensus. The algorithm uses a natural number called the “number of acceptors” to ensure that only one value is chosen. The algorithm uses the majority consensus protocol to choose a value. If a proposal with value v is chosen, then every proposal with number n that is chosen has value v. The algorithm maintains safety and liveness properties. It uses prepare requests to ensure that acceptors do not accept more than one proposal with number n from a single proposer and it uses accept requests to ensure that learners can eventually learn the value that is chosen. The algorithm is easy to implement, it only requires a set disjoint numbered values and a way for the proposer to know the number of the highest value it has proposed.', token_ids=[13, 13, 4013, 5650, 16612, 278, 349, 1165, 359, 5687, 363, 3657, 15387, 1136, 8841, 297, 263, 13235, 1788, 29889, 450, 5687, 3913, 263, 9551, 261, 29892, 3544, 943, 29892, 322, 5110, 414, 304, 6176, 1136, 8841, 29889, 450, 5687, 3913, 263, 5613, 1353, 2000, 278, 1346, 4537, 310, 3544, 943, 30024, 304, 9801, 393, 871, 697, 995, 338, 10434, 29889, 450, 5687, 3913, 278, 13638, 1136, 8841, 9608, 304, 6755, 263, 995, 29889, 960, 263, 24963, 411, 995, 325, 338, 10434, 29892, 769, 1432, 24963, 411, 1353, 302, 393, 338, 10434, 756, 995, 325, 29889, 450, 5687, 7344, 29879, 15332, 322, 301, 20193, 4426, 29889, 739, 3913, 19012, 7274, 304, 9801, 393, 3544, 943, 437, 451, 3544, 901, 1135, 697, 24963, 411, 1353, 302, 515, 263, 2323, 9551, 261, 322, 372, 3913, 3544, 7274, 304, 9801, 393, 5110, 414, 508, 10201, 5110, 278, 995, 393, 338, 10434, 29889, 450, 5687, 338, 4780, 304, 2334, 29892, 372, 871, 6858, 263, 731, 766, 12090, 1353, 287, 1819, 322, 263, 982, 363, 278, 9551, 261, 304, 1073, 278, 1353, 310, 278, 9939, 995, 372, 756, 7972, 29889, 2], cumulative_logprob=-165.06360625178195, logprobs=None, finish_reason=stop, stop_reason=None)]
