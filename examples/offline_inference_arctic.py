@@ -4,15 +4,15 @@ from vllm import LLM, SamplingParams
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
-     "The capital of France is",
-     "The future of AI is",
+    "The capital of France is",
+    "The future of AI is",
 ]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 arctic_model_path = "/checkpoint/arctic"
-llm = LLM(model=arctic_model_path, 
+llm = LLM(model=arctic_model_path,
           quantization="deepspeedfp",
           tensor_parallel_size=8)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
