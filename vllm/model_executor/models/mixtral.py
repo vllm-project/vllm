@@ -115,13 +115,13 @@ class MixtralMoE(nn.Module):
             requires_grad=False) if self.use_fp8 else None
 
         # Scaling factors for FP8 activations
-        static_act_scaling = self.use_fp8 and linear_method.act_scaling == "static"
+        need_act_scales = not self.use_fp8 or linear_method.act_scaling == "static"
         self.as_scale = nn.Parameter(
             torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if static_act_scaling else None
+            requires_grad=False) if need_act_scales else None
         self.a2s_scale = nn.Parameter(
             torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if static_act_scaling else None
+            requires_grad=False) if need_act_scales else None
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
