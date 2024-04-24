@@ -11,6 +11,7 @@ import triton.language as tl
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
