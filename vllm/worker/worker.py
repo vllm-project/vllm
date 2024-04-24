@@ -42,10 +42,11 @@ class Worker(WorkerBase):
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        lora_config: Optional[LoRAConfig]=None,
-        vision_language_config: Optional[VisionLanguageConfig]=None,
-        is_driver_worker: bool=False,
-        speculative_length: int=5, ) -> None:
+        lora_config: Optional[LoRAConfig] = None,
+        vision_language_config: Optional[VisionLanguageConfig] = None,
+        is_driver_worker: bool = False,
+        speculative_length: int = 5,
+        ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -79,7 +80,8 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            speculative_length=speculative_length, )
+            speculative_length=speculative_length, 
+        )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
@@ -162,8 +164,8 @@ class Worker(WorkerBase):
         torch.cuda.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks:
-                         int) -> None:
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
@@ -193,8 +195,11 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def cache_swap(
-        self, blocks_to_swap_in: Dict[int, int], blocks_to_swap_out:
-        Dict[int, int], blocks_to_copy: Dict[int, List[int]], ) -> None:
+        self,
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+    ) -> None:
         # Issue cache operations.
         # TODO(woosuk): Profile swapping overhead and optimize if needed.
         if blocks_to_swap_in:
@@ -207,11 +212,12 @@ class Worker(WorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]]=None,
-        blocks_to_swap_in: Optional[Dict[int, int]]=None,
-        blocks_to_swap_out: Optional[Dict[int, int]]=None,
-        blocks_to_copy: Optional[Dict[int, List[int]]]=None,
-        num_lookahead_slots: int=0, ) -> List[SamplerOutput]:
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
+        blocks_to_swap_in: Optional[Dict[int, int]] = None,
+        blocks_to_swap_out: Optional[Dict[int, int]] = None,
+        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        num_lookahead_slots: int = 0,
+    ) -> List[SamplerOutput]:
 
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
@@ -269,15 +275,17 @@ class Worker(WorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(
-            self.cache_config, self.model_config, self.parallel_config)
+        return CacheEngine.get_cache_block_size(self.cache_config,
+                                                self.model_config,
+                                                self.parallel_config)
 
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
-    distributed_init_method: Optional[str]=None,
-    local_rank: int=-1, ) -> None:
+    distributed_init_method: Optional[str] = None,
+    local_rank: int=-1, 
+) -> None:
     """Initialize the distributed environment."""
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
