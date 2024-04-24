@@ -221,10 +221,10 @@ class ModelRunner:
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
         k = self.speculative_length
+        max_context_len = self.max_context_len_to_capture
         if k : # able speculative decoding w/ lookahead 
-            return self.max_context_len_to_capture // block_size + max(k // block_size, 1)
-        else:
-            return (self.max_context_len_to_capture + block_size - 1) // block_size 
+            return max_context_len // block_size + max(k // block_size, 1)
+        return (max_context_len + block_size - 1) // block_size 
                        
 
     def _prepare_prompt(
