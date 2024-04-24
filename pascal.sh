@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# This script adds Pascal GPU support to the VLLM OpenAI Docker image.
-# It updates the CMakeLists.txt and Dockerfile files to include 6.0, 6.1 and 6.2.
+# This script adds Pascal GPU support to vLLM by adding 6.0, 6.1 and 6.2 
+# GPU architectures to the build files MakeLists.txt and Dockerfile
 #
 
 # Ask user for confirmation
