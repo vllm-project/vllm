@@ -104,6 +104,13 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=self.params_dtype))
 
+        set_weight_attrs(self.ws, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.w2s, {
+            "weight_loader": self.weight_loader,
+        })
+
         # Scaling factors for FP8 weights
         self.ws_scale = nn.Parameter(
             torch.ones(
@@ -123,18 +130,13 @@ class MixtralMoE(nn.Module):
             torch.zeros(1, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
 
-        set_weight_attrs(self.ws, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.w2s, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.as_scale, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.a2s_scale, {
-            "weight_loader": self.weight_loader,
-        })
+        if need_act_scales:
+            set_weight_attrs(self.as_scale, {
+                "weight_loader": self.weight_loader,
+            })
+            set_weight_attrs(self.a2s_scale, {
+                "weight_loader": self.weight_loader,
+            })
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
