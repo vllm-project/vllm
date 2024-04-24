@@ -1,4 +1,3 @@
-import asyncio
 import time
 from typing import AsyncIterator, List, Tuple
 
@@ -13,7 +12,6 @@ from vllm.entrypoints.openai.serving_completion import parse_prompt_format
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
-from vllm.sampling_params import SamplingParams
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -104,7 +102,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 generators.append(
                     self.engine.generate(prompt_text,
-                                         SamplingParams(),
+                                         pooling_params,
                                          f"{request_id}-{i}",
                                          prompt_token_ids=prompt_ids))
         except ValueError as e:

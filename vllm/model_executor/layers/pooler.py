@@ -36,7 +36,7 @@ class Pooler(nn.Module):
         attention_metadata: AttentionMetadata,
     ) -> PoolerOutput:
         """Pools specific information from hidden states based on metadata."""
-        prompt_lens = attention_metadata.prompt_lens_tensor
+        prompt_lens = attention_metadata.prefill_metadata.prompt_lens_tensor
 
         if self.pooling_type == PoolingType.LAST:
             last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1

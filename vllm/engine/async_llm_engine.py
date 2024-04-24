@@ -259,7 +259,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         prompt: Optional[str],
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
@@ -278,7 +278,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         return self.add_request(request_id,
                                 prompt=prompt,
-                                sampling_params=sampling_params,
+                                params=params,
                                 prompt_token_ids=prompt_token_ids,
                                 arrival_time=arrival_time,
                                 lora_request=lora_request,

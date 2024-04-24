@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Iterable, Tuple
 
 import torch
 from torch import nn
@@ -51,12 +51,5 @@ class LlamaEmbeddingModel(nn.Module):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, attention_metadata)
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
-        self.model.load_weights(model_name_or_path, cache_dir, load_format,
-                                revision)
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        self.model.load_weights(weights)

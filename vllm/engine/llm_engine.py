@@ -24,8 +24,7 @@ from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (CompletionSequenceGroupOutput,
-                           EmbeddingSequenceGroupOutput, ExecuteModelRequest, MultiModalData,
+from vllm.sequence import (ExecuteModelRequest, EmbeddingSequenceGroupOutput, MultiModalData,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceStatus,
                            SequenceGroupMetadata)
@@ -552,18 +551,16 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _process_sequence_group_outputs(
-        self, seq_group: SequenceGroup,
-        outputs: Union[CompletionSequenceGroupOutput,
-                       EmbeddingSequenceGroupOutput]
+        self,
+        seq_group: SequenceGroup,
+        outputs: List[EmbeddingSequenceGroupOutput],
     ) -> None:
+        seq_group.embeddings = outputs[0].embeddings
 
-        if self.model_config.embedding_mode:
-            seq_group.embeddings = outputs.embeddings
+        for seq in seq_group.get_seqs():
+            seq.status = SequenceStatus.FINISHED_STOPPED
 
-            for seq in seq_group.get_seqs():
-                seq.status = SequenceStatus.FINISHED_STOPPED
-
-            return
+        return
 
     def _process_model_outputs(
         self,
@@ -591,7 +588,9 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
-            self._process_sequence_group_outputs(seq_group, outputs)
+            if self.model_config.embedding_mode:
+                self._process_sequence_group_outputs(seq_group, outputs)
+                continue
 
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
