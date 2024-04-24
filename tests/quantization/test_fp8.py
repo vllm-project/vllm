@@ -5,7 +5,6 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 import pytest
 import torch
 
-from vllm import SamplingParams
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 
