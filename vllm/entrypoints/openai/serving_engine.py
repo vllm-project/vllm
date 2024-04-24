@@ -48,10 +48,7 @@ class OpenAIServing:
 
         self.max_model_len = 0
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-        
-        self._post_init()
 
-    def _post_init(self):
         engine_model_config = asyncio.run(self.engine.get_model_config())
         self.max_model_len = engine_model_config.max_model_len
 
