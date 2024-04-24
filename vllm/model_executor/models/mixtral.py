@@ -114,10 +114,25 @@ class MixtralMoE(nn.Module):
                 self.num_total_experts, device="cuda", dtype=torch.float32),
             requires_grad=False) if self.use_fp8 else None
 
+        # Scaling factors for FP8 activations
+        static_act_scaling = self.use_fp8 and linear_method.act_scaling == "static"
+        self.as_scale = nn.Parameter(
+            torch.zeros(1, device="cuda", dtype=torch.float32),
+            requires_grad=False) if static_act_scaling else None
+        self.a2s_scale = nn.Parameter(
+            torch.zeros(1, device="cuda", dtype=torch.float32),
+            requires_grad=False) if static_act_scaling else None
+
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
         })
         set_weight_attrs(self.w2s, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.as_scale, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.a2s_scale, {
             "weight_loader": self.weight_loader,
         })
 
@@ -134,6 +149,9 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        if "activation_scale" in weight_name:
+            param_data[:] = param_data[:].max(loaded_weight)
+            print("loaded scale", weight_name, param_data)
 
     def process_weights_after_loading(self):
         if self.use_fp8:
@@ -161,7 +179,9 @@ class MixtralMoE(nn.Module):
                                         inplace=True,
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
-                                        w2_scale=self.w2s_scale)
+                                        w2_scale=self.w2s_scale,
+                                        a1_scale=self.a1_scale,
+                                        a2_scale=self.a2_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -443,11 +463,19 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the activation scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("a_scale" if activation_name in ["a1", "a3"] else "a2_scale",
+             f"experts.{expert_id}.{activation_name}.activation_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for activation_name in ["a1", "a2", "a3"]
         ]
 
         params_dict = dict(self.named_parameters())
