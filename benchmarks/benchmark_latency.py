@@ -55,13 +55,13 @@ def main(args: argparse.Namespace):
                     ],
                     on_trace_ready=torch.profiler.tensorboard_trace_handler(
                         str(profile_dir))) as p:
-                llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+                llm.generate({"prompt_token_ids": dummy_prompt_token_ids},
                              sampling_params=sampling_params,
                              use_tqdm=False)
             print(p.key_averages())
         else:
             start_time = time.perf_counter()
-            llm.generate(prompt_token_ids=dummy_prompt_token_ids,
+            llm.generate({"prompt_token_ids": dummy_prompt_token_ids},
                          sampling_params=sampling_params,
                          use_tqdm=False)
             end_time = time.perf_counter()

@@ -11,11 +11,11 @@ from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.ray_utils import initialize_ray_cluster, ray
+from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
@@ -230,46 +230,51 @@ class _AsyncLLMEngine(LLMEngine):
     async def encode_request_async(
         self,
         request_id: str,  # pylint: disable=unused-argument
-        prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]] = None,
+        inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ):
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = await self.tokenizer.encode_async(
+    ) -> LLMInputs:
+        if isinstance(inputs, str):
+            inputs = {"prompt": inputs}
+
+        if "prompt_token_ids" not in inputs:
+            tokenizer = self._require_tokenizer("prompts must be None if "
+                                                "skip_tokenizer_init is True")
+
+            prompt_token_ids = await tokenizer.encode_async(
                 request_id=request_id,
-                prompt=prompt,
+                prompt=inputs["prompt"],
                 lora_request=lora_request)
-        return prompt_token_ids
+        else:
+            prompt_token_ids = inputs["prompt_token_ids"]
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=inputs.get("prompt"),
+                         multi_modal_data=inputs.get("multi_modal_data"))
 
     async def add_request_async(
         self,
         request_id: str,
-        prompt: Optional[str],
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
-        prompt_token_ids = await self.encode_request_async(
-            request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            lora_request=lora_request)
 
-        return self.add_request(request_id,
-                                prompt=prompt,
-                                prompt_token_ids=prompt_token_ids,
-                                sampling_params=sampling_params,
-                                arrival_time=arrival_time,
-                                lora_request=lora_request,
-                                multi_modal_data=multi_modal_data)
+        processed_inputs = await self.encode_request_async(
+            request_id=request_id, inputs=inputs, lora_request=lora_request)
+
+        return self._add_request(
+            request_id=request_id,
+            processed_inputs=processed_inputs,
+            sampling_params=sampling_params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
@@ -505,22 +510,26 @@ class AsyncLLMEngine:
     async def add_request(
         self,
         request_id: str,
-        prompt: Optional[str],
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> AsyncStream:
         if self.log_requests:
-            shortened_prompt = prompt
-            shortened_token_ids = prompt_token_ids
-            if self.max_log_len is not None:
+            if isinstance(inputs, str):
+                shortened_prompt = inputs
+                shortened_token_ids = None
+            else:
+                shortened_prompt = inputs.get("prompt")
+                shortened_token_ids = inputs.get("prompt_token_ids")
+
+            max_log_len = self.max_log_len
+            if max_log_len is not None:
                 if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:self.max_log_len]
+                    shortened_prompt = shortened_prompt[:max_log_len]
                 if shortened_token_ids is not None:
-                    shortened_token_ids = shortened_token_ids[:self.
-                                                              max_log_len]
+                    shortened_token_ids = shortened_token_ids[:max_log_len]
+
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"sampling_params: {sampling_params}, "
@@ -541,39 +550,32 @@ class AsyncLLMEngine:
             arrival_time = time.time()
 
         if self.engine_use_ray:
-            prompt_token_ids = await (
-                self.engine.encode_request_async.remote(  # type: ignore
-                    request_id=request_id,
-                    prompt=prompt,
-                    prompt_token_ids=prompt_token_ids,
-                    lora_request=lora_request))
-        else:
-            prompt_token_ids = await self.engine.encode_request_async(
+            processed_inputs = await self.engine.encode_request_async.remote(  # type: ignore
                 request_id=request_id,
-                prompt=prompt,
-                prompt_token_ids=prompt_token_ids,
+                inputs=inputs,
+                lora_request=lora_request)
+        else:
+            processed_inputs = await self.engine.encode_request_async(
+                request_id=request_id,
+                inputs=inputs,
                 lora_request=lora_request)
 
         stream = self._request_tracker.add_request(
             request_id,
-            prompt=prompt,
+            inputs=processed_inputs,
             sampling_params=sampling_params,
-            prompt_token_ids=prompt_token_ids,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            multi_modal_data=multi_modal_data,
         )
 
         return stream
 
     async def generate(
         self,
-        prompt: Optional[str],
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
         request_id: str,
-        prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -582,14 +584,10 @@ class AsyncLLMEngine:
         from the LLMEngine to the caller.
 
         Args:
-            prompt: The prompt string. Can be None if prompt_token_ids is
-                provided.
+            inputs: The inputs to the LLM.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
-            prompt_token_ids: The token IDs of the prompt. If None, we
-                use the tokenizer to convert the prompts to token IDs.
             lora_request: LoRA request to use for generation, if any.
-            multi_modal_data: Multi modal data per request.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine for the
@@ -644,12 +642,10 @@ class AsyncLLMEngine:
         try:
             stream = await self.add_request(
                 request_id,
-                prompt,
+                inputs,
                 sampling_params,
-                prompt_token_ids=prompt_token_ids,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                multi_modal_data=multi_modal_data,
             )
 
             async for request_output in stream:

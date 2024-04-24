@@ -17,12 +17,12 @@ from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
+from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceStage)
+from vllm.sequence import SamplerOutput, Sequence, SequenceGroup, SequenceStage
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -78,6 +78,7 @@ class LLMEngine:
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection
     """
+    tokenizer: Optional[BaseTokenizerGroup]
 
     def __init__(
         self,
@@ -134,9 +135,8 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
-            self.tokenizer: BaseTokenizerGroup
-            self._init_tokenizer()
-            self.detokenizer = Detokenizer(self.tokenizer)
+            tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(tokenizer)
         else:
             self.detokenizer = None
             self.tokenizer = None
@@ -287,12 +287,23 @@ class LLMEngine:
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
 
+    def _require_tokenizer(self, fail_msg: Optional[str] = None):
+        if self.tokenizer is None:
+            if fail_msg is None:
+                fail_msg = ("Unable to get tokenizer because "
+                            "skip_tokenizer_init is True")
+
+            raise ValueError(fail_msg)
+
+        return self.tokenizer
+
     def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self.tokenizer.get_lora_tokenizer(None)
+        return self._require_tokenizer().get_lora_tokenizer(None)
 
     def get_tokenizer_for_seq(self,
                               sequence: Sequence) -> "PreTrainedTokenizer":
-        return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
+        return self._require_tokenizer().get_lora_tokenizer(
+            sequence.lora_request)
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
         init_kwargs = dict(
@@ -304,8 +315,11 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
+
         self.tokenizer = get_tokenizer_group(
             self.parallel_config.tokenizer_pool_config, **init_kwargs)
+
+        return self.tokenizer
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -315,29 +329,81 @@ class LLMEngine:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
+    def _add_request(
+        self,
+        request_id: str,
+        processed_inputs: LLMInputs,
+        sampling_params: SamplingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> None:
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
+
+        # Create the sequences.
+        block_size = self.cache_config.block_size
+        seq_id = next(self.seq_counter)
+        eos_token_id = None
+        if self.tokenizer:
+            eos_token_id = self.tokenizer.get_lora_tokenizer(
+                lora_request).eos_token_id
+        else:
+            logger.warning("Use None for EOS token id because tokenizer is "
+                           "not initialized")
+        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                       lora_request)
+
+        # Defensive copy of SamplingParams, which are used by the sampler,
+        # this doesn't deep-copy LogitsProcessor objects
+        sampling_params = sampling_params.clone()
+        # inject the eos token id into the sampling_params to support min_tokens
+        # processing
+        sampling_params.eos_token_id = seq.eos_token_id
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields)
+
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id, [seq], sampling_params,
+                                  arrival_time, lora_request)
+
+        # Add the sequence group to the scheduler.
+        self.scheduler.add_seq_group(seq_group)
+
     def encode_request(
         self,
-        request_id: str,  # pylint: disable=unused-argument
-        prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]] = None,
+        request_id: str,
+        inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ):
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(request_id=request_id,
-                                                     prompt=prompt,
-                                                     lora_request=lora_request)
-        return prompt_token_ids
+    ) -> LLMInputs:
+        if isinstance(inputs, str):
+            inputs = {"prompt": inputs}
+
+        if "prompt_token_ids" not in inputs:
+            tokenizer = self._require_tokenizer("prompts must be None if "
+                                                "skip_tokenizer_init is True")
+
+            prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                prompt=inputs["prompt"],
+                                                lora_request=lora_request)
+        else:
+            prompt_token_ids = inputs["prompt_token_ids"]
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=inputs.get("prompt"),
+                         multi_modal_data=inputs.get("multi_modal_data"))
 
     def add_request(
         self,
         request_id: str,
-        prompt: Optional[str],
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]] = None,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -347,14 +413,10 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt string. Can be None if prompt_token_ids is
-                provided.
+            inputs: The inputs to the LLM.
             sampling_params: The sampling parameters for text generation.
-            prompt_token_ids: The token IDs of the prompt. If None, we
-                use the tokenizer to convert the prompts to token IDs.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
-            multi_modal_data: Multi modal data per request.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -383,49 +445,20 @@ class LLMEngine:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
-        max_logprobs = self.get_model_config().max_logprobs
-        if (sampling_params.logprobs
-                and sampling_params.logprobs > max_logprobs) or (
-                    sampling_params.prompt_logprobs
-                    and sampling_params.prompt_logprobs > max_logprobs):
-            raise ValueError(f"Cannot request more than "
-                             f"{max_logprobs} logprobs.")
         if arrival_time is None:
             arrival_time = time.time()
-        prompt_token_ids = self.encode_request(
+
+        processed_inputs = self.encode_request(request_id=request_id,
+                                               inputs=inputs,
+                                               lora_request=lora_request)
+
+        return self._add_request(
             request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            lora_request=lora_request)
-
-        # Create the sequences.
-        block_size = self.cache_config.block_size
-        seq_id = next(self.seq_counter)
-        eos_token_id = None
-        if self.tokenizer:
-            eos_token_id = self.tokenizer.get_lora_tokenizer(
-                lora_request).eos_token_id
-        else:
-            logger.warning("Use None for EOS token id because tokenizer is "
-                           "not initialized")
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       eos_token_id, lora_request)
-
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
-        # inject the eos token id into the sampling_params to support min_tokens
-        # processing
-        sampling_params.eos_token_id = seq.eos_token_id
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields)
-
-        # Create the sequence group.
-        seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, multi_modal_data)
-
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+            processed_inputs=processed_inputs,
+            sampling_params=sampling_params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.

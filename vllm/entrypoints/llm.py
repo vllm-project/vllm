@@ -1,15 +1,14 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
-import torch
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.inputs import PromptStrictInputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
 
@@ -131,13 +130,11 @@ class LLM:
 
     def generate(
         self,
-        prompts: Optional[Union[str, List[str]]] = None,
+        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         sampling_params: Optional[Union[SamplingParams,
-                                        List[SamplingParams]]] = None,
-        prompt_token_ids: Optional[List[List[int]]] = None,
+                                        Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -146,42 +143,24 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            prompts: A list of prompts to generate completions for.
+            inputs: A list of inputs to generate completions for.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters. 
                 When it is a single value, it is applied to every prompt. 
                 When it is a list, the list must have the same length as the 
                 prompts and it is paired one by one with the prompt.
-            prompt_token_ids: A list of token IDs for the prompts. If None, we
-                use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            multi_modal_data: Multi modal data.
 
         Returns:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
-        if prompts is None and prompt_token_ids is None:
-            raise ValueError("Either prompts or prompt_token_ids must be "
-                             "provided.")
-        if self.llm_engine.model_config.skip_tokenizer_init \
-            and prompts is not None:
-            raise ValueError("prompts must be None if skip_tokenizer_init "
-                             "is True")
-        if isinstance(prompts, str):
+        if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
-            prompts = [prompts]
-        if (prompts is not None and prompt_token_ids is not None
-                and len(prompts) != len(prompt_token_ids)):
-            raise ValueError("The lengths of prompts and prompt_token_ids "
-                             "must be the same.")
+            inputs = [inputs]
 
-        if prompts is not None:
-            num_requests = len(prompts)
-        else:
-            assert prompt_token_ids is not None
-            num_requests = len(prompt_token_ids)
+        num_requests = len(inputs)
 
         if sampling_params is None:
             # Use default sampling params.
@@ -191,43 +170,28 @@ class LLM:
                         list) and len(sampling_params) != num_requests:
             raise ValueError("The lengths of prompts and sampling_params "
                              "must be the same.")
-        if multi_modal_data:
-            multi_modal_data.data = multi_modal_data.data.to(torch.float16)
 
         # Add requests to the engine.
-        for i in range(num_requests):
-            prompt = prompts[i] if prompts is not None else None
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[
-                i]
+        for i, request_inputs in enumerate(inputs):
             self._add_request(
-                prompt,
+                request_inputs,
                 sampling_params[i]
-                if isinstance(sampling_params, list) else sampling_params,
-                token_ids,
+                if isinstance(sampling_params, Sequence) else sampling_params,
                 lora_request=lora_request,
-                # Get ith image while maintaining the batch dim.
-                multi_modal_data=MultiModalData(
-                    type=multi_modal_data.type,
-                    data=multi_modal_data.data[i].unsqueeze(0))
-                if multi_modal_data else None,
             )
         return self._run_engine(use_tqdm)
 
     def _add_request(
         self,
-        prompt: Optional[str],
+        inputs: PromptStrictInputs,
         sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
-                                    prompt,
+                                    inputs,
                                     sampling_params,
-                                    prompt_token_ids,
-                                    lora_request=lora_request,
-                                    multi_modal_data=multi_modal_data)
+                                    lora_request=lora_request)
 
     def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
         # Initialize tqdm.

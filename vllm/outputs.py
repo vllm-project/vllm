@@ -74,7 +74,7 @@ class RequestOutput:
     def __init__(
         self,
         request_id: str,
-        prompt: str,
+        prompt: Optional[str],
         prompt_token_ids: List[int],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],

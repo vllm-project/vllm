@@ -12,6 +12,7 @@ from transformers import (AutoModelForCausalLM, AutoProcessor,
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
+from vllm.inputs import PromptInputs
 from vllm.sequence import MultiModalData
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -320,12 +321,17 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         if images is not None:
             assert len(prompts) == images.shape[0]
-        req_outputs = self.model.generate(
-            prompts,
-            sampling_params=sampling_params,
-            multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                            data=images)
-            if images is not None else None)
+
+        prompt_inputs: List[PromptInputs] = [{
+            "prompt":
+            prompt,
+            "multi_modal_data":
+            MultiModalData(type=MultiModalData.Type.IMAGE, data=images)
+            if images is not None else None
+        } for prompt in prompts]
+
+        req_outputs = self.model.generate(prompt_inputs,
+                                          sampling_params=sampling_params)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt

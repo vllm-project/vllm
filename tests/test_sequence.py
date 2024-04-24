@@ -24,7 +24,15 @@ def create_dummy_prompt(
     # and prompt "0 ... block_size".
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
+    prompt = Sequence(
+        int(request_id),
+        inputs={
+            "prompt": prompt_str,
+            "prompt_token_ids": prompt_tokens,
+            "multi_modal_data": None,
+        },
+        block_size=block_size,
+    )
     seq_group = SequenceGroup(
         request_id, [prompt],
         SamplingParams(use_beam_search=use_beam_search, best_of=best_of),

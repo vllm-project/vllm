@@ -25,9 +25,13 @@ def run_llava_pixel_values():
     # This should be provided by another online or offline component.
     images = torch.load("images/stop_sign_pixel_values.pt")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    outputs = llm.generate({
+        "prompt":
+        prompt,
+        "multi_modal_data":
+        MultiModalData(type=MultiModalData.Type.IMAGE, data=images),
+    })
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
