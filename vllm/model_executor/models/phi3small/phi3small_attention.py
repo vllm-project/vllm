@@ -213,10 +213,20 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         active_head_range = (tp_rank * self.num_heads, (tp_rank + 1) * self.num_heads)
 
         total_num_heads = num_heads * tp_size
-        self.bs_attn = LocalStridedBlockSparseAttn(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+        self.bs_attn = LocalStridedBlockSparseAttn(total_num_heads,
+                                                   max_seqlen,
+                                                   local_blocks,
+                                                   vert_stride,
+                                                   sparse_block_size,
+                                                   active_head_range=active_head_range)
 
         if self.use_triton_paged_attn:
-            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(total_num_heads, max_seqlen, local_blocks, vert_stride, sparse_block_size, active_head_range=active_head_range)
+            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(total_num_heads,
+                                                                  max_seqlen,
+                                                                  local_blocks,
+                                                                  vert_stride,
+                                                                  sparse_block_size,
+                                                                  active_head_range=active_head_range)
 
     def forward(
         self,
@@ -300,7 +310,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     self.sparse_block_size,
                     kv_scale,
                 )
-
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

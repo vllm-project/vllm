@@ -25,16 +25,6 @@ from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs import Phi3SmallConfig
 from vllm.model_executor.models.phi3small.phi3small_attention import BlockSparseFlashAttention
 
-'''
-Further optimization TODO:
-
-1. fused matmul + activation (this seems to affect quantization)
-2. test if gegelu vs triton version
-3. FP8 bs attn.
-4. Does bs attn work well with tensor-paralllelization?
-
-'''
-
 
 def load_column_parallel_weight(
             param: torch.nn.Parameter,
@@ -196,11 +186,10 @@ class Phi3SmallSelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.blocksparse_vert_stride = config.blocksparse_vert_stride
 
-        # Phi3Small.8
+        # Phi3Small
         use_dense_attn = getattr(self.config, 'dense_attention_every_n_layers', None) and \
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
-        # use_dense_attn = False
         if use_dense_attn:
             self.attn = Attention(self.num_heads_per_partition,
                                 self.head_dim,
