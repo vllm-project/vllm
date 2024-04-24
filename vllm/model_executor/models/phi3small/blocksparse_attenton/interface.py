@@ -9,7 +9,6 @@ if IS_COMPUTE_8_OR_ABOVE:
     from .kernels import blocksparse_flash_attn_varlen_fwd, blocksparse_flash_attn_varlen_fwd_with_blocktable
 
 
-@lru_cache
 class LocalStridedBlockSparseAttn(torch.nn.Module):
     def __init__(self, n_heads, max_seqlen, local_blocks, vert_stride, block_size,
                 device=None, dtype=None, homo_head=False,
@@ -18,7 +17,9 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         if use_spda is None:
             use_spda = not (torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8)
         device = device or (torch.cuda.current_device() if torch.cuda.is_available() else 'cpu')
-        dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE else torch.half)
+        device = torch.device(device)
+        # NOTE: vllm CPU backend support BF16 instead of FP16.
+        dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE or device.type == 'cpu' else torch.half)
 
         self.n_heads = n_heads
         self.max_seqlen = max_seqlen
@@ -162,12 +163,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             return self.spda(q, k, v, cu_seqlens_k, cu_seqlens_q=cu_seqlens_q, sm_scale=sm_scale)
         return self.varlen_attn(q, k, v, cu_seqlens_k, cu_seqlens_q=cu_seqlens_q, sm_scale=sm_scale)
 
-    def backward(self, *args):
-        raise NotImplementedError('> backward is not supported.')
 
-    
-    
-@lru_cache
 class LocalStridedBlockSparsePagedAttn(torch.nn.Module):
     def __init__(self, n_heads, max_seqlen,
                  local_blocks, vert_stride, block_size,
