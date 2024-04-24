@@ -38,9 +38,8 @@
 from typing import Iterable, List, Optional, Tuple
 
 import torch
-# this model must need this dependency
-from transformers import OlmoConfig
 from torch import nn
+from transformers import OlmoConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -198,8 +197,12 @@ class OlmoDecoderLayer(nn.Module):
         self.mlp = OlmoMLP(config, linear_method)
 
         # LayerNorm
-        self.input_layernorm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, bias=False)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, bias=False)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            elementwise_affine=False,
+                                            bias=False)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                     elementwise_affine=False,
+                                                     bias=False)
 
     def forward(
         self,
@@ -211,7 +214,8 @@ class OlmoDecoderLayer(nn.Module):
         # Attention block.
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(positions, hidden_states, kv_cache, attn_metadata)
+        hidden_states = self.self_attn(positions, hidden_states, kv_cache,
+                                       attn_metadata)
         hidden_states = hidden_states + residual
 
         # MLP block.
@@ -230,11 +234,15 @@ class OlmoModel(nn.Module):
         super().__init__()
         self.config = config
 
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList(
-            [OlmoDecoderLayer(config, linear_method) for layer_idx in range(config.num_hidden_layers)]
-        )
-        self.norm = nn.LayerNorm(config.hidden_size, elementwise_affine=False, bias=False)
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
+        self.layers = nn.ModuleList([
+            OlmoDecoderLayer(config, linear_method)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
+        self.norm = nn.LayerNorm(config.hidden_size,
+                                 elementwise_affine=False,
+                                 bias=False)
 
     def forward(
         self,
