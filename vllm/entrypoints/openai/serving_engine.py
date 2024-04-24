@@ -47,24 +47,12 @@ class OpenAIServing:
             ]
 
         self.max_model_len = 0
-        # Lazy initialized
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+        
+        self._post_init()
 
-        try:
-            event_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            event_loop = None
-
-        if event_loop is not None and event_loop.is_running():
-            # If the current is instanced by Ray Serve,
-            # there is already a running event loop
-            event_loop.create_task(self._post_init())
-        else:
-            # When using single vLLM without engine_use_ray
-            asyncio.run(self._post_init())
-
-    async def _post_init(self):
-        engine_model_config = await self.engine.get_model_config()
+    def _post_init(self):
+        engine_model_config = asyncio.run(self.engine.get_model_config())
         self.max_model_len = engine_model_config.max_model_len
 
         # A separate tokenizer to map token IDs to strings.
