@@ -434,10 +434,9 @@ class ModelRunner:
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
             and max_context_len <= self.max_context_len_to_capture)
-
         def is_tree_parallel_decoding(meta_data: SequenceGroupMetadata):
             sampling_params = meta_data.sampling_params
-            return len(meta_data.seq_data)>1 and sampling_params.sampling_type in \
+            return sampling_params.sampling_type in \
                     (SamplingType.RANDOM, SamplingType.RANDOM_SEED) and not use_captured_graph and sampling_params.best_of<=32
 
         enable_tree_attn = all(
