@@ -65,7 +65,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
             h_start, h_end = self.active_head_range
             sparse_layout = tuple(x[h_start:h_end] for x in sparse_layout)
             if self.use_spda:
-                attn_mask_dense = attn_mask_dense[h_start:h_end]
+                dense_attn_mask = dense_attn_mask[h_start:h_end]
         return sparse_layout, sparse_pattern, dense_attn_mask
         
     def varlen_attn(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
@@ -115,7 +115,6 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         total_n_tokens = cu_seqlens[-1]
         x = x_padded.new_empty(total_n_tokens, x_padded.size(1), x_padded.size(3))
         for i, (s, e) in enumerate(zip(cu_seqlens[:-1], cu_seqlens[1:])):
-            # import ipdb; ipdb.set_trace()
             x[s:e].copy_(x_padded[i, :, :e-s].transpose(0, 1))
         return x
 
@@ -132,14 +131,12 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         cu_seqlens = cu_seqlens_k.cpu()
         maxlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
-
-        if self.dense_attn_mask.dtype != self.q.dtype or self.dense_attn.device != q.device:
+        if self.dense_attn_mask.dtype != q.dtype or self.dense_attn_mask.device != q.device:
             _, _, self.dense_attn_mask = self.get_attn_pattern(q.dtype, q.device)
-        attn_mask = self.attn_mask_dense[None, :, :maxlen, :maxlen]
+        attn_mask = self.dense_attn_mask[None, :, :maxlen, :maxlen]
 
         q2 = self.transpose_and_pad(q, cu_seqlens, maxlen, 1)
         k2, v2 = [self.transpose_and_pad(x, cu_seqlens, maxlen, q_k_ratio) for x in [k, v]]
-
         spda_output = torch.nn.functional.scaled_dot_product_attention(q2, k2, v2, attn_mask=attn_mask, scale=sm_scale)
         return self.transpose_and_unpad(spda_output, cu_seqlens)
 
