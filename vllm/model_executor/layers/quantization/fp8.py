@@ -112,7 +112,6 @@ class Fp8LinearMethod(LinearMethodBase):
             scale_b=layer.weight_scaling_factor,
             bias=bias,
         )
-    
         return output
 
 
