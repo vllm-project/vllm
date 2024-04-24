@@ -284,8 +284,8 @@ class LlamaModel(nn.Module):
         is_warmup = kv_caches[0] is None
 
         if not is_warmup:
-            print("NOT IN WARMUP")
-            print(f"embeddings: {hidden_states[0]}")
+            # print("NOT IN WARMUP")
+            # print(f"embeddings: {hidden_states[0]}")
             pass
 
         residual = None
@@ -299,12 +299,10 @@ class LlamaModel(nn.Module):
                 residual,
             )
             if not is_warmup:
-                assert False
+                # assert False
                 # print(f"idx: {i}: {hidden_states}")
                 pass
         hidden_states, _ = self.norm(hidden_states, residual)
-        if not is_warmup:
-            assert False
         return hidden_states
 
 
