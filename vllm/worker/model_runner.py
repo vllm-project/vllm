@@ -677,7 +677,7 @@ class ModelRunner:
                 prompt_lens,
                 subquery_lens,
                 lora_index_mapping,
-                lora_prompt_mapping,f=
+                lora_prompt_mapping,
                 lora_requests,
                 multi_modal_input,
                 slot_mapping, 
