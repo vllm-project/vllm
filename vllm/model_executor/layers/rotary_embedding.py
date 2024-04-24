@@ -337,8 +337,8 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         return cache
 
 
-class PhiLongScaledRotaryEmbedding(nn.Module):
-    """Phi3 family of models long scaled rotary embedding.
+class Phi3SuScaledRotaryEmbedding(nn.Module):
+    """Phi3 family of models scaled rotary embedding.
 
     Based on the original RotaryEmbedding implementation.
     """
@@ -357,6 +357,11 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         long_mscale: float = 1.225,
     ):
         super().__init__()
+
+        if rotary_dim != head_size:
+            raise ValueError(f"`Phi3SuScaledRotaryEmbedding` does not support rotary_dim != head_size ({rotary_dim}!={head_size}).")
+        if is_neox_style is False:
+            raise ValueError("`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
 
         self.head_size = head_size
         self.rotary_dim = rotary_dim
@@ -421,12 +426,6 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
-        query_rot = query[..., :self.rotary_dim]
-        key_rot = key[..., :self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim:]
-            key_pass = key[..., self.rotary_dim:]
-
         k = self.original_max_position_embeddings
         long_prompt_offset = (torch.any(positions > k).float() *
                               torch.full_like(positions, k)).long()
@@ -439,25 +438,11 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 
         cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+        sin = sin.repeat(1, 1, 2).unsqueeze(-2)
 
-        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
-        query_rot = query_rot * cos + rotate_fn(query_rot) * sin
-        key_rot = key_rot * cos + rotate_fn(key_rot) * sin
-
-        if self.rotary_dim < self.head_size:
-            query = torch.cat((query_rot, query_pass), dim=-1)
-            key = torch.cat((key_rot, key_pass), dim=-1)
-        else:
-            query = query_rot
-            key = key_rot
+        query = query * cos + _rotate_neox(query) * sin
+        key = key * cos + _rotate_neox(key) * sin
 
         # Remove batch dimension if it's one
         if query.shape[0] == 1:
@@ -490,7 +475,7 @@ def get_rope(
                                      is_neox_style)
     else:
         scaling_type = rope_scaling["type"]
-        if scaling_type != "longrope":
+        if scaling_type != "su":
             scaling_factor = rope_scaling["factor"]
         if scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
@@ -515,7 +500,7 @@ def get_rope(
                                                     base, is_neox_style,
                                                     scaling_factor,
                                                     **extra_kwargs)
-        elif scaling_type == "longrope":
+        elif scaling_type == "su":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
             original_max_position = rope_scaling[
@@ -525,7 +510,7 @@ def get_rope(
                 for k, v in rope_scaling.items()
                 if k in ("short_mscale", "long_mscale")
             }
-            rotary_emb = PhiLongScaledRotaryEmbedding(
+            rotary_emb = Phi3SuScaledRotaryEmbedding(
                 head_size, rotary_dim, max_position, original_max_position,
                 base, is_neox_style, short_factor, long_factor, **extra_kwargs)
         else:
