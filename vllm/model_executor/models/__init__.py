@@ -89,9 +89,11 @@ class ModelRegistry:
                     f"Model architecture {model_arch} is not supported by "
                     "ROCm for now.")
             if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
+                logger_data = {"model_arch": model_arch}
                 logger.warning(
                     f"Model architecture {model_arch} is partially supported "
-                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch],
+                    extra=logger_data)
 
         module_name, model_cls_name = _MODELS[model_arch]
         module = importlib.import_module(

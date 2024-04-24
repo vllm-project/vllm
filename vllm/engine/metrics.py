@@ -221,6 +221,15 @@ class StatLogger:
                 generation_throughput=generation_throughput)
 
             # Log to stdout.
+            logger_data = {
+                "avg_prompt_throughput": f"{prompt_throughput:.1f}",
+                "avg_generation_throughput": generation_throughput,
+                "running": stats.num_running,
+                "swapped": stats.num_swapped,
+                "pending": stats.num_waiting,
+                "gpu_kv_cache_usage": f"{stats.gpu_cache_usage * 100:.1f}",
+                "cpu_kv_cache_usage": f"{stats.cpu_cache_usage * 100:.1f}"
+            }
             logger.info(
                 f"Avg prompt throughput: {prompt_throughput:.1f} tokens/s, "
                 f"Avg generation throughput: "
@@ -229,7 +238,8 @@ class StatLogger:
                 f"Swapped: {stats.num_swapped} reqs, "
                 f"Pending: {stats.num_waiting} reqs, "
                 f"GPU KV cache usage: {stats.gpu_cache_usage * 100:.1f}%, "
-                f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%")
+                f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%",
+                extra=logger_data)
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []

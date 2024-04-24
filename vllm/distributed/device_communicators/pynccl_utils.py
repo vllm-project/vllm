@@ -42,7 +42,8 @@ def init_process_group(world_size: int,
                        local_rank: int = -1) -> None:
     assert not is_initialized()
     global comm
-    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
+    logger_data = {"nccl": ncclGetVersion()}
+    logger.info(f"vLLM is using nccl=={ncclGetVersion()}", extra=logger_data)
     comm = NCCLCommunicator(init_method=init_method,
                             world_size=world_size,
                             local_rank=local_rank,

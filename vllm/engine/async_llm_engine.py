@@ -117,7 +117,8 @@ class RequestTracker:
         self._request_streams[request_id].put(request_output)
         if request_output.finished:
             if verbose:
-                logger.info(f"Finished request {request_id}.")
+                logger_data = {"request_id": request_id}
+                logger.info(f"Finished request {request_id}.", extra=logger_data)
             self.abort_request(request_id)
 
     def process_exception(self,
@@ -128,7 +129,8 @@ class RequestTracker:
         """Propagate an exception from the engine."""
         self._request_streams[request_id].put(exception)
         if verbose:
-            logger.info(f"Finished request {request_id}.")
+            logger_data = {"request_id": request_id}
+            logger.info(f"Finished request {request_id}.", extra=logger_data)
         self.abort_request(request_id)
 
     def add_request(self, request_id: str,
@@ -151,7 +153,8 @@ class RequestTracker:
     def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
-            logger.info(f"Aborted request {request_id}.")
+            logger_data = {"request_id": request_id}
+            logger.info(f"Aborted request {request_id}.", extra=logger_data)
 
         self._finished_requests.put_nowait(request_id)
 
@@ -521,11 +524,18 @@ class AsyncLLMEngine:
                 if shortened_token_ids is not None:
                     shortened_token_ids = shortened_token_ids[:self.
                                                               max_log_len]
+            logger_data = {
+                "request": request_id,
+                "prompt": shortened_prompt,
+                "sampling_params": sampling_params,
+                "prompt_token_ids": shortened_token_ids,
+                "lora_request": lora_request,
+            }
             logger.info(f"Received request {request_id}: "
                         f"prompt: {shortened_prompt!r}, "
                         f"sampling_params: {sampling_params}, "
                         f"prompt_token_ids: {shortened_token_ids}, "
-                        f"lora_request: {lora_request}.")
+                        f"lora_request: {lora_request}.", extra=logger_data)
 
         if not self.is_running:
             if self.start_engine_loop:

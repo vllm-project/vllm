@@ -328,13 +328,16 @@ class OpenAIServingChat(OpenAIServing):
                 # ensure we decode so our escape are interpreted correctly
                 self.tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
-
+            logger_data = {"template": self.tokenizer.chat_template}
             logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}"
+                f"Using supplied chat template:\n{self.tokenizer.chat_template}",
+                extra=logger_data
             )
         elif self.tokenizer.chat_template is not None:
+            logger_data = {"template": self.tokenizer.chat_template}
             logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}"
+                f"Using default chat template:\n{self.tokenizer.chat_template}",
+                extra=logger_data
             )
         else:
             logger.warning(
