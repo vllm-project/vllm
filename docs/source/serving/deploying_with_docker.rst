@@ -49,3 +49,6 @@ To run vLLM:
         --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
         vllm/vllm-openai <args...>
 
+.. note::
+
+        vLLM docker image is currently designed to be run under the root user (contribution welcomed for changing this!). It will try to load library at runtime under the root user's home directory, e.g. `/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` . If you are running the container under a different user, you may need to change the permissions of the library (and all the parent directories) to allow the user to access it. Then run vLLM with environment variable `VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` .
