@@ -1,7 +1,7 @@
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils import get_distributed_init_method
 from vllm.worker.worker import Worker
 
 
@@ -15,8 +15,7 @@ def test_swap() -> None:
     engine_config.cache_config.num_cpu_blocks = 1000
 
     # Create the worker.
-    distributed_init_method = get_distributed_init_method(
-        get_ip(), get_open_port())
+    distributed_init_method = get_distributed_init_method()
     worker = Worker(
         model_config=engine_config.model_config,
         parallel_config=engine_config.parallel_config,

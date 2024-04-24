@@ -15,8 +15,8 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
-from vllm.engine.ray_utils import initialize_ray_cluster
 from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -28,7 +28,7 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter
+from vllm.utils import Counter, enable_trace_function_call_for_process
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -132,6 +132,8 @@ class LLMEngine:
         self.load_config = load_config
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
+
+        enable_trace_function_call_for_process()
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer: BaseTokenizerGroup
@@ -286,6 +288,12 @@ class LLMEngine:
         # This is to ensure that the LLMEngine is not referenced in
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
+
+    def __del__(self):
+        # Shutdown model executor when engine is garbage collected
+        # Use getattr since __init__ can fail before the field is set
+        if model_executor := getattr(self, "model_executor", None):
+            model_executor.shutdown()
 
     def get_tokenizer(self) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(None)

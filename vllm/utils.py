@@ -1,10 +1,13 @@
 import asyncio
+import datetime
 import enum
 import gc
 import glob
 import os
 import socket
 import subprocess
+import tempfile
+import threading
 import uuid
 import warnings
 from collections import defaultdict
@@ -18,7 +21,7 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -232,6 +235,7 @@ def merge_async_iterators(
     return consumer()
 
 
+@lru_cache(maxsize=None)
 def get_ip() -> str:
     host_ip = os.environ.get("HOST_IP")
     if host_ip:
@@ -264,7 +268,10 @@ def get_ip() -> str:
     return "0.0.0.0"
 
 
-def get_distributed_init_method(ip: str, port: int) -> str:
+@lru_cache(maxsize=None)
+def get_distributed_init_method() -> str:
+    ip = get_ip()
+    port = get_open_port()
     # Brackets are not permitted in ipv4 addresses,
     # see https://github.com/python/cpython/issues/103848
     return f"tcp://[{ip}]:{port}" if ":" in ip else f"tcp://{ip}:{port}"
@@ -607,3 +614,15 @@ def find_nccl_library():
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info(f"Found nccl from library {so_file}")
     return so_file
+
+
+def enable_trace_function_call_for_process():
+    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+        tmp_dir = tempfile.gettempdir()
+        filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                    f"_thread_{threading.get_ident()}_"
+                    f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                filename)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        enable_trace_function_call(log_path)

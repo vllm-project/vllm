@@ -8,8 +8,7 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+from vllm.utils import get_distributed_init_method, make_async
 
 logger = init_logger(__name__)
 
@@ -33,8 +32,7 @@ class CPUExecutor(ExecutorBase):
         assert self.parallel_config.world_size == 1, (
             "CPUExecutor only supports single CPU socket currently.")
 
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        distributed_init_method = get_distributed_init_method()
         self.driver_worker = CPUWorker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,

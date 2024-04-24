@@ -11,7 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, SamplerOutput, SequenceData,
                            SequenceGroupMetadata, SequenceGroupOutput,
                            SequenceOutput)
-from vllm.utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils import get_distributed_init_method
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
 
@@ -112,8 +112,7 @@ def create_worker(cls: type,
     )
     engine_config = engine_args.create_engine_config()
 
-    distributed_init_method = get_distributed_init_method(
-        get_ip(), get_open_port())
+    distributed_init_method = get_distributed_init_method()
 
     worker = cls(
         model_config=engine_config.model_config,
