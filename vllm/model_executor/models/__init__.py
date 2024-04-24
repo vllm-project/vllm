@@ -107,10 +107,11 @@ class ModelRegistry:
     @staticmethod
     def register_model(model_arch: str, model_cls: Type[nn.Module]):
         if model_arch in _MODELS:
+            logger_data = {"model_arch": model_arch, "class": model_cls.__name__}
             logger.warning(
                 f"Model architecture {model_arch} is already registered, "
                 "and will be overwritten by the new model "
-                f"class {model_cls.__name__}.")
+                f"class {model_cls.__name__}.", extra=logger_data)
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 

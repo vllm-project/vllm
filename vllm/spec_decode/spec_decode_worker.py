@@ -157,7 +157,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        logger.info(f"spec_decode_worker.execute_model {num_lookahead_slots=}")
+        logger_data = {"num_lookahead_slots": num_lookahead_slots}
+        logger.info(
+            f"spec_decode_worker.execute_model {num_lookahead_slots=}",
+            extra=logger_data
+        )
 
         # If no spec tokens, call the proposer and scorer workers normally.
         # Used for prefill.

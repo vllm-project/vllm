@@ -69,7 +69,8 @@ class CPUExecutor(ExecutorBase):
         # NOTE: `cpu block` for CPU backend is located on CPU memory but is
         # referred as `gpu block`. Because we want to reuse the existing block
         # management procedure.
-        logger.info(f"# CPU blocks: {num_gpu_blocks}")
+        logger_data = {"num_gpu_blocks": num_gpu_blocks}
+        logger.info(f"# CPU blocks: {num_gpu_blocks}", extra=logger_data)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,

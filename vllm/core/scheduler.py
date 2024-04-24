@@ -297,7 +297,8 @@ class Scheduler:
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
         # Add sequence groups to the waiting queue.
-        logger.debug(f"add_seq_group {seq_group.request_id}")
+        logger_data = {"request_id": seq_group.request_id}
+        logger.debug(f"add_seq_group {seq_group.request_id}", extra=logger_data)
         self.waiting.append(seq_group)
 
     def abort_seq_group(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -427,7 +428,8 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                logger.debug(f"append slot for {seq_group}")
+                logger_data = {"seq_group": seq_group}
+                logger.debug(f"append slot for {seq_group}", extra=logger_data)
                 self._append_slots(seq_group, blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
@@ -612,9 +614,13 @@ class Scheduler:
                 assert num_new_tokens == num_prompt_tokens
 
             if num_new_tokens > self.prompt_limit:
+                logger_data = {
+                    "num_new_tokens": num_new_tokens,
+                    "prompt_limit": self.prompt_limit
+                }
                 logger.warning(
                     f"Input prompt ({num_new_tokens} tokens) is too long"
-                    f" and exceeds limit of {self.prompt_limit}")
+                    f" and exceeds limit of {self.prompt_limit}", extra=logger_data)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -626,9 +632,12 @@ class Scheduler:
             if can_allocate == AllocStatus.LATER:
                 break
             elif can_allocate == AllocStatus.NEVER:
+                logger_data = {
+                    "num_new_tokens": num_new_tokens,
+                }
                 logger.warning(
                     f"Input prompt ({num_new_tokens} tokens) is too long"
-                    f" and exceeds the capacity of block_manager")
+                    f" and exceeds the capacity of block_manager", extra=logger_data)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)

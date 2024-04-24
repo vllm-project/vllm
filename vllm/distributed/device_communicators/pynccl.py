@@ -41,6 +41,7 @@ try:
     nccl_integrity_check(so_file)
     nccl = ctypes.CDLL(so_file)
 except Exception as e:
+    logger_data = {"so_file": so_file, "platform": platform.platform()}
     logger.error(
         f"Failed to load NCCL library from {so_file} ."
         "It is expected if you are not running on NVIDIA/AMD GPUs."
@@ -50,7 +51,7 @@ except Exception as e:
         f"https://developer.download.nvidia.com/compute/cuda/repos/ "
         f"and extract the libnccl.so.2 file. If you already have the "
         f"library, please set the environment variable VLLM_NCCL_SO_PATH"
-        " to point to the correct nccl library path.")
+        " to point to the correct nccl library path.", extra=logger_data)
     raise e
 
 # === export types and functions from nccl to Python ===

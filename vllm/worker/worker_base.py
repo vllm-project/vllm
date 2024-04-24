@@ -148,7 +148,8 @@ class WorkerWrapperBase:
             # exceptions in the rest worker may cause deadlock in rpc like ray
             # see https://github.com/vllm-project/vllm/issues/3455
             # print the error and inform the user to solve the error
+            logger_data = {"method": method}
             msg = (f"Error executing method {method}. "
                    "This might cause deadlock in distributed execution.")
-            logger.exception(msg)
+            logger.exception(msg, extra=logger_data)
             raise e

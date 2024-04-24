@@ -56,8 +56,15 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
+    logger_data = {
+        "world_size": world_size,
+        "rank": rank,
+        "local_rank": local_rank,
+        "distributed_init_method": distributed_init_method,
+        "backend": backend,
+    }
     logger.debug(f"{world_size=} {rank=} {local_rank=} "
-                 f"{distributed_init_method=} {backend=}")
+                 f"{distributed_init_method=} {backend=}", extra=logger_data)
     if not torch.distributed.is_initialized():
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "

@@ -50,6 +50,7 @@ def _get_gemma_act_fn(
 ) -> nn.Module:
     if hidden_activation is None:
         if hidden_act is not None:
+            logger_data = {"hidden_act": hidden_act}
             logger.warning(
                 "Gemma's activation function was incorrectly set to exact GeLU "
                 "in the config JSON file when it was initially released. "
@@ -58,7 +59,7 @@ def _get_gemma_act_fn(
                 f"`{hidden_act}`, edit the config JSON to set "
                 f"`hidden_activation={hidden_act}` instead of `hidden_act`. "
                 "See https://github.com/huggingface/transformers/pull/29402 "
-                "for more details.")
+                "for more details.", extra=logger_data)
         return GeluAndMul(approximate="tanh")
     elif hidden_activation == "gelu_pytorch_tanh":
         return GeluAndMul(approximate="tanh")
