@@ -73,6 +73,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");
   ops.def("squeezellm_gemm", &squeezellm_gemm, "Quantized GEMM for SqueezeLLM");
+  ops.def("scaled_fp8_quant", &scaled_fp8_quant, "Compute FP8 quantized tensor and scaling factor");
   ops.def(
     "moe_align_block_size",
     &moe_align_block_size,
