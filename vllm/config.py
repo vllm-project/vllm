@@ -167,9 +167,9 @@ class ModelConfig:
                     f"supported in ROCm.")
             if self.quantization != "marlin":
                 logger.warning(
-                    f"{self.quantization} quantization is not fully "
+                    "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
-                    "non-quantized models.")
+                    "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
         if self.max_context_len_to_capture is None:
@@ -360,7 +360,7 @@ class CacheConfig:
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warning("Possibly too large swap space. " + msg)
+            logger.warning("Possibly too large swap space. %s", msg)
 
 
 @dataclass
@@ -898,8 +898,8 @@ class LoRAConfig:
                 "awq", "gptq"
         ]:
             # TODO support marlin and squeezellm
-            logger.warning(f"{model_config.quantization} quantization is not "
-                           "tested with LoRA yet.")
+            logger.warning("%s quantization is not tested with LoRA yet.",
+                           model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
@@ -1008,7 +1008,7 @@ def _get_and_verify_dtype(
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
-            logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
+            logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
 
     return torch_dtype
 
@@ -1051,8 +1051,8 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            f"{possible_keys}. Assuming the model's maximum length is "
-            f"{default_max_len}.")
+            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            default_max_len)
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
