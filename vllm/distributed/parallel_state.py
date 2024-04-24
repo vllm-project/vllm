@@ -4,6 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
+import os
 from typing import Optional
 
 import torch
@@ -73,6 +74,11 @@ def init_distributed_environment(
         ranks = list(range(torch.distributed.get_world_size()))
         _CPU_WORLD_GROUP = torch.distributed.new_group(ranks=ranks,
                                                        backend="gloo")
+        # set the local rank
+        # local_rank is not available in torch ProcessGroup,
+        # see https://github.com/pytorch/pytorch/issues/122816
+        if local_rank == -1 and distributed_init_method == "env://":
+            local_rank = int(os.environ['LOCAL_RANK'])
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
 
