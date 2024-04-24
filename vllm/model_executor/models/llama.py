@@ -166,27 +166,12 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # q k v all have shape [num_tokens, num_heads * head_size] i.e. [1, 4096] for decode
 
-        use_attn_sinks = False
+        use_attn_sinks = True
         llama_context_len = 4096
         norm = lambda x: torch.linalg.norm(x).item()
 
         if not use_attn_sinks:
             q, k = self.rotary_emb(positions, q, k)
-            
-            if kv_cache is not None and attn_metadata.decode_metadata is not None:
-                num_blocks = kv_cache.shape[1]
-                key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads * self.head_dim, -1)
-                block_size = key_cache.shape[-1]
-                
-                block_table = attn_metadata.decode_metadata.block_tables[0]
-                pos = positions[0] - 1
-                logic_bnum = pos // block_size
-                phys_bnum = block_table[logic_bnum]
-                offset = pos % block_size
-
-                past_key = key_cache[phys_bnum, :, offset]
-                print(f"read key@{pos} blocknum={phys_bnum}\t", norm(past_key))
-            
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                     self.kv_scale)
             output, _ = self.o_proj(attn_output)
@@ -194,6 +179,7 @@ class LlamaAttention(nn.Module):
 
         # what if metadata has both prefill and decode?
         if attn_metadata.prefill_metadata is not None:
+            # for prefill, storing original keys happens in xformers.py
             k_original = k.clone()
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
@@ -207,10 +193,9 @@ class LlamaAttention(nn.Module):
             positions = torch.clamp(positions, max=llama_context_len - 1)
             q, k = self.rotary_emb(positions, q, k)
             
-            # key cache reshape: [num_blocks, num_heads * head_size, block_size]
-            num_blocks = kv_cache.shape[1]
-            key_cache = kv_cache[0].view(num_blocks, self.num_kv_heads * self.head_dim, -1)
-            block_size = key_cache.shape[-1]
+            # key cache reshape: [num_blocks, num_heads, head_size/x, block_size, x]
+            key_cache, _ = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_dim)
+            block_size = key_cache.shape[-2]
 
             original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
             block_tables_tensor = attn_metadata.decode_metadata.block_tables
@@ -230,20 +215,23 @@ class LlamaAttention(nn.Module):
                 block_table = block_tables_tensor[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
-                # loop should have 4096 - 1 iterations
+                # loop should have 4096 - 1 iterations if not within_context_len
                 for abs_pos in range(start, end):
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
 
                     # rotate k based on new relative pos
-                    past_key = key_cache[phys_bnum, :, offset]
-                    if abs_pos==end-1: print(f"read key@{abs_pos}\t", norm(past_key))
+                    past_key = key_cache[phys_bnum, :, :, offset, :]
                     past_keys[abs_pos] = past_key.clone()
                     p = abs_pos if within_context_len else abs_pos - start + block_size
                     pos = torch.tensor([p], device=positions.device)
-                    past_key = self.rotary_emb._forward_single(pos, past_key.unsqueeze(0))
-                    key_cache[phys_bnum, :, offset] = past_key.squeeze(0)
+
+                    # would reshape(-1) work for rope?
+                    past_key = self.rotary_emb._forward_single(pos, past_key.reshape(-1).unsqueeze(0))
+                    # this reshape is also sus
+                    key_cache[phys_bnum, :, :, offset, :] = past_key.squeeze(0).reshape(
+                        key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
 
                 original_keys.append(past_keys)
                 
@@ -283,7 +271,7 @@ class LlamaAttention(nn.Module):
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
                     offset = abs_pos % block_size
-                    key_cache[phys_bnum, :, offset] = past_keys[abs_pos]
+                    key_cache[phys_bnum, :, :, offset, :] = past_keys[abs_pos]
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields
