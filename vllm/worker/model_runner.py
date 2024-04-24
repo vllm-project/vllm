@@ -456,7 +456,6 @@ class ModelRunner:
 
             # Parallel decoding with tree attention
             if enable_tree_attn:
-                assert len(seq_ids) == tree_width, "The best_of arg in sampling_params should be same with sequence number of group."
                 root_seq = seq_group_metadata.seq_data[seq_group_metadata.root_seq_id]
                 prompt_len = root_seq.get_prompt_len()
                 # In Parallel Decoding with tree attention, sequences will stop when every sequence in the group has stopped.
@@ -469,7 +468,10 @@ class ModelRunner:
                 block_tables.append(block_table)
                 context_lens.append(context_len)
                 prompt_lens.append(prompt_len)
-                input_tokens.extend([seq.get_last_token_id() for seq in seq_group_metadata.seq_data.values()])
+                seq_group_input_token = [0]*tree_width
+                for seq in seq_group_metadata.seq_data.values():
+                    seq_group_input_token[seq.inner_id] = seq.get_last_token_id()
+                input_tokens.extend(seq_group_input_token)
                 for pos in position:
                     block_number = block_table[pos // self.block_size]
                     block_offset = pos % self.block_size

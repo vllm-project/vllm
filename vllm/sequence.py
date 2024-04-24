@@ -121,6 +121,8 @@ class SequenceData:
         # The number of tokens that are computed (that run against the model).
         self._num_computed_tokens = 0
         self._stage: SequenceStage = SequenceStage.PREFILL
+        # The id to identify the sequences in same Group
+        self.inner_id = 0
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
@@ -231,6 +233,8 @@ class Sequence:
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
         self.seq_group: Optional[SequenceGroup] = None
+        # The id to identify the sequences in same Group
+        self.inner_id = 0
 
     @property
     def lora_int_id(self) -> int:
@@ -283,6 +287,13 @@ class Sequence:
     ) -> None:
         assert token_id in logprobs
         seq_group = self.seq_group
+        
+        def calc(seq_group):
+            num_token = 0     
+            for block in seq_group.find(seq_group.root_seq_id).logical_token_blocks:
+                num_token += block.num_tokens
+            return num_token
+        
         # allocate block for root seq if sampling type is RANDOM_SEED and generate multiple sequence per prompt
         if self.seq_id != seq_group.root_seq_id and seq_group.sampling_params.sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             buffer_seq = seq_group.find(self.seq_group.root_seq_id)
@@ -536,6 +547,8 @@ class SequenceGroup:
         if seq.seq_id in self.seqs_dict:
             raise ValueError(f"Sequence {seq.seq_id} already exists.")
         seq.seq_group = self
+        seq.inner_id = len(self.seqs_dict)
+        seq.data.inner_id = seq.inner_id
         self.seqs_dict[seq.seq_id] = seq
 
     def remove(self, seq_id: int) -> None:
