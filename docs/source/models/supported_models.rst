@@ -101,7 +101,7 @@ Alongside each architecture, we include some popular models that use it.
     -
   * - :code:`OLMoForCausalLM`
     - OLMo
-    - :code:`allenai/OLMo-1B`, :code:`allenai/OLMo-7B`, etc.
+    - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
