@@ -146,6 +146,11 @@ void gptq_shuffle(
   torch::Tensor q_perm,
   int bit);
 
+void scaled_fp8_quant(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& scale);
+
 void moe_align_block_size(
   torch::Tensor topk_ids,
   int num_experts,
