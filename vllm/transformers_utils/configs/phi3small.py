@@ -21,10 +21,8 @@ from transformers import PreTrainedTokenizer, TensorType, is_torch_available
 from transformers.configuration_utils import PretrainedConfig
 from transformers.onnx import OnnxConfigWithPast, PatchingSpec
 from transformers.utils import logging
-
 """ Phi3-small model configuration """
 logger = logging.get_logger(__name__)
-
 
 
 def next_mult(x, y):
@@ -127,12 +125,11 @@ class Phi3SmallConfig(PretrainedConfig):
 
     model_type = "phi3-small"
     keys_to_ignore_at_inference = ["past_key_values"]
-    
 
     def __init__(
         self,
         # General information about the model
-        vocab_size: int =100352,
+        vocab_size: int = 100352,
         max_position_embeddings: int = 8192,
         # RoPE Related Parameters
         rope_embedding_base: float = 10**6,
@@ -155,7 +152,7 @@ class Phi3SmallConfig(PretrainedConfig):
         blocksparse_vert_stride: int = 8,
         blocksparse_triton_kernel_block_size: int = 64,
         # Reegularization parameters
-        embedding_dropout_prob: float =0.1,
+        embedding_dropout_prob: float = 0.1,
         attention_dropout_prob: float = 0.0,
         ffn_dropout_prob: float = 0.1,
         layer_norm_epsilon=1e-5,
@@ -164,7 +161,7 @@ class Phi3SmallConfig(PretrainedConfig):
         mup_use_scaling: bool = True,
         mup_width_multiplier: bool = 8.0,
         mup_embedding_multiplier: bool = 10.0,
-        mup_attn_multiplier: bool =1.0,
+        mup_attn_multiplier: bool = 1.0,
         use_cache=True,
         # The model does not have a bos token id
         bos_token_id: Optional[int] = None,
@@ -201,7 +198,7 @@ class Phi3SmallConfig(PretrainedConfig):
 
         self.layer_norm_epsilon = layer_norm_epsilon
         self.initializer_range = initializer_range
-        
+
         # MuP parameters
         self.mup_use_scaling = mup_use_scaling
         self.mup_width_multiplier = mup_width_multiplier
@@ -215,20 +212,23 @@ class Phi3SmallConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.dense_attention_every_n_layers = dense_attention_every_n_layers
 
+        super().__init__(bos_token_id=bos_token_id,
+                         eos_token_id=eos_token_id,
+                         **kwargs)
 
-        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
-    
     @property
     def intermediate_size(self) -> int:
         if getattr(self, 'ff_intermediate_size', None):
             return self.ff_intermediate_size
-        intermediate_size = (self.ff_dim_multiplier) * (self.hidden_size // 3) * 2
+        intermediate_size = (self.ff_dim_multiplier) * (self.hidden_size //
+                                                        3) * 2
         if self.gegelu_pad_to_256:
             intermediate_size = next_mult(intermediate_size, 256)
         return intermediate_size
 
 
 class GPT2OnnxConfig(OnnxConfigWithPast):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -236,7 +236,10 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         patching_specs: List[PatchingSpec] = None,
         use_past: bool = False,
     ):
-        super().__init__(config, task=task, patching_specs=patching_specs, use_past=use_past)
+        super().__init__(config,
+                         task=task,
+                         patching_specs=patching_specs,
+                         use_past=use_past)
         if not getattr(self._config, "pad_token_id", None):
             # TODO: how to do that better?
             self._config.pad_token_id = 0
@@ -246,7 +249,10 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         common_inputs = OrderedDict({"input_ids": {0: "batch", 1: "sequence"}})
         if self.use_past:
             self.fill_with_past_key_values_(common_inputs, direction="inputs")
-            common_inputs["attention_mask"] = {0: "batch", 1: "past_sequence + sequence"}
+            common_inputs["attention_mask"] = {
+                0: "batch",
+                1: "past_sequence + sequence"
+            }
         else:
             common_inputs["attention_mask"] = {0: "batch", 1: "sequence"}
 
@@ -269,8 +275,11 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         framework: Optional[TensorType] = None,
     ) -> Mapping[str, Any]:
         common_inputs = super(OnnxConfigWithPast, self).generate_dummy_inputs(
-            tokenizer, batch_size=batch_size, seq_length=seq_length, is_pair=is_pair, framework=framework
-        )
+            tokenizer,
+            batch_size=batch_size,
+            seq_length=seq_length,
+            is_pair=is_pair,
+            framework=framework)
 
         # We need to order the input in the way they appears in the forward()
         ordered_inputs = OrderedDict({"input_ids": common_inputs["input_ids"]})
@@ -278,7 +287,9 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         # Need to add the past_keys
         if self.use_past:
             if not is_torch_available():
-                raise ValueError("Cannot generate dummy past_keys inputs without PyTorch installed.")
+                raise ValueError(
+                    "Cannot generate dummy past_keys inputs without PyTorch installed."
+                )
             else:
                 import torch
 
@@ -292,15 +303,18 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
                     self._config.hidden_size // self.num_attention_heads,
                 )
                 ordered_inputs["past_key_values"] = [
-                    (torch.zeros(past_shape), torch.zeros(past_shape)) for _ in range(self.num_layers)
+                    (torch.zeros(past_shape), torch.zeros(past_shape))
+                    for _ in range(self.num_layers)
                 ]
 
         ordered_inputs["attention_mask"] = common_inputs["attention_mask"]
         if self.use_past:
             mask_dtype = ordered_inputs["attention_mask"].dtype
-            ordered_inputs["attention_mask"] = torch.cat(
-                [ordered_inputs["attention_mask"], torch.ones(batch, past_key_values_length, dtype=mask_dtype)], dim=1
-            )
+            ordered_inputs["attention_mask"] = torch.cat([
+                ordered_inputs["attention_mask"],
+                torch.ones(batch, past_key_values_length, dtype=mask_dtype)
+            ],
+                                                         dim=1)
 
         return ordered_inputs
 

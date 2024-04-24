@@ -53,21 +53,19 @@ class BlockSparseFlashAttention(nn.Module):
     **kwargs: not used, only for API compatability.
     """
 
-    def __init__(
-        self,
-        local_blocks: int,
-        vert_stride: int,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: Optional[int] = None,
-        max_seqlen: int = 8192,
-        sparse_block_size: int = 64,
-        layer_idx: int = 0,
-        use_triton_paged_attn: Optional[bool] = None,
-        homo_head: bool = False,
-        **kwargs
-    ) -> None:
+    def __init__(self,
+                 local_blocks: int,
+                 vert_stride: int,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 num_kv_heads: Optional[int] = None,
+                 max_seqlen: int = 8192,
+                 sparse_block_size: int = 64,
+                 layer_idx: int = 0,
+                 use_triton_paged_attn: Optional[bool] = None,
+                 homo_head: bool = False,
+                 **kwargs) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.local_blocks = local_blocks
@@ -75,7 +73,8 @@ class BlockSparseFlashAttention(nn.Module):
         self.homo_head = homo_head
 
         if use_triton_paged_attn is None:
-            use_triton_paged_attn = bool(int(os.environ.get('PHI3SMALL_USE_TRITON_PAGED_ATTN', '0')))
+            use_triton_paged_attn = bool(
+                int(os.environ.get('PHI3SMALL_USE_TRITON_PAGED_ATTN', '0')))
 
         self.use_triton_paged_attn = use_triton_paged_attn
         self.backend = BlocksparseFlashAttentionBackend
@@ -84,7 +83,8 @@ class BlockSparseFlashAttention(nn.Module):
                              vert_stride,
                              num_heads,
                              head_size,
-                             scale, num_kv_heads,
+                             scale,
+                             num_kv_heads,
                              homo_head=homo_head,
                              max_seqlen=max_seqlen,
                              sparse_block_size=sparse_block_size,
@@ -141,7 +141,8 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class BlocksparseFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
+class BlocksparseFlashAttentionMetadata(AttentionMetadata,
+                                        PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -211,20 +212,20 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
     """
 
     def __init__(
-        self,
-        local_blocks: int,
-        vert_stride: int,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: Optional[int] = None,
-        max_seqlen: int = 8192,
-        sparse_block_size: int = 64,
-        alibi_slopes: Optional[List[float]] = None,
-        layer_idx: int = 0,
-        use_triton_paged_attn: bool = False,
-        homo_head: bool=False,
-        **kwargs, # for compatibiliy
+            self,
+            local_blocks: int,
+            vert_stride: int,
+            num_heads: int,
+            head_size: int,
+            scale: float,
+            num_kv_heads: Optional[int] = None,
+            max_seqlen: int = 8192,
+            sparse_block_size: int = 64,
+            alibi_slopes: Optional[List[float]] = None,
+            layer_idx: int = 0,
+            use_triton_paged_attn: bool = False,
+            homo_head: bool = False,
+            **kwargs,  # for compatibiliy
     ) -> None:
         self.layer_idx = layer_idx
         self.num_heads = num_heads
@@ -239,7 +240,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.use_triton_paged_attn = use_triton_paged_attn
 
         if alibi_slopes is not None:
-            assert ValueError('Alibi not support for blocksparse flash attention.')
+            assert ValueError(
+                'Alibi not support for blocksparse flash attention.')
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -253,25 +255,28 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        active_head_range = (tp_rank * self.num_heads, (tp_rank + 1) * self.num_heads)
+        active_head_range = (tp_rank * self.num_heads,
+                             (tp_rank + 1) * self.num_heads)
 
         total_num_heads = num_heads * tp_size
-        self.bs_attn = LocalStridedBlockSparseAttn(total_num_heads,
-                                                   max_seqlen,
-                                                   local_blocks,
-                                                   vert_stride,
-                                                   sparse_block_size,
-                                                   homo_head=self.homo_head,
-                                                   active_head_range=active_head_range)
+        self.bs_attn = LocalStridedBlockSparseAttn(
+            total_num_heads,
+            max_seqlen,
+            local_blocks,
+            vert_stride,
+            sparse_block_size,
+            homo_head=self.homo_head,
+            active_head_range=active_head_range)
 
         if self.use_triton_paged_attn:
-            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(total_num_heads,
-                                                                  max_seqlen,
-                                                                  local_blocks,
-                                                                  vert_stride,
-                                                                  sparse_block_size,
-                                                                  homo_head=self.homo_head,
-                                                                  active_head_range=active_head_range)
+            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
+                total_num_heads,
+                max_seqlen,
+                local_blocks,
+                vert_stride,
+                sparse_block_size,
+                homo_head=self.homo_head,
+                active_head_range=active_head_range)
 
     def forward(
         self,
@@ -320,25 +325,25 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            output = self.bs_attn(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=attn_metadata.seq_start_loc,
-                cu_seqlens_k=attn_metadata.seq_start_loc,
-                sm_scale=self.scale
-            )
+            output = self.bs_attn(q=query,
+                                  k=key,
+                                  v=value,
+                                  cu_seqlens_q=attn_metadata.seq_start_loc,
+                                  cu_seqlens_k=attn_metadata.seq_start_loc,
+                                  sm_scale=self.scale)
 
         else:
             # Decoding run.
             if self.use_triton_paged_attn:
-                output = self.bs_paged_attn(query, key_cache, value_cache,
+                output = self.bs_paged_attn(query,
+                                            key_cache,
+                                            value_cache,
                                             attn_metadata.block_tables,
                                             attn_metadata.context_lens,
                                             sm_scale=self.scale,
                                             kv_scale=kv_scale)
 
-            else: # cuda kernel
+            else:  # cuda kernel
                 output = PagedAttention.forward_decode(
                     query,
                     key_cache,

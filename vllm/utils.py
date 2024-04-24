@@ -452,20 +452,21 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: Dict[Any, List[Any]], dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
+def merge_dicts(dict1: Dict[Any, List[Any]],
+                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     # Create a new dictionary to hold the merged results
     merged_dict = dict()
 
     for key, value in dict1.items():
         if key in merged_dict:
-            merged_dict[key].extend(value) 
+            merged_dict[key].extend(value)
         else:
-            merged_dict[key] = value  
+            merged_dict[key] = value
 
     for key, value in dict2.items():
         if key in merged_dict:
-            merged_dict[key].extend(value)  
+            merged_dict[key].extend(value)
         else:
-            merged_dict[key] = value  
+            merged_dict[key] = value
 
     return merged_dict

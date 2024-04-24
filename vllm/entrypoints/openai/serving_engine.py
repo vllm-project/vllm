@@ -105,7 +105,8 @@ class OpenAIServing:
             if step_top_logprobs is not None:
                 token_logprob = step_top_logprobs[token_id].logprob
                 token_logprob = max(token_logprob, -1e9)
-                token_logprob = None if np.isinf(token_logprob) else token_logprob
+                token_logprob = None if np.isinf(
+                    token_logprob) else token_logprob
                 token = step_top_logprobs[token_id].decoded_token
             else:
                 token_logprob = None

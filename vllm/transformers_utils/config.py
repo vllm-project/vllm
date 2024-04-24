@@ -21,11 +21,10 @@ def get_config(model: str,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None) -> PretrainedConfig:
     try:
-        config = Phi3SmallConfig(
-            model,
-            trust_remote_code=trust_remote_code,
-            revision=revision,
-            code_revision=code_revision)
+        config = Phi3SmallConfig(model,
+                                 trust_remote_code=trust_remote_code,
+                                 revision=revision,
+                                 code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):

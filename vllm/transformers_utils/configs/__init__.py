@@ -8,7 +8,6 @@ from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.mpt import MPTConfig
 from vllm.transformers_utils.configs.phi3small import Phi3SmallConfig
 
-
 __all__ = [
     "ChatGLMConfig",
     "DbrxConfig",

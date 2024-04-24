@@ -16,8 +16,7 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
@@ -26,33 +25,29 @@ from vllm.transformers_utils.configs import Phi3SmallConfig
 from vllm.model_executor.models.phi3small.phi3small_attention import BlockSparseFlashAttention
 
 
-def load_column_parallel_weight(
-            param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor
-            ):
-        tp = get_tensor_model_parallel_world_size()
-        rk = get_tensor_model_parallel_rank()
-        assert param.size(0) * tp == loaded_weight.size(0)
-        s = rk * param.size(0)
-        e = (rk + 1) * param.size(0)
-        loaded_weight = loaded_weight[s:e]
-        assert param.shape == loaded_weight.shape
-        param.data.copy_(loaded_weight)
+def load_column_parallel_weight(param: torch.nn.Parameter,
+                                loaded_weight: torch.Tensor):
+    tp = get_tensor_model_parallel_world_size()
+    rk = get_tensor_model_parallel_rank()
+    assert param.size(0) * tp == loaded_weight.size(0)
+    s = rk * param.size(0)
+    e = (rk + 1) * param.size(0)
+    loaded_weight = loaded_weight[s:e]
+    assert param.shape == loaded_weight.shape
+    param.data.copy_(loaded_weight)
 
 
 class QKVParallelLinear2(QKVParallelLinear):
-    def weight_loader(self,
-                      param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor
-                    ):
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor):
         return load_column_parallel_weight(param, loaded_weight)
 
 
 class MergedColumnParallelLinear2(MergedColumnParallelLinear):
-    def weight_loader(self,
-                    param: torch.nn.Parameter,
-                    loaded_weight: torch.Tensor
-                    ):
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor):
         return load_column_parallel_weight(param, loaded_weight)
 
 
@@ -65,17 +60,16 @@ def quick_gelu(x):
 def gegelu(input, limit: Optional[float] = None):
     a_gelu, a_linear = input[..., ::2], input[..., 1::2]
     if limit is not None:
-        a_gelu = torch.where(
-            torch.isinf(a_gelu), a_gelu, a_gelu.clamp(min=None, max=limit)
-        )
-        a_linear = torch.where(
-            torch.isinf(a_linear), a_linear, a_linear.clamp(min=-limit, max=limit)
-        )
+        a_gelu = torch.where(torch.isinf(a_gelu), a_gelu,
+                             a_gelu.clamp(min=None, max=limit))
+        a_linear = torch.where(torch.isinf(a_linear), a_linear,
+                               a_linear.clamp(min=-limit, max=limit))
     out_gelu = quick_gelu(a_gelu)
     return out_gelu * (a_linear + 1)
 
 
 class Phi3SmallMLP(nn.Module):
+
     def __init__(
         self,
         config: Phi3SmallConfig,
@@ -90,7 +84,7 @@ class Phi3SmallMLP(nn.Module):
 
         self.up_proj = MergedColumnParallelLinear2(
             self.hidden_size,
-            2* [self.intermediate_size],
+            2 * [self.intermediate_size],
             bias=True,
             linear_method=linear_method,
         )
@@ -109,7 +103,10 @@ class Phi3SmallMLP(nn.Module):
 
 
 class Phi3SmallSelfAttention(nn.Module):
-    def __init__(self, config: Phi3SmallConfig, layer_idx: Optional[int] = None) -> None:
+
+    def __init__(self,
+                 config: Phi3SmallConfig,
+                 layer_idx: Optional[int] = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -131,7 +128,8 @@ class Phi3SmallSelfAttention(nn.Module):
         self.num_q_per_kv = self.num_heads // self.num_key_value_heads
         if self.tp_size > 1:
             assert self.num_key_value_heads % self.tp_size == 0
-        self.num_kv_heads_per_partion = max(1, self.num_key_value_heads // self.tp_size)
+        self.num_kv_heads_per_partion = max(
+            1, self.num_key_value_heads // self.tp_size)
         self.num_heads_per_partition = self.num_heads // self.tp_size
 
         self.max_position_embeddings = config.max_position_embeddings
@@ -155,12 +153,10 @@ class Phi3SmallSelfAttention(nn.Module):
             linear_method=None,
         )
 
-        self.dense = RowParallelLinear(
-            self.hidden_size,
-            self.hidden_size,
-            bias=True,
-            linear_method=None
-        )
+        self.dense = RowParallelLinear(self.hidden_size,
+                                       self.hidden_size,
+                                       bias=True,
+                                       linear_method=None)
 
         if getattr(self.config, 'rope_scaling', None) is not None:
             rope_scaling = self.config.rope_scaling
@@ -171,7 +167,10 @@ class Phi3SmallSelfAttention(nn.Module):
             if "factor" not in rope_scaling:
                 rope_scaling['factor'] = self.rope_position_scale
         else:
-            rope_scaling={"type":"linear","factor": self.rope_position_scale}
+            rope_scaling = {
+                "type": "linear",
+                "factor": self.rope_position_scale
+            }
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -191,22 +190,23 @@ class Phi3SmallSelfAttention(nn.Module):
             (self.layer_idx + 1) % self.config.dense_attention_every_n_layers == 0
 
         if use_dense_attn:
-            self.attn = Attention(self.num_heads_per_partition,
-                                self.head_dim,
-                                self.scale,
-                                num_kv_heads=self.num_kv_heads_per_partion,
-                                )
+            self.attn = Attention(
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                num_kv_heads=self.num_kv_heads_per_partion,
+            )
         else:
             self.attn = BlockSparseFlashAttention(
-                                  self.lcoal_blocks,
-                                  self.vert_stride,
-                                  self.num_heads_per_partition,
-                                  self.head_dim,
-                                  self.scale,
-                                  max_seqlen=self.max_position_embeddings,
-                                  sparse_block_size=self.sparse_block_size,
-                                  num_kv_heads=self.num_kv_heads_per_partion,
-                                  layer_idx=layer_idx)
+                self.lcoal_blocks,
+                self.vert_stride,
+                self.num_heads_per_partition,
+                self.head_dim,
+                self.scale,
+                max_seqlen=self.max_position_embeddings,
+                sparse_block_size=self.sparse_block_size,
+                num_kv_heads=self.num_kv_heads_per_partion,
+                layer_idx=layer_idx)
 
     def forward(
         self,
@@ -214,20 +214,22 @@ class Phi3SmallSelfAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[Tuple[torch.Tensor]]]:
         """_summary_
         """
 
         # TODO: why the bias is not used?
         qkv, _ = self.query_key_value(hidden_states)
 
-        qkv = qkv.view(qkv.shape[:-1]+ (-1, (self.num_q_per_kv + 2), self.head_dim))
+        qkv = qkv.view(qkv.shape[:-1] +
+                       (-1, (self.num_q_per_kv + 2), self.head_dim))
         q, k, v = qkv.split([self.num_q_per_kv, 1, 1], dim=-2)
 
         # NOTE: maybe we should change the order of qkv weights so that we don't need to reshape, but using view
-        q = q.reshape(-1, self.head_dim*self.num_heads_per_partition)
-        k = k.reshape(-1, self.head_dim*self.num_kv_heads_per_partion)
-        v = v.reshape(-1, self.head_dim*self.num_kv_heads_per_partion)
+        q = q.reshape(-1, self.head_dim * self.num_heads_per_partition)
+        k = k.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
+        v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata=attn_metadata)
@@ -237,14 +239,22 @@ class Phi3SmallSelfAttention(nn.Module):
 
 
 class Phi3SmallDecoderLayer(nn.Module):
-    def __init__(self, config: Phi3SmallConfig, layer_idx: int, linear_method: Optional[LinearMethodBase] = None,):
+
+    def __init__(
+        self,
+        config: Phi3SmallConfig,
+        layer_idx: int,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Phi3SmallSelfAttention(config, layer_idx)
         self.mlp = Phi3SmallMLP(config)
 
-        self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.layer_norm_epsilon)
+        self.post_attention_layernorm = nn.LayerNorm(
+            config.hidden_size, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -273,20 +283,26 @@ class Phi3SmallDecoderLayer(nn.Module):
 
 class Phi3SmallModel(nn.Module):
 
-    def __init__(self, config:Phi3SmallConfig, linear_method: Optional[LinearMethodBase] = None,):
+    def __init__(
+        self,
+        config: Phi3SmallConfig,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size
-            )
+        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
+                                                   config.hidden_size)
 
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
 
-        self.layers = nn.ModuleList([Phi3SmallDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([
+            Phi3SmallDecoderLayer(config, layer_idx)
+            for layer_idx in range(config.num_hidden_layers)
+        ])
 
-        self.final_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.final_layernorm = nn.LayerNorm(config.hidden_size,
+                                            eps=config.layer_norm_epsilon)
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -319,18 +335,20 @@ class Phi3SmallModel(nn.Module):
 class Phi3SmallForCausalLM(nn.Module):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config, linear_method: Optional[LinearMethodBase] = None,):
+    def __init__(
+        self,
+        config,
+        linear_method: Optional[LinearMethodBase] = None,
+    ):
         super().__init__()
         self.config = config
         self.model = Phi3SmallModel(config)
         self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
-        self.lm_head = ParallelLMHead(
-            self.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-        )
+        self.lm_head = ParallelLMHead(self.vocab_size,
+                                      config.hidden_size,
+                                      org_num_embeddings=config.vocab_size,
+                                      padding_size=DEFAULT_VOCAB_PADDING_SIZE)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -365,19 +383,21 @@ class Phi3SmallForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        output_hidden_states = self.model(input_ids=input_ids, positions=positions, kv_caches=kv_caches, attn_metadata=attn_metadata)
+        output_hidden_states = self.model(input_ids=input_ids,
+                                          positions=positions,
+                                          kv_caches=kv_caches,
+                                          attn_metadata=attn_metadata)
         output_hidden_states = output_hidden_states
         return output_hidden_states
-
 
     def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits / self.mup_width_multiplier, sampling_metadata)
+        next_tokens = self.sampler(logits / self.mup_width_multiplier,
+                                   sampling_metadata)
         return next_tokens
-
 
     def load_weights(self,
                      model_name_or_path: str,

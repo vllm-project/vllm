@@ -23,7 +23,10 @@ def dense_to_crow_col(x):
     crows = torch.vstack([xi.crow_indices() for xi in x])
     cols = [xi.col_indices() for xi in x]
     max_cols = max(len(xi) for xi in cols)
-    cols = [torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])]) for xi in cols]
+    cols = [
+        torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])])
+        for xi in cols
+    ]
     cols = torch.vstack(cols)
     if dim == 2:
         crows = crows[0]
@@ -42,7 +45,7 @@ def crow_col_to_dense(crows, cols, dtype=torch.float16):
     x = torch.zeros(shape, dtype=dtype)
     for i in range(shape[0]):
         for j in range(shape[1]):
-            x[i, j, cols[i, crows[i, j]:crows[i, j+1]]] = 1
+            x[i, j, cols[i, crows[i, j]:crows[i, j + 1]]] = 1
     if dim == 1:
         x = x[0]
     return x.to(device)
@@ -59,7 +62,14 @@ def ccol_row_to_dense(ccol, rows, dtype=torch.float16):
     return crow_col_to_dense(ccol, rows, dtype).permute(0, 2, 1).contiguous()
 
 
-def _get_sparse_attn_mask_homo_head(q_len, max_seqlen, dtype, device, block_size=128, local_blocks=4, vert_stride=4, return_dense=False):
+def _get_sparse_attn_mask_homo_head(q_len,
+                                    max_seqlen,
+                                    dtype,
+                                    device,
+                                    block_size=128,
+                                    local_blocks=4,
+                                    vert_stride=4,
+                                    return_dense=False):
     '''
     :return: a tuple of 3:
         - tuple of crow_indices, col_indices representation of CSR format.
@@ -71,16 +81,25 @@ def _get_sparse_attn_mask_homo_head(q_len, max_seqlen, dtype, device, block_size
         q_pos = torch.arange(num_blocks)[:, None]
         k_pos = torch.arange(num_blocks)[None]
         mask_vert_strided = (torch.arange(num_blocks) + 1) % vert_stride == 0
-        block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided)).to(device).to(dtype)
+        block_mask_dense = ((q_pos >= k_pos) &
+                            ((q_pos - k_pos < local_blocks)
+                             | mask_vert_strided)).to(device).to(dtype)
         num_blocks_q = triton.cdiv(q_len, block_size)
-        block_mask_dense_output = block_mask_dense[-num_blocks_q:].contiguous().to_sparse_csr()
+        block_mask_dense_output = block_mask_dense[-num_blocks_q:].contiguous(
+        ).to_sparse_csr()
     if return_dense:
-        mask_dense = torch.kron(block_mask_dense, block_mask_dense.new_ones((block_size, block_size)))
-        causal_mask = torch.tril(torch.ones(max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
+        mask_dense = torch.kron(
+            block_mask_dense,
+            block_mask_dense.new_ones((block_size, block_size)))
+        causal_mask = torch.tril(torch.ones(
+            max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[-q_len:, :max_seqlen] * causal_mask
-        return (block_mask_dense_output.crow_indices(), block_mask_dense_output.col_indices()), block_mask_dense, mask_dense
+        return (block_mask_dense_output.crow_indices(),
+                block_mask_dense_output.col_indices()
+                ), block_mask_dense, mask_dense
     else:
-        return (block_mask_dense_output.crow_indices(), block_mask_dense_output.col_indices()), block_mask_dense, None
+        return (block_mask_dense_output.crow_indices(),
+                block_mask_dense_output.col_indices()), block_mask_dense, None
 
 
 def binary_mask_to_bias(mask_dense):
@@ -90,7 +109,17 @@ def binary_mask_to_bias(mask_dense):
 
 
 @lru_cache
-def get_sparse_attn_mask(n_heads, q_len, max_seqlen, dtype, device, block_size=128, local_blocks=4, vert_stride=4, homo_head=True, return_dense=False, dense_mask_type='binary'):
+def get_sparse_attn_mask(n_heads,
+                         q_len,
+                         max_seqlen,
+                         dtype,
+                         device,
+                         block_size=128,
+                         local_blocks=4,
+                         vert_stride=4,
+                         homo_head=True,
+                         return_dense=False,
+                         dense_mask_type='binary'):
     '''
     :param dense_mask_type: "binary" (0 for skip token, 1 for others) or "bias" (-inf for skip token, 0 or others)
     :return: a tuple of 3:
@@ -101,11 +130,15 @@ def get_sparse_attn_mask(n_heads, q_len, max_seqlen, dtype, device, block_size=1
     assert dense_mask_type in ('binary', 'bias')
     if homo_head:
         with torch.no_grad():
-            (crow, col), block_mask_dense, mask_dense = _get_sparse_attn_mask_homo_head(q_len, max_seqlen, dtype, device, block_size, local_blocks, vert_stride, return_dense)
+            (crow, col
+             ), block_mask_dense, mask_dense = _get_sparse_attn_mask_homo_head(
+                 q_len, max_seqlen, dtype, device, block_size, local_blocks,
+                 vert_stride, return_dense)
             crow = crow[None].expand(n_heads, crow.shape[0])
             col = col[None].expand(n_heads, col.shape[0])
             if return_dense:
-                mask_dense = mask_dense[None].expand(n_heads, *mask_dense.shape)
+                mask_dense = mask_dense[None].expand(n_heads,
+                                                     *mask_dense.shape)
                 if dense_mask_type == 'bias':
                     mask_dense = binary_mask_to_bias(mask_dense)
             return (crow, col), block_mask_dense, mask_dense
@@ -114,19 +147,31 @@ def get_sparse_attn_mask(n_heads, q_len, max_seqlen, dtype, device, block_size=1
         num_blocks = triton.cdiv(max_seqlen, block_size)
         q_pos = torch.arange(num_blocks)[None, :, None]
         k_pos = torch.arange(num_blocks)[None, None]
-        head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
-        mask_vert_strided = [(torch.arange(num_blocks) + h * head_sliding_step + 1) % vert_stride == 0 for h in range(n_heads)]
+        head_sliding_step = max(
+            1, int(vert_stride /
+                   n_heads))  # if vert_stride <= n_heads, rotating the heads
+        mask_vert_strided = [
+            (torch.arange(num_blocks) + h * head_sliding_step + 1) %
+            vert_stride == 0 for h in range(n_heads)
+        ]
         mask_vert_strided = torch.vstack(mask_vert_strided).unsqueeze(1)
-        block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided)).to(device).to(dtype)
+        block_mask_dense = ((q_pos >= k_pos) &
+                            ((q_pos - k_pos < local_blocks)
+                             | mask_vert_strided)).to(device).to(dtype)
         num_blocks_q = triton.cdiv(q_len, block_size)
         block_mask_dense_output = block_mask_dense[:, -num_blocks_q:]
     if return_dense:
-        mask_dense = torch.kron(block_mask_dense, block_mask_dense.new_ones((block_size, block_size)))
-        causal_mask = torch.tril(torch.ones(max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
+        mask_dense = torch.kron(
+            block_mask_dense,
+            block_mask_dense.new_ones((block_size, block_size)))
+        causal_mask = torch.tril(torch.ones(
+            max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[..., -q_len:, :max_seqlen] * causal_mask[None]
         if dense_mask_type == 'bias':
             mask_dense = binary_mask_to_bias(mask_dense)
 
-        return dense_to_crow_col(block_mask_dense_output), block_mask_dense, mask_dense
+        return dense_to_crow_col(
+            block_mask_dense_output), block_mask_dense, mask_dense
     else:
-        return dense_to_crow_col(block_mask_dense_output), block_mask_dense, None
+        return dense_to_crow_col(
+            block_mask_dense_output), block_mask_dense, None

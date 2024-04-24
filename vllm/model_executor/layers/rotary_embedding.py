@@ -270,20 +270,26 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         short_cache = self._compute_cos_sin_cache(
             original_max_position_embeddings, short_factor, short_mscale)
         short_cache = short_cache.to(torch.get_default_dtype())
-        self.register_buffer("short_cos_sin_cache", short_cache, persistent=False)
+        self.register_buffer("short_cos_sin_cache",
+                             short_cache,
+                             persistent=False)
 
-        long_cache = self._compute_cos_sin_cache(
-            max_position_embeddings, long_factor, long_mscale)
+        long_cache = self._compute_cos_sin_cache(max_position_embeddings,
+                                                 long_factor, long_mscale)
         long_cache = long_cache.to(torch.get_default_dtype())
-        self.register_buffer("long_cos_sin_cache", long_cache, persistent=False)
+        self.register_buffer("long_cos_sin_cache",
+                             long_cache,
+                             persistent=False)
 
-        long_short_cache = torch.cat([self.short_cos_sin_cache,
-                           self.long_cos_sin_cache], dim=0)
-        self.register_buffer("long_short_cos_sin_cache", long_short_cache, persistent=False)
+        long_short_cache = torch.cat(
+            [self.short_cos_sin_cache, self.long_cos_sin_cache], dim=0)
+        self.register_buffer("long_short_cos_sin_cache",
+                             long_short_cache,
+                             persistent=False)
 
     def _compute_inv_freq(self, rescale_factors: List[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
-        inv_freq = 1.0 / (rescale_factors * (self.base **(torch.arange(
+        inv_freq = 1.0 / (rescale_factors * (self.base**(torch.arange(
             0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
         return inv_freq
 
@@ -324,9 +330,12 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
         # LongRoPE switch logic
         #For long prompt, offset position by original_max_position_embeddings to index long_cos_sin_cache properly
         k = self.original_max_position_embeddings
-        long_prompt_offset = (torch.any(positions > k).float() * torch.full_like(positions, k)).long()
-        idx = torch.add(positions, long_prompt_offset) if long_prompt_offset is not None else positions
-        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(idx.device)
+        long_prompt_offset = (torch.any(positions > k).float() *
+                              torch.full_like(positions, k)).long()
+        idx = torch.add(positions, long_prompt_offset
+                        ) if long_prompt_offset is not None else positions
+        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(
+            idx.device)
         idx = torch.add(idx, offsets) if offsets is not None else idx
 
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
@@ -467,8 +476,8 @@ def get_rope(
     # key = (head_size, rotary_dim, max_position, base, is_neox_style,
     #        tuple(rope_scaling.items()) if rope_scaling is not None else None)
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           (v for v in rope_scaling.items() if type(v) is not list)
-           if rope_scaling is not None else None)
+           (v for v in rope_scaling.items()
+            if type(v) is not list) if rope_scaling is not None else None)
 
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
@@ -514,13 +523,9 @@ def get_rope(
                 for k, v in rope_scaling.items()
                 if k in ("short_mscale", "long_mscale")
             }
-            rotary_emb = PhiLongScaledRotaryEmbedding(head_size, rotary_dim,
-                                                      max_position,
-                                                      original_max_position,
-                                                      base, is_neox_style,
-                                                      short_factor,
-                                                      long_factor,
-                                                      **extra_kwargs)
+            rotary_emb = PhiLongScaledRotaryEmbedding(
+                head_size, rotary_dim, max_position, original_max_position,
+                base, is_neox_style, short_factor, long_factor, **extra_kwargs)
         else:
             raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
     _ROPE_DICT[key] = rotary_emb
