@@ -298,12 +298,9 @@ def init_worker_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
-        pynccl_utils.init_process_group(
-            world_size=parallel_config.world_size,
-            local_rank=local_rank,
-            rank=rank,
-            init_method=distributed_init_method,
-        )
+        # NOTE(kaichao): By default, pynccl will use information inside
+        # `parallel_state` for initialization.
+        pynccl_utils.init_process_group()
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
