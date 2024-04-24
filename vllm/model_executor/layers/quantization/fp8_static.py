@@ -81,17 +81,17 @@ class Fp8LinearMethod(LinearMethodBase):
             "shard_indexer": self.scales_shard_indexer,
         })
 
-        in_scale = Parameter(
-            torch.empty(
-                len(output_partition_sizes), 
-                 device='cuda', dtype=torch.float32,
-            ), requires_grad=False
-        )
-        layer.register_parameter("in_scale", in_scale)
-        set_weight_attrs(in_scale, extra_weight_attrs)
-        set_weight_attrs(in_scale, {
-            "shard_indexer": self.scales_shard_indexer,
-        })
+        # in_scale = Parameter(
+        #     torch.empty(
+        #         len(output_partition_sizes), 
+        #          device='cuda', dtype=torch.float32,
+        #     ), requires_grad=False
+        # )
+        # layer.register_parameter("in_scale", in_scale)
+        # set_weight_attrs(in_scale, extra_weight_attrs)
+        # set_weight_attrs(in_scale, {
+        #     "shard_indexer": self.scales_shard_indexer,
+        # })
 
         layer.logical_widths = output_partition_sizes
 
@@ -130,6 +130,36 @@ class Fp8LinearMethod(LinearMethodBase):
         # print(f"----- loaded_weight: {loaded_weight}")
         return param[self.shard_id_as_int(shard_id)], loaded_weight
 
+    def apply_weights(self,
+                      layer: torch.nn.Module,
+                      x: torch.Tensor,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        logical_widths = layer.logical_widths
+        q_weight = layer.weight
+        w_scales = layer.weight_scale
+
+        qinput, x_scale = per_tensor_quantize(x)
+
+        output = torch.zeros(x.shape[0], q_weight.shape[0], dtype=x.dtype, device="cuda")
+        start_offset = 0
+        for _, (logical_width, w_scale) in enumerate(zip(logical_widths, w_scales)):
+            end_offset = start_offset + logical_width
+            q_weight = layer.weight[start_offset:end_offset, :].t()
+
+            out, _ = torch._scaled_mm(
+                qinput,
+                q_weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale,
+                scale_b=w_scale,
+                bias=bias,
+            )
+            output[:, start_offset:end_offset] = out
+            start_offset = end_offset
+        
+        assert end_offset == output.shape[1]
+        return output
+  
     # def apply_weights(
     #     self,
     #     layer: torch.nn.Module,
@@ -156,55 +186,55 @@ class Fp8LinearMethod(LinearMethodBase):
     #     assert end_offset == output.shape[1]
     #     return output
     
-    def apply_weights(
-        self,
-        layer,
-        x,
-        bias=None
-    ):
-        # print(sum(x))
-        # assert False
-        # qinput, x_scale = per_tensor_quantize(x)
-        # print(qinput)
-        # assert False
-        output = torch.zeros(x.shape[0], layer.weight.shape[0], dtype=x.dtype, device="cuda")
-        start_offset = 0
-        print("\n----")
+    # def apply_weights(
+    #     self,
+    #     layer,
+    #     x,
+    #     bias=None
+    # ):
+    #     # print(sum(x))
+    #     # assert False
+    #     # qinput, x_scale = per_tensor_quantize(x)
+    #     # print(qinput)
+    #     # assert False
+    #     output = torch.zeros(x.shape[0], layer.weight.shape[0], dtype=x.dtype, device="cuda")
+    #     start_offset = 0
+    #     print("\n----")
         
-        for _, (logical_width, w_scale, in_scale) in enumerate(zip(layer.logical_widths, layer.weight_scale, layer.in_scale)):
-            end_offset = start_offset + logical_width
-            print(f"(start,end) = ({start_offset}, {end_offset})")
+    #     for _, (logical_width, w_scale, in_scale) in enumerate(zip(layer.logical_widths, layer.weight_scale, layer.in_scale)):
+    #         end_offset = start_offset + logical_width
+    #         print(f"(start,end) = ({start_offset}, {end_offset})")
 
-            q_weight = layer.weight[start_offset:end_offset, :].t()
-            q_input = self._quantize(x, inv_scale=in_scale)
-            x_scale = in_scale
-            # print(f"in_scale: {in_scale}")
-            # print(f"w_scale: {w_scale}")
-            # print(f"input: {x}")
-            # print(f"q_input: {q_input}")
-            # print(f"q_weight: {q_weight}")
-            # q_input, x_scale = per_tensor_quantize(x)
+    #         q_weight = layer.weight[start_offset:end_offset, :].t()
+    #         q_input = self._quantize(x, inv_scale=in_scale)
+    #         x_scale = in_scale
+    #         # print(f"in_scale: {in_scale}")
+    #         # print(f"w_scale: {w_scale}")
+    #         # print(f"input: {x}")
+    #         # print(f"q_input: {q_input}")
+    #         # print(f"q_weight: {q_weight}")
+    #         # q_input, x_scale = per_tensor_quantize(x)
             
-            assert not torch.isnan(q_input[0,0])
+    #         assert not torch.isnan(q_input[0,0])
 
-            out, _ = torch._scaled_mm(
-                q_input,
-                q_weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale.float(),
-                scale_b=w_scale.float(),
-                bias=bias,
-            )
-            print(f"out.norm(): {out.norm()}")
-            output[:, start_offset:end_offset] = out
-            start_offset = end_offset
+    #         out, _ = torch._scaled_mm(
+    #             q_input,
+    #             q_weight * w_scale,
+    #             out_dtype=x.dtype,
+    #             scale_a=x_scale.float(),
+    #             scale_b=w_scale.float(),
+    #             bias=bias,
+    #         )
+    #         print(f"out.norm(): {out.norm()}")
+    #         output[:, start_offset:end_offset] = out
+    #         start_offset = end_offset
         
-        assert end_offset == output.shape[1]
-        # print(output.sum(dim=0).shape)
-        # print(output.sum(dim=1).shape)
+    #     assert end_offset == output.shape[1]
+    #     # print(output.sum(dim=0).shape)
+    #     # print(output.sum(dim=1).shape)
         
-        # print(output.norm(), output.norm(dim=0), output.norm(dim=1))
-        return output
+    #     # print(output.norm(), output.norm(dim=0), output.norm(dim=1))
+    #     return output
 
     def _quantize(self, tensor: torch.Tensor, inv_scale: torch.tensor):
         finfo = torch.finfo(torch.float8_e4m3fn)
@@ -231,17 +261,12 @@ def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
     # Since .abs() creates a new tensor, we use aminmax to get
     # the min and max first and then calculate the absmax.
     min_val, max_val = tensor.aminmax()
-    print(min_val)
-    print(max_val)
     amax = min_val.abs().max(max_val.abs())
-    print(amax)
     scale = finfo.max / amax.clamp(min=1e-12)
-    print(scale)
     # scale and clamp the tensor to bring it to
     # the representative range of float8 data type
     # (as default cast is unsaturated)
     qweight = (tensor * scale).clamp(min=finfo.min, max=finfo.max)
-    print(qweight)
     # Return both float8 data and the inverse scale (as float),
     # as both required as inputs to torch._scaled_mm
     qweight = qweight.to(torch.float8_e4m3fn)

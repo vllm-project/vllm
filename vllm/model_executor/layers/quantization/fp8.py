@@ -104,6 +104,10 @@ class Fp8LinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qinput, x_scale = per_tensor_quantize(x)
+        print(f"w_scale: {layer.weight_scaling_factor.item()}")
+        print(f"x_scale: {x_scale.item()}")
+        print(f"q_input: {qinput}")
+        print(f"weight: {layer.weight}")
         output, _ = torch._scaled_mm(
             qinput,
             layer.weight,
@@ -112,6 +116,7 @@ class Fp8LinearMethod(LinearMethodBase):
             scale_b=layer.weight_scaling_factor,
             bias=bias,
         )
+    
         return output
 
 
