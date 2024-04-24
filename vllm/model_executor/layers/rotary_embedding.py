@@ -359,9 +359,12 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
         super().__init__()
 
         if rotary_dim != head_size:
-            raise ValueError(f"`Phi3SuScaledRotaryEmbedding` does not support rotary_dim != head_size ({rotary_dim}!={head_size}).")
+            raise ValueError(
+                f"`Phi3SuScaledRotaryEmbedding` does not support rotary_dim != \
+                    head_size ({rotary_dim}!={head_size}).")
         if is_neox_style is False:
-            raise ValueError("`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
+            raise ValueError(
+                "`Phi3SuScaledRotaryEmbedding` only supports neox_style.")
 
         self.head_size = head_size
         self.rotary_dim = rotary_dim
