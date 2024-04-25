@@ -703,6 +703,12 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
                 for key, value in baseline_pos_logprobs.items()}
         
             assert set(spec_rank_to_token_id.keys()) == set(baseline_rank_to_token_id.keys())
+
+            ranks = sorted(set(spec_rank_to_token_id.keys()))
+
+            for rank in ranks:
+                assert spec_rank_to_token_id[rank] == baseline_rank_to_token_id[rank]
+                assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
             breakpoint()
         #if print_tokens:
         #    print(f'{i=} {baseline_tokens=}')
