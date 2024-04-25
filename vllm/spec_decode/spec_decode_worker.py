@@ -89,7 +89,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.probs_dtype = self.rejection_sampler.probs_dtype
         self.token_id_dtype = self.rejection_sampler.token_id_dtype
 
-        self.scorer: SpeculativeScorer = None
+        # Lazy initiazliation.
+        self.scorer: SpeculativeScorer
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -109,6 +110,32 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker=self.scorer_worker,
             device=self.device,
             vocab_size=self._vocab_size)
+
+        self._configure_model_sampler_for_spec_decode()
+
+    def _configure_model_sampler_for_spec_decode(self):
+        """Configure model sampler to emit GPU tensors. This allows spec decode
+        to keep data on device without transferring to CPU and serializing,
+        which significantly reduces overhead of rejection sampling.
+
+        NOTE(cade): This breaks abstraction boundaries pretty badly. The better
+        design is to have the "move to CPU and serialize" sampling decision be
+        done outside of the model/sampler; this way the "last-mile" worker
+        object which interfaces with the scheduler can serialize and incur the
+        performance hit as necessary. This allows us to run the worker several
+        iterations in a row without incurring the "move to CPU and serialize"
+        performance penalty.
+
+        Since this requires a large change to vLLM, we defer it to later and
+        temporarily accept this broken abstraction boundary.
+
+        NOTE(cade): This will require a special check if the proposer worker
+        does not have a sampler (e.g. ngram speculation).
+        """
+        (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+         ) = True
+        (self.proposer_worker.model_runner.model.sampler.
+         include_gpu_probs_tensor) = True
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
@@ -233,6 +260,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         logger.info("get spec proposals")
         # Generate proposals using draft worker.
+        assert blocks_to_swap_in is not None
+        assert blocks_to_swap_out is not None
+        assert blocks_to_copy is not None
         proposals = self.proposer_worker.get_spec_proposals(
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
@@ -282,15 +312,26 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             select_proposal_len_zero=True)
         original_indices = spec_indices + non_spec_indices
 
-        proposal_probs = proposal_scores.probs[spec_indices, :-1]
-        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+        # Get probabilities of target model, excluding bonus token.
+        proposal_verifier_probs = proposal_scores.probs[spec_indices, :-1]
+
+        # Get non-speculative sampled tokens from target model.
         non_spec_token_ids = proposal_scores.token_ids[non_spec_indices]
 
+        # Get bonus tokens from target model.
+        bonus_token_ids = proposal_scores.token_ids[spec_indices, -1:]
+
+        # Get probabilities according to proposal method.
+        proposal_probs = proposals.proposal_probs[spec_indices]
+
+        # Get proposed tokens.
+        proposal_token_ids = proposals.proposal_token_ids[spec_indices]
+
         accepted_token_ids = self.rejection_sampler(
-            proposal_probs,
-            bonus_token_ids,
-            proposals.proposal_probs,
-            proposals.proposal_token_ids,
+            target_probs=proposal_verifier_probs,
+            bonus_token_ids=bonus_token_ids,
+            draft_probs=proposal_probs,
+            draft_token_ids=proposal_token_ids,
         )
 
         # Append output tokens from non-speculative sequences to

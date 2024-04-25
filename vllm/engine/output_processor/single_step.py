@@ -1,4 +1,4 @@
-from typing import Iterable, List, Tuple, Union
+from typing import Dict, List, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -10,6 +10,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
                            SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         stop_checker: StopChecker,
     ):
         self.scheduler_config = scheduler_config
@@ -59,7 +60,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Process prompt logprobs
         prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None and seq_group.sampling_params.detokenize:
+        if prompt_logprobs is not None and \
+            seq_group.sampling_params.detokenize and self.detokenizer:
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             seq_group.prompt_logprobs = prompt_logprobs
@@ -68,7 +70,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         samples = outputs.samples
         parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
         existing_finished_seqs = seq_group.get_finished_seqs()
-        parent_child_dict = {
+        parent_child_dict: Dict[int, List[SequenceOutput]] = {
             parent_seq.seq_id: []
             for parent_seq in parent_seqs
         }
@@ -91,7 +93,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 continue
             # Fork the parent sequence if there are multiple child samples.
             for child_sample in child_samples[:-1]:
-                new_child_seq_id = next(self.seq_counter)
+                new_child_seq_id: int = next(self.seq_counter)
                 child = parent.fork(new_child_seq_id)
                 child.append_token_id(child_sample.output_token,
                                       child_sample.logprobs)
@@ -105,7 +107,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
-            if seq_group.sampling_params.detokenize:
+            if seq_group.sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, seq_group.sampling_params)
             else:
