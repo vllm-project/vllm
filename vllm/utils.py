@@ -6,7 +6,7 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, Awaitable, Callable, Dict, Generic, Hashable, List,

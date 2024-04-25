@@ -6,15 +6,22 @@ import torch
 import os
 from torch import nn
 
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+)
+from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
 
-from .blocksparse_attenton.interface import LocalStridedBlockSparseAttn, LocalStridedBlockSparsePagedAttn
+from .blocksparse_attn.interface import (
+    LocalStridedBlockSparseAttn,
+    LocalStridedBlockSparsePagedAttn,
+)
 
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 
 
 class BlockSparseFlashAttention(nn.Module):
@@ -28,44 +35,56 @@ class BlockSparseFlashAttention(nn.Module):
     2. Perform (multi-head/multi-query/grouped-query) attention.
     3. Return the output tensor.
 
-    NOTE: You can use set PHI3SMALL_USE_TRITON_PAGED_ATTN=1 to use the Triton paged attn instead of vllm cuda paged attn.
+    NOTE: You can use set PHI3SMALL_USE_TRITON_PAGED_ATTN=1 to use the 
+    Triton paged attn instead of vllm cuda paged attn.
 
     Arguments
     =========
 
-    local_blocks: number of blocks for local attention, i.e., number of local attended tokens / `sparse_block_size`
+    local_blocks: number of blocks for local attention, i.e., number of 
+    local attended tokens / `sparse_block_size`
     vert_stride: attend to one block per every `vert_stride` blocks.
-    num_heads: num of heads per tensor-paralllel rank, i.e., total num of heads / TP_SIZE.
+    num_heads: num of heads per tensor-paralllel rank, i.e., 
+    total num of heads / TP_SIZE.
     head_size:
     scale: softmax scale.
-    num_kv_heads: num of kv heads per tensor-parallel rank, i.e., total num of KV heads / TP_SIZE
+    num_kv_heads: num of kv heads per tensor-parallel rank, i.e., 
+        total num of KV heads / TP_SIZE
     max_seqlen: target sequence length. Used to construct attention mask
-    sparse_block_size: block size used for blocksparse attention. This is the block_size used in `local_blocks`, `vert_stride`.
+    sparse_block_size: block size used for blocksparse attention. 
+        This is the block_size used in `local_blocks`, `vert_stride`.
     layer_idx: idx starts from 0
-    use_triton_paged_attn: If to use customized Triton paged attn kernel for blocksparse-attention during decoding phase.
-        By default it is False, but you can activate this by setting environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
-    homo_head: if to use the same veritcal stride offset for all heads, i.e., attend to the same block of tokens on all heads.
-            By default, it is False, i.e., attention on the non-local blocks depends on the `head_idx`, that is on
-            blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % vert_stride == 0`
-            where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
-                  `block_idx = position_id // sparse_block_size`.
-            See `.blocksparse_attn.utils:get_sparse_attn_mask` for more detail.
-    **kwargs: not used, only for API compatability.
+    use_triton_paged_attn: If to use customized Triton paged attn kernel
+        for blocksparse-attention during decoding phase.
+        By default it is False, but you can activate this by setting 
+        environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
+    homo_head: if to use the same vertical stride offset for all heads, 
+        i.e., attend to the same block of tokens on all heads.
+        By default, it is False, i.e., attention on the non-local 
+        blocks depends on the `head_idx`, that is on
+        blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % \
+            vert_stride == 0`
+        where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
+                `block_idx = position_id // sparse_block_size`.
+        See `.blocksparse_attn.utils:get_sparse_attn_mask` for more detail.
+    **kwargs: not used, only for API compatibility.
     """
 
-    def __init__(self,
-                 local_blocks: int,
-                 vert_stride: int,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 num_kv_heads: Optional[int] = None,
-                 max_seqlen: int = 8192,
-                 sparse_block_size: int = 64,
-                 layer_idx: int = 0,
-                 use_triton_paged_attn: Optional[bool] = None,
-                 homo_head: bool = False,
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        local_blocks: int,
+        vert_stride: int,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+        max_seqlen: int = 8192,
+        sparse_block_size: int = 64,
+        layer_idx: int = 0,
+        use_triton_paged_attn: Optional[bool] = None,
+        homo_head: bool = False,
+        **kwargs,
+    ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.local_blocks = local_blocks
@@ -74,22 +93,24 @@ class BlockSparseFlashAttention(nn.Module):
 
         if use_triton_paged_attn is None:
             use_triton_paged_attn = bool(
-                int(os.environ.get('PHI3SMALL_USE_TRITON_PAGED_ATTN', '0')))
+                int(os.environ.get("PHI3SMALL_USE_TRITON_PAGED_ATTN", "0")))
 
         self.use_triton_paged_attn = use_triton_paged_attn
         self.backend = BlocksparseFlashAttentionBackend
         impl_cls = self.backend.get_impl_cls()
-        self.impl = impl_cls(local_blocks,
-                             vert_stride,
-                             num_heads,
-                             head_size,
-                             scale,
-                             num_kv_heads,
-                             homo_head=homo_head,
-                             max_seqlen=max_seqlen,
-                             sparse_block_size=sparse_block_size,
-                             layer_idx=layer_idx,
-                             use_triton_paged_attn=use_triton_paged_attn)
+        self.impl = impl_cls(
+            local_blocks,
+            vert_stride,
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            homo_head=homo_head,
+            max_seqlen=max_seqlen,
+            sparse_block_size=sparse_block_size,
+            layer_idx=layer_idx,
+            use_triton_paged_attn=use_triton_paged_attn,
+        )
 
     def forward(
         self,
@@ -150,6 +171,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata,
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
+
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -225,7 +247,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             layer_idx: int = 0,
             use_triton_paged_attn: bool = False,
             homo_head: bool = False,
-            **kwargs,  # for compatibiliy
+            **kwargs,  # for compatibility
     ) -> None:
         self.layer_idx = layer_idx
         self.num_heads = num_heads
@@ -241,7 +263,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         if alibi_slopes is not None:
             assert ValueError(
-                'Alibi not support for blocksparse flash attention.')
+                "Alibi not support for blocksparse flash attention.")
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -255,8 +277,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
-        active_head_range = (tp_rank * self.num_heads,
-                             (tp_rank + 1) * self.num_heads)
+        active_head_range = (
+            tp_rank * self.num_heads,
+            (tp_rank + 1) * self.num_heads,
+        )
 
         total_num_heads = num_heads * tp_size
         self.bs_attn = LocalStridedBlockSparseAttn(
@@ -266,7 +290,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             vert_stride,
             sparse_block_size,
             homo_head=self.homo_head,
-            active_head_range=active_head_range)
+            active_head_range=active_head_range,
+        )
 
         if self.use_triton_paged_attn:
             self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
@@ -276,7 +301,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 vert_stride,
                 sparse_block_size,
                 homo_head=self.homo_head,
-                active_head_range=active_head_range)
+                active_head_range=active_head_range,
+            )
 
     def forward(
         self,
@@ -312,11 +338,15 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
 
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache,
-                                                attn_metadata.slot_mapping,
-                                                attn_metadata.kv_cache_dtype,
-                                                kv_scale)
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata.kv_cache_dtype,
+                kv_scale,
+            )
 
         if attn_metadata.is_prompt:
 
@@ -325,23 +355,27 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            output = self.bs_attn(q=query,
-                                  k=key,
-                                  v=value,
-                                  cu_seqlens_q=attn_metadata.seq_start_loc,
-                                  cu_seqlens_k=attn_metadata.seq_start_loc,
-                                  sm_scale=self.scale)
+            output = self.bs_attn(
+                q=query,
+                k=key,
+                v=value,
+                cu_seqlens_q=attn_metadata.seq_start_loc,
+                cu_seqlens_k=attn_metadata.seq_start_loc,
+                sm_scale=self.scale,
+            )
 
         else:
             # Decoding run.
             if self.use_triton_paged_attn:
-                output = self.bs_paged_attn(query,
-                                            key_cache,
-                                            value_cache,
-                                            attn_metadata.block_tables,
-                                            attn_metadata.context_lens,
-                                            sm_scale=self.scale,
-                                            kv_scale=kv_scale)
+                output = self.bs_paged_attn(
+                    query,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.block_tables,
+                    attn_metadata.context_lens,
+                    sm_scale=self.scale,
+                    kv_scale=kv_scale,
+                )
 
             else:  # cuda kernel
                 output = PagedAttention.forward_decode(

@@ -31,34 +31,45 @@ def next_mult(x, y):
 
 class Phi3SmallConfig(PretrainedConfig):
     """
-    This is the configuration class to store the configuration of a [`GPT2Model`] or a [`TFGPT2Model`]. It is used to
-    instantiate a GPT-2 model according to the specified arguments, defining the model architecture. Instantiating a
-    configuration with the defaults will yield a similar configuration to that of the GPT-2
+    This is the configuration class to store the configuration of a 
+    [`GPT2Model`] or a [`TFGPT2Model`]. It is used to instantiate a 
+    GPT-2 model according to the specified arguments, defining the 
+    model architecture. Instantiating a configuration with the defaults
+    will yield a similar configuration to that of the GPT-2
     [gpt2](https://huggingface.co/gpt2) architecture.
 
-    Configuration objects inherit from [`PretrainedConfig`] and can be used to control the model outputs. Read the
-    documentation from [`PretrainedConfig`] for more information.
+    Configuration objects inherit from [`PretrainedConfig`] and can 
+    be used to control the model outputs. Read the documentation from 
+    [`PretrainedConfig`] for more information.
 
 
     Args:
         vocab_size (`int`, *optional*, defaults to 50257):
-            Vocabulary size of the GPT-2 model. Defines the number of different tokens that can be represented by the
-            `inputs_ids` passed when calling [`GPT2Model`] or [`TFGPT2Model`].
+            Vocabulary size of the GPT-2 model. Defines the number of 
+            different tokens that can be represented by the
+            `inputs_ids` passed when calling [`GPT2Model`] 
+            or [`TFGPT2Model`].
         n_positions (`int`, *optional*, defaults to 1024):
-            The maximum sequence length that this model might ever be used with. Typically set this to something large
+            The maximum sequence length that this model 
+            might ever be used with. 
+            Typically set this to something large
             just in case (e.g., 512 or 1024 or 2048).
         n_embd (`int`, *optional*, defaults to 768):
             Dimensionality of the embeddings and hidden states.
         n_layer (`int`, *optional*, defaults to 12):
             Number of hidden layers in the Transformer encoder.
         n_head (`int`, *optional*, defaults to 12):
-            Number of attention heads for each attention layer in the Transformer encoder.
+            Number of attention heads for each attention layer 
+            in the Transformer encoder.
         n_inner (`int`, *optional*, defaults to None):
-            Dimensionality of the inner feed-forward layers. `None` will set it to 4 times n_embd
+            Dimensionality of the inner feed-forward layers. 
+            `None` will set it to 4 times n_embd
         activation_function (`str`, *optional*, defaults to `"gelu"`):
-            Activation function, to be selected in the list `["relu", "silu", "gelu", "tanh", "gelu_new"]`.
+            Activation function, to be selected in the list 
+            `["relu", "silu", "gelu", "tanh", "gelu_new"]`.
         resid_pdrop (`float`, *optional*, defaults to 0.1):
-            The dropout probability for all fully connected layers in the embeddings, encoder, and pooler.
+            The dropout probability for all fully connected layers 
+            in the embeddings, encoder, and pooler.
         embd_pdrop (`float`, *optional*, defaults to 0.1):
             The dropout ratio for the embeddings.
         attn_pdrop (`float`, *optional*, defaults to 0.1):
@@ -66,9 +77,11 @@ class Phi3SmallConfig(PretrainedConfig):
         layer_norm_epsilon (`float`, *optional*, defaults to 1e-5):
             The epsilon to use in the layer normalization layers.
         initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+            The standard deviation of the truncated_normal_initializer
+            for initializing all weight matrices.
         summary_type (`string`, *optional*, defaults to `"cls_index"`):
-            Argument used when doing sequence summary, used in the models [`GPT2DoubleHeadsModel`] and
+            Argument used when doing sequence summary, used in the models 
+            [`GPT2DoubleHeadsModel`] and
             [`TFGPT2DoubleHeadsModel`].
 
             Has to be one of the following options:
@@ -76,37 +89,45 @@ class Phi3SmallConfig(PretrainedConfig):
                 - `"last"`: Take the last token hidden state (like XLNet).
                 - `"first"`: Take the first token hidden state (like BERT).
                 - `"mean"`: Take the mean of all tokens hidden states.
-                - `"cls_index"`: Supply a Tensor of classification token position (like GPT/GPT-2).
+                - `"cls_index"`: Supply a Tensor of classification token 
+                    position (like GPT/GPT-2).
                 - `"attn"`: Not implemented now, use multi-head attention.
         summary_use_proj (`bool`, *optional*, defaults to `True`):
-            Argument used when doing sequence summary, used in the models [`GPT2DoubleHeadsModel`] and
-            [`TFGPT2DoubleHeadsModel`].
+            Argument used when doing sequence summary, used in the models 
+            [`GPT2DoubleHeadsModel`] and [`TFGPT2DoubleHeadsModel`].
 
             Whether or not to add a projection after the vector extraction.
         summary_activation (`str`, *optional*):
-            Argument used when doing sequence summary. Used in for the multiple choice head in
-            [`GPT2DoubleHeadsModel`].
+            Argument used when doing sequence summary. Used in for the 
+            multiple choice head in [`GPT2DoubleHeadsModel`].
 
-            Pass `"tanh"` for a tanh activation to the output, any other value will result in no activation.
+            Pass `"tanh"` for a tanh activation to the output, 
+            any other value will result in no activation.
         summary_proj_to_labels (`bool`, *optional*, defaults to `True`):
-            Argument used when doing sequence summary, used in the models [`GPT2DoubleHeadsModel`] and
-            [`TFGPT2DoubleHeadsModel`].
+            Argument used when doing sequence summary, used in the models 
+            [`GPT2DoubleHeadsModel`] and [`TFGPT2DoubleHeadsModel`].
 
-            Whether the projection outputs should have `config.num_labels` or `config.hidden_size` classes.
+            Whether the projection outputs should have `config.num_labels` 
+            or `config.hidden_size` classes.
         summary_first_dropout (`float`, *optional*, defaults to 0.1):
-            Argument used when doing sequence summary, used in the models [`GPT2DoubleHeadsModel`] and
-            [`TFGPT2DoubleHeadsModel`].
+            Argument used when doing sequence summary, used in the models 
+            [`GPT2DoubleHeadsModel`] and [`TFGPT2DoubleHeadsModel`].
 
             The dropout ratio to be used after the projection and activation.
         scale_attn_weights (`bool`, *optional*, defaults to `True`):
             Scale attention weights by dividing by sqrt(hidden_size)..
-        use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models).
-        scale_attn_by_inverse_layer_idx (`bool`, *optional*, defaults to `False`):
-            Whether to additionally scale attention weights by `1 / layer_idx + 1`.
-        reorder_and_upcast_attn (`bool`, *optional*, defaults to `False`):
-            Whether to scale keys (K) prior to computing attention (dot-product) and upcast attention
-            dot-product/softmax to float() when training with mixed precision.
+        use_cache (`bool`, *optional*, defaults to `True`):q
+            Whether or not the model should return the last key/values 
+            attentions (not used by all models).
+        scale_attn_by_inverse_layer_idx 
+            (`bool`, *optional*, defaults to `False`):
+            Whether to additionally scale attention weights by 
+            `1 / layer_idx + 1`.
+        reorder_and_upcast_attn 
+            (`bool`, *optional*, defaults to `False`):
+            Whether to scale keys (K) prior to computing attention 
+            (dot-product) and upcast attention dot-product/softmax 
+            to float() when training with mixed precision.
 
     Example:
 
@@ -184,7 +205,8 @@ class Phi3SmallConfig(PretrainedConfig):
         self.blocksparse_block_size = blocksparse_block_size
         self.blocksparse_num_local_blocks = blocksparse_num_local_blocks
         self.blocksparse_vert_stride = blocksparse_vert_stride
-        self.blocksparse_triton_kernel_block_size = blocksparse_triton_kernel_block_size
+        self.blocksparse_triton_kernel_block_size = (
+            blocksparse_triton_kernel_block_size)
 
         # Activation function
         self.hidden_act = hidden_act
@@ -218,10 +240,10 @@ class Phi3SmallConfig(PretrainedConfig):
 
     @property
     def intermediate_size(self) -> int:
-        if getattr(self, 'ff_intermediate_size', None):
+        if getattr(self, "ff_intermediate_size", None):
             return self.ff_intermediate_size
-        intermediate_size = (self.ff_dim_multiplier) * (self.hidden_size //
-                                                        3) * 2
+        intermediate_size = ((self.ff_dim_multiplier) *
+                             (self.hidden_size // 3) * 2)
         if self.gegelu_pad_to_256:
             intermediate_size = next_mult(intermediate_size, 256)
         return intermediate_size
@@ -251,7 +273,7 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
             self.fill_with_past_key_values_(common_inputs, direction="inputs")
             common_inputs["attention_mask"] = {
                 0: "batch",
-                1: "past_sequence + sequence"
+                1: "past_sequence + sequence",
             }
         else:
             common_inputs["attention_mask"] = {0: "batch", 1: "sequence"}
@@ -279,7 +301,8 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
             batch_size=batch_size,
             seq_length=seq_length,
             is_pair=is_pair,
-            framework=framework)
+            framework=framework,
+        )
 
         # We need to order the input in the way they appears in the forward()
         ordered_inputs = OrderedDict({"input_ids": common_inputs["input_ids"]})
@@ -287,9 +310,8 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         # Need to add the past_keys
         if self.use_past:
             if not is_torch_available():
-                raise ValueError(
-                    "Cannot generate dummy past_keys inputs without PyTorch installed."
-                )
+                raise ValueError("Cannot generate dummy past_keys inputs \
+                        without PyTorch installed.")
             else:
                 import torch
 
@@ -310,11 +332,14 @@ class GPT2OnnxConfig(OnnxConfigWithPast):
         ordered_inputs["attention_mask"] = common_inputs["attention_mask"]
         if self.use_past:
             mask_dtype = ordered_inputs["attention_mask"].dtype
-            ordered_inputs["attention_mask"] = torch.cat([
-                ordered_inputs["attention_mask"],
-                torch.ones(batch, past_key_values_length, dtype=mask_dtype)
-            ],
-                                                         dim=1)
+            ordered_inputs["attention_mask"] = torch.cat(
+                [
+                    ordered_inputs["attention_mask"],
+                    torch.ones(batch, past_key_values_length,
+                               dtype=mask_dtype),
+                ],
+                dim=1,
+            )
 
         return ordered_inputs
 

@@ -1,7 +1,6 @@
 import triton
 import triton.language as tl
 import torch
-import math
 
 
 def blocksparse_flash_attn_varlen_fwd(
@@ -35,16 +34,17 @@ def blocksparse_flash_attn_varlen_fwd(
 
     if cu_seqlens_q is None:
         if q.size(0) == batch_size:  # decoding only
-            cu_seqlens_q = torch.arange(0,
-                                        batch_size + 1,
-                                        dtype=cu_seqlens_k.dtype,
-                                        device=cu_seqlens_k.device)
+            cu_seqlens_q = torch.arange(
+                0,
+                batch_size + 1,
+                dtype=cu_seqlens_k.dtype,
+                device=cu_seqlens_k.device,
+            )
         elif q.size(0) == k.size(0):
             cu_seqlens_q = cu_seqlens_k
         else:
-            raise ValueError(
-                'cu_seqlens_q must be specified if it is mix of prefilling and decoding.'
-            )
+            raise ValueError("cu_seqlens_q must be specified\
+                    if it mix of prefilling and decoding.")
     else:
         assert cu_seqlens_k.size(0) == cu_seqlens_q.size(0)
 
@@ -52,8 +52,8 @@ def blocksparse_flash_attn_varlen_fwd(
     q_lens = (cu_seqlens_q[1:] - cu_seqlens_q[:-1]).cpu()
     k_lens = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).cpu()
 
-    assert torch.logical_or(q_lens == 1, k_lens == q_lens).all(), \
-        'length of q should either be 1 (decoding) or same as k (prefilling).'
+    assert torch.logical_or(q_lens == 1, k_lens == q_lens).all(), (
+        "length of q should either be 1 (decoding) or same as k (prefilling).")
 
     if max_seqlen:
         assert k_lens.max() <= max_seqlen
@@ -63,11 +63,13 @@ def blocksparse_flash_attn_varlen_fwd(
     q_batch_ids = torch.tensor(
         [i for i, n in enumerate(n_blocks) for _ in range(n)],
         dtype=cu_seqlens_q.dtype,
-        device=cu_seqlens_q.device)
+        device=cu_seqlens_q.device,
+    )
     q_start_sids = torch.tensor(
         [i * q_block_size for n in n_blocks for i in range(n)],
         dtype=cu_seqlens_q.dtype,
-        device=cu_seqlens_q.device)
+        device=cu_seqlens_q.device,
+    )
 
     out = q.new_empty(q.shape)
     cu_seqlens_q = cu_seqlens_q.contiguous()
@@ -109,8 +111,8 @@ def blocksparse_flash_attn_varlen_fwd(
         BLOCK_M=q_block_size,
         BLOCK_N=block_size,
         BLOCK_D=block_d,
-        BLOCK_M_LOADING=16
-        if decoding_only else q_block_size,  # smaller for decoding
+        BLOCK_M_LOADING=(16 if decoding_only else
+                         q_block_size),  # smaller for decoding
         EVEN_D=block_d == head_size,
         num_warps=1 if decoding_only else 4,
         num_stages=3)
@@ -119,24 +121,49 @@ def blocksparse_flash_attn_varlen_fwd(
 
 
 @triton.jit
-def _fwd_kernel_inner(acc, l_i, m_i, q, Q, k_block_col_idx, layout_col_ptr,
-                      layout_col_stride_h, layout_col_stride_m, k_ptrs, v_ptrs,
-                      off_h, offs_m, offs_n, offs_d, stride_kt, stride_vt,
-                      sm_scale, k_seqlen, past_len, LAST_K_BLOCK: tl.constexpr,
-                      BLOCK_M_LOADING: tl.constexpr, BLOCK_N: tl.constexpr,
-                      D_HEAD: tl.constexpr, EVEN_D: tl.constexpr,
-                      M_LT_N: tl.constexpr):
+def _fwd_kernel_inner(
+    acc,
+    l_i,
+    m_i,
+    q,
+    Q,
+    k_block_col_idx,
+    layout_col_ptr,
+    layout_col_stride_h,
+    layout_col_stride_m,
+    k_ptrs,
+    v_ptrs,
+    off_h,
+    offs_m,
+    offs_n,
+    offs_d,
+    stride_kt,
+    stride_vt,
+    sm_scale,
+    k_seqlen,
+    past_len,
+    LAST_K_BLOCK: tl.constexpr,
+    BLOCK_M_LOADING: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    D_HEAD: tl.constexpr,
+    EVEN_D: tl.constexpr,
+    M_LT_N: tl.constexpr,
+):
     k_block_id = tl.load(layout_col_ptr + off_h * layout_col_stride_h +
                          k_block_col_idx * layout_col_stride_m).to(tl.int32)
     start_n = k_block_id * BLOCK_N
     if LAST_K_BLOCK:
         if EVEN_D:
-            k = tl.load(k_ptrs + start_n * stride_kt,
-                        mask=offs_n[None, :] + start_n < k_seqlen)
+            k = tl.load(
+                k_ptrs + start_n * stride_kt,
+                mask=offs_n[None, :] + start_n < k_seqlen,
+            )
         else:
-            k = tl.load(k_ptrs + start_n * stride_kt,
-                        mask=(offs_n[None, :] + start_n < k_seqlen) &
-                        (offs_d[:, None] < D_HEAD))
+            k = tl.load(
+                k_ptrs + start_n * stride_kt,
+                mask=(offs_n[None, :] + start_n < k_seqlen)
+                & (offs_d[:, None] < D_HEAD),
+            )
     else:
         if EVEN_D:
             k = tl.load(k_ptrs + start_n * stride_kt)
@@ -151,8 +178,10 @@ def _fwd_kernel_inner(acc, l_i, m_i, q, Q, k_block_col_idx, layout_col_ptr,
     # the following is needed only when LAST_K_BLOCK or BLOCK_M < BLOCK_N
     if LAST_K_BLOCK | M_LT_N:
         qk += tl.where(
-            offs_m[:, None] + past_len >= (start_n + offs_n[None, :]), 0,
-            float('-inf'))
+            offs_m[:, None] + past_len >= (start_n + offs_n[None, :]),
+            0,
+            float("-inf"),
+        )
 
     ### flash-attn2
     m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -168,12 +197,16 @@ def _fwd_kernel_inner(acc, l_i, m_i, q, Q, k_block_col_idx, layout_col_ptr,
     # update acc
     if LAST_K_BLOCK:
         if EVEN_D:
-            v = tl.load(v_ptrs + start_n * stride_vt,
-                        mask=offs_n[:, None] + start_n < k_seqlen)
+            v = tl.load(
+                v_ptrs + start_n * stride_vt,
+                mask=offs_n[:, None] + start_n < k_seqlen,
+            )
         else:
-            v = tl.load(v_ptrs + start_n * stride_vt,
-                        mask=(offs_n[:, None] + start_n < k_seqlen) &
-                        (offs_d[None, :] < D_HEAD))
+            v = tl.load(
+                v_ptrs + start_n * stride_vt,
+                mask=(offs_n[:, None] + start_n < k_seqlen)
+                & (offs_d[None, :] < D_HEAD),
+            )
     else:
         if EVEN_D:
             v = tl.load(v_ptrs + start_n * stride_vt)
@@ -187,22 +220,55 @@ def _fwd_kernel_inner(acc, l_i, m_i, q, Q, k_block_col_idx, layout_col_ptr,
 
 
 @triton.heuristics({
-    'M_LT_N':
-    lambda kwargs: kwargs['BLOCK_M'] < kwargs['BLOCK_N'],
+    "M_LT_N":
+    lambda kwargs: kwargs["BLOCK_M"] < kwargs["BLOCK_N"],
 })
 @triton.jit
 def _fwd_kernel_batch_inference(
-        Q, K, V, Out, sm_scale, q_batch_starts, q_batch_ends, k_batch_starts,
-        k_batch_ends, q_batch_ids, q_start_sids, stride_qb, stride_qt,
-        stride_qh, stride_qd, stride_kb, stride_kt, stride_kh, stride_kd,
-        stride_vb, stride_vt, stride_vh, stride_vd, stride_ob, stride_ot,
-        stride_oh, stride_od, layout_crow_ptr, layout_col_ptr,
-        layout_crow_stride_h, layout_crow_stride_m, layout_col_stride_h,
-        layout_col_stride_m, q_k_ratio, HAS_BATCH_DIM: tl.constexpr,
-        D_HEAD: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-        BLOCK_D: tl.constexpr, BLOCK_M_LOADING: tl.constexpr,
-        EVEN_D: tl.constexpr, M_LT_N: tl.constexpr):
-    '''
+    Q,
+    K,
+    V,
+    Out,
+    sm_scale,
+    q_batch_starts,
+    q_batch_ends,
+    k_batch_starts,
+    k_batch_ends,
+    q_batch_ids,
+    q_start_sids,
+    stride_qb,
+    stride_qt,
+    stride_qh,
+    stride_qd,
+    stride_kb,
+    stride_kt,
+    stride_kh,
+    stride_kd,
+    stride_vb,
+    stride_vt,
+    stride_vh,
+    stride_vd,
+    stride_ob,
+    stride_ot,
+    stride_oh,
+    stride_od,
+    layout_crow_ptr,
+    layout_col_ptr,
+    layout_crow_stride_h,
+    layout_crow_stride_m,
+    layout_col_stride_h,
+    layout_col_stride_m,
+    q_k_ratio,
+    HAS_BATCH_DIM: tl.constexpr,
+    D_HEAD: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_M_LOADING: tl.constexpr,
+    EVEN_D: tl.constexpr,
+    M_LT_N: tl.constexpr,
+):
+    """
     NOTATION:
     pid: position id
     sid: storage id
@@ -212,7 +278,7 @@ def _fwd_kernel_batch_inference(
 
     TODO(linxihui):
     Optimize grouped-attn
-    '''
+    """
     off_zm = tl.program_id(0)
     off_h = tl.program_id(1)
 
@@ -249,42 +315,93 @@ def _fwd_kernel_batch_inference(
     q_pbid = (past_len + q_start_sid) // BLOCK_M
 
     if EVEN_D:
-        q = tl.load(Q + offs_m[:, None] * stride_qt +
-                    offs_d[None, :] * stride_qd,
-                    mask=offs_m[:, None] < q_seqlen)
+        q = tl.load(
+            Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
+            mask=offs_m[:, None] < q_seqlen,
+        )
     else:
         q = tl.load(
             Q + offs_m[:, None] * stride_qt + offs_d[None, :] * stride_qd,
             mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD),
-            other=0)
+            other=0,
+        )
 
-    sparse_crow_ptr = layout_crow_ptr + off_h * layout_crow_stride_h + q_pbid * layout_crow_stride_m
+    sparse_crow_ptr = (layout_crow_ptr + off_h * layout_crow_stride_h +
+                       q_pbid * layout_crow_stride_m)
 
     # TODO(linxihui): load at once, supported in new Triton
     k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
     k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
 
-    m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float('inf')
+    m_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32) - float("inf")
     l_i = tl.zeros([BLOCK_M_LOADING], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M_LOADING, BLOCK_D], dtype=tl.float32)
 
     k_ptrs = K + offs_n[None, :] * stride_kt + offs_d[:, None] * stride_kd
     v_ptrs = V + offs_n[:, None] * stride_vt + offs_d[None, :] * stride_vd
 
-    sm_scale *= 1.44269504  # 1/log2 as we use base2 for exponential and logorithm
+    sm_scale *= (
+        1.44269504  # 1/log2 as we use base2 for exponential and logarithm
+    )
 
     for k_block_col_idx in range(k_block_start, k_block_end - 1):
         acc, l_i, m_i = _fwd_kernel_inner(
-            acc, l_i, m_i, q, Q, k_block_col_idx, layout_col_ptr,
-            layout_col_stride_h, layout_col_stride_m, k_ptrs, v_ptrs, off_h,
-            offs_m, offs_n, offs_d, stride_kt, stride_vt, sm_scale, k_seqlen,
-            past_len, False, BLOCK_M_LOADING, BLOCK_N, D_HEAD, EVEN_D, M_LT_N)
+            acc,
+            l_i,
+            m_i,
+            q,
+            Q,
+            k_block_col_idx,
+            layout_col_ptr,
+            layout_col_stride_h,
+            layout_col_stride_m,
+            k_ptrs,
+            v_ptrs,
+            off_h,
+            offs_m,
+            offs_n,
+            offs_d,
+            stride_kt,
+            stride_vt,
+            sm_scale,
+            k_seqlen,
+            past_len,
+            False,
+            BLOCK_M_LOADING,
+            BLOCK_N,
+            D_HEAD,
+            EVEN_D,
+            M_LT_N,
+        )
 
     acc, l_i, m_i = _fwd_kernel_inner(
-        acc, l_i, m_i, q, Q, k_block_end - 1, layout_col_ptr,
-        layout_col_stride_h, layout_col_stride_m, k_ptrs, v_ptrs, off_h,
-        offs_m, offs_n, offs_d, stride_kt, stride_vt, sm_scale, k_seqlen,
-        past_len, True, BLOCK_M_LOADING, BLOCK_N, D_HEAD, EVEN_D, M_LT_N)
+        acc,
+        l_i,
+        m_i,
+        q,
+        Q,
+        k_block_end - 1,
+        layout_col_ptr,
+        layout_col_stride_h,
+        layout_col_stride_m,
+        k_ptrs,
+        v_ptrs,
+        off_h,
+        offs_m,
+        offs_n,
+        offs_d,
+        stride_kt,
+        stride_vt,
+        sm_scale,
+        k_seqlen,
+        past_len,
+        True,
+        BLOCK_M_LOADING,
+        BLOCK_N,
+        D_HEAD,
+        EVEN_D,
+        M_LT_N,
+    )
 
     ### flash-attn 2
     m_i += tl.math.log2(l_i)
@@ -292,12 +409,14 @@ def _fwd_kernel_batch_inference(
 
     # write output
     if EVEN_D:
-        tl.store(Out + offs_m[:, None] * stride_ot +
-                 offs_d[None, :] * stride_od,
-                 acc,
-                 mask=offs_m[:, None] < q_seqlen)
+        tl.store(
+            Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od,
+            acc,
+            mask=offs_m[:, None] < q_seqlen,
+        )
     else:
         tl.store(
             Out + offs_m[:, None] * stride_ot + offs_d[None, :] * stride_od,
             acc,
-            mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD))
+            mask=(offs_m[:, None] < q_seqlen) & (offs_d[None, :] < D_HEAD),
+        )

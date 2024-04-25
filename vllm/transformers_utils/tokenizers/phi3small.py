@@ -7,12 +7,13 @@ import base64
 from transformers import PreTrainedTokenizer, AddedToken
 import tiktoken
 """
-    This tokenizer is almost identical to tiktoken.get_encoding("cl100k_base")
-    with a few additional special tokens to support the ChatML format.
+    This tokenizer is almost identical to 
+    tiktoken.get_encoding("cl100k_base") with a few additional
+    special tokens to support the ChatML format.
 
-    TODO(bapatra): Right now, I do not save the special tokens to the vocab file.
-    Maybe in the future, that would be useful? Can add that support later.
-
+    TODO(bapatra): Right now, I do not save the special tokens 
+    to the vocab file. Maybe in the future, that would be 
+    useful? Can add that support later.
 """
 
 
@@ -28,11 +29,11 @@ def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
 
 SPECIAL_TOKENS = {
     # tiktoken.get_encoding("cl100k_base")._special_tokens
-    '<|endoftext|>': 100257,
-    '<|fim_prefix|>': 100258,
-    '<|fim_middle|>': 100259,
-    '<|fim_suffix|>': 100260,
-    '<|endofprompt|>': 100276,
+    "<|endoftext|>": 100257,
+    "<|fim_prefix|>": 100258,
+    "<|fim_middle|>": 100259,
+    "<|fim_suffix|>": 100260,
+    "<|endofprompt|>": 100276,
     # ChatML Related Special Tokens
     "<|im_start|>": 100264,
     "<|im_end|>": 100265,
@@ -44,15 +45,21 @@ class Phi3SmallTokenizer(PreTrainedTokenizer):
 
     model_input_names: List[str] = ["input_ids", "attention_mask"]
 
-    def __init__(self,
-                 vocab_file: Optional[str] = None,
-                 errors: str = "replace",
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        vocab_file: Optional[str] = None,
+        errors: str = "replace",
+        **kwargs,
+    ) -> None:
         # PreTrainedTokenizer's init calls _add_tokens, which in turn checks
-        # if the token is present in `self.special_tokens``. Hence instantiating it here.
-        # The way Qwen gets around this is by checking against SPECIAL_TOKENS
-        # But I think it's better to check against the objects own `special_tokens`
-        # in case we eventually want to allow the tokenizer to have special tokens.
+        # if the token is present in `self.special_tokens``.
+        # Hence instantiating it here.
+        # The way Qwen gets around this is by checking against
+        # SPECIAL_TOKENS
+        # But I think it's better to check against the objects
+        # own `special_tokens`
+        # in case we eventually want to allow the tokenizer to
+        # have special tokens.
         self.special_tokens = SPECIAL_TOKENS
 
         super().__init__(**kwargs)
@@ -128,35 +135,41 @@ class Phi3SmallTokenizer(PreTrainedTokenizer):
             raise ValueError(
                 "Only special tokens can be added to this tokenizer")
         for token in new_tokens:
-            surface_form = token.content if isinstance(token,
-                                                       AddedToken) else token
+            surface_form = (token.content
+                            if isinstance(token, AddedToken) else token)
             if surface_form not in self.special_tokens:
                 raise ValueError(
                     "For now, we do not support unknown special tokens\n"
-                    "In the future, if there is a need for this, we can add special tokens to the tokenizer\n"
-                    "starting from rank 100261 - 100263 and then 100266 - 100275.\n"
-                    "And finally, we can re-construct the enc object back\n")
+                    "In the future, if there is a need for this, we can \
+                        add special tokens to the tokenizer\n"
+                    "starting from rank 100261 - 100263 and then \
+                        100266 - 100275.\n"
+                    "And finally, we can re-construct the enc object \
+                        back\n")
         return 0
 
     def save_vocabulary(self, save_directory: str, **kwargs) -> Tuple[str]:
         file_path = os.path.join(save_directory, "cl100k_base.tiktoken")
         with open(file_path, "w") as f:
             for token, rank in self.mergeable_ranks.items():
-                line = base64.b64encode(token).decode("utf-8") + " " + str(
-                    rank) + "\n"
+                line = (base64.b64encode(token).decode("utf-8") + " " +
+                        str(rank) + "\n")
                 f.write(line)
         return (file_path, )
 
-    def tokenize(self,
-                 text: str,
-                 allowed_special: Union[Set, str] = "all",
-                 disallowed_special: Union[Collection, str] = (),
-                 **kwargs) -> List[Union[bytes, str]]:
+    def tokenize(
+        self,
+        text: str,
+        allowed_special: Union[Set, str] = "all",
+        disallowed_special: Union[Collection, str] = (),
+        **kwargs,
+    ) -> List[Union[bytes, str]]:
         tokens: List[Union[bytes, str]] = []
         for token_id in self.tokenizer.encode(
                 text,
                 allowed_special=allowed_special,
-                disallowed_special=disallowed_special):
+                disallowed_special=disallowed_special,
+        ):
             tokens.append(self.decoder[token_id])
         return tokens
 
@@ -208,8 +221,9 @@ class Phi3SmallTokenizer(PreTrainedTokenizer):
 
     def _tokenize(self, text: str, **kwargs):
         """
-        Converts a string in a sequence of tokens (string), using the tokenizer. Split in words for word-based
-        vocabulary or sub-words for sub-word-based vocabularies (BPE/SentencePieces/WordPieces).
+        Converts a string in a sequence of tokens (string),using the tokenizer. 
+        Split in words for word-based vocabulary or sub-words for 
+        sub-word-based vocabularies (BPE/SentencePieces/WordPieces).
         Do NOT take care of added tokens.
         """
         raise NotImplementedError

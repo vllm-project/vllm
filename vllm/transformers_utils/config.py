@@ -1,6 +1,6 @@
 from typing import Optional
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import PretrainedConfig
 
 from vllm.transformers_utils.configs import *
 from vllm.transformers_utils.configs.phi3small import Phi3SmallConfig

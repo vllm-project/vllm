@@ -5,7 +5,7 @@ from transformers import (AutoTokenizer, PreTrainedTokenizer,
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.tokenizers.phi3small import Phi3SmallTokenizer
+from vllm.transformers_utils.tokenizers import BaichuanTokenizer
 from vllm.utils import make_async
 
 logger = init_logger(__name__)

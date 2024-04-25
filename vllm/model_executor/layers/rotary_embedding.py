@@ -26,7 +26,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from functools import lru_cache
 
 from vllm._C import ops
 
@@ -328,7 +327,8 @@ class PhiLongScaledRotaryEmbedding(nn.Module):
             key_pass = key[..., self.rotary_dim:]
 
         # LongRoPE switch logic
-        #For long prompt, offset position by original_max_position_embeddings to index long_cos_sin_cache properly
+        # For long prompt, offset position by original_max_position_embeddings
+        # to index long_cos_sin_cache properly
         k = self.original_max_position_embeddings
         long_prompt_offset = (torch.any(positions > k).float() *
                               torch.full_like(positions, k)).long()
@@ -477,7 +477,7 @@ def get_rope(
     #        tuple(rope_scaling.items()) if rope_scaling is not None else None)
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
            (v for v in rope_scaling.items()
-            if type(v) is not list) if rope_scaling is not None else None)
+            if not isinstance(v, list)) if rope_scaling is not None else None)
 
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
