@@ -123,8 +123,8 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[Union[SamplerOutput, PoolerOutput]]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 

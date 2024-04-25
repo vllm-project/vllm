@@ -137,6 +137,8 @@ class CompletionRequestOutput(RequestOutput):
     @classmethod
     def from_seq_group(cls,
                        seq_group: SequenceGroup) -> "CompletionRequestOutput":
+        if seq_group.sampling_params is None:
+            raise ValueError("Sampling parameters are missing in seq_group.")
         seqs = seq_group.get_seqs()
         if len(seqs) == 1:
             top_n_seqs = seqs
@@ -213,6 +215,8 @@ class EmbeddingRequestOutput(RequestOutput):
     @classmethod
     def from_seq_group(cls,
                        seq_group: 'SequenceGroup') -> "EmbeddingRequestOutput":
+        if seq_group.embeddings is None:
+            raise ValueError("Embeddings are missing in seq_group.")
         output = EmbeddingOutput(seq_group.embeddings)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()

@@ -44,7 +44,7 @@ class EmbeddingModelRunner(ModelRunner):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
@@ -81,7 +81,7 @@ class EmbeddingModelRunner(ModelRunner):
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
@@ -115,6 +115,10 @@ class EmbeddingModelRunner(ModelRunner):
                 decode_lora_requests,
                 decode_slot_mapping,
             ) = self._prepare_decode(decode_reqs)
+
+            # Prepare PoolingMetadata
+            pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
+                                                     prompt_lens)
 
             if not self.scheduler_config.chunked_prefill_enabled:
                 assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -210,6 +214,10 @@ class EmbeddingModelRunner(ModelRunner):
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
 
+            pooling_metadata = PoolingMetadata(seq_groups=None,
+                                               seq_data=None,
+                                               prompt_lens=None)
+
             # if it is a mixed batch, decode attn_metadata is broadcasted
             # separately.
             if batch_type == BatchType.MIXED:
@@ -226,10 +234,6 @@ class EmbeddingModelRunner(ModelRunner):
             decode_metadata=decode_attn_metadata,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-
-        # Prepare PoolingMetadata
-        pooling_metadata = self._prepare_pooling(
-            seq_group_metadata_list, decode_attn_metadata.prompt_lens)
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
                 lora_requests, lora_mapping, multi_modal_input)

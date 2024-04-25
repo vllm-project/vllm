@@ -24,9 +24,9 @@ from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (ExecuteModelRequest, EmbeddingSequenceGroupOutput, MultiModalData,
-                           PoolerOutput, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
+from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
+                           MultiModalData, PoolerOutput, SamplerOutput,
+                           Sequence, SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
@@ -803,8 +803,10 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
-                    best_of_requests.append(seq_group.sampling_params.best_of)
-                    n_requests.append(seq_group.sampling_params.n)
+                    if seq_group.sampling_params is not None:
+                        best_of_requests.append(
+                            seq_group.sampling_params.best_of)
+                        n_requests.append(seq_group.sampling_params.n)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()

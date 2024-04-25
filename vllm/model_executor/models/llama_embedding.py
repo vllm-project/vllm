@@ -2,11 +2,8 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import LoRAConfig
-from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.pooling_metadata import PoolingMetadata
@@ -26,12 +23,10 @@ class LlamaEmbeddingModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
-        linear_method: Optional[LinearMethodBase] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        **kwargs,
     ) -> None:
         super().__init__()
-        self.model = LlamaModel(config, linear_method, lora_config)
+        self.model = LlamaModel(**kwargs)
         self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
 
     def forward(

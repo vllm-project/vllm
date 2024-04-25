@@ -32,7 +32,7 @@ def test_models(
     hf_outputs = hf_model.encode(example_prompts)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, max_model_len=32768)
+    vllm_model = vllm_runner(model, dtype=dtype)
     vllm_outputs = vllm_model.encode(example_prompts)
     del vllm_model
 

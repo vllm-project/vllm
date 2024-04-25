@@ -819,6 +819,8 @@ class PoolerOutput:
     """The output from a pooling operation in the Llama model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
+    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
     def __getitem__(self, idx: int):
         return self.outputs[idx]
 

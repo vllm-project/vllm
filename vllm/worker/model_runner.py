@@ -301,10 +301,9 @@ class ModelRunner:
                 lora_requests.add(seq_group_metadata.lora_request)
 
             lora_index_mapping += [lora_id] * (seq_len - context_len)
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (seq_len - context_len
-                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+            lora_prompt_mapping.extend([lora_id] * (
+                seq_len - context_len if seq_group_metadata.sampling_params
+                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.multi_modal_data:
                 multi_modal_input_list.append(
