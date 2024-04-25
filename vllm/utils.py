@@ -341,7 +341,7 @@ def _generate_random_fp8(
     del tensor_tmp
 
 
-def _str_to_torch_dtype(
+def get_kv_cache_torch_dtype(
         cache_dtype: Optional[Union[str, torch.dtype]],
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
@@ -381,7 +381,7 @@ def create_kv_caches_with_random_flashinfer(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    torch_dtype = _str_to_torch_dtype(cache_dtype, model_dtype)
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
     key_caches, value_caches = [], []
@@ -410,7 +410,7 @@ def create_kv_caches_with_random(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
 
-    torch_dtype = _str_to_torch_dtype(cache_dtype, model_dtype)
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()

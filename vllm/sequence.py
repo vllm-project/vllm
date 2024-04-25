@@ -557,7 +557,8 @@ class SequenceGroupMetadata:
         token_chunk_size: The number of tokens to be processed (per sequence).
             None if chunking is not required.
         lora_request: LoRA request.
-        computed_block_nums: The block numbers that are already computed, used in prefix caching.
+        computed_block_nums: The block numbers that are already computed,
+            used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
     """

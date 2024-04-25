@@ -77,9 +77,9 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         return _Backend.XFORMERS
 
     try:
-        import flashinfer
         # Still use flash attention for the prefill stage.
-        import flash_attn
+        import flash_attn  # noqa: F401
+        import flashinfer  # noqa: F401
         return _Backend.FLASHINER
     except ImportError:
         logger.info(

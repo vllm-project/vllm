@@ -1,13 +1,14 @@
-from typing import Type, Tuple, List, Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Type
+
+import flashinfer
+import torch
+from flash_attn import flash_attn_varlen_func
+
+from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
-
-import torch
-import flashinfer
-from vllm._C import cache_ops
-from dataclasses import dataclass
-from flash_attn import flash_attn_varlen_func
 
 
 class FlashInferBackend(AttentionBackend):
@@ -17,8 +18,8 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferImpl
 
     @staticmethod
-    def make_metadata(**kwargs) -> "FlashInferMetadata":
-        return FlashInferMetadata.new(**kwargs)
+    def make_metadata(*args, **kwargs) -> "FlashInferMetadata":
+        return FlashInferMetadata(*args, **kwargs)
 
     @staticmethod
     def get_kv_cache_shape(
@@ -55,6 +56,8 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     use_cuda_graph: bool = False
 
     wrapper: Optional[flashinfer.BatchDecodeWithPagedKVCacheWrapper] = None
+
+    # Metadata for prefill stage since we still use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
     max_prompt_len: Optional[int] = None
 

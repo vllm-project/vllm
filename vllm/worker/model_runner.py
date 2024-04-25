@@ -24,7 +24,8 @@ from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
+from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d,
+                        get_kv_cache_torch_dtype, is_hip,
                         is_pin_memory_available, make_tensor_with_pad,
                         maybe_expand_dim)
 
@@ -398,18 +399,26 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=True,
-            prompt_lens=prompt_lens,
-            prompt_lens_tensor=prompt_lens_tensor,
-            max_subquery_len=max_subquery_len,
-            max_context_len=None,
-            max_prompt_len=max_prompt_len,
-            subquery_start_loc=subquery_start_loc,
-            seq_start_loc=seq_start_loc,
-            context_lens=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=False)
+        if self.attn_backend is FlashInferBackend:
+            attn_metadata = self.attn_backend.make_metadata(
+                is_prompt=True,
+                use_cuda_graph=False,
+                wrapper=None,
+                seq_start_loc=seq_start_loc,
+                max_prompt_len=max_prompt_len)
+        else:
+            attn_metadata = self.attn_backend.make_metadata(
+                is_prompt=True,
+                prompt_lens=prompt_lens,
+                prompt_lens_tensor=prompt_lens_tensor,
+                max_subquery_len=max_subquery_len,
+                max_context_len=None,
+                max_prompt_len=max_prompt_len,
+                subquery_start_loc=subquery_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=False)
 
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -541,7 +550,7 @@ class ModelRunner:
         if self.attn_backend is FlashInferBackend:
             # Lazy import to avoid repetitive import
             try:
-                flashinfer
+                flashinfer  # noqa: B018
             except NameError:
                 import flashinfer
 
@@ -560,6 +569,8 @@ class ModelRunner:
             paged_kv_last_page_len = torch.tensor(paged_kv_last_page_len,
                                                   dtype=torch.int,
                                                   device=self.device)
+            kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
+                                                      self.model_config.dtype)
             flashinfer_wrapper.begin_forward(
                 paged_kv_indptr,
                 paged_kv_indices,
@@ -568,24 +579,27 @@ class ModelRunner:
                 self.model_config.get_num_kv_heads(self.parallel_config),
                 self.model_config.get_head_size(),
                 self.block_size,
-                pos_encoding_mode=
-                "NONE",  # FIXME: Add support for pos_encoding_mode
-                data_type=torch.float16  # FIXME: Add support for data_type
-            )
-
-        attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=False,
-            prompt_lens=None,
-            prompt_lens_tensor=None,
-            max_subquery_len=None,
-            max_context_len=max_context_len,
-            max_prompt_len=None,
-            subquery_start_loc=None,
-            seq_start_loc=None,
-            context_lens=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=use_captured_graph,
-            wrapper=flashinfer_wrapper)
+                # Disable flashinfer's pos encoding and use vllm's rope.
+                pos_encoding_mode="NONE",
+                data_type=kv_cache_dtype)
+            attn_metadata = self.attn_backend.make_metadata(
+                is_prompt=False,
+                use_cuda_graph=use_captured_graph,
+                wrapper=flashinfer_wrapper)
+        else:
+            attn_metadata = self.attn_backend.make_metadata(
+                is_prompt=False,
+                prompt_lens=None,
+                prompt_lens_tensor=None,
+                max_subquery_len=None,
+                max_context_len=max_context_len,
+                max_prompt_len=None,
+                subquery_start_loc=None,
+                seq_start_loc=None,
+                context_lens=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=use_captured_graph,
+                wrapper=flashinfer_wrapper)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,
