@@ -29,6 +29,12 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
+    # The following is not an abstract method and returns True by default.
+    @classmethod
+    def require_config_file(cls) -> bool:
+        """Whether this quantization config needs a configuration filen."""
+        return True
+
     @staticmethod
     @abstractmethod
     def get_config_filenames() -> List[str]:

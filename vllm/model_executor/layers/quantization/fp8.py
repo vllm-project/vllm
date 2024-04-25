@@ -13,8 +13,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 class FP8Config(QuantizationConfig):
     """Config class for FP8."""
 
-    config_file_optional = True
-
     def __init__(
         self,
         act_scaling: str="dynamic",
@@ -35,6 +33,10 @@ class FP8Config(QuantizationConfig):
         # SM 89 (e.g. Ada) GPUs. Specifically, this PR has to
         # be included: https://github.com/pytorch/pytorch/pull/118881
         return 90
+
+    @classmethod
+    def require_config_file(cls) -> bool:
+        return False
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
