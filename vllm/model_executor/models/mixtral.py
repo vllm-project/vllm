@@ -153,7 +153,7 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if "activation_scale" in weight_name:
+        if "act_scale" in weight_name:
             param_data[:] = param_data[:].max(loaded_weight)
 
     def process_weights_after_loading(self):
@@ -476,7 +476,7 @@ class MixtralForCausalLM(nn.Module):
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
             ("as_scale" if weight_name in ["w1", "w3"] else "a2s_scale",
-             f"experts.{expert_id}.{weight_name}.activation_scale", expert_id)
+             f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
