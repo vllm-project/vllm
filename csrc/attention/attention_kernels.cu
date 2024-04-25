@@ -211,7 +211,7 @@ __device__ void paged_attention_kernel(
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
-    // (e.g., kv_block_stride).
+    // For blocksparse attention: skip computation on blocks that are not attended
     if (is_sparse) {
       const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
       const bool is_remote = ((block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride == 0);
@@ -222,10 +222,10 @@ __device__ void paged_attention_kernel(
           const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
 
           if (thread_group_offset == 0) {
-            // Store the partial reductions to shared memory.
-            // NOTE(woosuk): It is required to zero out the masked logits.
+            // NOTE(linxihui): asign very large number to skipped tokens to avoid
+            // contribution to the sumexp softmax normalizer.
+            // This will not be used at computing sum(softmax*v) as the blocks will be skipped.
             logits[token_idx - start_token_idx] = -FLT_MAX;
-            // printf("=========skip block_idx: %d, block_seq_id: %d, num_blocksparse_blocks: %d, num_context_blocks: %d, head_idx: %d, context_len: %d, local_mult: %d, local_sum: %d, local_exp: %d, local_exp_mod: %d, \n", block_idx, block_seq_id, num_blocksparse_blocks, num_context_blocks, head_idx, context_len, local_mult, local_sum, local_exp, local_judge);
           }
         }
       continue;
@@ -361,10 +361,11 @@ __device__ void paged_attention_kernel(
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
-    // (e.g., kv_block_stride).
+    // For blocksparse attention: skip computation on blocks that are not attended
     if (is_sparse) {
       int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      if (!((block_seq_id + head_idx * blocksparse_head_sliding_step + 1) % blocksparse_vert_stride == 0) && !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
+      if (!((block_seq_id + head_idx * blocksparse_head_sliding_step + 1) % blocksparse_vert_stride == 0) &&
+          !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
         continue;
       }
     }
