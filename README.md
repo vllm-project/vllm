@@ -15,6 +15,17 @@ Easy, fast, and cheap LLM serving for everyone
 </p>
 
 ---
+# Multi Device Support
+Modify vllm so that it can support running on multiple GPU on one node.
+
+Usage:
+```
+
+llm_0 = LLM(model="facebook/opt-125m", local_rank=0, enforce_eager=True)
+```
+Add a local_rank parameter and set the encforce_eager to True
+
+---
 
 *Latest News* 🔥
 - [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).

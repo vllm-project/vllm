@@ -45,6 +45,7 @@ class EngineArgs:
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
+    local_rank : int = 0
 
     def __post_init__(self):
         if self.tokenizer is None:

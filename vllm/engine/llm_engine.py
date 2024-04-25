@@ -392,7 +392,8 @@ class LLMEngine:
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      placement_group,
-                     log_stats=not engine_args.disable_log_stats)
+                     log_stats=not engine_args.disable_log_stats,
+                     local_rank=engine_args.local_rank)
         return engine
 
     def encode_request(
