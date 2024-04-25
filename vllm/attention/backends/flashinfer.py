@@ -7,6 +7,7 @@ import torch
 import flashinfer
 from vllm._C import cache_ops
 from dataclasses import dataclass
+from flash_attn import flash_attn_varlen_func
 
 
 class FlashInferBackend(AttentionBackend):
@@ -26,7 +27,7 @@ class FlashInferBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        raise NotImplementedError
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -46,72 +47,16 @@ class FlashInferBackend(AttentionBackend):
 
 @dataclass
 class FlashInferMetadata(AttentionMetadataPerStage):
+
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
 
-    # The indptr of the paged kv-cache, shape: [batch_size + 1].
-    # Please follow the definition in the FlashInfer documentation: https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout.
-    paged_kv_indptr: List[int]
-
-    # The indices of the paged kv-cache of all sequences.
-    paged_kv_indices: List[int]
-
-    # The last page length of the paged kv-cache of all sequences, shape: [batch_size].
-    paged_kv_last_page_len: List[int]
-
-    # The number of query/output heads.
-    num_qo_heads: int
-
-    # The number of key/value heads.
-    num_kv_heads: int
-
-    # The dimension of the heads
-    head_dim: int
-
-    # The wrapper for the prefill or decode operation.
-    wrapper = None
-
-    # The indptr of the query/output sequence, shape: [batch_size + 1].
-    # This is only used for the prefill operation.
-    subquery_start_loc: Optional[torch.Tensor] = None
-
-    # The block size for the decode operation.
-    block_size: Optional[int] = None
-
     use_cuda_graph: bool = False
 
-    def __post_init__(self):
-        assert not self.use_cuda_graph, "CUDA graph is not supported yet."
-        # Allocate 16MB workspace buffer
-        # Follow the example: https://docs.flashinfer.ai/api/python/prefill.html#batch-prefill-append-attention
-        workspace_buffer = torch.empty(16 * 1024 * 1024,
-                                       dtype=torch.uint8,
-                                       device="cuda:0")
-        if self.is_prompt:
-            self.wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD")
-            self.wrapper.begin_forward(self.subquery_start_loc,
-                                       self.paged_kv_indptr,
-                                       self.paged_kv_indices,
-                                       self.paged_kv_last_page_len,
-                                       self.num_qo_heads, self.num_kv_heads,
-                                       self.head_dim)
-        else:
-            self.wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                workspace_buffer, "NHD")
-            self.wrapper.begin_forward(
-                self.paged_kv_indptr,
-                self.paged_kv_indices,
-                self.paged_kv_last_page_len,
-                self.num_qo_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.block_size,
-                pos_encoding_mode=
-                "NONE",  # FIXME: Add support for pos_encoding_mode
-                data_type=torch.float16  # FIXME: Add support for data_type
-            )
+    wrapper: Optional[flashinfer.BatchDecodeWithPagedKVCacheWrapper] = None
+    seq_start_loc: Optional[torch.Tensor] = None
+    max_prompt_len: Optional[int] = None
 
 
 class FlashInferImpl(AttentionImpl):
@@ -125,11 +70,23 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        pass
+        self.sliding_window = ((sliding_window, sliding_window)
+                               if sliding_window is not None else (-1, -1))
+        self.alibi_slopes = alibi_slopes
+        self.scale = scale
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
     def forward(self, query: torch.Tensor, key: torch.Tensor,
                 value: torch.Tensor, kv_cache: Optional[torch.Tensor],
-                attn_metadata: AttentionMetadata[FlashInferMetadata]):
+                attn_metadata: AttentionMetadata[FlashInferMetadata],
+                kv_scale: float):
+        num_tokens, hidden_size = query.shape
+        query = query.view(-1, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_kv_heads, self.head_size)
+        value = value.view(-1, self.num_kv_heads, self.head_size)
+
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
             cache_ops.reshape_and_cache_flash(
@@ -141,11 +98,27 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.kv_cache_dtype,
             )
 
-        if attn_metadata.is_prompt:
-            assert kv_cache is None, "Does not support prefix caching yet."
-            attn_metadata.prefill_metadata.wrapper.forward(query,
-                                                           kv_cache,
-                                                           causal=True)
-
+        if attn_metadata.prefill_metadata:
+            output = flash_attn_varlen_func(
+                q=query,
+                k=key,
+                v=value,
+                cu_seqlens_q=attn_metadata.prefill_metadata.seq_start_loc,
+                cu_seqlens_k=attn_metadata.prefill_metadata.seq_start_loc,
+                max_seqlen_q=attn_metadata.prefill_metadata.max_prompt_len,
+                max_seqlen_k=attn_metadata.prefill_metadata.max_prompt_len,
+                softmax_scale=self.scale,
+                causal=True,
+                window_size=self.sliding_window,
+                alibi_slopes=self.alibi_slopes,
+            )
         else:
-            attn_metadata.decode_metadata.wrapper.forward(query, kv_cache)
+            assert attn_metadata.decode_metadata is not None
+            query = query.contiguous(
+            )  # Flashinfer requires query to be contiguous
+            output = attn_metadata.decode_metadata.wrapper.forward(
+                query,
+                kv_cache,
+                sm_scale=self.scale,
+            )
+        return output.view(num_tokens, hidden_size)

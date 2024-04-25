@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
+from vllm.attention.backends.flashinfer import FlashInferBackend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
@@ -157,6 +158,9 @@ class ModelRunner:
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables: torch.Tensor  # Set after initial profiling.
 
+        # Set if the backend is flashinfer.
+        self.workspace_buffer = None
+
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
@@ -236,9 +240,6 @@ class ModelRunner:
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
         multi_modal_input_list: List[torch.Tensor] = []
-        paged_kv_indices: List[int] = []
-        paged_kv_indptr: List[int] = [0]
-        paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -321,12 +322,6 @@ class ModelRunner:
 
             # Compute the slot mapping.
             block_table = seq_group_metadata.block_tables[seq_id]
-            paged_kv_indices.extend(block_table)
-            paged_kv_indptr.append(len(block_table))
-            last_len = seq_data.get_len() % self.block_size
-            if last_len == 0:
-                last_len = self.block_size
-            paged_kv_last_page_len.append(last_len)
 
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, prompt_len - sliding_window).
@@ -414,16 +409,7 @@ class ModelRunner:
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=False,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_indptr=paged_kv_indptr,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=self.model_config.get_num_attention_heads(),
-            num_kv_heads=self.model_config.get_num_kv_heads(
-                self.parallel_config),
-            head_dim=self.model_config.get_head_size(),
-            # block_size = self.block_size
-        )
+            use_cuda_graph=False)
 
         return PreparePromptMetadata(
             input_tokens=input_tokens,
@@ -495,7 +481,7 @@ class ModelRunner:
                 block_tables.append(block_table)
 
                 paged_kv_indices.extend(block_table)
-                paged_kv_indptr.append(len(block_table))
+                paged_kv_indptr.append(paged_kv_indptr[-1] + len(block_table))
                 last_len = seq_data.get_len() % self.block_size
                 if last_len == 0:
                     last_len = self.block_size
@@ -551,6 +537,42 @@ class ModelRunner:
                 device=self.device,
             )
 
+        flashinfer_wrapper = None
+        if self.attn_backend is FlashInferBackend:
+            # Lazy import to avoid repetitive import
+            try:
+                flashinfer
+            except NameError:
+                import flashinfer
+
+            if self.workspace_buffer is None:
+                self.workspace_buffer = torch.empty(16 * 1024 * 1024,
+                                                    dtype=torch.uint8,
+                                                    device=self.device)
+            flashinfer_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                self.workspace_buffer, "NHD")
+            paged_kv_indptr = torch.tensor(paged_kv_indptr,
+                                           dtype=torch.int,
+                                           device=self.device)
+            paged_kv_indices = torch.tensor(paged_kv_indices,
+                                            dtype=torch.int,
+                                            device=self.device)
+            paged_kv_last_page_len = torch.tensor(paged_kv_last_page_len,
+                                                  dtype=torch.int,
+                                                  device=self.device)
+            flashinfer_wrapper.begin_forward(
+                paged_kv_indptr,
+                paged_kv_indices,
+                paged_kv_last_page_len,
+                self.model_config.get_num_attention_heads(),
+                self.model_config.get_num_kv_heads(self.parallel_config),
+                self.model_config.get_head_size(),
+                self.block_size,
+                pos_encoding_mode=
+                "NONE",  # FIXME: Add support for pos_encoding_mode
+                data_type=torch.float16  # FIXME: Add support for data_type
+            )
+
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             prompt_lens=None,
@@ -563,13 +585,7 @@ class ModelRunner:
             context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_indptr=paged_kv_indptr,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=self.model_config.get_num_attention_heads(),
-            num_kv_heads=self.model_config.get_num_kv_heads(),
-            head_dim=self.model_config.get_head_size(),
-            block_size=self.block_size)
+            wrapper=flashinfer_wrapper)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,
