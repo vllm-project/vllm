@@ -346,6 +346,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
+        # TODO need to map the logprobs of the accepted tokens
+        # need a way to determine prob batch index for a given sequence
+        # I forget the order of the probs
+
         return accepted_token_ids
 
     def _create_output_sampler_list(
@@ -364,6 +368,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # shape: [k+1, batch_size]
         accepted_token_ids_by_step = accepted_token_ids.transpose(0,
                                                                   1).tolist()
+        # Need to get logprobs of accepted token ids according to target model
+        # what is rank? how is order determined
+        # 
+
         sampler_output_list = []
         for token_ids_by_step in accepted_token_ids_by_step:
             if all(token_id == -1 for token_id in token_ids_by_step):
