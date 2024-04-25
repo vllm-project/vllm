@@ -1,13 +1,15 @@
-from vllm import LLM
+import argparse
+
 from transformers import AutoTokenizer
-import argparse 
+
+from vllm import LLM
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--type", choices=["static", "dynamic"])
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    
+
     if args.type == "static":
         model_name = "nm-testing/mistral-fp8-static"
     elif args.type == "dynamic":
@@ -17,15 +19,19 @@ if __name__ == "__main__":
 
     tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.2"
 
-    model = LLM(
-        model_name, 
-        tokenizer=tokenizer_name,
-        enforce_eager=True,
-        max_model_len=1024)
-    
+    model = LLM(model_name,
+                tokenizer=tokenizer_name,
+                enforce_eager=True,
+                max_model_len=1024)
+
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
 
-    prompt = tokenizer.apply_chat_template([{"role": "user", "content": "What is your name"}], tokenize=False, add_generation_prompt=True)
+    prompt = tokenizer.apply_chat_template([{
+        "role": "user",
+        "content": "What is your name"
+    }],
+                                           tokenize=False,
+                                           add_generation_prompt=True)
     print(f"----- Prompt: {prompt}")
 
     outputs = model.generate(prompt)
