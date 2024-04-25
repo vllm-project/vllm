@@ -185,7 +185,7 @@ def per_tensor_quantize_static(tensor: torch.Tensor,
 
 
 def per_tensor_quantize_dyanmic(
-        tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+        tensor: torch.Tensor) -> Tuple[torch.Tensor, float]:
     """Quantize a tensor using per-tensor dynamic scaling factor.
     Args:
         tensor: The input tensor.
