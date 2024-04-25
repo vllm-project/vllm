@@ -5,8 +5,8 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
