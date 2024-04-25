@@ -10,7 +10,7 @@ from vllm.sequence import SamplerOutput
 logger = init_logger(__name__)
 
 
-class MultiGPUExecutor(GPUExecutor):
+class DistributedGPUExecutor(GPUExecutor):
     """Abstract superclass of multi-GPU executor implementations."""
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -91,7 +91,7 @@ class MultiGPUExecutor(GPUExecutor):
         raise NotImplementedError
 
 
-class MultiGPUExecutorAsync(MultiGPUExecutor, ExecutorAsyncBase):
+class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
 
     @abstractmethod
     async def _run_workers_async(

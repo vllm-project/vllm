@@ -5,8 +5,8 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from vllm.executor.multi_gpu_executor import (MultiGPUExecutor,
-                                              MultiGPUExecutorAsync)
+from vllm.executor.distributed_gpu_executor import (
+    DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
-class RayGPUExecutor(MultiGPUExecutor):
+class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
         assert (not self.speculative_config
@@ -320,7 +320,7 @@ class RayGPUExecutor(MultiGPUExecutor):
                                f"Dead Workers: {dead_actors}. ")
 
 
-class RayGPUExecutorAsync(RayGPUExecutor, MultiGPUExecutorAsync):
+class RayGPUExecutorAsync(RayGPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
