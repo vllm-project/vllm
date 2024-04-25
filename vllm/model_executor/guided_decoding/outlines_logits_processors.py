@@ -18,7 +18,7 @@ import json
 import math
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Callable, DefaultDict, Dict, List, Union
 
 import torch
 from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM

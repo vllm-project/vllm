@@ -144,7 +144,9 @@ class ChatCompletionRequest(BaseModel):
         default=None,
         description=(
             "If specified, will override the default whitespace pattern "
-            "of the server for this specific request."))
+            "for guided json decoding."
+        )
+    )
 
     # doc: end-chat-completion-extra-params
 
