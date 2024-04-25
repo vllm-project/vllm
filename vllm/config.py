@@ -115,10 +115,9 @@ class ModelConfig:
             self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
-    
-        self.served_model_name = (served_model_name
-                                    if served_model_name is not None else model)
 
+        self.served_model_name = (served_model_name
+                                  if served_model_name is not None else model)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
