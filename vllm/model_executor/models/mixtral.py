@@ -154,7 +154,6 @@ class MixtralMoE(nn.Module):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
         if "activation_scale" in weight_name:
             param_data[:] = param_data[:].max(loaded_weight)
-            print("loaded scale", weight_name, param_data)
 
     def process_weights_after_loading(self):
         if self.use_fp8:
