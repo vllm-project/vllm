@@ -1056,7 +1056,7 @@ def _get_and_verify_max_len(
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
+    if rope_scaling is not None and rope_scaling["type"] != "su":
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
         if rope_scaling["type"] == "yarn":

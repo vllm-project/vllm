@@ -78,6 +78,7 @@ vLLM seamlessly supports many Hugging Face models, including the following archi
 - OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
 - Orion (`OrionStarAI/Orion-14B-Base`, `OrionStarAI/Orion-14B-Chat`, etc.)
 - Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
+- Phi3 (`microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, etc.)
 - Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
 - Qwen2 (`Qwen/Qwen1.5-7B`, `Qwen/Qwen1.5-7B-Chat`, etc.)
 - Qwen2MoE (`Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.)
