@@ -15,6 +15,7 @@ MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
 
+
 @ray.remote(num_gpus=1)
 class ServerRunner:
 
@@ -52,6 +53,7 @@ class ServerRunner:
     def __del__(self):
         if hasattr(self, "proc"):
             self.proc.terminate()
+
 
 @pytest.fixture(scope="session")
 def server():
@@ -114,6 +116,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI):
     )
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
+
 
 @pytest.mark.asyncio
 async def test_single_chat_session(server, client: openai.AsyncOpenAI):
