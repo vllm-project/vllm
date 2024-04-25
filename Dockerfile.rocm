@@ -98,6 +98,7 @@ RUN cd /app \
     && pip install -U -r requirements-rocm.txt \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
     && cd ..
 
 RUN python3 -m pip install --upgrade pip
