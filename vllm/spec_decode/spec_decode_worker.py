@@ -350,6 +350,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # need a way to determine prob batch index for a given sequence
         # I forget the order of the probs
 
+        breakpoint()
+
         return accepted_token_ids
 
     def _create_output_sampler_list(
