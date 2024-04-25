@@ -57,6 +57,9 @@ class BaseLogitsProcessor:
         elif type(instruction) == Write:
             # TODO: support fast forward tokens
             allowed_tokens = [instruction.tokens[0]]
+        else:
+            raise TypeError(
+                f"Unsupported instruction type {type(instruction)}")
 
         mask = torch.full((scores.shape[-1], ),
                           -math.inf,
