@@ -15,9 +15,9 @@ class FP8Config(QuantizationConfig):
 
     def __init__(
         self,
-        act_scaling: str = "dynamic",
+        activation_scheme: str = "dynamic",
     ) -> None:
-        self.act_scaling = act_scaling
+        self.activation_scheme = activation_scheme
 
     @classmethod
     def get_name(cls) -> str:
@@ -44,8 +44,8 @@ class FP8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
-        act_scaling = cls.get_from_keys(config, ["act_scaling"])
-        return cls(act_scaling)
+        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        return cls(activation_scheme)
 
     def get_linear_method(self) -> "Fp8LinearMethod":
         return Fp8LinearMethod(self)
