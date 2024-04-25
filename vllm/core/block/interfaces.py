@@ -1,5 +1,5 @@
-from abc import ABC, abstractmethod, abstractproperty
-from typing import Dict, List, Optional, Protocol
+from abc import ABC, abstractmethod
+from typing import Dict, FrozenSet, List, Optional, Protocol
 
 from vllm.utils import Device
 
@@ -10,23 +10,28 @@ class Block(ABC):
     def append_token_ids(self, token_ids: List[int]) -> None:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def block_id(self) -> Optional[int]:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def token_ids(self) -> List[int]:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def num_empty_slots(self) -> int:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def is_full(self) -> bool:
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def prev_block(self) -> Optional["Block"]:
         pass
 
@@ -52,7 +57,7 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int]) -> Block:
+                           token_ids: List[int], device: Device) -> Block:
         pass
 
     @abstractmethod
@@ -64,11 +69,12 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_free_blocks(self) -> int:
+    def get_num_free_blocks(self, device: Device) -> int:
         pass
 
-    @abstractproperty
-    def all_block_ids(self) -> frozenset[int]:
+    @property
+    @abstractmethod
+    def all_block_ids(self) -> FrozenSet[int]:
         pass
 
     @abstractmethod
@@ -91,8 +97,7 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(BlockAllocator):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block],
-                         device: Device) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod

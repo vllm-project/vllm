@@ -2,7 +2,9 @@
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
@@ -231,10 +233,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if self.enable_caching:
             logger.info("Automatic prefix caching is enabled.")
-            self.gpu_allocator = CachedBlockAllocator(Device.GPU, block_size,
-                                                      num_gpu_blocks)
-            self.cpu_allocator = CachedBlockAllocator(Device.CPU, block_size,
-                                                      num_cpu_blocks)
+            self.gpu_allocator: BlockAllocatorBase = CachedBlockAllocator(
+                Device.GPU, block_size, num_gpu_blocks)
+            self.cpu_allocator: BlockAllocatorBase = CachedBlockAllocator(
+                Device.CPU, block_size, num_cpu_blocks)
         else:
             self.gpu_allocator = UncachedBlockAllocator(
                 Device.GPU, block_size, num_gpu_blocks)
@@ -328,7 +330,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self,
         seq: Sequence,
     ) -> bool:
-        token_ids_len = len(seq.data.get_token_ids())
+        token_ids_len = seq.data.get_len()
         return token_ids_len > 0 and token_ids_len % seq.block_size == 0
 
     def _maybe_promote_last_block(
@@ -588,7 +590,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for b in takewhile(lambda b: b.computed, block_table[:-1])
         ]
 
-    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         """Return the block ids that are common for a given sequence group.
 
         Used in prefill (can skip prefill of some blocks).
