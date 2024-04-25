@@ -32,12 +32,10 @@ class SequenceGroupToSample:
     # True if the sequence group is in prefill stage. False if it is in a
     # decode stage.
     is_prompt: bool
-    # Prefill query token indices from a batched input. Empty if prompt logprob
-    # is not required. It should not include the last prefill token's indice
-    # because that's for sampling.
+    # Query token indices from logits. to compute prompt logprob. Empty if
+    # prompt logprob is not required.
     prompt_logprob_indices: List[int]
-    # Sample token indices from a bathced input. Empty if sampling is not
-    # required.
+    # Sample token indices from logits. Empty if sampling is not required.
     sample_indices: List[int]
 
     @property
@@ -176,12 +174,15 @@ def _prepare_seq_groups(
         t: []
         for t in SamplingType
     }
-    # Index of logits to compute logprob (both prompt and sample logprob).
+    # Index of logits to compute logprob. Logits include both prompt logprob
+    # and sample logprob indices.
     logit_idx = 0
-    # Index of logits to sample.
-    sample_logit_idx = 0
-
+    # Index to sample from a sample tensor. It is used by triton sample kernel.
+    # See `_sample_with_triton_kernel` for more details.
+    sample_idx = 0
+    # Total number of prompts from given sequence groups.
     num_prompts = 0
+
     for i, seq_group_metadata in enumerate(seq_group_metadata_list):
         seq_ids = list(seq_group_metadata.seq_data.keys())
         sampling_params = seq_group_metadata.sampling_params
@@ -190,9 +191,7 @@ def _prepare_seq_groups(
         # If the current seq group is in decode stage, it is None.
         prompt_len: Optional[int] = None
         subquery_len: Optional[int] = None
-        # prefill indices for this particular seq group.
         prompt_logprob_indices: List[int] = []
-        # sample indices for this particular seq group.
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
 
@@ -204,11 +203,10 @@ def _prepare_seq_groups(
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
-            assert subquery_lens is not None
-            assert prompt_lens is not None
-            subquery_len = subquery_lens[i]
-            prompt_len = prompt_lens[i]
-            # Prefill length except a query token to sample.
+            assert subquery_lens is not None and prompt_lens is not None
+            subquery_len, prompt_len = subquery_lens[i], prompt_lens[i]
+            # If we need sampling, exclude num_prefill_sample tokens from
+            # prompt logprob.
             prompt_logprob_len = (subquery_len - num_prefill_sample
                                   if do_sample else subquery_len)
             sample_len = num_prefill_sample if do_sample else 0
@@ -217,8 +215,12 @@ def _prepare_seq_groups(
             prompt_logprob_len = 0
             sample_len = len(seq_ids) if do_sample else 0
 
-        # Update indices to select from the model output. The selected indices
-        # will become logits.
+        # Update indices to select from the model output.
+        """
+        hidden_states = model(...)
+        logits = hidden_states[selected_token_indices]
+        """
+
         if sampling_params.prompt_logprobs:
             selected_token_indices.extend(
                 range(model_output_idx, model_output_idx + prompt_logprob_len))
@@ -228,9 +230,14 @@ def _prepare_seq_groups(
                 range(model_output_idx, model_output_idx + sample_len))
         model_output_idx += sample_len
 
-        # We can obtain logits by pruning model output using
-        # selected_token_indices. We now find indices for logprob computation
-        # and sampling.
+        # We now find indices for logprob computation and sampling.
+        """
+        hidden_states = model(...)
+        logits = hidden_states[selected_token_indices]
+        def sample(logits):
+           # Use categorized_sample_indices for sampling.
+        """
+
         if sampling_params.prompt_logprobs is not None:
             prompt_logprob_indices.extend(
                 range(logit_idx, logit_idx + prompt_logprob_len))
@@ -240,10 +247,9 @@ def _prepare_seq_groups(
             categorized_sample_indices[sampling_params.sampling_type].extend(
                 list(
                     zip(range(logit_idx, logit_idx + sample_len),
-                        range(sample_logit_idx,
-                              sample_logit_idx + sample_len))))
+                        range(sample_idx, sample_idx + sample_len))))
             logit_idx += sample_len
-            sample_logit_idx += sample_len
+            sample_idx += sample_len
 
         if sampling_params.seed is not None:
             generator = seq_group_metadata.state.generator
@@ -365,6 +371,7 @@ class SamplingTensors:
                 repetition_penalties += [1] * prefill_len
                 prompt_tokens.extend([] for _ in range(prefill_len))
                 output_tokens.extend([] for _ in range(prefill_len))
+
             if seq_group.do_sample:
                 sample_lens = len(seq_group.sample_indices)
                 assert sample_lens == len(seq_ids)
