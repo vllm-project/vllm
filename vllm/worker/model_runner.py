@@ -410,7 +410,7 @@ class ModelRunner:
             seq_start_loc=seq_start_loc,
             context_lens=context_lens_tensor,
             block_tables=block_tables,
-            use_cuda_graph=True,
+            use_cuda_graph=False,
         )
 
         return PreparePromptMetadata(
