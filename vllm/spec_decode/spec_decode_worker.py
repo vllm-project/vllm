@@ -342,15 +342,43 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
 
-        # Rearrange so that results are in the order of the original seq group
-        # metadata.
-        accepted_token_ids[original_indices] = accepted_token_ids.clone()
-
         # TODO need to map the logprobs of the accepted tokens
         # need a way to determine prob batch index for a given sequence
         # I forget the order of the probs
+        """
+        (Pdb) accepted_token_ids
+        tensor([[29889,    -1,    -1],
+                [  697,  1058,    -1]], device='cuda:0')
+        (Pdb) proposal_scores.probs
+        tensor([[[0., 0., 0.,  ..., 0., 0., 0.],
+                 [0., 0., 0.,  ..., 0., 0., 0.],
+                 [0., 0., 0.,  ..., 0., 0., 0.]],
+        
+                [[0., 0., 0.,  ..., 0., 0., 0.],
+                 [0., 0., 0.,  ..., 0., 0., 0.],
+                 [0., 0., 0.,  ..., 0., 0., 0.]]], device='cuda:0')
+        (Pdb) proposal_scores.probs.shape
+        torch.Size([2, 3, 32000])
+        (Pdb) accepted_token_ids.shape
+        torch.Size([2, 3])
+        (Pdb) proposal_scores.probs[0]
+        tensor([[0., 0., 0.,  ..., 0., 0., 0.],
+                [0., 0., 0.,  ..., 0., 0., 0.],
+                [0., 0., 0.,  ..., 0., 0., 0.]], device='cuda:0')
+        (Pdb) proposal_scores.probs[0].shape
+        torch.Size([3, 32000])
+        (Pdb) proposal_scores.probs[0][0][29889]
+        tensor(1., device='cuda:0')
+
+        [batch][k][token]
+        I think non spec sequences are in same order
+        """
 
         breakpoint()
+
+        # Rearrange so that results are in the order of the original seq group
+        # metadata.
+        accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
         return accepted_token_ids
 

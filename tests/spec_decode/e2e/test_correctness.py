@@ -617,7 +617,7 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
             "num_speculative_tokens": k,
         }
         # Try a range of common k, as well as large speculation.
-        for k in [1]
+        for k in [2]
     ])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
