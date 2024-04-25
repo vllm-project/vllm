@@ -159,8 +159,14 @@ if __name__ == "__main__":
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
     openai_serving_chat = OpenAIServingChat(
-        engine, served_model, args.response_role, args.lora_modules,
-        args.chat_template, args.tool_template, args.rag_template,)
+        engine,
+        served_model_names,
+        args.response_role,
+        args.lora_modules,
+        args.chat_template,
+        args.tool_template,
+        args.rag_template,
+    )
     openai_serving_completion = OpenAIServingCompletion(
         engine, served_model_names, args.lora_modules)
 
