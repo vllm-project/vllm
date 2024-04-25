@@ -687,13 +687,20 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
     for i, (baseline_logprobs, spec_logprobs) in enumerate(
                 zip(baseline_batch_logprobs, spec_batch_logprobs)):
         assert len(spec_logprobs) == len(baseline_logprobs)
-        for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(zip(spec_logprobs, baseline_logprobs)):
+        for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(
+            zip(spec_logprobs, baseline_logprobs)):
             
-            spec_rank_to_token_id = {value.rank: key for key, value in spec_pos_logprobs.items()}
-            spec_rank_to_logprob = {value.rank: value.logprob for key, value in spec_pos_logprobs.items()}
+            spec_rank_to_token_id = {
+                value.rank: key for key, value in spec_pos_logprobs.items()}
+            spec_rank_to_logprob = {
+                value.rank: value.logprob
+                for key, value in spec_pos_logprobs.items()}
         
-            baseline_rank_to_token_id = {value.rank: key for key, value in baseline_pos_logprobs.items()}
-            baseline_rank_to_logprob = {value.rank: value.logprob for key, value in baseline_pos_logprobs.items()}
+            baseline_rank_to_token_id = {
+                value.rank: key for key, value in baseline_pos_logprobs.items()}
+            baseline_rank_to_logprob = {
+                value.rank: value.logprob
+                for key, value in baseline_pos_logprobs.items()}
         
             assert set(spec_rank_to_token_id.keys()) == set(baseline_rank_to_token_id.keys())
             breakpoint()
