@@ -209,7 +209,8 @@ class ModelConfig:
             return None
 
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        # This is needed for Phi-3 models and bypasses issue https://github.com/vllm-project/vllm/issues/3385.
+        # This is needed for Phi-3 models and bypasses issue
+        # https://github.com/vllm-project/vllm/issues/3385.
         if sliding_window is not None and sliding_window % 2 != 0:
             sliding_window += 1
         return sliding_window
