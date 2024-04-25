@@ -48,6 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip
 
+from vllm.ex.ex import backend, make_backend
 
 class LlamaMLP(nn.Module):
 
@@ -72,6 +73,11 @@ class LlamaMLP(nn.Module):
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
+    # TODO: some issues with in/out parameters in primitives, silu_and_mul
+    # custom op and fused_add_rms_norm
+    # TODO: getitem, get_attr
+    @torch.compile(backend=backend)
+    #@torch.compile(backend=make_backend(final=None))
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from vllm import _custom_ops as ops
-
+from vllm.lowering_utils import vllm_lib, register_vllm_lowering
 
 class RMSNorm(nn.Module):
     """Root mean square normalization.
@@ -49,6 +49,11 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
+            # TODO: Figure this out
+            if isinstance(x, list):
+                print(f"HERE {type(x)}")
+                x = x[0]
+            # end figure this out
             ops.fused_add_rms_norm(
                 x,
                 residual,
