@@ -13,10 +13,10 @@ class FP8Config(QuantizationConfig):
     """Config class for FP8."""
     def __init__(
         self,
-        scheme: str,
+        activation_scheme: str,
     ) -> None:
-        assert scheme == "static" or scheme == "dynamic"
-        self.scheme = scheme
+        assert activation_scheme == "static" or activation_scheme == "dynamic"
+        self.activation_scheme = activation_scheme
 
     @classmethod
     def get_name(cls) -> str:
@@ -36,8 +36,8 @@ class FP8Config(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
-        scheme = cls.get_from_keys(config, ["scheme"])
-        return cls(scheme=scheme)
+        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        return cls(activation_scheme=activation_scheme)
 
     def get_linear_method(self) -> "FP8LinearMethod":
         return FP8LinearMethod(self)
@@ -87,7 +87,7 @@ class FP8LinearMethod(LinearMethodBase):
             "shard_indexer": self.scales_shard_indexer,
         })
 
-        if self.quant_config.scheme == "static":
+        if self.quant_config.activation_scheme == "static":
             act_scale = Parameter(
                 torch.empty(len(output_partition_sizes), dtype=torch.float32), 
                 requires_grad=False
@@ -140,9 +140,9 @@ class FP8LinearMethod(LinearMethodBase):
 
         w_scale = layer.weight_scale.max()
 
-        if self.quant_config.scheme == "dynamic":
+        if self.quant_config.activation_scheme == "dynamic":
             qinput, x_scale = per_tensor_quantize_dyanmic(x)
-        elif self.quant_config.scheme == "static":
+        elif self.quant_config.activation_scheme == "static":
             # empirically, these are all the same
             x_scale = layer.act_scale.max()
             qinput = per_tensor_quantize_static(x, x_scale)
