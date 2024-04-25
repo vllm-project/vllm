@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
@@ -256,6 +257,29 @@ class RotaryEmbedding(CustomOp):
         s += f", max_position_embeddings={self.max_position_embeddings}"
         s += f", base={self.base}, is_neox_style={self.is_neox_style}"
         return s
+
+
+# needed for compile
+vllm_lib.define(
+    "rotary_embedding(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> (Tensor, Tensor)"
+)
+
+
+@torch.library.impl(vllm_lib, "rotary_embedding", "Meta")
+def _rotary_embedding_meta(positions, query, key, head_size, cos_sin_cache,
+                           is_neox):
+    return query, key
+
+
+@torch.library.impl(vllm_lib, "rotary_embedding", "CUDA")
+def _rotary_embedding(positions, query, key, head_size, cos_sin_cache,
+                      is_neox):
+    ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
+                         is_neox)
+    return query, key
+
+
+register_vllm_lowering(torch.ops.vllm.rotary_embedding, [1, 2])
 
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
