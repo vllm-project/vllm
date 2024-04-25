@@ -365,11 +365,13 @@ class LoRAModelManager:
         except ValueError:
             pass
 
-    def deactivate_lora(self, lora_id: int):
+    def deactivate_lora(self, lora_id: int) -> bool:
         """Remove a LoRA from a GPU buffer."""
         if lora_id in self._active_loras:
             self._deactivate_lora(lora_id)
             self._active_loras.pop(lora_id)
+            return True
+        return False
 
     def _add_lora(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
@@ -560,7 +562,7 @@ class LoRAModelManager:
 class LoRALRUCache(LRUCache[LoRAModel]):
 
     def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int],
-                                                                   None]):
+                                                                   bool]):
         super().__init__(capacity)
         self.deactivate_lora_fn = deactivate_lora_fn
 
