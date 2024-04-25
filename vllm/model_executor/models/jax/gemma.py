@@ -13,6 +13,8 @@
 # limitations under the License.
 # ============================================================================
 """Gemma transformer."""
+from typing import List, Tuple
+
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -134,7 +136,7 @@ class Attention(nn.Module):
       slot_mapping: jax.Array,
       block_tables: jax.Array | None,
       context_lens: jax.Array | None,
-      cache: jax.Array,
+      cache: Tuple[jax.Array, jax.Array],
   ) -> tuple[jax.Array, jax.Array]:
     if self.use_qkv_einsum:
       query_proj, key_proj, value_proj = self.qkv_einsum('BTD,SNDH->SBTNH', x)
@@ -154,7 +156,9 @@ class Attention(nn.Module):
     )
 
     # Write the incoming keys and values to KV cache.
-    cache = write_to_kv_cache(key_proj, value_proj, cache, slot_mapping)
+    k_cache, v_cache = cache
+    k_cache, v_cache = write_to_kv_cache(
+      key_proj, value_proj, k_cache, v_cache, slot_mapping)
 
     if block_tables is None:
       # Prompt attention.
@@ -187,15 +191,15 @@ class Attention(nn.Module):
       # Decode attention.
       output = paged_attn(
           query_proj,
-          cache[0],
-          cache[1],
+          k_cache,
+          v_cache,
           self.sm_scale,
           block_tables,
           context_lens,
       )
 
     attn_output = self.attn_vec_einsum('BTNH,NHD->BTD', output)
-    return cache, attn_output
+    return (k_cache, v_cache), attn_output
 
 
 class FeedForward(nn.Module):
@@ -253,8 +257,8 @@ class Block(nn.Module):
       slot_mapping: jax.Array,
       block_tables: jax.Array | None,
       context_lens: jax.Array | None,
-      cache: jax.Array,
-  ) -> tuple[jax.Array, jax.Array]:
+      cache: Tuple[jax.Array, jax.Array],
+  ) -> Tuple[Tuple[jax.Array, jax.Array], jax.Array]:
     inputs_normalized = self.pre_attention_norm(x)
     cache, attn_output = self.attn(
         inputs_normalized,
@@ -302,9 +306,9 @@ class Transformer(nn.Module):
       slot_mapping: jax.Array,
       block_tables: jax.Array | None,
       context_lens: jax.Array | None,
-      kv_caches: list[jax.Array],
+      kv_caches: List[Tuple[jax.Array, jax.Array]],
       logits_indices: jax.Array,
-  ) -> tuple[jax.Array, list[jax.Array]]:
+  ) -> tuple[jax.Array, List[Tuple[jax.Array, jax.Array]]]:
     x = self.embedder.encode(token_ids)
     new_caches = []
     for i, block in enumerate(self.blocks):

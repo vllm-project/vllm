@@ -80,11 +80,14 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
-        self.tpu_cache = [
-            jnp.zeros(
-                (2, num_kv_heads, num_gpu_blocks, self.block_size, head_size),
-                dtype=dtype) for _ in range(num_layers)
-        ]
+
+        self.tpu_cache = []
+        for _ in range(num_layers):
+            key_cache = jnp.zeros(
+                (num_kv_heads, num_gpu_blocks * self.block_size, head_size),
+                dtype=dtype)
+            value_cache = jnp.zeros_like(key_cache)
+            self.tpu_cache.append((key_cache, value_cache))
         self.model_runner.block_size = self.block_size
         self._warmup_model()
 
