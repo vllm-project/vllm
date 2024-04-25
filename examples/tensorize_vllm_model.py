@@ -225,7 +225,7 @@ s3_access_key_id = (getattr(args, 's3_access_key_id', None)
 s3_secret_access_key = (getattr(args, 's3_secret_access_key', None)
                         or os.environ.get("S3_SECRET_ACCESS_KEY", None))
 s3_endpoint = (getattr(args, 's3_endpoint', None)
-               or os.environ.get("S3_ENDPOINT", None))
+               or os.environ.get("S3_ENDPOINT_URL", None))
 
 credentials = {
     "s3_access_key_id": s3_access_key_id,
