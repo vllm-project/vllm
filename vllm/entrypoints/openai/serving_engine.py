@@ -22,17 +22,15 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LoRA:
+class LoRAModulePath:
     name: str
     local_path: str
 
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model_names: List[str],
-                 lora_modules=Optional[List[LoRA]]):
+    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]]):
         self.engine = engine
         self.served_model_names = served_model_names
         if lora_modules is None:
