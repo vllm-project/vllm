@@ -928,10 +928,10 @@ class ModelRunner:
         torch.cuda.synchronize()
         return
 
-    def remove_all_loras(self) -> bool:
+    def remove_all_loras(self):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.remove_all_loras()
+        self.lora_manager.remove_all_loras()
 
     def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
