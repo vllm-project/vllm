@@ -9,6 +9,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
 def main(args: argparse.Namespace):
@@ -101,7 +102,7 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', 'gptq', 'squeezellm', None],
+                        choices=[*QUANTIZATION_METHODS, None],
                         default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--input-len', type=int, default=32)
@@ -169,16 +170,15 @@ if __name__ == '__main__':
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda"],
-        help='device type for vLLM execution, supporting CUDA only currently.')
+        choices=["cuda", "cpu"],
+        help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument('--block-size',
                         type=int,
                         default=16,
                         help='block size of key/value cache')
     parser.add_argument(
         '--enable-chunked-prefill',
-        type=bool,
-        default=False,
+        action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
     parser.add_argument(
