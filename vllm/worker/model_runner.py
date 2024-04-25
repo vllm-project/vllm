@@ -170,8 +170,8 @@ class ModelRunner:
             )
 
         self.model_memory_usage = m.consumed_memory
-        logger.info(f"Loading model weights took "
-                    f"{self.model_memory_usage / float(2**30):.4f} GB")
+        logger.info("Loading model weights took %.4f GB",
+                    self.model_memory_usage / float(2**30))
 
         if self.lora_config:
             assert hasattr(self.model, "supported_lora_modules"
@@ -196,18 +196,19 @@ class ModelRunner:
                     self.model.load_kv_cache_scales(
                         self.model_config.quantization_param_path)
                 else:
-                    raise RuntimeError("Using FP8 KV cache and scaling "
-                                       "factors provided but model "
-                                       f"{self.model.__class__} does not "
-                                       "support loading scaling factors.")
+                    raise RuntimeError(
+                        "Using FP8 KV cache and scaling factors provided but "
+                        "model %s does not support loading scaling factors.",
+                        self.model.__class__)
             else:
-                logger.warn("Using FP8 KV cache but no scaling factors "
-                            "provided. Defaulting to scaling factors of 1.0. "
-                            "This may lead to less accurate results!")
+                logger.warning(
+                    "Using FP8 KV cache but no scaling factors "
+                    "provided. Defaulting to scaling factors of 1.0. "
+                    "This may lead to less accurate results!")
         elif self.model_config.quantization_param_path is not None:
-            logger.warn("KV cache scaling factors provided, "
-                        "but the KV cache data type is not FP8. "
-                        "KV cache scaling factors will not be used.")
+            logger.warning("KV cache scaling factors provided, "
+                           "but the KV cache data type is not FP8. "
+                           "KV cache scaling factors will not be used.")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
@@ -1054,7 +1055,7 @@ class ModelRunner:
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
-        logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
+        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
     def __del__(self) -> None:
         # Delete the CUDA graphs before deleting the pynccl communicator.
