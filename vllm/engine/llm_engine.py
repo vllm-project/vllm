@@ -22,7 +22,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceStage)
+                           SequenceGroup, SequenceStage, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -705,7 +705,7 @@ class LLMEngine:
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
-          
+
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
