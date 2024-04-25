@@ -6,7 +6,7 @@ from typing import Dict, List, Set, Tuple
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import (enable_trace_function_call_for_process,
+from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 
 logger = init_logger(__name__)
@@ -126,7 +126,7 @@ class WorkerWrapperBase:
        function tracing if required.
         Arguments are passed to the worker class constructor.
         """
-        enable_trace_function_call_for_process()
+        enable_trace_function_call_for_thread()
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)

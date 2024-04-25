@@ -616,7 +616,7 @@ def find_nccl_library():
     return so_file
 
 
-def enable_trace_function_call_for_process():
+def enable_trace_function_call_for_thread():
     if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
         tmp_dir = tempfile.gettempdir()
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"

@@ -13,7 +13,7 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
 from vllm.logger import init_logger
-from vllm.utils import enable_trace_function_call_for_process
+from vllm.utils import enable_trace_function_call_for_thread
 
 logger = init_logger(__name__)
 
@@ -205,7 +205,7 @@ def _run_worker_process(
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
 
-    enable_trace_function_call_for_process()
+    enable_trace_function_call_for_thread()
 
     worker = worker_factory()
     del worker_factory
@@ -223,9 +223,8 @@ def _run_worker_process(
                 output = executor(*args, **kwargs)
             except BaseException as e:
                 tb = traceback.format_exc()
-                logger.error(
-                    f"Exception in worker {process_name} "
-                    f"while processing method {method}: {e}, {tb}")
+                logger.error(f"Exception in worker {process_name} "
+                             f"while processing method {method}: {e}, {tb}")
                 exception = e
             result_queue.put(
                 Result(task_id=task_id, value=output, exception=exception))

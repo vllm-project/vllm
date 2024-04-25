@@ -33,9 +33,6 @@ def _start_workers() -> Tuple[List[LocalWorkerVllm], WorkerMonitor]:
         for rank in range(8)
     ]
 
-    for worker in workers:
-        worker.start()
-
     worker_monitor = WorkerMonitor(workers, result_handler)
     assert not worker_monitor.is_alive()
 
@@ -83,14 +80,14 @@ def test_local_workers() -> None:
 
     # Test cleanup when a worker fails
     assert worker_monitor.is_alive()
-    workers[3].kill()
+    workers[3].process.kill()
 
     # Other workers should get shut down here
     worker_monitor.join(2)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
-    assert all(not worker.is_alive() for worker in workers)
+    assert all(not worker.process.is_alive() for worker in workers)
 
     # Further attempts to submit tasks should fail
     try:
@@ -106,7 +103,7 @@ def test_local_workers_clean_shutdown() -> None:
     workers, worker_monitor = _start_workers()
 
     assert worker_monitor.is_alive()
-    assert all(worker.is_alive() for worker in workers)
+    assert all(worker.process.is_alive() for worker in workers)
 
     # Clean shutdown
     worker_monitor.close()
@@ -115,7 +112,7 @@ def test_local_workers_clean_shutdown() -> None:
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
-    assert all(not worker.is_alive() for worker in workers)
+    assert all(not worker.process.is_alive() for worker in workers)
 
     # Further attempts to submit tasks should fail
     try:
@@ -161,14 +158,14 @@ async def test_local_workers_async() -> None:
 
     # Test cleanup when a worker fails
     assert worker_monitor.is_alive()
-    workers[3].kill()
+    workers[3].process.kill()
 
     # Other workers should get shut down here
     worker_monitor.join(2)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()
-    assert all(not worker.is_alive() for worker in workers)
+    assert all(not worker.process.is_alive() for worker in workers)
 
     # Further attempts to submit tasks should fail
     try:

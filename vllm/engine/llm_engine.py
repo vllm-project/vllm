@@ -28,7 +28,7 @@ from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, enable_trace_function_call_for_process
+from vllm.utils import Counter, enable_trace_function_call_for_thread
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -133,7 +133,7 @@ class LLMEngine:
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
-        enable_trace_function_call_for_process()
+        enable_trace_function_call_for_thread()
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer: BaseTokenizerGroup
