@@ -26,7 +26,7 @@ RESET = '\033[0;0m'
 
 # Use dedicated multiprocess context for workers.
 # Both spawn and fork work
-mp_method = os.getenv("WORKER_MULTIPROC_METHOD", "fork")
+mp_method = os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 mp = multiprocessing.get_context(mp_method)
 
 
@@ -236,7 +236,7 @@ def _run_worker_process(
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
-    """Prepend output with process-specific prefix"""
+    """Prepend each output line with process-specific prefix"""
 
     prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
     file_write = file.write
