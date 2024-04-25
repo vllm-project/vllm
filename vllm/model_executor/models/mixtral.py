@@ -474,10 +474,10 @@ class MixtralForCausalLM(nn.Module):
         ] + [
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
-            ("a_scale" if activation_name in ["a1", "a3"] else "a2_scale",
-             f"experts.{expert_id}.{activation_name}.activation_scale", expert_id)
+            ("as_scale" if weight_name in ["w1", "w3"] else "a2s_scale",
+             f"experts.{expert_id}.{weight_name}.activation_scale", expert_id)
             for expert_id in range(self.config.num_local_experts)
-            for activation_name in ["a1", "a2", "a3"]
+            for weight_name in ["w1", "w2", "w3"]
         ]
 
         params_dict = dict(self.named_parameters())
