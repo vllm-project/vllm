@@ -236,11 +236,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     if not isinstance(linear_method, Fp8LinearMethod):
         assert A_scale is None
         assert B_scale is None
-    elif linear_method.quant_config.act_scaling == "static":
-        A = ops.static_scaled_fp8_quant(A, A_scale)
-        assert B_scale is not None
-    elif linear_method.quant_config.act_scaling == "dynamic":
-        A, A_scale = ops.dynamic_scaled_fp8_quant(A)
+    else:
+        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
