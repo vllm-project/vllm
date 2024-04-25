@@ -124,7 +124,7 @@ def create_sequence(prompt_token_ids=None):
     return Sequence(
         seq_id=0,
         inputs={
-            "prompt": None,
+            "prompt": "<s>",
             "prompt_token_ids": prompt_token_ids,
             "multi_modal_data": None,
         },

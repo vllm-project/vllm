@@ -322,12 +322,15 @@ class VllmRunner:
         if images is not None:
             assert len(prompts) == images.shape[0]
 
+        if images is None:
+            mm_data = None
+        else:
+            mm_data = MultiModalData(type=MultiModalData.Type.IMAGE,
+                                     data=images)
+
         prompt_inputs: List[PromptInputs] = [{
-            "prompt":
-            prompt,
-            "multi_modal_data":
-            MultiModalData(type=MultiModalData.Type.IMAGE, data=images)
-            if images is not None else None
+            "prompt": prompt,
+            "multi_modal_data": mm_data
         } for prompt in prompts]
 
         req_outputs = self.model.generate(prompt_inputs,

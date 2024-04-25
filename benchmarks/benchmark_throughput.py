@@ -113,11 +113,7 @@ def run_vllm(
             max_tokens=output_len,
         )
         # FIXME(woosuk): Do not use internal method.
-        llm._add_request(
-            prompt=prompt,
-            prompt_token_ids=None,
-            sampling_params=sampling_params,
-        )
+        llm._add_request(prompt, sampling_params=sampling_params)
 
     start = time.perf_counter()
     # FIXME(woosuk): Do not use internal method.
