@@ -154,7 +154,10 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # fp8
-def scaled_fp8_quant(input: torch.Tensor, scale: Optional[torch.Tensor]=None) -> Tuple[torch.Tensor, torch.Tensor]:
+def scaled_fp8_quant(
+        input: torch.Tensor,
+        scale: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)

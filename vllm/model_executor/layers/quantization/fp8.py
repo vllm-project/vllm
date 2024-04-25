@@ -15,7 +15,7 @@ class FP8Config(QuantizationConfig):
 
     def __init__(
         self,
-        act_scaling: str="dynamic",
+        act_scaling: str = "dynamic",
     ) -> None:
         self.act_scaling = act_scaling
 

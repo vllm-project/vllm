@@ -143,9 +143,11 @@ def get_quant_config(model_config: ModelConfig,
             f.endswith(x) for x in possible_config_filenames)
     ]
 
-    # If the quantization config is optional and not provided, use the default config.
+    # If the quantization config is optional and not provided, use the
+    # default config.
     if not quant_cls.require_config_file() and not quant_config_files:
         return quant_cls()
+
     if len(quant_config_files) == 0:
         raise ValueError(
             f"Cannot find the config file for {model_config.quantization}")
