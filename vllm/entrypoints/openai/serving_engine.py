@@ -12,7 +12,9 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse,
                                               LogProbs, ModelCard, ModelList,
-                                              ModelPermission)
+                                              ModelPermission, LoraAddRequest,
+                                              LoraErrorResponse)
+
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
@@ -156,6 +158,15 @@ class OpenAIServing:
         })
         return json_str
 
+    def create_lora_error_response(
+        self,
+        message: str,
+        lora_name: str,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ) -> LoraErrorResponse:
+        return LoraErrorResponse(message=message, type=err_type, code=status_code.value, errorLoraName=lora_name)
+
     async def _check_model(
         self, request: Union[CompletionRequest, ChatCompletionRequest]
     ) -> Optional[ErrorResponse]:
@@ -226,3 +237,86 @@ class OpenAIServing:
                 f"Please reduce the length of the messages or completion.", )
         else:
             return input_ids, input_text
+
+    def _get_lora_id(self, model_name: str):
+        lora = next((lora for lora in self.lora_requests if model_name == lora.lora_name), None)
+        return lora.lora_int_id if lora else None
+
+    def _remove_lora(self, model_name: str):
+        lora = next((lora for lora in self.lora_requests if model_name == lora.lora_name), None)
+        if lora:
+            self.lora_requests.remove(lora)
+
+    def _add_lora(self, model):
+        existing_lora = next((lora for lora in self.lora_requests if model.name == lora.lora_name), None)
+        if not existing_lora:
+            lora = LoRAModulePath(name=model.name, local_path=model.path)
+            lora_request = LoRARequest(
+                lora_name=lora.name,
+                lora_int_id=len(self.lora_requests) + 1,
+                lora_local_path=lora.local_path,
+            )
+            self.lora_requests.append(lora_request)
+        return self.lora_requests[-1]
+
+    async def add_lora_module(self, lora_add_request: LoraAddRequest, model_name: str) -> Union[bool, ErrorResponse]:
+        # if lora_add_request.model.name is not same as model_name, return error
+        if lora_add_request.model.name != model_name:
+            return self.create_lora_error_response(
+                message=f"Adding lora {lora_add_request.model.name} failed: model name mismatch with payload {model_name}.",
+                err_type="UnprocessableEntityError",
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                lora_name=lora_add_request.model.name,
+            )
+        lora_request = self._add_lora(lora_add_request.model)
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.engine.engine.model_executor.driver_worker.model_runner.add_lora, lora_request
+            )
+        except RuntimeError as e:
+            self._remove_lora(lora_request.lora_name)
+            return self.create_lora_error_response(
+                message=f"Adding lora {lora_request.lora_name} failed: {e}",
+                err_type="UnprocessableEntityError",
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                lora_name=lora_request.lora_name,
+            )
+        except ValueError as e:
+            self._remove_lora(lora_request.lora_name)
+            return self.create_lora_error_response(
+                message=f"Adding lora {lora_request.lora_name} failed: {e}",
+                err_type="BadRequestError",
+                status_code=HTTPStatus.BAD_REQUEST,
+                lora_name=lora_request.lora_name,
+            )
+        except Exception:
+            self._remove_lora(lora_request.lora_name)
+            return self.create_lora_error_response(
+                message=f"Adding lora {lora_request.lora_name} failed.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                lora_name=lora_request.lora_name,
+            )
+        return result
+
+    async def remove_lora_module(self, model_name) -> Union[bool, ErrorResponse]:
+        lora_id = self._get_lora_id(model_name)
+        if lora_id is None:
+            # Return a successful response even if the model doesn't exist
+            return True
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, self.engine.engine.model_executor.driver_worker.model_runner.remove_lora, lora_id
+            )
+        except Exception:
+            return self.create_lora_error_response(
+                message=f"Removing lora {model_name} failed.",
+                err_type="InternalServerError",
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                lora_name=model_name,
+            )
+        else:
+            self._remove_lora(model_name)
+        return result

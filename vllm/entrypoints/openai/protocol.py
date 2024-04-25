@@ -1,11 +1,12 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+import os
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
 from openai.types.chat import ChatCompletionMessageParam
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 from typing_extensions import Annotated
 
 from vllm.sampling_params import SamplingParams
@@ -23,6 +24,35 @@ class ErrorResponse(OpenAIBaseModel):
     type: str
     param: Optional[str] = None
     code: int
+
+class LoraErrorResponse(ErrorResponse):
+    errorLoraName: str
+
+class LoraModel(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    path: str = Field(...)
+
+    @field_validator("path")
+    def path_must_exist(cls, v):
+        try:
+            if not os.path.exists(v):
+                raise ValueError("The provided path does not exist")
+            return v
+        except Exception as e:
+            raise ValueError(f"An error occurred while validating the path: {str(e)}")
+
+
+class LoraAddRequest(BaseModel):
+    model: LoraModel
+
+    @field_validator("model")
+    def models_must_not_be_empty(cls, v):
+        try:
+            if not v:
+                raise ValueError("The model list cannot be empty")
+            return v
+        except Exception as e:
+            raise ValueError(f"An error occurred while validating the models: {str(e)}")
 
 
 class ModelPermission(OpenAIBaseModel):
