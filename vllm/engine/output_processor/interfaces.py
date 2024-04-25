@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Callable, Iterable, List
+from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
 
@@ -8,6 +8,7 @@ from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 
 class SequenceGroupOutputProcessor(ABC):
@@ -27,7 +28,7 @@ class SequenceGroupOutputProcessor(ABC):
         scheduler_config: SchedulerConfig,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: "StopChecker",
     ):
