@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
 
-from .blocksparse_attn.interface import (
+from .blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn,
     LocalStridedBlockSparsePagedAttn,
 )

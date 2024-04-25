@@ -27,7 +27,6 @@ def _set_default_torch_dtype(dtype: torch.dtype):
 
 def _get_model_architecture(
         model_config: ModelConfig) -> Tuple[Type[nn.Module], str]:
-    print(f"================{model_config.hf_config}")
     architectures = getattr(model_config.hf_config, "architectures", [])
     # Special handling for quantized Mixtral.
     # FIXME(woosuk): This is a temporary hack.
