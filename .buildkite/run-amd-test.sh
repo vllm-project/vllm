@@ -5,6 +5,19 @@ set -ex
 # Print ROCm version
 rocminfo
 
+
+echo "reset" > /opt/amdgpu/etc/gpu_state
+
+while true; do
+        sleep 3
+        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+                echo "GPUs state is \"clean\""
+                break
+        fi
+done
+
+
+
 # Try building the docker image
 docker build -t rocm -f Dockerfile.rocm .
 
@@ -14,7 +27,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm rocm python3 -m vllm.entrypoints.api_server &
+export HIP_VISIBLE_DEVICES=1
+docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES --name rocm rocm python3 -m vllm.entrypoints.api_server &
 
 # Wait for the server to start
 wait_for_server_to_start() {
