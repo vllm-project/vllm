@@ -84,7 +84,8 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
     except ImportError:
         logger.info(
             "Cannot use Flashinfer backend because the flashinfer package "
-            "is not found. Please install it for better performance.")
+            "is not found. Please install both flashinfer and flash attention "
+            "for better performance.")
 
     try:
         import flash_attn  # noqa: F401

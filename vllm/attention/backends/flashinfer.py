@@ -117,6 +117,7 @@ class FlashInferImpl(AttentionImpl):
             )
         else:
             assert attn_metadata.decode_metadata is not None
+            assert attn_metadata.decode_metadata.wrapper is not None
             query = query.contiguous(
             )  # Flashinfer requires query to be contiguous
             output = attn_metadata.decode_metadata.wrapper.forward(
