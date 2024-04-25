@@ -77,15 +77,6 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         return _Backend.XFORMERS
 
     try:
-        import flash_attn  # noqa: F401
-    except ImportError:
-        logger.info(
-            "Cannot use FlashAttention backend because the flash_attn package "
-            "is not found. Please install it for better performance.")
-        return _Backend.XFORMERS
-
-    # Move flahsinfer below flash_attn for now to avoid breaking tests
-    try:
         import flashinfer
         # Still use flash attention for the prefill stage.
         import flash_attn
@@ -94,6 +85,14 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         logger.info(
             "Cannot use Flashinfer backend because the flashinfer package "
             "is not found. Please install it for better performance.")
+
+    try:
+        import flash_attn  # noqa: F401
+    except ImportError:
+        logger.info(
+            "Cannot use FlashAttention backend because the flash_attn package "
+            "is not found. Please install it for better performance.")
+        return _Backend.XFORMERS
 
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
     if backend_by_env_var is not None:
