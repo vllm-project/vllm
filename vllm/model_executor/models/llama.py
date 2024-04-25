@@ -168,7 +168,6 @@ class LlamaAttention(nn.Module):
 
         use_attn_sinks = True
         llama_context_len = 4096
-        norm = lambda x: torch.linalg.norm(x).item()
 
         if not use_attn_sinks:
             q, k = self.rotary_emb(positions, q, k)
@@ -219,8 +218,9 @@ class LlamaAttention(nn.Module):
                 while abs_pos < end:
                     logic_bnum = abs_pos // block_size
                     phys_bnum = block_table[logic_bnum]
+                    if phys_bnum==3392 and not within_context_len: print("abs pos", abs_pos)
                     offset_start = abs_pos % block_size
-                    offset_end = block_size if end - abs_pos > block_size else end - abs_pos
+                    offset_end = min(end - abs_pos, block_size)
                     num_tokens = offset_end - offset_start
 
                     # past_key shape: [num_heads, head_size/x, num_tokens, x]
@@ -229,16 +229,14 @@ class LlamaAttention(nn.Module):
 
                     # rotate k based on new relative pos
                     p = abs_pos if within_context_len else abs_pos - start + block_size
-                    pos = [p + off for off in range(num_tokens)] # sus
-                    pos = torch.tensor(pos, device=positions.device)
+                    pos = torch.arange(p, p + num_tokens, device=positions.device)
 
                     # sus reshapes
                     past_key = past_key.permute((2, 0, 1, 3)).reshape(num_tokens, -1)
-                    past_key = self.rotary_emb._forward_single(pos, past_key)
+                    dummy_q = torch.zeros_like(past_key)
+                    _, past_key = self.rotary_emb(pos, dummy_q, past_key)
                     past_key = past_key.reshape(num_tokens, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
                     key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_key.permute((1, 2, 0, 3))
-                    
-                    # rotary emb kernel has almost 2x speedup BUT it's incorrect for some reason
                     
                     abs_pos += num_tokens
 
@@ -248,6 +246,7 @@ class LlamaAttention(nn.Module):
                     blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
                     # block_table[0] is attention sink
                     capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
+                    print("attn block table", capped_block_table[-10:])
                     block_tables.append(capped_block_table)
 
             if block_tables:
@@ -270,8 +269,6 @@ class LlamaAttention(nn.Module):
             # put original keys back in cache
             for i in range(batch_size):
                 num_past_tokens = context_lens[i] - 1
-                # if num_past_tokens < llama_context_len: continue
-
                 past_keys = original_keys[i]
                 block_table = original_block_tables[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size

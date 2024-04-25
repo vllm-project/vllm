@@ -34,7 +34,7 @@ classes of agents: proposers, acceptors, and learners. In an implementation,
 a single process may act as more than one agent, but the mapping from
 agents to processes does not concern us here.
 Assume that agents can communicate with one another by sending messages. We use the customary asynchronous, non-Byzantine model, in which:
-• Agents operate at arbitrary speed, may fail by stopping, and may
+• Agents operate at arbitrary speed, may fail by stopping, and may
 restart. Since all agents may fail after a value is chosen and then
 restart, a solution is impossible unless some information can be remembered by an agent that has failed and restarted.
 • Messages can take arbitrarily long to be delivered, can be duplicated,
@@ -72,7 +72,7 @@ more than one proposal. We keep track of the different proposals that an
 acceptor may accept by assigning a (natural) number to each proposal, so a
 proposal consists of a proposal number and a value. To prevent confusion,
 we require that different proposals have different numbers. How this is
-achieved depends on the implementation, so for now we just assume it. A
+achieved depends on the implementation, so for now we just assume it. A
 value is chosen when a single proposal with that value has been accepted by
 a majority of the acceptors. In that case, we say that the proposal (as well
 as its value) has been chosen.
@@ -102,7 +102,7 @@ value v , where i . . j denotes the set of numbers from i through j . For the
 proposal numbered m to be chosen, there must be some set C consisting of a
 majority of acceptors such that every acceptor in C accepted it. Combining
 this with the induction assumption, the hypothesis that m is chosen implies:
-Every acceptor in C has accepted a proposal with number in
+Every acceptor in C has accepted a proposal with number in
 m . . (n − 1), and every proposal with number in m . . (n − 1)
 accepted by any acceptor has value v .
 Since any set S consisting of a majority of acceptors contains at least one
@@ -134,7 +134,7 @@ v , where v is the value of the highest-numbered proposal among the
 responses, or is any value selected by the proposer if the responders
 reported no proposals.
 
-A proposer issues a proposal by sending, to some set of acceptors, a request
+A proposer issues a proposal by sending, to some set of acceptors, a request
 that the proposal be accepted. (This need not be the same set of acceptors
 that responded to the initial requests.) Let’s call this an accept request.
 This describes a proposer’s algorithm. What about an acceptor? It can
@@ -170,7 +170,7 @@ than that of any prepare request to which it has already responded,
 then it responds to the request with a promise not to accept any more
 proposals numbered less than n and with the highest-numbered proposal (if any) that it has accepted.
 
-Phase 2. (a) If the proposer receives a response to its prepare requests
+Phase 2. (a) If the proposer receives a response to its prepare requests
 (numbered n) from a majority of acceptors, then it sends an accept
 request to each of those acceptors for a proposal numbered n with a
 value v , where v is the value of the highest-numbered proposal among
@@ -210,7 +210,7 @@ acceptors and the number of learners.
 More generally, the acceptors could respond with their acceptances to
 some set of distinguished learners, each of which can then inform all the
 learners when a value has been chosen. Using a larger set of distinguished
-learners provides greater reliability at the cost of greater communication
+learners provides greater reliability at the cost of greater communication
 complexity.
 Because of message loss, a value could be chosen with no learner ever
 finding out. The learner could ask the acceptors what proposals they have
@@ -251,9 +251,9 @@ The Implementation
 The Paxos algorithm [5] assumes a network of processes. In its consensus
 algorithm, each process plays the role of proposer, acceptor, and learner.
 The algorithm chooses a leader, which plays the roles of the distinguished
-proposer and the distinguished learner. The Paxos consensus algorithm is precisely the one described above, where requests and responses are sent as ordinary messages. (Response messages are tagged with the corresponding proposal number to prevent confusion.) Stable storage, preserved during failures, is used to maintain the information that the acceptor must remember. An acceptor records its intended response in stable storage before actually sending the response.
+proposer and the distinguished learner. The Paxos consensus algorithm is precisely the one described above, where requests and responses are sent as ordinary messages. (Response messages are tagged with the corresponding proposal number to prevent confusion.) Stable storage, preserved during failures, is used to maintain the information that the acceptor must remember. An acceptor records its intended response in stable storage before actually sending the response.
 All that remains is to describe the mechanism for guaranteeing that no two proposals are ever issued with the same number. Different proposers choose their numbers from disjoint sets of numbers, so two different proposers never issue a proposal with the same number. Each proposer remembers (in stable storage) the highest-numbered proposal it has tried to issue,
 and begins phase 1 with a higher proposal number than any it has already
 used.
 
-Can you briefly summarize this paper for me?
+Can you give a detailed summary of this paper for me?
