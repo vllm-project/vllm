@@ -153,6 +153,20 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                 size_n, size_k)
 
 
+# aqlm
+def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
+              codebooks: torch.Tensor, scales: torch.Tensor,
+              codebook_partition_sizes: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    return vllm_ops.aqlm_gemm(input, codes, codebooks, scales,
+                              codebook_partition_sizes, bias)
+
+
+def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
+                 codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+    return vllm_ops.aqlm_dequant(codes, codebooks, codebook_partition_sizes)
+
+
 # fp8
 def scaled_fp8_quant(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     scale = torch.zeros(1, device=input.device, dtype=torch.float32)

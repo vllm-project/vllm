@@ -6,7 +6,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.aqlm import (
     dequantize_weight, generic_dequantize_gemm, get_int_dtype,
     optimized_dequantize_gemm)
