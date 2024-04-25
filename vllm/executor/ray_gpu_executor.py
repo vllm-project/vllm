@@ -5,9 +5,9 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.multi_gpu_executor import (MultiGPUExecutor,
                                               MultiGPUExecutorAsync)
+from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -74,7 +74,7 @@ class RayGPUExecutor(MultiGPUExecutor):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: RayWorkerWrapper = None
+        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
@@ -260,6 +260,7 @@ class RayGPUExecutor(MultiGPUExecutor):
             driver_worker_output = self.driver_worker.execute_method(
                 method, *driver_args, **driver_kwargs)
         else:
+            assert self.driver_dummy_worker is not None
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
                     method, *driver_args, **driver_kwargs))
@@ -295,8 +296,9 @@ class RayGPUExecutor(MultiGPUExecutor):
         # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.bind(input_data)
-                for worker in self.workers
+                worker.execute_model_compiled_dag_remote.
+                bind(  # type: ignore[attr-defined]
+                    input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile()
 
