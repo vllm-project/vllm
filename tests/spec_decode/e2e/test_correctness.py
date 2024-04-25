@@ -643,6 +643,7 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
                                          batch_size,
                                          max_output_len,
                                          force_output_len: bool,
+                                         logprob_rank: int = 1,
                                          print_tokens: bool = False):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
@@ -671,7 +672,7 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
         max_tokens=max_output_len,
         ignore_eos=ignore_eos,
         temperature=temperature,
-        logprobs=1,
+        logprobs=logprob_rank,
     )
 
     #spec_batch_tokens, spec_batch_token_ids = get_logprobs_from_llm_generator(
@@ -683,14 +684,22 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
     assert len(baseline_batch_logprobs) == len(prompts)
     assert len(spec_batch_logprobs) == len(prompts)
 
-    breakpoint()
-    for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
-            spec_tokens) in enumerate(
-                zip(baseline_batch_token_ids, baseline_batch_tokens,
-                    spec_batch_token_ids, spec_batch_tokens)):
-        if print_tokens:
-            print(f'{i=} {baseline_tokens=}')
-            print(f'{i=}     {spec_tokens=}')
+    for i, (baseline_logprobs, spec_logprobs) in enumerate(
+                zip(baseline_batch_logprobs, spec_batch_logprobs)):
+        assert len(spec_logprobs) == len(baseline_logprobs)
+        for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(zip(spec_logprobs, baseline_logprobs)):
+            
+            spec_rank_to_token_id = {value.rank: key for key, value in spec_pos_logprobs.items()}
+            spec_rank_to_logprob = {value.rank: value.logprob for key, value in spec_pos_logprobs.items()}
+        
+            baseline_rank_to_token_id = {value.rank: key for key, value in baseline_pos_logprobs.items()}
+            baseline_rank_to_logprob = {value.rank: value.logprob for key, value in baseline_pos_logprobs.items()}
+        
+            assert set(spec_rank_to_token_id.keys()) == set(baseline_rank_to_token_id.keys())
+            breakpoint()
+        #if print_tokens:
+        #    print(f'{i=} {baseline_tokens=}')
+        #    print(f'{i=}     {spec_tokens=}')
         print(f'{i=} {baseline_token_ids=}')
         print(f'{i=}     {spec_token_ids=}')
         assert baseline_token_ids == spec_token_ids
