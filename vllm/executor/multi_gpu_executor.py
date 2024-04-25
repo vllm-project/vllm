@@ -13,12 +13,6 @@ logger = init_logger(__name__)
 class MultiGPUExecutor(GPUExecutor):
     """Abstract superclass of multi-GPU executor implementations."""
 
-    def _init_device_and_model(self) -> None:
-        self._run_workers("init_device")
-        self._run_workers("load_model",
-                          max_concurrent_workers=self.parallel_config.
-                          max_parallel_loading_workers)
-
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 

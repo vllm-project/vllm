@@ -178,7 +178,10 @@ class RayGPUExecutor(MultiGPUExecutor):
                 ))
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
-        self._init_device_and_model()
+        self._run_workers("init_device")
+        self._run_workers("load_model",
+                          max_concurrent_workers=self.parallel_config.
+                          max_parallel_loading_workers)
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
