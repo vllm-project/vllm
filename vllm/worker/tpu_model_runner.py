@@ -193,7 +193,7 @@ class TPUModelRunner:
             kv_caches,
             logits_indices,
         )
-        # TODO
+        # TODO(woosuk): Support sampling with temperature and top_p.
         next_token_ids = jnp.argmax(logits, axis=-1)
         return next_token_ids, new_kv_caches
 
