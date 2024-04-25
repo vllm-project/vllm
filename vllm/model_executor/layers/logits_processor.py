@@ -100,7 +100,7 @@ def _apply_logits_processors(
                     logits_row = logits_processor(token_ids, logits_row)
                 logits[logits_row_idx] = logits_row
 
-        logits_processed += len(seq_group.sample_indices)
+        logits_processed += len(seq_group.sample_indices) + len(seq_group.prefill_indices)
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly

@@ -1,4 +1,5 @@
 import random
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -16,21 +17,25 @@ _SEED_0_REPLACEMENT = 3403598558
 
 @dataclass
 class SequenceGroupToSample:
-    # Sequence ids for the current sequence group.
+    # Sequence ids for the sequence group in a previous step.
     seq_ids: List[int]
     sampling_params: SamplingParams
     # seq_id -> sequence data.
     seq_data: Dict[int, SequenceData]
-    # The length of the prompt of the sequence group.
+    # The length of the prompt of the sequence group. None if it is in a deocde
+    # stage.
     prompt_len: Optional[int]
-    # The length of the query tokens to compute in the current step.
+    # The length of the query tokens to compute in the current step. None if it
+    # is in a decode stage. The length of subquery_len <= prompt_len.
     subquery_len: Optional[int]
+    # A random number generator for sampling.
     generator: Optional[torch.Generator]
     # True if the sequence group is in prefill stage. False if it is in a
     # decode stage.
     is_prompt: bool
     # Prefill query token indices from a batched input. Empty if prompt logprob
-    # is not required.
+    # is not required. It should not include the last prefill token's indice
+    # because that's for sampling.
     prefill_indices: List[int]
     # Sample token indices from a bathced input. Empty if sampling is not
     # required.
@@ -43,6 +48,9 @@ class SequenceGroupToSample:
     def __post_init__(self):
         if len(self.prefill_indices) > 0:
             assert self.sampling_params.prompt_logprobs is not None
+        if self.is_prompt:
+            assert self.prompt_len is not None
+            assert self.subquery_len is not None
 
 
 class SamplingMetadata:
@@ -51,46 +59,42 @@ class SamplingMetadata:
     The usage is as follow;
     ```
     logits = execute_model(...)
-    # prune logits
+    # prune logits (remove paddings).
     logits[sampling_metadata.selected_token_indices]
     sample(logits)
 
     def sample(logits):
-        # Use categorized_sample_indices....
+        # Use categorized_sample_indices for sampling....
     ```
-
-    categorized_sample_indices is index after the pruning.
 
     Args:
         seq_groups: List of batched sequence groups.
         selected_token_indices: (num_query_tokens_to_logprob), Query token
-            indices to process for sampling or logprob calculation.
+            indices to post-process. It is to prune paddings from the returned
+            logits. The indices that are needed for logit-process, sampling,
+            and logprob computation is returned.
         categorized_sample_indices: SamplingType -> token indices to sample.
             Each token indices is 2D tensor of (num_indices, num_indices) where
-            the first item means the sample index within the returned logit,
-            and the second item means the sample index within selected tokens.
+            the first item means the sample index within the returned logit
+            (before pruning padding), and the second item means the sample
+            index after pruning using selected_token_indices.
             For example, if the returned logit is [1, 2, 3], and we select
-            [1, 2] for sampling, the pruned logit will be [2, 3]. The first
-            tuple is [1, 2] (sampled index within original logit), and the
-            second tuple is [0, 1] (sampled index within pruned logit).
-        perform_sampling: Whether to perform sampling. This option is used to
-            make the sampling only happens in the driver worker, and disable
-            sampling in other worker processes. Setting this True is equivalent
-            to choose no indices for categorized_sample_indices.
+            [1, 2] for sampling, the pruned logit will be [2, 3]. In this case,
+            The first tuple is [1, 2] (sampled index within original logit),
+            and the second tuple is [0, 1] (sampled index within pruned logit).
+        num_prompts: Number of prompt sequence groups in seq_groups.
     """
 
     def __init__(
         self,
         seq_groups: List[SequenceGroupToSample],
         selected_token_indices: torch.Tensor,
-        categorized_sample_indices: Optional[Dict[SamplingType, torch.Tensor]],
+        categorized_sample_indices: Dict[SamplingType, torch.Tensor],
         num_prompts: int,
-        perform_sampling: bool = True,
     ) -> None:
         self.seq_groups = seq_groups
         self.selected_token_indices = selected_token_indices
         self.categorized_sample_indices = categorized_sample_indices
-        self.perform_sampling = perform_sampling
         self.num_prompts = num_prompts
 
     @staticmethod
@@ -101,6 +105,7 @@ class SamplingMetadata:
         device: str,
         pin_memory: bool,
     ) -> "SamplingMetadata":
+        # s = time.perf_counter()
         (
             seq_groups,
             selected_token_indices,
@@ -108,6 +113,7 @@ class SamplingMetadata:
             num_prompts,
         ) = _prepare_seq_groups(seq_group_metadata_list, prompt_lens,
                                 subquery_lens, device)
+        # print(f"SANG-TODO Preparing seq groups took {(time.perf_counter() - s) * 1000} ms num seq groups: {len(seq_groups)}")
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -134,8 +140,7 @@ class SamplingMetadata:
             "SamplingMetadata("
             f"seq_groups={self.seq_groups}, "
             f"selected_token_indices={self.selected_token_indices}, "
-            f"categorized_sample_indices={self.categorized_sample_indices}), "
-            f"perform_sampling={self.perform_sampling})")
+            f"categorized_sample_indices={self.categorized_sample_indices}), ")
 
 
 def _prepare_seq_groups(
@@ -145,6 +150,25 @@ def _prepare_seq_groups(
     device: str,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
+    """Prepare sequence groups and indices for sampling.
+
+    Args:
+        seq_group_metadata_list: A list of sequence group to batch.
+        prompt_lens: A list of prompt lens per sequence group.
+            Index of prompt len should match with seq_group_metadata_list.
+        subquery_lens: A list of query lengths. Prompt lens include the length
+            of entire prompt tokens, and it could be shorter.
+        device: A device to use for random number generator,
+            `SequenceGroupToSample.generator`.
+
+    Returns:
+        seq_groups: A list of sequence group to sample. It has a different data
+            structure that contains metadata needed for sampling.
+        selected_token_indices: See the definition from `SamplingMetadata`.
+        categorized_sample_indices: See the definition from `SamplingMetadata`.
+        num_prompts: Total number of prompts from a given
+            seq_group_metadata_list.
+    """
     # Batched sequence groups for the current model forward stsep.
     seq_groups: List[SequenceGroupToSample] = []
     # A list of token indices to sample/compute logprob. It is used to
@@ -178,105 +202,6 @@ def _prepare_seq_groups(
         # sample indices for this particular seq group.
         sample_indices = []
         do_sample = seq_group_metadata.do_sample
-
-        # if do_sample:
-        #     if seq_group_metadata.is_prompt:
-        #         # Update selected_token_indices which is used to select
-        #         # tokens to post-process (logit processor, sampling, logprob)
-        #         # from an entire logits.
-        #         if sampling_params.prompt_logprobs is not None:
-        #             selected_token_end_idx = (selected_token_start_idx +
-        #                                     subquery_len)
-        #             # The last num_samples indexes are
-        #             # for sampling.
-        #             selected_token_end_idx -= num_samples
-        #             selected_token_indices.extend(
-        #                 range(selected_token_start_idx, selected_token_end_idx))
-
-        #         prefill_sample_indice = (selected_token_start_idx +
-        #                                 subquery_len - num_samples)
-        #         selected_token_indices.append(prefill_sample_indice)
-        #         selected_token_start_idx += subquery_len
-
-        #         # Assuming the logits are pruned by selected_token_indices,
-        #         # find indices for sampling per type and logprob per seq_group.
-        #         if sampling_params.prompt_logprobs is not None:
-        #             # Update prefill indices for this seq_group.
-        #             categorized_sample_indices_end_idx = (
-        #                 categorized_sample_indices_start_idx + subquery_len)
-        #             categorized_sample_indices_end_idx -= num_samples
-        #             prefill_indices = list(
-        #                 range(categorized_sample_indices_start_idx,
-        #                     categorized_sample_indices_end_idx))
-        #             categorized_sample_indices_start_idx = categorized_sample_indices_end_idx
-
-        #         # Update sample indices for this seq_group.
-        #         sample_indices = list(
-        #             range(categorized_sample_indices_start_idx,
-        #                 categorized_sample_indices_start_idx + num_samples))
-        #         categorized_sample_indices[
-        #             sampling_params.sampling_type].append(
-        #                 (categorized_sample_indices_start_idx,
-        #                 categorized_sampled_token_indices_start_idx))
-        #         categorized_sample_indices_start_idx += num_samples
-        #         categorized_sampled_token_indices_start_idx += num_samples
-
-        #         if sampling_params.seed is not None:
-        #             seq_group_metadata.state.generator = torch.Generator(
-        #                 device=device).manual_seed(sampling_params.seed)
-        #     else:
-        #         num_seqs = len(seq_ids)
-        #         selected_token_indices.extend(
-        #             range(selected_token_start_idx,
-        #                   selected_token_start_idx + num_seqs))
-        #         selected_token_start_idx += num_seqs
-
-        #         sample_indices = list(
-        #             range(categorized_sample_indices_start_idx,
-        #                   categorized_sample_indices_start_idx + num_seqs))
-        #         categorized_sample_indices[
-        #             sampling_params.sampling_type].extend(
-        #                 list(
-        #                     zip(
-        #                         range(
-        #                             categorized_sample_indices_start_idx,
-        #                             categorized_sample_indices_start_idx +
-        #                             num_seqs),
-        #                         range(
-        #                             categorized_sampled_token_indices_start_idx,
-        #                             categorized_sampled_token_indices_start_idx
-        #                             + num_seqs))))
-        #         categorized_sample_indices_start_idx += num_seqs
-        #         categorized_sampled_token_indices_start_idx += num_seqs
-
-        # else:
-        #     if seq_group_metadata.is_prompt:
-        #         # Update selected_token_indices which is used to select
-        #         # tokens to post-process (logit processor, sampling, logprob)
-        #         # from an entire logits.
-        #         if sampling_params.prompt_logprobs is not None:
-        #             selected_token_end_idx = (selected_token_start_idx +
-        #                                     subquery_len)
-        #             selected_token_indices.extend(
-        #                 range(selected_token_start_idx, selected_token_end_idx))
-        #         selected_token_start_idx += subquery_len
-
-        #         # Assuming the logits are pruned by selected_token_indices,
-        #         # find indices for sampling per type and logprob per seq_group.
-        #         if sampling_params.prompt_logprobs is not None:
-        #             # Update prefill indices for this seq_group.
-        #             categorized_sample_indices_end_idx = (
-        #                 categorized_sample_indices_start_idx + subquery_len)
-        #             prefill_indices = list(
-        #                 range(categorized_sample_indices_start_idx,
-        #                     categorized_sample_indices_end_idx))
-
-        #             # NOTE: prompt token positions do not need sample, skip
-        #             categorized_sample_indices_start_idx += subquery_len
-
-        #         if sampling_params.seed is not None:
-        #             seq_group_metadata.state.generator = torch.Generator(
-        #                 device=device).manual_seed(sampling_params.seed)
 
         if seq_group_metadata.is_prompt:
             num_prompts += 1

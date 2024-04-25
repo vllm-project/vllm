@@ -685,6 +685,12 @@ def _get_logprobs(
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample lobprobs and prompt logprobs.
 
+    The logic consists of 3 parts.
+    - Select indices to compute logprob from, ranks of token ids, and
+        the top k token ids from logprobs.
+    - Compute prompt logprobs if required.
+    - Compute sample logprobs if required.
+
     Args:
         logprobs: (num_query_tokens_across_batch, num_vocab). Each query token's
             logprob per vocab. Sequence groups' query tokens are batched in a
@@ -706,14 +712,14 @@ def _get_logprobs(
     # The index of query token to calculate logprobs. It includes both
     # prompt and sample logprob indices.
     query_indices: List[int] = []
-    query_idx = 0
     # The next token ids to get the logprob value from.
     next_token_ids: List[int] = []
     # The largest requested number of logprobs. We find logprobs as many as the
     # largest num logprobs in this API.
     largest_num_logprobs = 1
 
-    # First find prompt/sample indices and next tokens to pick from logprobs.
+    # Select indices to compute logprob from, ranks of token ids, and the top
+    # k token ids from logprobs.
     for (seq_group, sample_result) in zip(sampling_metadata.seq_groups,
                                           sample_results):
         seq_ids = seq_group.seq_ids
@@ -726,21 +732,24 @@ def _get_logprobs(
                                        sampling_params.prompt_logprobs)
             next_prompt_tokens = _get_next_prompt_tokens(seq_group)
             query_indices.extend(seq_group.prefill_indices)
-            query_idx += len(seq_group.prefill_indices)
             next_token_ids.extend(next_prompt_tokens)
 
         # Update indices and next tokenes for sample logprob.
         if seq_group.do_sample:
             token_ids, parent_seq_ids = sample_result
-            assert len(token_ids) > 0
+            # NOTE: We cannot directly use sample_indices because
+            # sample_indices only contain parent seq_ids of a previous step.
+            # The current step may have different number of seq_ids, and
+            # we can obtain it from `sample_result[1]`.
+            query_idx = seq_group.sample_indices[0]
             query_indices.extend(
                 [query_idx + parent_id for parent_id in parent_seq_ids])
-            query_idx += len(seq_ids)
             next_token_ids.extend(token_ids)
 
             if sampling_params.logprobs is not None:
                 largest_num_logprobs = max(largest_num_logprobs,
                                            sampling_params.logprobs)
+
         assert len(next_token_ids) == len(query_indices)
 
     if len(query_indices) == 0:
