@@ -76,8 +76,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @abstractmethod
-    def get_quantize_method(self,
-                            layer: torch.nn.Module) -> QuantizeMethodBase:
+    def get_quant_method(self, layer: torch.nn.Module) -> QuantizeMethodBase:
         """Get the quantize method to use for the quantized layer."""
         raise NotImplementedError
 

@@ -130,7 +130,7 @@ class LinearBase(torch.nn.Module):
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
         else:
-            self.quant_method = quant_config.get_quantize_method(self)
+            self.quant_method = quant_config.get_quant_method(self)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError

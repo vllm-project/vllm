@@ -63,7 +63,7 @@ class GPTQConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         return cls(weight_bits, group_size, desc_act)
 
-    def get_quantize_method(
+    def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQLinearMethod(self)

@@ -207,7 +207,7 @@ class AQLMConfig(QuantizationConfig):
         return cls(in_group_size, nbits_per_codebook, num_code_books,
                    out_group_size)
 
-    def get_quantize_method(
+    def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["AQLMLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AQLMLinearMethod(self)

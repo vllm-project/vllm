@@ -30,8 +30,7 @@ from transformers import OlmoConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -80,7 +79,7 @@ class OlmoAttention(nn.Module):
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
-            bias=config.include_bias,
+            bias=config.attention_bias,
             quant_config=quant_config,
         )
 
@@ -97,10 +96,10 @@ class OlmoAttention(nn.Module):
                               scale=self.scaling)
 
         # Attention output projection.
-        self.attn_out = RowParallelLinear(
-            config.d_model,
-            config.d_model,
-            bias=config.include_bias,
+        self.o_proj = RowParallelLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=config.attention_bias,
             quant_config=quant_config,
         )
 
