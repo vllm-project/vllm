@@ -6,9 +6,8 @@ from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple,
                     Type)
 
-import requests
 import torch
-from huggingface_hub.utils import OfflineModeIsEnabled, RevisionNotFoundError
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from torch import nn
 
 from vllm.config import (VLLM_USE_MODELSCOPE, DeviceConfig, LoadConfig,
@@ -137,7 +136,9 @@ class DefaultModelLoader(BaseModelLoader):
                 model_path = snapshot_download(
                     model_id=model,
                     cache_dir=self.load_config.download_dir,
-                    revision=revision)
+                    local_files_only=HF_HUB_OFFLINE,
+                    revision=revision,
+                )
             else:
                 model_path = model
             return model_path
@@ -172,32 +173,9 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns += ["*.pt"]
 
         if not is_local:
-            try:
-                hf_folder = download_weights_from_hf(
-                    model_name_or_path, self.load_config.download_dir,
-                    allow_patterns)
-            except (
-                    requests.exceptions.SSLError,
-                    requests.exceptions.ProxyError,
-                    requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    OfflineModeIsEnabled,
-                    RevisionNotFoundError,
-                    FileNotFoundError,
-                    requests.HTTPError,
-            ) as error:
-                # If querying the repo fails (eg. Network is down / HF Hub is
-                # down / HF Hub returns access error / or HF_HUB_OFFLINE=1), see
-                # if we can fallback to load from locally cached files instead
-                # of crashing
-                logger.warning(f"Error in call to HF Hub: {error}. "
-                               f"Attempting to load from local cache instead.")
-                hf_folder = download_weights_from_hf(
-                    model_name_or_path,
-                    self.load_config.download_dir,
-                    allow_patterns,
-                    local_files_only=True,
-                )
+            hf_folder = download_weights_from_hf(model_name_or_path,
+                                                 self.load_config.download_dir,
+                                                 allow_patterns, revision)
         else:
             hf_folder = model_name_or_path
 
