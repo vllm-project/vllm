@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -8,10 +8,8 @@ from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader.neuron import get_neuron_model
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import (async_tensor_h2d, is_pin_memory_available,
-                        make_tensor_with_pad, maybe_expand_dim)
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import is_pin_memory_available, make_tensor_with_pad
 
 logger = init_logger(__name__)
 
@@ -159,7 +157,9 @@ class NeuronModelRunner:
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
             prompt_lens,
-            # CPU worker doesn't support chunked prefill, so we can just use prompt_lens
+            # subquery_lens is not needed if chunked prefill is not
+            # supported. Since neuron worker doesn't support chunked prefill
+            # just use prompt_lens instead.
             prompt_lens,
             self.device,
             self.pin_memory)

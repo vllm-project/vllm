@@ -61,8 +61,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         output = outputs[0]
         prompt_logprobs = output.prompt_logprobs
         if (prompt_logprobs is not None
-                and seq_group.sampling_params.detokenize
-                and self.detokenizer):
+                and seq_group.sampling_params.detokenize and self.detokenizer):
             self.detokenizer.decode_prompt_logprobs_inplace(
                 seq_group, prompt_logprobs)
             if not seq_group.prompt_logprobs:
