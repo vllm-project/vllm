@@ -50,6 +50,23 @@ inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
                                int64_t y_offset, int64_t full_y_size,
                                int64_t batch_size, int64_t num_layers,
                                int64_t layer_idx, float scale) {
+  // NOTE(woosuk): While Punica supports various combinations of input/output
+  // data types, we limit the supported data types to reduce the binary size.
+  constexpr bool is_input_float = std::is_same<in_T, float>::value;
+  constexpr bool is_output_float = std::is_same<out_T, float>::value;
+  if (is_input_float) {
+    if (!std::is_same<out_T, W_T>::value) {
+      return false;
+    }
+  } else if (is_output_float) {
+    if (!std::is_same<in_T, W_T>::value) {
+      return false;
+    }
+  } else if (!(std::is_same<in_T, W_T>::value &&
+               std::is_same<out_T, W_T>::value)) {
+    return false;
+  }
+
   switch (pack_u32(in_features, out_features)) {
 #define CASE_ONESIDE(_in_T, _out_T, _W_T, feat_in, feat_out)                   \
   case pack_u32(feat_in, feat_out):                                            \
