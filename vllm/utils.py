@@ -230,7 +230,7 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                task.cancel(msg=str(e))
+                task.cancel(str(e))  # type: ignore
             raise e
         await asyncio.gather(*_tasks)
 
