@@ -3,7 +3,7 @@
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git
@@ -73,7 +73,8 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 
 # one liner to check that the size of the dist is <100MB, this is used as a test
 # case in CI system because PyPI limits the size of the wheel <100MB.
-RUN du -sm dist | awk '{if ($1 > 100) exit 1}' || exit 1
+RUN cd dist && fallocate -l 120M test_wheel
+RUN bash -c 'du -sm dist | awk \'{if ($1 > 100) exit 1}\''
 
 # the `vllm_nccl` package must be installed from source distribution
 # pip is too smart to store a wheel in the cache, and other CI jobs
@@ -102,7 +103,7 @@ RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
