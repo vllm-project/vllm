@@ -9,12 +9,18 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 
-class FP8SerializedConfig(QuantizationConfig):
+class FP8Config(QuantizationConfig):
     """Config class for FP8."""
+    def __init__(
+        self,
+        scheme: str,
+    ) -> None:
+        assert scheme == "static" or scheme == "dynamic"
+        self.scheme = scheme
 
     @classmethod
     def get_name(cls) -> str:
-        return "fp8_static"
+        return "fp8"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -29,24 +35,24 @@ class FP8SerializedConfig(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "FP8SerializedConfig":
-        return cls()
+    def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
+        scheme = cls.get_from_keys(config, ["scheme"])
+        return cls(scheme=scheme)
 
-    def get_linear_method(self) -> "Fp8SerializedLinearMethod":
-        return Fp8SerializedLinearMethod(self)
+    def get_linear_method(self) -> "FP8LinearMethod":
+        return FP8LinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
-
-class Fp8SerializedLinearMethod(LinearMethodBase):
+class FP8LinearMethod(LinearMethodBase):
     """Linear method for StaticFP8
     .
     Args:
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: FP8SerializedConfig):
+    def __init__(self, quant_config: FP8Config):
         self.quant_config = quant_config
 
     def create_weights(
@@ -80,6 +86,17 @@ class Fp8SerializedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight_scale, {
             "shard_indexer": self.scales_shard_indexer,
         })
+
+        if self.quant_config.scheme == "static":
+            act_scale = Parameter(
+                torch.empty(len(output_partition_sizes), dtype=torch.float32), 
+                requires_grad=False
+            )
+            layer.register_parameter("act_scale", act_scale)
+            set_weight_attrs(act_scale, extra_weight_attrs)
+            set_weight_attrs(act_scale, {
+                "shard_indexer": self.scales_shard_indexer,
+            })
 
         layer.logical_widths = output_partition_sizes
 
@@ -121,7 +138,14 @@ class Fp8SerializedLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        qinput, x_scale = per_tensor_quantize(x)
+        w_scale = layer.weight_scale.max()
+
+        if self.quant_config.scheme == "dynamic":
+            qinput, x_scale = per_tensor_quantize_dyanmic(x)
+        elif self.quant_config.scheme == "static":
+            # empirically, these are all the same
+            x_scale = layer.act_scale.max()
+            qinput = per_tensor_quantize_static(x, x_scale)
         
         # FOR LOOP TO BE REPLACED BY CUTLASS KERNEL W/ EPILOGUE FUSION
         output = torch.zeros(x.shape[0], layer.weight.shape[0], dtype=x.dtype, device="cuda")
@@ -143,8 +167,22 @@ class Fp8SerializedLinearMethod(LinearMethodBase):
         return output
 
 
-def per_tensor_quantize(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+def per_tensor_quantize_static(tensor: torch.Tensor, inv_scale: float) -> torch.Tensor:
     """Quantize a tensor using per-tensor static scaling factor.
+    Args:
+        tensor: The input tensor.
+        inv_scale: The scale.
+    """
+    # Scale and clamp the tensor to bring it to
+    # the representative range of float8 data type
+    # (as default cast is unsaturated)
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    qweight = (tensor / inv_scale).clamp(min=finfo.min, max=finfo.max)
+    return qweight.to(torch.float8_e4m3fn)
+
+
+def per_tensor_quantize_dyanmic(tensor: torch.Tensor) -> tuple[torch.Tensor, float]:
+    """Quantize a tensor using per-tensor dynamic scaling factor.
     Args:
         tensor: The input tensor.
     """
