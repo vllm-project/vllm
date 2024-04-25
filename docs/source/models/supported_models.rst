@@ -115,6 +115,10 @@ Alongside each architecture, we include some popular models that use it.
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
     -
+  * - :code:`Phi3ForCausalLM`
+    - Phi-3
+    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.

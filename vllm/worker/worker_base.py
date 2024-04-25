@@ -103,12 +103,18 @@ class WorkerWrapperBase:
 
     def __init__(self,
                  worker_module_name=None,
-                 worker_class_name=None) -> None:
+                 worker_class_name=None,
+                 trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name
         self.worker = None
+        if trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
 
-    def update_environment_variables(self, envs: Dict[str, str]) -> None:
+    @staticmethod
+    def update_environment_variables(envs: Dict[str, str]) -> None:
         key = 'CUDA_VISIBLE_DEVICES'
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
@@ -138,10 +144,8 @@ class WorkerWrapperBase:
 
     def execute_method(self, method, *args, **kwargs):
         try:
-            if hasattr(self, method):
-                executor = getattr(self, method)
-            else:
-                executor = getattr(self.worker, method)
+            target = self if self.worker is None else self.worker
+            executor = getattr(target, method)
             return executor(*args, **kwargs)
         except Exception as e:
             # if the driver worker also execute methods,

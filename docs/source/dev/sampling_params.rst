@@ -1,4 +1,5 @@
 Sampling Params
 ===============
 
-.. automodule:: vllm.sampling_params.SamplingParams
+.. autoclass:: vllm.SamplingParams
+    :members:
