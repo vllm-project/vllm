@@ -1,10 +1,11 @@
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import pytest
 
 from tests.conftest import cleanup
 from vllm import LLM
 from vllm.model_executor.utils import set_random_seed
+from vllm.sequence import Logprob
 
 
 @pytest.fixture
@@ -64,3 +65,17 @@ def get_output_from_llm_generator(
         del llm
 
     return tokens, token_ids
+
+def get_logprobs_from_llm_generator(
+        llm_generator, prompts,
+        sampling_params) -> List[Dict[int, Logprob]]:
+    tokens = []
+    token_ids = []
+    for llm in llm_generator():
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+        # outputs[0].outputs[0].logprobs[0]
+        # {590: Logprob(logprob=-4.327400207519531, rank=1, decoded_token=' my')}
+        logprobs = [output.outputs[0].logprobs[:] for output in outputs]
+        del llm
+
+    return logprobs
