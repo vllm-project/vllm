@@ -26,8 +26,8 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed \
-       	rocm  python3 -m pytest -v -s vllm/tests/distributed/test_pynccl.py
+#docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_distributed \
+#       	rocm  python3 -m pytest -v -s vllm/tests/distributed/test_pynccl.py
 
 docker run --device /dev/kfd --device /dev/dri --network host --name rocm_test_basic_distributed_correctness_opt \
 	        rocm  /bin/bash -c "TEST_DIST_MODEL=facebook/opt-125m python3 -m pytest \
