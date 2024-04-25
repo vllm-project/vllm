@@ -4,7 +4,8 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, Field, conint, model_validator
+from pydantic import BaseModel, Field, model_validator
+from typing_extensions import Annotated
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
@@ -30,7 +31,7 @@ class ModelPermission(BaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: str = False
+    is_blocking: bool = False
 
 
 class ModelCard(BaseModel):
@@ -56,7 +57,7 @@ class UsageInfo(BaseModel):
 
 class ResponseFormat(BaseModel):
     # type must be "json_object" or "text"
-    type: str = Literal["text", "json_object"]
+    type: Literal["text", "json_object"]
 
 
 class ChatCompletionRequest(BaseModel):
@@ -135,6 +136,12 @@ class ChatCompletionRequest(BaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default guided decoding backend "
+            "of the server for this specific request. If set, must be either "
+            "'outlines' / 'lm-format-enforcer'"))
 
     # doc: end-chat-completion-extra-params
 
@@ -148,6 +155,7 @@ class ChatCompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -209,7 +217,7 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    n: Optional[int] = 1
+    n: int = 1
     presence_penalty: Optional[float] = 0.0
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
@@ -231,7 +239,7 @@ class CompletionRequest(BaseModel):
     min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -267,6 +275,12 @@ class CompletionRequest(BaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    guided_decoding_backend: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default guided decoding backend "
+            "of the server for this specific request. If set, must be one of "
+            "'outlines' / 'lm-format-enforcer'"))
 
     # doc: end-completion-extra-params
 
@@ -279,6 +293,7 @@ class CompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))

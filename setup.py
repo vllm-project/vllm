@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import List
+from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
@@ -52,7 +52,7 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config = {}
+    did_config: Dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -204,7 +204,8 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed
+    return torch_neuronx_installed or os.environ.get("VLLM_BUILD_WITH_NEURON",
+                                                     False)
 
 
 def _is_cpu() -> bool:
@@ -261,6 +262,7 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
+    assert CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
@@ -404,6 +406,9 @@ setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
+    extras_require={
+        "tensorizer": ["tensorizer==2.9.0a1"],
+    },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
 )

@@ -104,7 +104,7 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be appended.
         """
         assert self._is_allocated
-        assert token_ids, "can't append empty token ids"
+        assert self._blocks is not None
 
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)

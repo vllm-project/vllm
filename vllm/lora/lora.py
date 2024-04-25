@@ -33,7 +33,7 @@ class LoRALayerWeights:
     def optimize(self) -> "LoRALayerWeights":
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
-            return
+            return self
         self.lora_b *= self.scaling
         self.scaling = 1
         return self
