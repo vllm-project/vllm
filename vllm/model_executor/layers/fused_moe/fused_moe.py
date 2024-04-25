@@ -221,8 +221,8 @@ def moe_align_block_size(
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             A_scale: Optional[torch.Tensor],
-                            B_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
-                            topk_ids: torch.Tensor,
+                            B_scale: Optional[torch.Tensor],
+                            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
