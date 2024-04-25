@@ -716,11 +716,9 @@ class ModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        # s = time.perf_counter()
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
-        # print(f"SANG-TODO Preparing input tensors took {(time.perf_counter() - s) * 1000} ms num seq groups: {len(seq_group_metadata_list)}")
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -741,26 +739,21 @@ class ModelRunner:
         }
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
-        # s = time.perf_counter()
         hidden_states = model_executable(**execute_model_kwargs)
-        # print(f"SANG-TODO Running model took {(time.perf_counter() - s) * 1000} ms")
 
         # Compute the logits.
-        # s = time.perf_counter()
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
-        # print(f"SANG-TODO logit process took {(time.perf_counter() - s) * 1000} ms")
 
         # Only perform sampling in the driver worker.
         if not self.is_driver_worker:
             return None
 
         # Sample the next token.
-        # s = time.perf_counter()
         output = self.model.sample(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
-        # print(f"SANG-TODO sampling took {(time.perf_counter() - s) * 1000} ms")
+
         return output
 
     @torch.inference_mode()
