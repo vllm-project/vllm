@@ -10,8 +10,6 @@ import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearMethodBase
-from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.utils import is_hip
 
 logger = init_logger(__name__)
@@ -229,11 +227,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
                             mul_routed_weight: bool, top_k: int,
                             config: Dict[str, Any], compute_type: tl.dtype,
-                            linear_method: Optional[LinearMethodBase]) -> None:
+                            use_fp8: bool) -> None:
     assert topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
 
-    if not isinstance(linear_method, Fp8LinearMethod):
+    if not use_fp8:
         assert A_scale is None
         assert B_scale is None
     else:
@@ -267,7 +265,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
-        use_fp8=isinstance(linear_method, Fp8LinearMethod),
+        use_fp8=use_fp8,
         **config,
     )
 
@@ -317,7 +315,7 @@ def fused_moe(
     renormalize: bool,
     inplace: bool = False,
     override_config: Optional[Dict[str, Any]] = None,
-    linear_method: Optional[LinearMethodBase] = None,
+    use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
@@ -399,7 +397,7 @@ def fused_moe(
     else:
         # First try to load optimal config from the file
         configs = get_moe_configs(E, w2.shape[2],
-                                  "float8" if isinstance(linear_method, Fp8LinearMethod) else None)
+                                  "float8" if use_fp8 else None)
 
         if configs:
             # If an optimal configuration map has been found, look up the
@@ -449,7 +447,7 @@ def fused_moe(
                             topk_ids.shape[1],
                             config,
                             compute_type=tl.float16,
-                            linear_method=linear_method)
+                            use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
@@ -467,7 +465,7 @@ def fused_moe(
                             1,
                             config,
                             compute_type=tl.float16,
-                            linear_method=linear_method)
+                            use_fp8=use_fp8)
 
     if inplace:
         return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
