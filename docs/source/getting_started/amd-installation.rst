@@ -23,7 +23,7 @@ Installation options:
 
 .. _build_from_source_docker_rocm:
 
-Option 1: Build from source with docker (recommanded)
+Option 1: Build from source with docker (recommended)
 -----------------------------------------------------
 
 You can build and install vLLM from source.
@@ -135,7 +135,7 @@ Tips:
 ---------------------------
 
 - You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
-- Triton flash attention is used by default. For benchmarking purposes, it is recommanded to run a warm up step before collecting perf numbers.
+- Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
 - To use CK flash-attention, please use this flag ``export VLLM_USE_FLASH_ATTN_TRITON=0`` to turn off triton flash attention. 
 - The ROCm version of pytorch, ideally, should match the ROCm driver version.
 
