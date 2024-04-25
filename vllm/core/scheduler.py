@@ -666,6 +666,10 @@ class Scheduler:
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
+            # FIXME(woosuk): For TPUs, we want to schedule only one prompt
+            # per scheduling step.
+            break
+
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
         if len(seq_groups) > 0:
