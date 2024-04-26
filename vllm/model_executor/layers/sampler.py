@@ -178,7 +178,8 @@ def _apply_min_tokens_penalty(
                                             [sampling_params.eos_token_id])
                 # some times the eos_token_id has been set to None by default, 
                 # we should handle this case.
-                token_ids_to_penalize.remove(None)
+                if None in token_ids_to_penalize:
+                    token_ids_to_penalize.remove(None)
                 # itertools.product pairs each seq index with every token id
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
