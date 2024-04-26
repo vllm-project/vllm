@@ -1,7 +1,6 @@
 import asyncio
 import enum
 import gc
-import importlib
 import os
 import socket
 import subprocess
