@@ -35,7 +35,7 @@ body:
     description: >
       The list of people you want to CC.
   validations:
-    required: true
+    required: false
 - type: textarea
   attributes:
     label: Any Other Things.
