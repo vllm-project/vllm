@@ -157,7 +157,8 @@ class TPUModelRunner:
                                             pad=_PAD_SLOT_ID,
                                             dtype=jnp.int32)
         prompt_lens = jnp.asarray(prompt_lens, dtype=jnp.int32)
-        return input_tokens, input_positions, slot_mapping, None, None, prompt_lens
+        return (input_tokens, input_positions, slot_mapping, None, None,
+                prompt_lens)
 
     def _prepare_decode(
         self,

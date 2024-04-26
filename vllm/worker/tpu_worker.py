@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import jax.numpy as jnp
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
