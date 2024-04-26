@@ -1,4 +1,3 @@
-import locale
 import subprocess
 import sys
 import time
