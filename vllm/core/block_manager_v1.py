@@ -250,6 +250,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.encoder_block_tables: Dict[int, BlockTable] = {}
 
     def get_seq_num_required_blocks(self, seq: Sequence) -> int:
+        if seq is None:
+            return 0
         return len(seq.logical_token_blocks)  
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
@@ -309,7 +311,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         seq = seq_group.get_encoder_seq()
 
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = len(seq.logical_token_blocks)
+        num_prompt_blocks = 0 if seq is None else len(seq.logical_token_blocks)
 
         block_table: BlockTable = []
         for logical_idx in range(num_prompt_blocks):

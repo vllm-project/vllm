@@ -909,7 +909,7 @@ class Scheduler:
             # encoder physical block numbers
             encoder_block_table: List[int] = self.block_manager.encoder_block_tables[request_id]
             # encoder SequenceData
-            encoder_seq_data: SequenceData = encoder_seq.data
+            encoder_seq_data: SequenceData = None if encoder_seq is None else encoder_seq.data
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
