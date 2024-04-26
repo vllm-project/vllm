@@ -176,6 +176,7 @@ def _apply_min_tokens_penalty(
                 # use set() to remove any duplicates
                 token_ids_to_penalize = set(sampling_params.stop_token_ids +
                                             [sampling_params.eos_token_id])
+                token_ids_to_penalize.remove(None)
                 # itertools.product pairs each seq index with every token id
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
