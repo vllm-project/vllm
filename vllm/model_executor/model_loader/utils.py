@@ -47,7 +47,8 @@ def is_param_gptq_and_skippable(name: str, params: dict):
             (
                 name.endswith(".bias") or
                 name.endswith(".g_idx") or
-                name.endswith(".qweight")
+                name.endswith(".qweight") or
+                name.endswith(".qzeros")
             )
             and name not in params
     )
