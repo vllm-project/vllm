@@ -13,6 +13,12 @@ from vllm.model_executor.layers.quantization.base_config import (
 class FP8Config(QuantizationConfig):
     """Config class for FP8."""
 
+    def __init__(
+        self,
+        activation_scheme: str = "dynamic",
+    ) -> None:
+        self.activation_scheme = activation_scheme
+
     @classmethod
     def get_name(cls) -> str:
         return "fp8"
@@ -29,12 +35,17 @@ class FP8Config(QuantizationConfig):
         return 90
 
     @classmethod
+    def require_config_file(cls) -> bool:
+        return False
+
+    @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return []
+        return ["quantize_config.json"]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
-        return cls()
+        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        return cls(activation_scheme)
 
     def get_linear_method(self) -> "Fp8LinearMethod":
         return Fp8LinearMethod(self)
