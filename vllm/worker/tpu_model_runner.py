@@ -12,11 +12,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import pad_to_max_length
 
-# DELETE
-from jax_smi import initialise_tracking
-
-initialise_tracking()
-
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
@@ -91,7 +86,7 @@ class TPUModelRunner:
 
         # Decode
         start = time.time()
-        for batch_size in [1, 2, 4] + [8 * i for i in range(1, 17)]:
+        for batch_size in [1, 2, 4, 8] + [16 * i for i in range(1, 17)]:
             seq_len = 1
             token_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
             position_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
@@ -325,8 +320,10 @@ def _get_padded_batch_size(batch_size: int) -> int:
         return batch_size
     elif batch_size <= 4:
         return 4
+    elif batch_size <= 8:
+        return 8
     else:
-        return ((batch_size + 7) // 8) * 8
+        return ((batch_size + 15) // 16) * 16
 
 
 import functools

@@ -598,6 +598,13 @@ class Scheduler:
 
         leftover_waiting_sequences: Deque[SequenceGroup] = deque()
         while self._passed_delay(time.time()) and waiting_queue:
+            # FIXME(woosuk): The TPU backend only supports up to 4 sequence
+            # groups in a single batch.
+            MAX_BATCH_SIZE = 1
+            if len(seq_groups) == MAX_BATCH_SIZE:
+                break
+            assert len(seq_groups) < MAX_BATCH_SIZE
+
             seq_group = waiting_queue[0]
 
             waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -665,10 +672,6 @@ class Scheduler:
                                        token_chunk_size=num_new_tokens))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
-
-            # FIXME(woosuk): For TPUs, we want to schedule only one prompt
-            # per scheduling step.
-            break
 
         # Queue requests that couldn't be scheduled.
         waiting_queue.extendleft(leftover_waiting_sequences)
