@@ -5,8 +5,8 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
-from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -74,7 +74,7 @@ class RayGPUExecutor(ExecutorBase):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: RayWorkerWrapper = None
+        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
@@ -214,8 +214,8 @@ class RayGPUExecutor(ExecutorBase):
         # NOTE: We log here to avoid multiple logs when number of workers is
         # greater than one. We could log in the engine, but not all executors
         # have GPUs.
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
+        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+                    num_cpu_blocks)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -318,6 +318,7 @@ class RayGPUExecutor(ExecutorBase):
             driver_worker_output = self.driver_worker.execute_method(
                 method, *driver_args, **driver_kwargs)
         else:
+            assert self.driver_dummy_worker is not None
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
                     method, *driver_args, **driver_kwargs))
@@ -353,8 +354,9 @@ class RayGPUExecutor(ExecutorBase):
         # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.bind(input_data)
-                for worker in self.workers
+                worker.execute_model_compiled_dag_remote.
+                bind(  # type: ignore[attr-defined]
+                    input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile()
 
