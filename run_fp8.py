@@ -17,15 +17,11 @@ if __name__ == "__main__":
     else:
         raise ValueError("--type should be `static` or `dynamic`")
 
-    # tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.2"
-    tokenizer_name = model_name
-
     model = LLM(model_name,
-                tokenizer=tokenizer_name,
                 enforce_eager=True,
                 max_model_len=1024)
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     prompt = tokenizer.apply_chat_template([{
         "role": "user",

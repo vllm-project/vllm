@@ -97,9 +97,11 @@ class FP8LinearMethod(LinearMethodBase):
                 torch.empty(sum(output_partition_sizes), dtype=torch.float32),
                 requires_grad=False)
             layer.register_parameter("weight_scale", weight_scale)
-            set_weight_attrs(weight_scale, extra_weight_attrs)
+            # set_weight_attrs(weight_scale, extra_weight_attrs)
             set_weight_attrs(weight_scale, {
-                "shard_indexer": self.scales_shard_indexer,
+                **extra_weight_attrs,
+                "shard_indexer": self.scales_shard_indexer_NKK,
+                "logical_widths": output_partition_sizes
             })
 
         # ACT Scale
@@ -112,6 +114,7 @@ class FP8LinearMethod(LinearMethodBase):
             set_weight_attrs(act_scale, {
                 "shard_indexer": self.scales_shard_indexer,
             })
+
 
     def shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
