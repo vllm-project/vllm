@@ -11,7 +11,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.type == "static":
-        model_name = "nm-testing/mistral-fp8-static"
+        model_name = "nm-testing/Meta-Llama-3-8B-Instruct-FP8"
     elif args.type == "dynamic":
         model_name = "nm-testing/mistral-fp8-dynamic"
     else:

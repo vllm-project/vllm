@@ -300,6 +300,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # TODO: sync with is_metadata.
         # For loading scales.
         shard_indexer = getattr(param, "shard_indexer", None)
+        logical_widths = getattr(param, "logical_widths", None)
         if output_dim is not None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support output_dim != None and "
@@ -372,7 +373,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         elif shard_indexer is not None:
             param_data, loaded_weight = shard_indexer(param_data,
                                                       loaded_weight,
-                                                      loaded_shard_id)
+                                                      loaded_shard_id,
+                                                      logical_widths)
 
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
@@ -458,6 +460,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         # TODO: sync with is_metadata UX
         shard_indexer = getattr(param, "shard_indexer", None)
+        logical_widths = getattr(param, "logical_widths", None)
         if output_dim is not None and shard_indexer is not None:
             raise NotImplementedError(
                 "We do not currently support output_dim != None and "
@@ -544,7 +547,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         elif shard_indexer is not None:
             param_data, loaded_weight = shard_indexer(param_data,
                                                       loaded_weight,
-                                                      loaded_shard_id)
+                                                      loaded_shard_id,
+                                                      logical_widths)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:

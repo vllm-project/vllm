@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.model_executor.layers.fused_gemm_dq import fused_gemm_dq_fp8
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
@@ -68,7 +69,10 @@ class FP8LinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ):
         del input_size, output_size, params_dtype
+        num_logical_weights = len(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
 
+        # WEIGHT
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=torch.float8_e4m3fn),
@@ -76,19 +80,29 @@ class FP8LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         set_weight_attrs(weight, extra_weight_attrs)
+        
+        # WEIGHT SCALE
+        if num_logical_weights == 1:
+            weight_scale = Parameter(
+                torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                requires_grad=False)
+             
+            layer.register_parameter("weight_scale", weight_scale)
+            set_weight_attrs(weight_scale, extra_weight_attrs)
+            set_weight_attrs(weight_scale, {
+                "shard_indexer": self.scales_shard_indexer,
+            })
+        else:
+            weight_scale = Parameter(
+                torch.empty(sum(output_partition_sizes), dtype=torch.float32),
+                requires_grad=False)
+            layer.register_parameter("weight_scale", weight_scale)
+            set_weight_attrs(weight_scale, extra_weight_attrs)
+            set_weight_attrs(weight_scale, {
+                "shard_indexer": self.scales_shard_indexer,
+            })
 
-        weight_scale = Parameter(torch.empty(
-            len(output_partition_sizes),
-            device='cuda',
-            dtype=torch.float32,
-        ),
-                                 requires_grad=False)
-        layer.register_parameter("weight_scale", weight_scale)
-        set_weight_attrs(weight_scale, extra_weight_attrs)
-        set_weight_attrs(weight_scale, {
-            "shard_indexer": self.scales_shard_indexer,
-        })
-
+        # ACT Scale
         if self.quant_config.activation_scheme == "static":
             act_scale = Parameter(torch.empty(len(output_partition_sizes),
                                               dtype=torch.float32),
@@ -99,8 +113,6 @@ class FP8LinearMethod(LinearMethodBase):
                 "shard_indexer": self.scales_shard_indexer,
             })
 
-        layer.logical_widths = output_partition_sizes
-
     def shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
             return shard_id
@@ -109,26 +121,28 @@ class FP8LinearMethod(LinearMethodBase):
         assert shard_id in qkv_idxs
         return qkv_idxs[shard_id]
 
-    # def scales_shard_splitter_NKK(
-    #     self,
-    #     param: torch.Tensor,
-    #     loaded_weight: torch.Tensor,
-    #     shard_id: Union[str, int],
-    #     logical_widths: torch.Tensor
-    # ) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     shard_id = self.shard_id_as_int(shard_id)
-    #     offset = sum(logical_widths[:shard_id])
-    #     size = logical_widths[shard_id]
-    #     # update loaded weight with copies for broadcast.
-    #     loaded_weight = loaded_weight.repeat(size)
-    #     return param[offset : offset + size], loaded_weight
+    def scales_shard_indexer_NKK(
+        self,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        shard_id: Union[str, int],
+        logical_widths,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        shard_id = self.shard_id_as_int(shard_id)
+        offset = sum(logical_widths[:shard_id])
+        size = logical_widths[shard_id]
+        # update loaded weight with copies for broadcast.
+        loaded_weight = loaded_weight.repeat(size)
+        return param[offset:offset + size], loaded_weight
 
     def scales_shard_indexer(
         self,
         param: torch.Tensor,
         loaded_weight: torch.Tensor,
         shard_id: Union[str, int],
+        logical_widths,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        del logical_widths
         return param[self.shard_id_as_int(shard_id)], loaded_weight
 
     def apply_weights(self,
@@ -136,7 +150,7 @@ class FP8LinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        w_scale = layer.weight_scale.max()
+        m = x.shape[0]
 
         if self.quant_config.activation_scheme == "dynamic":
             qinput, x_scale = per_tensor_quantize_dyanmic(x)
@@ -145,28 +159,26 @@ class FP8LinearMethod(LinearMethodBase):
             x_scale = layer.act_scale.max()
             qinput = per_tensor_quantize_static(x, x_scale)
 
-        # FOR LOOP TO BE REPLACED BY CUTLASS KERNEL W/ EPILOGUE FUSION
-        output = torch.zeros(x.shape[0],
-                             layer.weight.shape[0],
-                             dtype=x.dtype,
-                             device="cuda")
-        start_offset = 0
-        for _, (logical_width, w_scale) in enumerate(
-                zip(layer.logical_widths, layer.weight_scale)):
-            end_offset = start_offset + logical_width
+        # HACK: CUTLASS hits an illegal instruction for fp8 when m == 1,
+        # so pad m to 2
+        if m == 1:
+            tmp = torch.zeros(2,
+                              qinput.shape[1],
+                              dtype=qinput.dtype,
+                              device="cuda")
+            tmp[0, :] = qinput
+            qinput = tmp
 
-            out, _ = torch._scaled_mm(
-                qinput,
-                layer.weight[start_offset:end_offset, :].t(),
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=w_scale,
-                bias=bias,
-            )
-            output[:, start_offset:end_offset] = out
-            start_offset = end_offset
+        out_cutlass_qkv = fused_gemm_dq_fp8(
+            qinput,
+            layer.weight.t(),
+            out_dtype=x.dtype,
+            scale_a=x_scale,
+            scale_b=layer.weight_scale,
+            bias=bias,
+        )
 
-        return output
+        return out_cutlass_qkv[:m, :]
 
 
 def per_tensor_quantize_static(tensor: torch.Tensor,
