@@ -13,6 +13,7 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
 from vllm.logger import init_logger
+from vllm.utils import enable_trace_function_call_for_thread
 
 logger = init_logger(__name__)
 
@@ -204,7 +205,8 @@ def _run_worker_process(
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
 
-    #enable_trace_function_call_for_thread()
+    # Set up function call tracing if enabled via env var
+    enable_trace_function_call_for_thread()
 
     worker = worker_factory()
     del worker_factory
