@@ -410,13 +410,7 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    print(f"Skipped loading of bias: {name}")  # noqa: G004
-                    continue
-                # Skip loading extra g_idx for GPTQ models.
-                if name.endswith(".g_idx") and name not in params_dict:
-                    print(f"Skipped loading of g_idx: {name}")  # noqa: G004
+                if is_param_gptq_and_skippable(name, params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
