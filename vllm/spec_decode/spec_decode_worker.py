@@ -374,7 +374,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         I think non spec sequences are in same order
         """
 
-        breakpoint()
+        #breakpoint()
 
         # Rearrange so that results are in the order of the original seq group
         # metadata.
