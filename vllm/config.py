@@ -33,6 +33,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+            It is also used as the content for `model_name` tag in metrics 
+            output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -68,6 +70,10 @@ class ModelConfig:
             to eager mode.
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
+        served_model_name: 'The model name used in metrics tag `model_name`,
+            same to the model name exposed in service. If multiple model names 
+            provided, the first name will be used. If not specified, the model
+            name will be the same as `model`.
     """
 
     def __init__(
@@ -88,7 +94,7 @@ class ModelConfig:
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
-        served_model_name: Optional[str] = None,
+        served_model_name: Optional[List[str]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -116,8 +122,9 @@ class ModelConfig:
         self._verify_quantization()
         self._verify_cuda_graph()
 
-        self.served_model_name = (served_model_name
-                                  if served_model_name is not None else model)
+        # Simply take the first model_name in `served_model_name` for metrics
+        self.served_model_name = (served_model_name[0]
+                                  if served_model_name else self.model)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()

@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -15,7 +15,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
-    served_model_name: Optional[str] = None
+    served_model_name: Optional[List[str]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -449,6 +449,21 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
+
+        parser.add_argument(
+            "--served-model-name",
+            nargs="+",
+            type=str,
+            default=None,
+            help="The model name(s) used in the API. If multiple "
+            "names are provided, the server will respond to any "
+            "of the provided names. The model name in the model "
+            "field of a response will be the first name in this "
+            "list. If not specified, the model name will be the "
+            "same as the `--model` argument. Noted that this name(s)"
+            "will also be used in `model_name` tag content of "
+            "prometheus metrics, if multiple names provided, metrics"
+            "tag will take the first one.")
 
         return parser
 
