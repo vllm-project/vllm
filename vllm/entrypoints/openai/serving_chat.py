@@ -57,8 +57,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt)
         except Exception as e:
-            logger.error(
-                f"Error in applying chat template from request: {str(e)}")
+            logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -338,11 +337,11 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
 
-            logger.info(
-                f"Using supplied chat template:\n{tokenizer.chat_template}")
+            logger.info("Using supplied chat template:\n%s",
+                        tokenizer.chat_template)
         elif tokenizer.chat_template is not None:
-            logger.info(
-                f"Using default chat template:\n{tokenizer.chat_template}")
+            logger.info("Using default chat template:\n%s",
+                        tokenizer.chat_template)
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")

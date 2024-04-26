@@ -14,7 +14,7 @@ try:
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
-    logger.info(f"Failed to import NCCL library: {e}")
+    logger.info("Failed to import NCCL library: %s", e)
     logger.info("It is expected if you are not running on NVIDIA GPUs.")
     pass
 
@@ -40,7 +40,7 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
 def init_process_group(group: Optional[ProcessGroup] = None) -> None:
     assert not is_initialized()
     global comm
-    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
+    logger.info("vLLM is using nccl==%s", ncclGetVersion())
     comm = NCCLCommunicator(group=group)
 
 
