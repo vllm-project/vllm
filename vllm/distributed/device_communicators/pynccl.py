@@ -43,15 +43,16 @@ try:
     nccl = ctypes.CDLL(so_file)
 except Exception as e:
     logger.error(
-        f"Failed to load NCCL library from {so_file} ."
+        "Failed to load NCCL library from %s ."
         "It is expected if you are not running on NVIDIA/AMD GPUs."
         "Otherwise, the nccl library might not exist, be corrupted "
-        f"or it does not support the current platform {platform.platform()}."
-        f"One solution is to download libnccl2 version 2.18 from "
-        f"https://developer.download.nvidia.com/compute/cuda/repos/ "
-        f"and extract the libnccl.so.2 file. If you already have the "
-        f"library, please set the environment variable VLLM_NCCL_SO_PATH"
-        " to point to the correct nccl library path.")
+        "or it does not support the current platform %s."
+        "One solution is to download libnccl2 version 2.18 from "
+        "https://developer.download.nvidia.com/compute/cuda/repos/ "
+        "and extract the libnccl.so.2 file. If you already have the "
+        "library, please set the environment variable VLLM_NCCL_SO_PATH"
+        " to point to the correct nccl library path.", so_file,
+        platform.platform())
     raise e
 
 # === export types and functions from nccl to Python ===
@@ -250,15 +251,13 @@ class NCCLCommunicator:
         assert isinstance(device, torch.device)
         self.device = device
         # nccl communicator and stream will use this device
-        current_device = torch.cuda.current_device()
-        try:
-            torch.cuda.set_device(device)
+        # `torch.cuda.device` is a context manager that changes the
+        # current cuda device to the specified one
+        with torch.cuda.device(device):
             NCCL_CHECK(
                 _c_ncclCommInitRank(ctypes.byref(self.comm), self.world_size,
                                     self.unique_id, self.rank))
             self.stream = torch.cuda.Stream()
-        finally:
-            torch.cuda.set_device(current_device)
 
     def all_reduce(self,
                    tensor: torch.Tensor,
