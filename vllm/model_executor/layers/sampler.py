@@ -455,12 +455,12 @@ def _sample_with_torch(
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
 ) -> Tuple[List[Tuple[List[int], List[int]]], Optional[torch.Tensor]]:
-    categorized_seq_group_idx = {t: [] for t in SamplingType}
+    categorized_seq_group_ids = {t: [] for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
         sampling_type = sampling_params.sampling_type
-        categorized_seq_group_idx[sampling_type].append(i)
+        categorized_seq_group_ids[sampling_type].append(i)
 
     sample_results_dict: Dict[int, Tuple[List[int], List[int]]] = {}
     sample_metadata = {}
@@ -483,9 +483,9 @@ def _sample_with_torch(
         if num_tokens == 0:
             continue
 
-        seq_group_idx = categorized_seq_group_idx[sampling_type]
-        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
-        sample_metadata[sampling_type] = (seq_group_idx, seq_groups)
+        seq_group_id = categorized_seq_group_ids[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
+        sample_metadata[sampling_type] = (seq_group_id, seq_groups)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.GREEDY:
             greedy_samples = torch.argmax(logprobs[long_sample_indices],
@@ -534,7 +534,7 @@ def _sample_with_torch(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        (seq_group_idx, seq_groups) = sample_metadata[sampling_type]
+        (seq_group_id, seq_groups) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(seq_groups, greedy_samples)
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
@@ -543,7 +543,7 @@ def _sample_with_torch(
         elif sampling_type == SamplingType.BEAM:
             sample_results = _beam_search_sample(seq_groups,
                                                  beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_idx, sample_results))
+        sample_results_dict.update(zip(seq_group_id, sample_results))
 
     sample_results = [
         sample_results_dict.get(i, ([], []))
@@ -577,9 +577,9 @@ def _sample_with_triton_kernel(
         num_tokens = len(sample_indices)
         if num_tokens == 0:
             continue
-        seq_group_idx = categorized_seq_group_ids[sampling_type]
-        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_idx]
-        sample_metadata[sampling_type] = (seq_group_idx, seq_groups,
+        seq_group_id = categorized_seq_group_ids[sampling_type]
+        seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
+        sample_metadata[sampling_type] = (seq_group_id, seq_groups,
                                           sample_indices,
                                           sampled_token_indices)
         if sampling_type in (SamplingType.GREEDY, SamplingType.RANDOM,
@@ -610,7 +610,7 @@ def _sample_with_triton_kernel(
     for sampling_type in SamplingType:
         if sampling_type not in sample_metadata:
             continue
-        (seq_group_idx, seq_groups, sample_indices,
+        (seq_group_id, seq_groups, sample_indices,
          sampled_token_indices) = sample_metadata[sampling_type]
         if sampling_type == SamplingType.GREEDY:
             sample_results = _greedy_sample(
@@ -621,7 +621,7 @@ def _sample_with_triton_kernel(
         elif sampling_type == SamplingType.BEAM:
             sample_results = _beam_search_sample(seq_groups,
                                                  beam_search_logprobs)
-        sample_results_dict.update(zip(seq_group_idx, sample_results))
+        sample_results_dict.update(zip(seq_group_id, sample_results))
 
     sample_results = [
         sample_results_dict.get(i, ([], []))
@@ -701,7 +701,7 @@ def _get_logprobs(
             sampling is required), prefill tokens for seq_group_2, ...
         sampling_metadata: The sampling metadata.
         sample_results: (num_seq_groups) The tuple of (next_token_ids,
-            parent_ids) for each sequence group.When beam search is enabled,
+            parent_ids) for each sequence group. When beam search is enabled,
             sample_results can contain different number of seq_ids from
             sampling_metadata.seq_groups. It is because beam search creates
             2 * BEAM_WIDTH number of samples (whereas there are only up to

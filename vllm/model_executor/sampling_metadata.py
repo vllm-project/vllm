@@ -217,6 +217,9 @@ def _prepare_seq_groups(
 
         # Update indices to select from the model output.
         """
+        This blocks computes selected_token_indices which is used in the
+        following way.
+
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         """
@@ -232,10 +235,15 @@ def _prepare_seq_groups(
 
         # We now find indices for logprob computation and sampling.
         """
+        This block computes categorized_sample_indices which is used in the
+        following way.
+
         hidden_states = model(...)
         logits = hidden_states[selected_token_indices]
         def sample(logits):
            # Use categorized_sample_indices for sampling.
+           # prompt_logprob_indices to find prompt logprob indices.
+           # sample_indices to find sample indices.
         """
 
         if sampling_params.prompt_logprobs is not None:

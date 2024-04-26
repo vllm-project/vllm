@@ -48,6 +48,9 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                                outputs: List[SequenceGroupOutput]) -> None:
         # TODO(sang): Prompt logprob currently not implemented in multi step
         # workers.
+        logger.warning(
+            "Prompt logprob is not supported by multi step workers. "
+            "(e.g., speculative decode uses multi step workers).")
         pass
 
     def process_outputs(self, sequence_group: SequenceGroup,
