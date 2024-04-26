@@ -152,6 +152,15 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
     return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                 size_n, size_k)
 
+# cutlass 
+def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor, a_scales: torch.Tensor,
+                     b_scales: torch.Tensor) -> torch.Tensor:
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m,n), dtype=torch.bfloat16, device="cuda")
+    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
+    return out
+
 
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,

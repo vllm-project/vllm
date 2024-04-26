@@ -165,6 +165,7 @@ set(VLLM_EXT_SRC
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
+  "csrc/quantization/cutlass/scaled_mm_dq.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/fp8/common.cu"
@@ -188,7 +189,9 @@ define_gpu_extension_target(
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  #  ARCHITECTURES ${VLLM_GPU_ARCHES}
+  ARCHITECTURES 90a 
+  INCLUDE_DIRECTORIES csrc/third_party/cutlass/include;csrc/third_party/cutlass/tools/util/include
   WITH_SOABI)
 
 #
