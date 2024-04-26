@@ -643,8 +643,7 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
                                          batch_size,
                                          max_output_len,
                                          force_output_len: bool,
-                                         logprob_rank: int = 1,
-                                         print_tokens: bool = False):
+                                         logprob_rank: int = 1):
     """Helper method that compares the outputs of both the baseline LLM and
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
@@ -711,9 +710,3 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
                 #assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
                 assert spec_rank_to_logprob[rank] == 0.1
             #breakpoint()
-        #if print_tokens:
-        #    print(f'{i=} {baseline_tokens=}')
-        #    print(f'{i=}     {spec_tokens=}')
-        print(f'{i=} {baseline_token_ids=}')
-        print(f'{i=}     {spec_token_ids=}')
-        assert baseline_token_ids == spec_token_ids
