@@ -222,7 +222,7 @@ __device__ void paged_attention_kernel(
           const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
 
           if (thread_group_offset == 0) {
-            // NOTE(linxihui): asign very large number to skipped tokens to avoid
+            // NOTE(linxihui): assign very large number to skipped tokens to avoid
             // contribution to the sumexp softmax normalizer.
             // This will not be used at computing sum(softmax*v) as the blocks will be skipped.
             logits[token_idx - start_token_idx] = -FLT_MAX;
