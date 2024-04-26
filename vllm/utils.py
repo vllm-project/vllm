@@ -289,8 +289,9 @@ def get_open_port() -> int:
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
-            logger.warning(f"Overwriting environment variable {k} "
-                           f"from '{os.environ[k]}' to '{v}'")
+            logger.warning(
+                "Overwriting environment variable %s "
+                "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
 
 
@@ -310,11 +311,12 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(f'CUDA_HOME is not found in the environment. '
-                        f'Using {cuda_home} as CUDA_HOME.')
+            logger.info(
+                'CUDA_HOME is not found in the environment. '
+                'Using %s as CUDA_HOME.', cuda_home)
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning('Not found nvcc in %s. Skip cuda version check!',
+                           cuda_home)
             return None
     nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
@@ -599,8 +601,8 @@ def find_nccl_library():
     # manually load the nccl library
     if so_file:
         logger.info(
-            f"Found nccl from environment variable VLLM_NCCL_SO_PATH={so_file}"
-        )
+            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s",
+            so_file)
     else:
         if torch.version.cuda is not None:
             so_file = vllm_nccl_path or find_library("libnccl.so.2")
@@ -608,7 +610,7 @@ def find_nccl_library():
             so_file = find_library("librccl.so.1")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info(f"Found nccl from library {so_file}")
+        logger.info("Found nccl from library %s", so_file)
     return so_file
 
 
