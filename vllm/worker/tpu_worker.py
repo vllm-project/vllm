@@ -92,8 +92,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        # self.model_runner.warmup_model(self.tpu_cache)
-        pass
+        self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
         head_size = self.model_config.get_head_size()
@@ -129,8 +128,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         if num_seq_groups == 0:
             return {}
 
-        output, kv_caches = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.tpu_cache)
+        output, kv_caches = self.model_runner.execute_model(
+            seq_group_metadata_list, self.tpu_cache)
         self.tpu_cache = kv_caches
         return output
 
