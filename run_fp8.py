@@ -11,13 +11,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.type == "static":
-        model_name = "nm-testing/Meta-Llama-3-8B-Instruct-FP8"
+        model_name = "nm-testing/mistral-fp8-static"
     elif args.type == "dynamic":
         model_name = "nm-testing/mistral-fp8-dynamic"
     else:
         raise ValueError("--type should be `static` or `dynamic`")
 
-    tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.2"
+    # tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.2"
+    tokenizer_name = model_name
 
     model = LLM(model_name,
                 tokenizer=tokenizer_name,
@@ -29,9 +30,7 @@ if __name__ == "__main__":
     prompt = tokenizer.apply_chat_template([{
         "role": "user",
         "content": "What is your name"
-    }],
-                                           tokenize=False,
-                                           add_generation_prompt=True)
+    }], tokenize=False, add_generation_prompt=True)
     print(f"----- Prompt: {prompt}")
 
     outputs = model.generate(prompt)
