@@ -293,7 +293,7 @@ def _attn_fwd_inner(
             num_warps=4,
         ),
     ],
-    key=["hq", "hk", "IS_CAUSAL", "dropout_p", "BLOCK_DMODEL"],
+    key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
 )
 @triton.jit
 def attn_fwd(
@@ -330,8 +330,8 @@ def attn_fwd(
     philox_seed,
     philox_offset_base,
     encoded_softmax,
-    hq,
-    hk,
+    HQ: tl.constexpr,
+    HK:tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     MAX_SEQLENS_Q: tl.constexpr,
     MAX_SEQLENS_K: tl.constexpr,
@@ -403,7 +403,7 @@ def attn_fwd(
             # We still need to write 0s to the result
             # tl.store(O_block_ptr,
             # acc.to(Out.type.element_ty), boundary_check=(0,1))
-            # l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q
+            # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q 
             #          + offs_m
             # We store inf to LSE, not -inf because in the bwd pass,
             # we subtract this
@@ -414,9 +414,10 @@ def attn_fwd(
             # TODO: Should dropout and return encoded softmax be handled here?
             return
 
-    is_mqa = hq != hk
-    if is_mqa:  # noqa: SIM108
-        off_h_k = off_h_q % hk
+    # If MQA / GQA, set the K and V head offsets appropriately.
+    GROUP_SIZE: tl.constexpr = HQ // HK
+    if GROUP_SIZE != 1:
+        off_h_k = off_h_q // GROUP_SIZE
     else:
         off_h_k = off_h_q
 
@@ -624,7 +625,7 @@ def attn_fwd(
             z = 0.0
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
-    # l_ptrs = L + off_z * hq * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
+    # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q + offs_m
     # If seqlen_q not multiple of BLOCK_M, we need to mask out the last
     # few rows. This is only true for the last M block. For others,
     # overflow_size will be -ve
@@ -784,8 +785,8 @@ class _attention(torch.autograd.Function):
             philox_seed=philox_seed,
             philox_offset_base=philox_offset,
             encoded_softmax=encoded_softmax,
-            hq=nheads_q,
-            hk=nheads_k,
+            HQ=nheads_q,
+            HK=nheads_k,
             ACTUAL_BLOCK_DMODEL=head_size,
             MAX_SEQLENS_Q=max_seqlens_q,
             MAX_SEQLENS_K=max_seqlens_k,
