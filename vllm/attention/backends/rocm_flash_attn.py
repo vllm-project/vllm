@@ -248,6 +248,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
+            assert prefill_meta.prompt_lens is not None
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # triton attention
                 # When block_tables are not filled, it means q and k are the

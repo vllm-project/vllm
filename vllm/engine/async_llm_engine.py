@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizer
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.engine.ray_utils import initialize_ray_cluster, ray
+from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -118,7 +118,7 @@ class RequestTracker:
         if request_output.finished:
             if verbose:
                 logger_data = {"request_id": request_id}
-                logger.info(f"Finished request {request_id}.", extra=logger_data)
+                logger.info("Finished request %s.", request_id, extra=logger_data)
             self.abort_request(request_id)
 
     def process_exception(self,
@@ -130,7 +130,7 @@ class RequestTracker:
         self._request_streams[request_id].put(exception)
         if verbose:
             logger_data = {"request_id": request_id}
-            logger.info(f"Finished request {request_id}.", extra=logger_data)
+            logger.info("Finished request %s.", request_id, extra=logger_data)
         self.abort_request(request_id)
 
     def add_request(self, request_id: str,
@@ -154,7 +154,7 @@ class RequestTracker:
         """Abort a request during next background loop iteration."""
         if verbose:
             logger_data = {"request_id": request_id}
-            logger.info(f"Aborted request {request_id}.", extra=logger_data)
+            logger.info("Aborted request %s.", request_id, extra=logger_data)
 
         self._finished_requests.put_nowait(request_id)
 
@@ -524,6 +524,7 @@ class AsyncLLMEngine:
                 if shortened_token_ids is not None:
                     shortened_token_ids = shortened_token_ids[:self.
                                                               max_log_len]
+
             logger_data = {
                 "request": request_id,
                 "prompt": shortened_prompt,
@@ -531,11 +532,11 @@ class AsyncLLMEngine:
                 "prompt_token_ids": shortened_token_ids,
                 "lora_request": lora_request,
             }
-            logger.info(f"Received request {request_id}: "
-                        f"prompt: {shortened_prompt!r}, "
-                        f"sampling_params: {sampling_params}, "
-                        f"prompt_token_ids: {shortened_token_ids}, "
-                        f"lora_request: {lora_request}.", extra=logger_data)
+            logger.info(
+                "Received request %s: prompt: %r, "
+                "sampling_params: %s, prompt_token_ids: %s, "
+                "lora_request: %s.", request_id, shortened_prompt,
+                sampling_params, shortened_token_ids, lora_request, extra=logger_data)
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -727,5 +728,7 @@ class AsyncLLMEngine:
                 raise RuntimeError("Engine is dead.") from e
         else:
             await self.engine.check_health_async()
-        logger_data = {"perf_counter": f"{time.perf_counter()-t}"}
-        logger.debug(f"Health check took {time.perf_counter()-t}s", extra=logger_data)
+
+        logger_data = {"perf_counter": f"{time.perf_counter()-t}", extra=logger_data}
+        logger.debug("Health check took %fs", time.perf_counter() - t)
+

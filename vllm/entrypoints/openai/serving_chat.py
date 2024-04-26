@@ -57,8 +57,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenize=False,
                 add_generation_prompt=request.add_generation_prompt)
         except Exception as e:
-            logger.error(
-                f"Error in applying chat template from request: {str(e)}")
+            logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
 
         request_id = f"cmpl-{random_uuid()}"
@@ -115,12 +114,12 @@ class OpenAIServingChat(OpenAIServing):
         first_iteration = True
 
         # Send response for each token for each request.n (index)
+        assert request.n is not None
         previous_texts = [""] * request.n
         previous_num_tokens = [0] * request.n
         finish_reason_sent = [False] * request.n
         try:
             async for res in result_generator:
-                res: RequestOutput
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
@@ -319,26 +318,32 @@ class OpenAIServingChat(OpenAIServing):
         return response
 
     def _load_chat_template(self, chat_template):
+        tokenizer = self.tokenizer
+
         if chat_template is not None:
             try:
                 with open(chat_template, "r") as f:
-                    self.tokenizer.chat_template = f.read()
-            except OSError:
+                    tokenizer.chat_template = f.read()
+            except OSError as e:
+                JINJA_CHARS = "{}\n"
+                if not any(c in chat_template for c in JINJA_CHARS):
+                    msg = (f"The supplied chat template ({chat_template}) "
+                           f"looks like a file path, but it failed to be "
+                           f"opened. Reason: {e}")
+                    raise ValueError(msg) from e
+
                 # If opening a file fails, set chat template to be args to
                 # ensure we decode so our escape are interpreted correctly
-                self.tokenizer.chat_template = codecs.decode(
+                tokenizer.chat_template = codecs.decode(
                     chat_template, "unicode_escape")
+
             logger_data = {"template": self.tokenizer.chat_template}
-            logger.info(
-                f"Using supplied chat template:\n{self.tokenizer.chat_template}",
-                extra=logger_data
-            )
-        elif self.tokenizer.chat_template is not None:
+            logger.info("Using supplied chat template:\n%s",
+                        tokenizer.chat_template, extra=logger_data)
+        elif tokenizer.chat_template is not None:
             logger_data = {"template": self.tokenizer.chat_template}
-            logger.info(
-                f"Using default chat template:\n{self.tokenizer.chat_template}",
-                extra=logger_data
-            )
+            logger.info("Using default chat template:\n%s",
+                        tokenizer.chat_template, extra=logger_data)
         else:
             logger.warning(
                 "No chat template provided. Chat API will not work.")

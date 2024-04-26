@@ -83,6 +83,7 @@ class GPUExecutor(ExecutorBase):
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
             cache_config=self.cache_config,
+            # TODO allow draft-model specific load config.
             load_config=self.load_config,
             local_rank=0,
             rank=0,
@@ -116,8 +117,8 @@ class GPUExecutor(ExecutorBase):
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
         logger_data = {"gpu_blocks": num_gpu_blocks, "cpu_blocks": num_cpu_blocks}
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}", extra=logger_data)
+        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+                    num_cpu_blocks, extra=logger_data)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 

@@ -113,7 +113,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger_data = {"path": path}
-        logger.info(f"generating GPU P2P access cache for in {path}", extra=logger_data)
+        logger.info("generating GPU P2P access cache for in %s", path, extra=logger_data)
         cache = {}
         for _i in range(num_dev):
             for _j in range(num_dev):
@@ -128,7 +128,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cpu_world_group = get_cpu_world_group()
         dist.barrier(cpu_world_group)
     logger_data = {"path": path}
-    logger.info(f"reading GPU P2P access cache from {path}", extra=logger_data)
+    logger.info("reading GPU P2P access cache from %s", path, extra=logger_data)
     with open(path, "r") as f:
         cache = json.load(f)
     _gpu_p2p_access_cache = cache

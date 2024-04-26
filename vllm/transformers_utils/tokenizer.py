@@ -58,11 +58,12 @@ def get_tokenizer(
     *args,
     tokenizer_mode: str = "auto",
     trust_remote_code: bool = False,
-    tokenizer_revision: Optional[str] = None,
+    revision: Optional[str] = None,
     download_dir: Optional[str] = None,
     **kwargs,
 ) -> Union[PreTrainedTokenizer, PreTrainedTokenizerFast]:
-    """Gets a tokenizer for the given model name via Huggingface/modelscope."""
+    """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
+    """
     if VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
         # lazy import so that modelscope is not required for normal use.
@@ -74,7 +75,7 @@ def get_tokenizer(
             tokenizer_path = snapshot_download(
                 model_id=tokenizer_name,
                 cache_dir=download_dir,
-                revision=tokenizer_revision,
+                revision=revision,
                 # Ignore weights - we only need the tokenizer.
                 ignore_file_pattern=["*.pt", "*.safetensors", "*.bin"])
             tokenizer_name = tokenizer_path
@@ -90,7 +91,7 @@ def get_tokenizer(
             tokenizer_name,
             *args,
             trust_remote_code=trust_remote_code,
-            tokenizer_revision=tokenizer_revision,
+            revision=revision,
             **kwargs)
     except ValueError as e:
         # If the error pertains to the tokenizer class not existing or not
@@ -114,7 +115,7 @@ def get_tokenizer(
                 tokenizer_name,
                 *args,
                 trust_remote_code=trust_remote_code,
-                tokenizer_revision=tokenizer_revision,
+                revision=revision,
                 **kwargs)
         else:
             raise e
@@ -138,9 +139,8 @@ def get_lora_tokenizer(lora_request: LoRARequest, *args,
         # use base model tokenizer
         logger_data = {"lora_local_path": lora_request.lora_local_path}
         logger.warning(
-            f"No tokenizer found in {lora_request.lora_local_path}, "
-            "using base model tokenizer instead. "
-            f"(Exception: {str(e)})", extra=logger_data)
+            "No tokenizer found in %s, using base model tokenizer instead. "
+            "(Exception: %s)", lora_request.lora_local_path, e, extra=logger_data)
         tokenizer = None
     return tokenizer
 
