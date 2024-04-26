@@ -83,13 +83,27 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
             return
         # Log every function call or return
         try:
+            last_frame = frame.f_back
+            if last_frame is not None:
+                last_filename = last_frame.f_code.co_filename
+                last_lineno = last_frame.f_lineno
+                last_func_name = last_frame.f_code.co_name
+            else:
+                # initial frame
+                last_filename = ""
+                last_lineno = 0
+                last_func_name = ""
             with open(log_path, 'a') as f:
                 if event == 'call':
                     f.write(f"{datetime.datetime.now()} Call to"
-                            f" {func_name} in {filename}:{lineno}\n")
+                            f" {func_name} in {filename}:{lineno}"
+                            f" from {last_func_name} in {last_filename}:"
+                            f"{last_lineno}\n")
                 else:
                     f.write(f"{datetime.datetime.now()} Return from"
-                            f" {func_name} in {filename}:{lineno}\n")
+                            f" {func_name} in {filename}:{lineno}"
+                            f" to {last_func_name} in {last_filename}:"
+                            f"{last_lineno}\n")
         except NameError:
             # modules are deleted during shutdown
             pass
@@ -112,7 +126,7 @@ def enable_trace_function_call(log_file_path: str,
         "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
         "is suggested to be used for debugging hang or crashes only.")
-    logger.info(f"Trace frame log is saved to {log_file_path}")
+    logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory
         root_dir = os.path.dirname(os.path.dirname(__file__))

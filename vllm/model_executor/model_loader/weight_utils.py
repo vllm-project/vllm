@@ -190,7 +190,7 @@ def download_weights_from_hf(model_name_or_path: str,
             allow_patterns = [pattern]
             break
 
-    logger.info(f"Using model weights format {allow_patterns}")
+    logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
@@ -310,17 +310,17 @@ def kv_cache_scales_loader(
             return layer_scales_map.items()
 
     except FileNotFoundError:
-        logger.error(f"File or directory '{filename}' not found.")
+        logger.error("File or directory '%s' not found.", filename)
     except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON in file '{filename}'.")
+        logger.error("Error decoding JSON in file '%s'.", filename)
     except Exception as e:
-        logger.error(f"An error occurred while reading '{filename}': {e}")
+        logger.error("An error occurred while reading '%s': %s", filename, e)
     # This section is reached if and only if any of the excepts are hit
     # Return an empty iterable (list) => no KV cache scales are loaded
     # which ultimately defaults to 1.0 scales
-    logger.warning("Defaulting to KV cache scaling factors = 1.0 "
-                   f"for all layers in TP rank {tp_rank} "
-                   "as an error occurred during loading.")
+    logger.warning(
+        "Defaulting to KV cache scaling factors = 1.0 for all "
+        "layers in TP rank %d as an error occurred during loading.", tp_rank)
     return []
 
 

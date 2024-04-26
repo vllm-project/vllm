@@ -232,6 +232,8 @@ class DefaultModelLoader(BaseModelLoader):
                 linear_method = getattr(module, "linear_method", None)
                 if linear_method is not None:
                     linear_method.process_weights_after_loading(module)
+                if hasattr(module, "process_weights_after_loading"):
+                    module.process_weights_after_loading()
         return model.eval()
 
 
