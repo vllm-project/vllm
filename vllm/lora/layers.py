@@ -407,19 +407,10 @@ class LinearWithLoRA(BaseLayerWithLoRA):
         return output
 
     def forward(self, input_):
-        """Forward of ColumnParallelLinear
 
-        Args:
-            input_: Tensor whose last dimension is `input_size`.
-
-        Returns:
-            - output
-            - bias
-        """
         bias = self.base_layer.bias
 
         output = self.apply_weights(input_, bias)
-        output_bias = self.base_layer.bias
 
         return output
 
@@ -427,7 +418,7 @@ class LinearWithLoRA(BaseLayerWithLoRA):
     def can_replace_layer(cls, source_layer: nn.Module,
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is torch.nn.Linear
+        return type(source_layer) is nn.Linear
 
 
 class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
@@ -526,15 +517,7 @@ class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
         return output
 
     def forward(self, input_):
-        """Forward of ColumnParallelLinear
 
-        Args:
-            input_: Tensor whose last dimension is `input_size`.
-
-        Returns:
-            - output
-            - bias
-        """
         bias = (self.base_layer.bias
                 if not self.base_layer.skip_bias_add else None)
 
