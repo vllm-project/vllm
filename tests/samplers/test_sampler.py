@@ -201,7 +201,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     def create_sampling_params(min_tokens,
                                eos_token_id=0,
                                *,
-                               stop_token_ids: Optional[List[str]] = None,
+                               stop_token_ids: Optional[List[int]] = None,
                                prompt_logprobs: Optional[int] = None):
         sampling_params = SamplingParams(
             min_tokens=min_tokens,
@@ -210,7 +210,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             # requesting prompt_logprobs changes the structure of `logits`
             prompt_logprobs=prompt_logprobs,
         )
-        sampling_params.eos_token_id = eos_token_id
+        sampling_params.all_stop_token_ids.add(eos_token_id)
         return sampling_params
 
     def create_sequence_data(num_input=3, num_generated=0):
