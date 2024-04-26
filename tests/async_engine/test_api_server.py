@@ -1,3 +1,4 @@
+import locale
 import subprocess
 import sys
 import time
@@ -39,8 +40,13 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
         commands.append("--engine-use-ray")
     if worker_use_ray:
         commands.append("--worker-use-ray")
-    uvicorn_process = subprocess.Popen(commands)
-    yield
+    with subprocess.Popen(commands,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT) as uvicorn_process:
+        output, _ = uvicorn_process.communicate()
+        output = output.decode(locale.getpreferredencoding())
+        assert "prompt" in output
+        yield
     uvicorn_process.terminate()
 
 
