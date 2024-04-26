@@ -7,7 +7,7 @@ from vllm import LLM
 choices = ["llama-static", "mistral-static", "mistral-dynamic", "mixtral-static"]
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--type", choices="mixtral-static")
+parser.add_argument("--type", choices=choices)
 
 if __name__ == "__main__":
     args = parser.parse_args()
