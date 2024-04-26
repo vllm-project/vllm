@@ -67,8 +67,8 @@ class TPUWorker(LoraNotSupportedWorkerBase):
                           os.path.expanduser("~/.vllm/jax_cache"))
 
         # DELETE
-        from jax_smi import initialise_tracking
-        initialise_tracking()
+        # from jax_smi import initialise_tracking
+        # initialise_tracking()
 
     def load_model(self):
         self.model_runner.load_model()
