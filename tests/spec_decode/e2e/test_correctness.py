@@ -708,5 +708,8 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
             for rank in ranks:
                 assert spec_rank_to_token_id[rank] == baseline_rank_to_token_id[rank]
                 #assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
-                assert spec_rank_to_logprob[rank] == 0.1
+                if pos == 0:
+                    assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
+                else:
+                    assert spec_rank_to_logprob[rank] == 0.1
             #breakpoint()

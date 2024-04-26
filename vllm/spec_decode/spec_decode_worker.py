@@ -416,7 +416,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                 parent_seq_id=seq_id,
                                 output_token=token_id,
                                 # TODO Add verifier logprobs.
-                                logprobs={token_id: Logprob(0.1)},
+                                logprobs={token_id: Logprob(
+                                    logprob=0.1,
+                                    rank=1,
+                                    decoded_token="TODO",
+                                )},
                             )
                         ],
                         prompt_logprobs=None,

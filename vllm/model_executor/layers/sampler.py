@@ -805,8 +805,8 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     has implications on the overall design of the sampler, e.g. how to record
     accurate logprobs for the user, so this improvement is deferred to later.
     """
-    logprobs[sample_indices, :] = -float('inf')
-    logprobs[sample_indices, greedy_samples] = 0.0
+    #logprobs[sample_indices, :] = -float('inf')
+    #logprobs[sample_indices, greedy_samples] = 0.0
     probs[sample_indices, :] = 0
     probs[sample_indices, greedy_samples] = 1.0
 

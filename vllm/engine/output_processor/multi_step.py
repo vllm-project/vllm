@@ -105,7 +105,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        breakpoint()
         for output_token_id, output_logprob in zip(output_token_ids, output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
