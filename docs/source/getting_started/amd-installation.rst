@@ -3,9 +3,7 @@
 Installation with ROCm
 ======================
 
-vLLM 0.2.4 onwards supports model inferencing and serving on AMD GPUs with ROCm.
-At the moment AWQ quantization is not supported in ROCm, but SqueezeLLM quantization has been ported.
-Data types currently supported in ROCm are FP16 and BF16.
+vLLM supports AMD GPUs with ROCm 5.7 and 6.0.
 
 Requirements
 ------------
@@ -13,8 +11,7 @@ Requirements
 * OS: Linux
 * Python: 3.8 -- 3.11
 * GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
-* Pytorch 2.0.1/2.1.1/2.2
-* ROCm 5.7 (Verified on python 3.10) or ROCm 6.0 (Verified on python 3.9)
+* ROCm 6.0 and ROCm 5.7
 
 Installation options:
 
@@ -28,9 +25,10 @@ Option 1: Build from source with docker (recommended)
 
 You can build and install vLLM from source.
 
-First, build a docker image from `Dockerfile.rocm`, and then launch a docker container from the docker image.
+First, build a docker image from `Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ and launch a docker container from the image.
 
-The `Dockerfile.rocm` is designed to support both ROCm 5.7 and ROCm 6.0 and later versions. It provides flexibility to customize the build of docker image using the following arguments:
+`Dockerfile.rocm <https://github.com/vllm-project/vllm/blob/main/Dockerfile.rocm>`_ uses ROCm 6.0 by default, but also supports ROCm 5.7.
+It provides flexibility to customize the build of docker image using the following arguments:
 
 * `BASE_IMAGE`: specifies the base image used when running ``docker build``, specifically the PyTorch on ROCm base image. We have tested ROCm 5.7 and ROCm 6.0. The default is `rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1`
 * `BUILD_FA`: specifies whether to build CK flash-attention. The default is 1. For `Radeon RX 7900 series (gfx1100) <https://rocm.docs.amd.com/projects/radeon/en/latest/index.html>`_, this should be set to 0 before flash-attention supports this target.
@@ -131,12 +129,9 @@ Install ROCm's flash attention (v2.0.4) following the instructions from `ROCm/fl
     $ python setup.py install # This may take 5-10 minutes. Currently, `pip install .`` does not work for ROCm installation
 
 
-Tips:
----------------------------
+.. tip::
 
-- You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
-- Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
-- To use CK flash-attention, please use this flag ``export VLLM_USE_FLASH_ATTN_TRITON=0`` to turn off triton flash attention. 
-- The ROCm version of pytorch, ideally, should match the ROCm driver version.
-
-
+    - You may need to turn on the ``--enforce-eager`` flag if you experience process hang when running the `benchmark_thoughput.py` script to test your installation.
+    - Triton flash attention is used by default. For benchmarking purposes, it is recommended to run a warm up step before collecting perf numbers.
+    - To use CK flash-attention, please use this flag ``export VLLM_USE_FLASH_ATTN_TRITON=0`` to turn off triton flash attention. 
+    - The ROCm version of pytorch, ideally, should match the ROCm driver version.
