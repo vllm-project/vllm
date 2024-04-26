@@ -40,13 +40,8 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
         commands.append("--engine-use-ray")
     if worker_use_ray:
         commands.append("--worker-use-ray")
-    with subprocess.Popen(commands,
-                          stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT) as uvicorn_process:
-        output, _ = uvicorn_process.communicate()
-        output = output.decode(locale.getpreferredencoding())
-        assert "prompt" in output
-        yield
+    uvicorn_process = subprocess.Popen(commands)
+    yield
     uvicorn_process.terminate()
 
 
@@ -54,7 +49,7 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
 @pytest.mark.parametrize("worker_use_ray", [False, True])
 @pytest.mark.parametrize("engine_use_ray", [False, True])
 def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
-                    engine_use_ray: bool):
+                    engine_use_ray: bool, capsys):
     """
     Run the API server and test it.
 
@@ -75,6 +70,10 @@ def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
                     break
             except requests.exceptions.ConnectionError:
                 time.sleep(1)
+
+        captured = capsys.readouterr()
+        time.sleep(5)
+        assert "Avg prompt throughput" in captured.out
 
         # Actual tests start here
         # Try with 1 prompt
