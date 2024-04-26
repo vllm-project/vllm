@@ -1,21 +1,19 @@
 # pylint: disable=unused-argument
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import LoRAConfig
-from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
 from vllm.distributed.communication_op import (
-    tensor_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
-)
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank)
+    tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA)
+from vllm.lora.punica import bgmv, dispatch_bgmv_low_level
 
 if TYPE_CHECKING:
     pass

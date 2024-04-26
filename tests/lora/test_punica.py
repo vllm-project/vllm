@@ -128,14 +128,15 @@ def test_lora_a_extra_shapes(dtype_str, h1, r, seed):
         y = torch.randn(bs, r, dtype=dtype, device=device)
 
         y_ref = y.clone()
-        _lora_ref_impl(y_ref,
-                       x,
-                       wa_T_all,
-                       None,
-                       indices,
-                       layer_idx,
-                       1.0,
-                       )
+        _lora_ref_impl(
+            y_ref,
+            x,
+            wa_T_all,
+            None,
+            indices,
+            layer_idx,
+            1.0,
+        )
 
         y_our = y.clone()
         punica.bgmv(y_our, x, wa_T_all, indices, layer_idx, 1.0)

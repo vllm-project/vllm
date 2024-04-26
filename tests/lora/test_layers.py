@@ -8,6 +8,10 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import LoRAConfig
+from vllm.lora.fully_sharded_layers import (
+    ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
@@ -17,10 +21,6 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
-from vllm.lora.fully_sharded_layers import (
-    ColumnParallelLinearWithShardedLoRA, RowParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora,
-    MergedColumnParallelLinearWithShardedLoRA)
 # yapf: enable
 from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
                               convert_mapping)

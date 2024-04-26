@@ -15,6 +15,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
+from vllm.distributed.utils import divide
 from vllm.lora.punica import add_lora, add_lora_slice, bgmv
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -23,7 +24,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.distributed.utils import divide
 
 if TYPE_CHECKING:
     pass
@@ -547,8 +547,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         shard_size = self.output_dim
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        lora_b = lora_b[0][:, start_idx:end_idx], lora_b[1][:,
-                                                            start_idx:end_idx]
+        lora_b = [
+            lora_b[0][:, start_idx:end_idx], lora_b[1][:, start_idx:end_idx]
+        ]
         return lora_b
 
     def set_lora(

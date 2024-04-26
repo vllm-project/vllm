@@ -1,30 +1,34 @@
-import inspect
-from typing import Tuple, Optional, Set, Type, List
-from vllm.config import LoRAConfig
+from typing import List, Optional, Set, Tuple, Type
+
+from torch import nn
 from transformers import PretrainedConfig
-# being imported for _all_lora_classes below
-from vllm.lora.layers import (
-    BaseLayerWithLoRA, VocabParallelEmbeddingWithLoRA,
-    ColumnParallelLinearWithLoRA, MergedColumnParallelLinearWithLoRA,
-    QKVParallelLinearWithLora, MergedQKVParallelLinearWithLora,
-    RowParallelLinearWithLoRA, LogitsProcessorWithLoRA)
+
+from vllm.config import LoRAConfig
+from vllm.logger import init_logger
 from vllm.lora.fully_sharded_layers import (
     ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+# being imported for _all_lora_classes below
+from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LogitsProcessorWithLoRA,
+                              MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
+                              QKVParallelLinearWithLora,
+                              RowParallelLinearWithLoRA,
+                              VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-
-from torch import nn
-
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
-    cls
-    for cls in globals().values() if inspect.isclass(cls)
-    and issubclass(cls, BaseLayerWithLoRA) and cls is not BaseLayerWithLoRA
+    VocabParallelEmbeddingWithLoRA, ColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithLoRA, QKVParallelLinearWithLora,
+    MergedQKVParallelLinearWithLora, RowParallelLinearWithLoRA,
+    LogitsProcessorWithLoRA, ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA
 }
 
 
