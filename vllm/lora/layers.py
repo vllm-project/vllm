@@ -399,9 +399,9 @@ class LinearWithLoRA(BaseLayerWithLoRA):
         _apply_lora(
             x,
             self.lora_a_stacked,
-            torch.cat([self.lora_b_stacked, self._b], 2),
+            torch.cat((self.lora_b_stacked, self._b), 2),
             self.indices[:self.indices_len[0]],
-            torch.cat([output, _output], 1),
+            torch.cat((output, _output), 1),
         )
 
         return output
@@ -509,9 +509,9 @@ class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
         _apply_lora(
             x,
             self.lora_a_stacked,
-            torch.cat([self.lora_b_stacked, self._b], 2),
+            torch.cat((self.lora_b_stacked, self._b), 2),
             self.indices[:self.indices_len[0]],
-            torch.cat([output, _output], 1),
+            torch.cat((output, _output), 1),
         )
 
         return output
