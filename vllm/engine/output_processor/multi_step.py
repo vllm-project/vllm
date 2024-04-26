@@ -80,6 +80,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
+        output_logprobs = [sample.logprobs for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -104,15 +105,17 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id in output_token_ids:
+        for output_token_id, output_logprob in zip(output_token_ids, output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
                 # TODO emit logprobs in multi-step decoding.
                 # TODO get correct rank
-                logprobs={output_token_id: Logprob(
-                    logprob=0.1,
-                    rank=1,
-                    decoded_token="todo")},
+                logprobs=output_logprob,
+                #{output_token_id:Logprob(
+                #    logprob=0.1,
+                #    rank=1,
+                #    decoded_token="todo")
+                #    },
             )
 
             new_char_count = 0
