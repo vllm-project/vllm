@@ -16,12 +16,14 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 
 import vllm
+from vllm import AsyncLLMEngine, AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 
 openai_serving_chat: OpenAIServingChat = None
 openai_serving_completion: OpenAIServingCompletion = None
@@ -45,9 +47,9 @@ def parse_args():
 
 router = APIRouter()
 app = FastAPI(lifespan=lifespan)
-
-
-# Add prometheus asgi middleware to route /metrics requests
+engine = None
+openai_serving_chat = None
+openai_serving_completion = None
 
 
 @app.exception_handler(RequestValidationError)
@@ -104,7 +106,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
-def get_app() -> FastAPI:
+def get_app(*args) -> FastAPI:
     """
     Get FastAPI application.
 
@@ -112,10 +114,31 @@ def get_app() -> FastAPI:
 
     :return: application.
     """
+    global engine
+    global openai_serving_chat
+    global openai_serving_completion
+
     metrics_app = make_asgi_app()
 
     app.mount("/metrics", metrics_app)
     app.include_router(router=router)
-    # TODO: add engine
+
+    openai_config_dict = {
+        "response_role": "assistant",
+        "lora_modules": None,
+        "chat_template": None,
+        "served_model_names": ["facebook/opt-125m"],
+
+    }
+    engine_args = AsyncEngineArgs("facebook/opt-125m")
+    # engine_args = AsyncEngineArgs.from_cli_args(argparse.Namespace(**engine_config_dict))
+    engine = AsyncLLMEngine.from_engine_args(
+        engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+    openai_serving_chat = OpenAIServingChat(engine, openai_config_dict["served_model_names"],
+                                            openai_config_dict["response_role"],
+                                            openai_config_dict["lora_modules"],
+                                            openai_config_dict["chat_template"])
+    openai_serving_completion = OpenAIServingCompletion(
+        engine, openai_config_dict["served_model_names"], openai_config_dict["lora_modules"])
 
     return app
