@@ -729,6 +729,8 @@ class AsyncLLMEngine:
         else:
             await self.engine.check_health_async()
 
-        logger_data = {"perf_counter": f"{time.perf_counter()-t}", extra=logger_data}
-        logger.debug("Health check took %fs", time.perf_counter() - t)
+        logger_data = {"perf_counter": f"{time.perf_counter()-t}"}
+        logger.debug(
+            "Health check took %fs", time.perf_counter() - t, extra=logger_data
+        )
 
