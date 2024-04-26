@@ -42,7 +42,7 @@ _MODELS = {
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
-    "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
+    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
@@ -91,8 +91,8 @@ class ModelRegistry:
                     "ROCm for now.")
             if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
                 logger.warning(
-                    f"Model architecture {model_arch} is partially supported "
-                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+                    "Model architecture %s is partially supported by ROCm: %s",
+                    model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
         module_name, model_cls_name = _MODELS[model_arch]
         module = importlib.import_module(
@@ -107,9 +107,9 @@ class ModelRegistry:
     def register_model(model_arch: str, model_cls: Type[nn.Module]):
         if model_arch in _MODELS:
             logger.warning(
-                f"Model architecture {model_arch} is already registered, "
-                "and will be overwritten by the new model "
-                f"class {model_cls.__name__}.")
+                "Model architecture %s is already registered, and will be "
+                "overwritten by the new model class %s.", model_arch,
+                model_cls.__name__)
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
 
