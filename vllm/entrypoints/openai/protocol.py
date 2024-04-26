@@ -284,6 +284,11 @@ class CompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-completion-extra-params
 
