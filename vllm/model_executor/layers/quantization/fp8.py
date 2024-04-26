@@ -35,12 +35,8 @@ class FP8Config(QuantizationConfig):
         return 90
 
     @classmethod
-    def require_config_file(cls) -> bool:
-        return False
-
-    @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return ["quantize_config.json"]
+        return []
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
