@@ -1,6 +1,6 @@
+import torch
 import triton
 import triton.language as tl
-import torch
 
 
 def blocksparse_flash_attn_varlen_fwd(

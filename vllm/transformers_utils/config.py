@@ -1,9 +1,8 @@
 from typing import Optional
 
-from transformers import PretrainedConfig
+from transformers import AutoConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import *
-from vllm.transformers_utils.configs.phi3small import Phi3SmallConfig
 
 _CONFIG_REGISTRY = {
     "chatglm": ChatGLMConfig,
@@ -12,7 +11,6 @@ _CONFIG_REGISTRY = {
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
     "jais": JAISConfig,
-    "phi3-small": Phi3SmallConfig,
 }
 
 
@@ -21,10 +19,11 @@ def get_config(model: str,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None) -> PretrainedConfig:
     try:
-        config = Phi3SmallConfig(model,
-                                 trust_remote_code=trust_remote_code,
-                                 revision=revision,
-                                 code_revision=code_revision)
+        config = AutoConfig.from_pretrained(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):

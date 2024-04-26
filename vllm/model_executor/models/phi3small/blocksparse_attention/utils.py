@@ -1,6 +1,7 @@
+from functools import lru_cache
+
 import torch
 import triton
-from functools import lru_cache
 
 
 # helper functions for 3D sparse pattern

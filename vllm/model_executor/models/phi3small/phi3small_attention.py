@@ -1,27 +1,20 @@
 # from vllm.attention import Attention, AttentionMetadata
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-import os
 from torch import nn
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionMetadata,
-)
-from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
-
-from .blocksparse_attention.interface import (
-    LocalStridedBlockSparseAttn,
-    LocalStridedBlockSparsePagedAttn,
-)
-
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionMetadata)
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+
+from .blocksparse_attention.interface import (LocalStridedBlockSparseAttn,
+                                              LocalStridedBlockSparsePagedAttn)
 
 
 class BlockSparseFlashAttention(nn.Module):

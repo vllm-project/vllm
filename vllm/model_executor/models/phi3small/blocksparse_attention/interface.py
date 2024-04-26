@@ -1,16 +1,16 @@
-import torch
 import math
 from functools import lru_cache
-from .utils import get_sparse_attn_mask, dense_to_crow_col
+
+import torch
+
+from .utils import dense_to_crow_col, get_sparse_attn_mask
 
 IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
                          and torch.cuda.get_device_capability()[0] >= 8)
 
 if IS_COMPUTE_8_OR_ABOVE:
-    from .kernels import (
-        blocksparse_flash_attn_varlen_fwd,
-        blocksparse_flash_attn_varlen_fwd_with_blocktable,
-    )
+    from .kernels import (blocksparse_flash_attn_varlen_fwd,
+                          blocksparse_flash_attn_varlen_fwd_with_blocktable)
 
 
 class LocalStridedBlockSparseAttn(torch.nn.Module):
@@ -321,9 +321,10 @@ class LocalStridedBlockSparsePagedAttn(torch.nn.Module):
             self.sparse_layout = sparse_layout
             self.sparse_pattern = self.sparse_pattern
 
+    @classmethod
     @lru_cache
     def get_remote_sparse_layout(
-        self,
+        cls,
         n_heads,
         max_seqlen,
         dtype,

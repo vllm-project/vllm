@@ -1,37 +1,28 @@
-from typing import List, Optional, Tuple
 import math
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (
-    LinearMethodBase,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-    DEFAULT_VOCAB_PADDING_SIZE,
-)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
-from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs import Phi3SmallConfig
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.phi3small.phi3small_attention import (
-    BlockSparseFlashAttention, )
+    BlockSparseFlashAttention)
+from vllm.model_executor.parallel_utils.parallel_state import (
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
+from vllm.sequence import SamplerOutput
+from transformers.configuration_utils import PretrainedConfig
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
@@ -81,10 +72,9 @@ def gegelu(input, limit: Optional[float] = None):
 
 
 class Phi3SmallMLP(nn.Module):
-
     def __init__(
         self,
-        config: Phi3SmallConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ) -> None:
         super().__init__()
@@ -116,9 +106,8 @@ class Phi3SmallMLP(nn.Module):
 
 
 class Phi3SmallSelfAttention(nn.Module):
-
     def __init__(self,
-                 config: Phi3SmallConfig,
+                 config: PretrainedConfig,
                  layer_idx: Optional[int] = None) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -199,7 +188,6 @@ class Phi3SmallSelfAttention(nn.Module):
         self.blocksparse_num_local_blocks = config.blocksparse_num_local_blocks
         self.blocksparse_vert_stride = config.blocksparse_vert_stride
 
-        # Phi3Small
         use_dense_attn = (getattr(self.config,
                                   "dense_attention_every_n_layers", None)
                           and (self.layer_idx + 1) %
@@ -233,17 +221,14 @@ class Phi3SmallSelfAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[Tuple[torch.Tensor]]]:
-        """_summary_"""
-
-        # TODO: why the bias is not used?
         qkv, _ = self.query_key_value(hidden_states)
 
         qkv = qkv.view(qkv.shape[:-1] +
                        (-1, (self.num_q_per_kv + 2), self.head_dim))
         q, k, v = qkv.split([self.num_q_per_kv, 1, 1], dim=-2)
 
-        # NOTE: maybe we should change the order of qkv weights so that we don't
-        # need to reshape, but using view
+        # NOTE: this is required by RotaryEmbed, which indeed does not have to
+        # TODO: allow 3D QK for rotary forward
         q = q.reshape(-1, self.head_dim * self.num_heads_per_partition)
         k = k.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
         v = v.reshape(-1, self.head_dim * self.num_kv_heads_per_partion)
@@ -256,10 +241,9 @@ class Phi3SmallSelfAttention(nn.Module):
 
 
 class Phi3SmallDecoderLayer(nn.Module):
-
     def __init__(
         self,
-        config: Phi3SmallConfig,
+        config: PretrainedConfig,
         layer_idx: int,
         linear_method: Optional[LinearMethodBase] = None,
     ):
@@ -302,7 +286,7 @@ class Phi3SmallModel(nn.Module):
 
     def __init__(
         self,
-        config: Phi3SmallConfig,
+        config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
