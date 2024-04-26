@@ -1,5 +1,8 @@
 import math
-
+try:
+    import timm
+except ImportError:
+    raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 from PIL import Image
 from torchvision import transforms
@@ -70,63 +73,71 @@ def get_grid_placeholder(grid, query_num):
     return slice_placeholder
 
 
-def get_slice_image_placeholder(config, image):
-    image_placeholder = config.query_num + 2
+class MiniCPMV_VLLM:
+    def __init__(self) -> None:
+        self.config = AutoConfig.from_pretrained('openbmb/MiniCPM-V-2',
+                                            trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained('openbmb/MiniCPM-V-2',
+                                                trust_remote_code=True)
+        self.llm = LLM(
+            model="openbmb/MiniCPM-V-2",
+            image_input_type="pixel_values",
+            image_token_id=101,
+            image_input_shape="1,3,448,448",
+            image_feature_size=64,
+            gpu_memory_utilization=0.75,
+            trust_remote_code=True,
+        )
 
-    best_grid = slice_image(
-        image,
-        config.max_slice_nums,
-        config.scale_resolution,
-        config.patch_size,
-    )
-    final_placeholder = image_placeholder
+    def get_slice_image_placeholder(self, image):
+        image_placeholder = self.config.query_num + 2
 
-    if best_grid is not None:
-        final_placeholder += get_grid_placeholder(best_grid, config.query_num)
+        best_grid = slice_image(
+            image,
+            self.config.max_slice_nums,
+            self.config.scale_resolution,
+            self.config.patch_size,
+        )
+        final_placeholder = image_placeholder
 
-    return final_placeholder - 1
+        if best_grid is not None:
+            final_placeholder += get_grid_placeholder(best_grid, self.config.query_num)
 
+        return final_placeholder - 1
 
-config = AutoConfig.from_pretrained('openbmb/MiniCPM-V-2',
-                                    trust_remote_code=True)
-tokenizer = AutoTokenizer.from_pretrained('openbmb/MiniCPM-V-2',
-                                          trust_remote_code=True)
+    def generate(self, image, question, sampling_params):
+        addtion_tokens = self.get_slice_image_placeholder(image)
+        image = transforms.Compose([transforms.ToTensor()])(img=image)
+        images = torch.stack([image])
 
-sampling_params = SamplingParams(
-    temperature=0.7,
-    top_p=0.8,
-    top_k=100,
-    seed=3472,
-    max_tokens=1024,
-    min_tokens=150,
-    # temperature=0,
-    # use_beam_search=True,
-    # length_penalty=1.2,
-    # best_of=3
-)
-llm = LLM(
-    model="openbmb/MiniCPM-V-2",
-    image_input_type="pixel_values",
-    image_token_id=101,
-    image_input_shape="1,3,448,448",
-    image_feature_size=64,
-    gpu_memory_utilization=0.75,
-    trust_remote_code=True,
-)
+        prompt = "<用户><image></image>" + \
+            question + \
+            "<AI>" + '<unk>' * addtion_tokens
+
+        outputs = self.llm.generate(prompt,
+                            multi_modal_data=MultiModalData(
+                                type=MultiModalData.Type.IMAGE, data=images),
+                            sampling_params=sampling_params)
+        return outputs[0].outputs[0].text
+
 
 if __name__ == '__main__':
+    model = MiniCPMV_VLLM()
+
+    sampling_params = SamplingParams(
+        temperature=0.7,
+        top_p=0.8,
+        top_k=100,
+        seed=3472,
+        max_tokens=1024,
+        min_tokens=150,
+        # temperature=0,
+        # use_beam_search=True,
+        # length_penalty=1.2,
+        # best_of=3
+    )
+
     image = Image.open('./example.png').convert('RGB')
-    addtion_tokens = get_slice_image_placeholder(config, image)
-    image = transforms.Compose([transforms.ToTensor()])(img=image)
-    images = torch.stack([image])
-
-    prompt = "<用户><image></image>" + \
-        "Provide an intricate description of the image." + \
-        "<AI>" + '<unk>' * addtion_tokens
-
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images),
-                           sampling_params=sampling_params)
-
-    print(outputs[0].outputs[0].text)
+    question = "Provide an intricate description of the image."
+    response = model.generate(image, question, sampling_params)
+    print(response)
