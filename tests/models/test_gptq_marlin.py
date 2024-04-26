@@ -87,11 +87,6 @@ def test_models(
 
     del gptq_model
 
-    for prompt_idx, (outputs_0, outputs_1) in enumerate(
-            zip(gptq_outputs, gptq_marlin_outputs)):
-        output_ids_0, output_str_0, logprobs_0 = outputs_0
-        output_ids_1, output_str_1, logprobs_1 = outputs_1
-
     # Compare
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,

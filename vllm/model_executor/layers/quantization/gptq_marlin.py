@@ -198,7 +198,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_size_per_partition: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
@@ -216,6 +216,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 f"The params dtype must be float16, but got {params_dtype}")
 
         # Validate output_size_per_partition
+        output_size_per_partition = sum(output_partition_sizes)
         if output_size_per_partition % self.quant_config.min_thread_n != 0:
             raise ValueError(
                 f"Weight output_size_per_partition = "
