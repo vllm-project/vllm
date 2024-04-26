@@ -331,7 +331,7 @@ def attn_fwd(
     philox_offset_base,
     encoded_softmax,
     HQ: tl.constexpr,
-    HK:tl.constexpr,
+    HK: tl.constexpr,
     ACTUAL_BLOCK_DMODEL: tl.constexpr,
     MAX_SEQLENS_Q: tl.constexpr,
     MAX_SEQLENS_K: tl.constexpr,
@@ -403,7 +403,7 @@ def attn_fwd(
             # We still need to write 0s to the result
             # tl.store(O_block_ptr,
             # acc.to(Out.type.element_ty), boundary_check=(0,1))
-            # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q 
+            # l_ptrs = L + off_z * HQ * MAX_SEQLENS_Q + off_h_q * MAX_SEQLENS_Q
             #          + offs_m
             # We store inf to LSE, not -inf because in the bwd pass,
             # we subtract this
@@ -416,10 +416,7 @@ def attn_fwd(
 
     # If MQA / GQA, set the K and V head offsets appropriately.
     GROUP_SIZE: tl.constexpr = HQ // HK
-    if GROUP_SIZE != 1:
-        off_h_k = off_h_q // GROUP_SIZE
-    else:
-        off_h_k = off_h_q
+    off_h_k = off_h_q // GROUP_SIZE if GROUP_SIZE != 1 else off_h_q
 
     n_extra_tokens = 0
     if seqlen_k < BLOCK_N:
@@ -472,7 +469,7 @@ def attn_fwd(
         bias_ptr = None
     if ENABLE_DROPOUT:
         batch_philox_offset = philox_offset_base \
-                              + (off_z * hq + off_h_q) \
+                              + (off_z * HQ + off_h_q) \
                               * seqlen_q * seqlen_k
     else:
         batch_philox_offset = 0
