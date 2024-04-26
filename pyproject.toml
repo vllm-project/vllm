@@ -31,6 +31,7 @@ select = [
     "SIM",
     # isort
     # "I",
+    "G",
 ]
 ignore = [
     # star imports
