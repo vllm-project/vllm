@@ -39,6 +39,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8_serialized import FP8LinearMethod
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod,
                                                          per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -79,7 +80,8 @@ class MixtralMoE(nn.Module):
         self.intermediate_size = intermediate_size // self.tp_size
         # FIXME(pcmoritz): Make this more general to support different
         # quantization schemes
-        self.use_fp8 = isinstance(linear_method, Fp8LinearMethod)
+        self.use_fp8 = (isinstance(linear_method, Fp8LinearMethod) or 
+                        isinstance(linear_method, FP8LinearMethod))
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -90,19 +92,22 @@ class MixtralMoE(nn.Module):
                                      bias=False,
                                      params_dtype=self.params_dtype,
                                      linear_method=None)
+        
+        if self.use_fp8:
+            params_dtype = torch.float8_e4m3fn
 
         self.ws = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=params_dtype))
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
@@ -120,16 +125,23 @@ class MixtralMoE(nn.Module):
             torch.ones(
                 self.num_total_experts, device="cuda", dtype=torch.float32),
             requires_grad=False) if self.use_fp8 else None
+        
+        set_weight_attrs(self.ws_scale, {
+            "weight_loader": self.weight_loader,
+        })
+        set_weight_attrs(self.w2s_scale, {
+            "weight_loader": self.weight_loader,
+        })
 
         # Scaling factors for FP8 activations
         need_act_scales = (self.use_fp8
                            and linear_method.quant_config.activation_scheme
                            == "static")
         self.as_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
+            torch.zeros(self.num_total_experts, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
         self.a2s_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
+            torch.zeros(self.num_total_experts, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
 
         if need_act_scales:
@@ -152,27 +164,29 @@ class MixtralMoE(nn.Module):
             param_data[expert_id,
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
-            param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if "act_scale" in weight_name:
-            param_data[:] = param_data[:].max(loaded_weight)
+            param_data[expert_id] = loaded_weight[:, shard]
+        if "act_scale" in weight_name or "weight_scale" in weight_name:
+            param_data[expert_id] = loaded_weight
 
-    def process_weights_after_loading(self):
-        if self.use_fp8:
-            ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
-            w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
-            for expert in range(self.num_total_experts):
-                ws[expert, :, :], self.ws_scale[expert] = per_tensor_quantize(
-                    self.ws.data[expert, :, :])
-                w2s[expert, :, :], self.w2s_scale[
-                    expert] = per_tensor_quantize(self.w2s.data[expert, :, :])
-            self.ws = nn.Parameter(ws, requires_grad=False)
-            self.w2s = nn.Parameter(w2s, requires_grad=False)
+    # def process_weights_after_loading(self):
+    #     if self.use_fp8:
+    #         ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
+    #         w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
+    #         for expert in range(self.num_total_experts):
+    #             ws[expert, :, :], self.ws_scale[expert] = per_tensor_quantize(
+    #                 self.ws.data[expert, :, :])
+    #             w2s[expert, :, :], self.w2s_scale[
+    #                 expert] = per_tensor_quantize(self.w2s.data[expert, :, :])
+    #         self.ws = nn.Parameter(ws, requires_grad=False)
+    #         self.w2s = nn.Parameter(w2s, requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+
+        # TODO: fused MoE kernel might want to take different scales for each expert?
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
@@ -183,8 +197,8 @@ class MixtralMoE(nn.Module):
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
                                         w2_scale=self.w2s_scale,
-                                        a1_scale=self.as_scale,
-                                        a2_scale=self.a2s_scale)
+                                        a1_scale=self.as_scale.max(),
+                                        a2_scale=self.a2s_scale.max())
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -466,6 +480,13 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the activation scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("ws_scale" if weight_name in ["w1", "w3"] else "w2s_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
