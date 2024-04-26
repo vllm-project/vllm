@@ -28,7 +28,7 @@ body:
     description: >
       The feedback period of the RFC. Usually at least one week.
   validations:
-    required: true
+    required: false
 - type: textarea
   attributes:
     label: CC List.
