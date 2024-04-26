@@ -21,7 +21,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only LLaMA model compatible with HuggingFace weights."""
-import logging
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -412,11 +411,11 @@ class LlamaForCausalLM(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    logging.info(f"Skipped loading of bias: {name}")  # noqa: G004
+                    print(f"Skipped loading of bias: {name}")  # noqa: G004
                     continue
                 # Skip loading extra g_idx for GPTQ models.
                 if name.endswith(".g_idx") and name not in params_dict:
-                    logging.info(f"Skipped loading of g_idx: {name}")  # noqa: G004
+                    print(f"Skipped loading of g_idx: {name}")  # noqa: G004
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
