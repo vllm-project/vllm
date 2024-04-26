@@ -1,10 +1,13 @@
 import asyncio
+import datetime
 import enum
 import gc
 import glob
 import os
 import socket
 import subprocess
+import tempfile
+import threading
 import uuid
 import warnings
 from collections import defaultdict
@@ -18,7 +21,7 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -553,6 +556,34 @@ def nccl_integrity_check(filepath):
     return version.value
 
 
+@lru_cache(maxsize=None)
+def find_library(lib_name: str) -> str:
+    """
+    Find the library file in the system.
+    `lib_name` is full filename, with both prefix and suffix.
+    This function resolves `lib_name` to the full path of the library.
+    """
+    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
+    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
+    # `/sbin/ldconfig` should exist in all Linux systems.
+    # `/sbin/ldconfig` searches the library in the system
+    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+    # each line looks like the following:
+    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
+    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
+    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
+    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    if not locs and env_ld_library_path:
+        locs = [
+            os.path.join(dir, lib_name)
+            for dir in env_ld_library_path.split(":")
+            if os.path.exists(os.path.join(dir, lib_name))
+        ]
+    if not locs:
+        raise ValueError(f"Cannot find {lib_name} in the system.")
+    return locs[0]
+
+
 def find_nccl_library():
     so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
 
@@ -572,10 +603,26 @@ def find_nccl_library():
         )
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or "libnccl.so.2"
+            so_file = vllm_nccl_path or find_library("libnccl.so.2")
         elif torch.version.hip is not None:
-            so_file = "librccl.so.1"
+            so_file = find_library("librccl.so.1")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info(f"Found nccl from library {so_file}")
     return so_file
+
+
+def enable_trace_function_call_for_thread() -> None:
+    """Set up function tracing for the current thread,
+    if enabled via the VLLM_TRACE_FUNCTION environment variable
+    """
+
+    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+        tmp_dir = tempfile.gettempdir()
+        filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                    f"_thread_{threading.get_ident()}_"
+                    f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                filename)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        enable_trace_function_call(log_path)

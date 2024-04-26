@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod, abstractproperty
-from typing import Any, Dict, List, Optional, Set, Type
+from typing import Any, Dict, List, Set, Type
 
 import torch
 
@@ -37,7 +37,7 @@ class AbstractWorkerLoRAManager(ABC):
         ...
 
     @abstractmethod
-    def set_active_loras(self, lora_requests: List[LoRARequest],
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         ...
 
@@ -54,7 +54,7 @@ class AbstractWorkerLoRAManager(ABC):
         ...
 
     @abstractmethod
-    def remove_all_loras(self) -> bool:
+    def remove_all_loras(self):
         ...
 
     @abstractmethod
@@ -81,10 +81,11 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         embedding_padding_modules: List[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
     ):
-        self._lora_manager: Optional[LoRAModelManager] = None
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self.embedding_padding_modules = embedding_padding_modules
+        # Lazily initialized by create_lora_manager.
+        self._lora_manager: LoRAModelManager
         super().__init__(max_num_seqs, max_num_batched_tokens, vocab_size,
                          lora_config, device)
 
@@ -104,7 +105,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             lora_config=self.lora_config,
             lora_manager_cls=self._lora_manager_cls,
         )
-        self._lora_manager: LoRAModelManager = lora_manager
+        self._lora_manager = lora_manager
         return lora_manager.model
 
     def set_active_loras(self, lora_requests: Set[LoRARequest],
@@ -188,7 +189,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     def remove_lora(self, lora_id: int) -> bool:
         return self._lora_manager.remove_lora(lora_id)
 
-    def remove_all_loras(self) -> bool:
+    def remove_all_loras(self):
         self._lora_manager.remove_all_loras()
 
     def list_loras(self) -> Set[int]:
@@ -217,10 +218,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             lora_config=self.lora_config,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
-        self._lora_manager: LRUCacheLoRAModelManager = lora_manager
+        self._lora_manager = lora_manager
         return lora_manager.model
 
-    def _apply_loras(self, lora_requests: List[LoRARequest]) -> None:
+    def _apply_loras(self, lora_requests: Set[LoRARequest]) -> None:
         loras_map = {
             lora_request.lora_int_id: lora_request
             for lora_request in lora_requests if lora_request
@@ -237,12 +238,14 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         if lora_request.lora_int_id not in self.list_loras():
             # Remove before we load the new lora to save memory
             if len(self._lora_manager) + 1 > self._lora_manager.capacity:
+                assert isinstance(self._lora_manager, LRUCacheLoRAModelManager)
                 self._lora_manager.remove_oldest_lora()
             lora = self._load_lora(lora_request)
             loaded = self._lora_manager.add_lora(lora)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches
-            loaded = self._lora_manager.get_lora(lora_request.lora_int_id)
+            loaded = self._lora_manager.get_lora(
+                lora_request.lora_int_id) is not None
         self._lora_manager.activate_lora(lora_request.lora_int_id)
         return loaded

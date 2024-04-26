@@ -172,7 +172,7 @@ class DefaultModelLoader(BaseModelLoader):
         if not is_local:
             hf_folder = download_weights_from_hf(model_name_or_path,
                                                  self.load_config.download_dir,
-                                                 allow_patterns)
+                                                 allow_patterns, revision)
         else:
             hf_folder = model_name_or_path
 
@@ -232,6 +232,8 @@ class DefaultModelLoader(BaseModelLoader):
                 linear_method = getattr(module, "linear_method", None)
                 if linear_method is not None:
                     linear_method.process_weights_after_loading(module)
+                if hasattr(module, "process_weights_after_loading"):
+                    module.process_weights_after_loading()
         return model.eval()
 
 
