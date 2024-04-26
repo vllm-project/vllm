@@ -248,7 +248,7 @@ class StatLogger:
                 stats.num_waiting,
                 stats.gpu_cache_usage * 100,
                 stats.cpu_cache_usage * 100,
-                extra=logger_data,
+                extra=logger_data
             )
 
             # Reset tracked stats for next interval.
