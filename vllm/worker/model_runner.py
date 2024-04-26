@@ -20,12 +20,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad,
-                        maybe_expand_dim)
+from vllm.utils import (CudaMemoryProfiler, is_hip, is_pin_memory_available,
+                        make_tensor_with_pad)
 
 logger = init_logger(__name__)
 
@@ -547,108 +546,6 @@ class ModelRunner:
             slot_mapping=slot_mapping,
         )
 
-    def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
-    ) -> SamplingMetadata:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        selected_token_indices: List[int] = []
-        generators: List[torch.Generator] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices: Dict[SamplingType,
-                                         List[Tuple[int, int]]] = {
-                                             t: []
-                                             for t in SamplingType
-                                         }
-        categorized_sample_indices_start_idx = 0
-        categorized_sampled_token_indices_start_idx = 0
-
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            if seq_group_metadata.is_prompt:
-                assert len(seq_ids) == 1
-                assert subquery_lens is not None
-                subquery_len = subquery_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        (categorized_sample_indices_start_idx,
-                         categorized_sampled_token_indices_start_idx))
-                categorized_sample_indices_start_idx += 1
-                categorized_sampled_token_indices_start_idx += 1
-
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += subquery_len
-
-                if sampling_params.seed is not None:
-                    seq_group_metadata.state.generator = torch.Generator(
-                        device=self.device).manual_seed(sampling_params.seed)
-            else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        list(
-                            zip(
-                                range(
-                                    categorized_sample_indices_start_idx,
-                                    categorized_sample_indices_start_idx +
-                                    num_seqs),
-                                range(
-                                    categorized_sampled_token_indices_start_idx,
-                                    categorized_sampled_token_indices_start_idx
-                                    + num_seqs))))
-                categorized_sample_indices_start_idx += num_seqs
-                categorized_sampled_token_indices_start_idx += num_seqs
-
-            if sampling_params.seed is not None:
-                generators.append(seq_group_metadata.state.generator)
-
-        selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=self.device,
-                                                  pin_memory=self.pin_memory)
-
-        categorized_sample_indices = {
-            t: maybe_expand_dim(
-                async_tensor_h2d(seq_ids,
-                                 dtype=torch.int,
-                                 target_device=self.device,
-                                 pin_memory=self.pin_memory), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        sampling_metadata = SamplingMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
-        return sampling_metadata
-
     def prepare_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
@@ -685,9 +582,9 @@ class ModelRunner:
                 decode_lora_requests,
                 decode_slot_mapping,
             ) = self._prepare_decode(decode_reqs)
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list, prompt_lens, subquery_lens,
+                self.device, self.pin_memory)
 
             if not self.scheduler_config.chunked_prefill_enabled:
                 assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -788,12 +685,9 @@ class ModelRunner:
                     **metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
-                seq_data=None,
-                prompt_lens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
-                generators=None,
-                perform_sampling=False,
+                num_prompts=0,
             )
 
             # if it is a mixed batch, decode attn_metadata is broadcasted
@@ -852,7 +746,7 @@ class ModelRunner:
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
+        if not self.is_driver_worker:
             return None
 
         # Sample the next token.
@@ -860,6 +754,7 @@ class ModelRunner:
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
         return output
 
     @torch.inference_mode()
