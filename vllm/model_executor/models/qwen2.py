@@ -33,11 +33,12 @@ from vllm.config import LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -54,17 +55,17 @@ class Qwen2MLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
-            linear_method=linear_method)
+            quant_config=quant_config)
         self.down_proj = RowParallelLinear(intermediate_size,
                                            hidden_size,
                                            bias=False,
-                                           linear_method=linear_method)
+                                           quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -86,7 +87,7 @@ class Qwen2Attention(nn.Module):
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
                  use_sliding_window: bool = False,
-                 linear_method: Optional[LinearMethodBase] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -117,13 +118,13 @@ class Qwen2Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         self.rotary_emb = get_rope(
@@ -159,7 +160,7 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         config: Qwen2Config,
         layer_idx: int,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -174,13 +175,13 @@ class Qwen2DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             use_sliding_window=use_sliding_window,
-            linear_method=linear_method,
+            quant_config=quant_config,
             sliding_window=config.sliding_window)
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -221,7 +222,7 @@ class Qwen2Model(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -233,7 +234,7 @@ class Qwen2Model(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            Qwen2DecoderLayer(config, layer_idx, linear_method)
+            Qwen2DecoderLayer(config, layer_idx, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -286,14 +287,14 @@ class Qwen2ForCausalLM(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         del lora_config
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.model = Qwen2Model(config, linear_method)
+        self.quant_config = quant_config
+        self.model = Qwen2Model(config, quant_config)
 
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight

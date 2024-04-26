@@ -50,10 +50,10 @@ def test_load_with_tensorizer(mock_agent, tensorizer_config):
     mock_agent_instance.deserialize.return_value = MagicMock()
 
     result = load_with_tensorizer(tensorizer_config,
-                                  linear_method=mock_linear_method)
+                                  quant_method=mock_linear_method)
 
     mock_agent.assert_called_once_with(tensorizer_config,
-                                       linear_method=mock_linear_method)
+                                       quant_method=mock_linear_method)
     mock_agent_instance.deserialize.assert_called_once()
     assert result == mock_agent_instance.deserialize.return_value
 
