@@ -227,13 +227,13 @@ class StatLogger:
 
             # Log to stdout.
             logger_data = {
-                "avg_prompt_throughput": f"{prompt_throughput:.1f}",
+                "avg_prompt_throughput": prompt_throughput,
                 "avg_generation_throughput": generation_throughput,
                 "running": stats.num_running,
                 "swapped": stats.num_swapped,
                 "pending": stats.num_waiting,
-                "gpu_kv_cache_usage": f"{stats.gpu_cache_usage * 100:.1f}",
-                "cpu_kv_cache_usage": f"{stats.cpu_cache_usage * 100:.1f}"
+                "gpu_kv_cache_usage": stats.gpu_cache_usage * 100,
+                "cpu_kv_cache_usage": stats.cpu_cache_usage * 100
             }
             logger.info(
                 "Avg prompt throughput: %.1f tokens/s, "
