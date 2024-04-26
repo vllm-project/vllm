@@ -199,7 +199,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   constexpr int tz = 4;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if constexpr (feat_in < feat_out) {
+  if constexpr (feat_in <= feat_out) {
     static_assert(feat_in % vec_size == 0);
     constexpr int tx = feat_in / vec_size;
 

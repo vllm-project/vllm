@@ -74,9 +74,12 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 // Keep above in sync with vllm/lora/layers::LogitsProcessorWithLoRA
 // and vllm/tests/lora/test_punica.py
 
-// Used for defining kernels going from the variety of dim in to the narrow dim out
-    // one, because the kernel has this flexibility so add support for it
-    // but mainly, using it for the fully sharded column parallel LoRA A which splits the rank dim
+// Used for defining kernels going from the variety of 
+// dim in to the narrow dim out
+    // one, because the kernel has this flexibility so 
+    // add support for it
+    // but mainly, using it for the fully sharded column 
+    // parallel LoRA A which splits the rank dim
 #define FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, narrow) \
     f(in_T, out_T, W_T, 128, narrow) \
     f(in_T, out_T, W_T, 256, narrow) \
@@ -153,5 +156,11 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 1) \
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 2) \
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 4) \
+    // extra expand shapes, allow for higher 
+    // tensor parallel size (most likely for QKV)
+    f(in_T, out_T, W_T, 8, 64) \
+    f(in_T, out_T, W_T, 16, 64) \
+    f(in_T, out_T, W_T, 32, 64) \
+    f(in_T, out_T, W_T, 64, 64)
 
 // clang-format on

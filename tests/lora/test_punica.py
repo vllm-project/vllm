@@ -23,7 +23,6 @@ def _lora_ref_impl(
     indicies: torch.LongTensor,
     layer_idx: int,
     scale: float,
-    just_lora_a: bool = False,
 ):
     y_stage_1 = torch.empty(
         (x.size(0), wa_T_all.size(-2)),
@@ -35,14 +34,14 @@ def _lora_ref_impl(
     for i, lora_idx in zip(range(bs), indicies.cpu().tolist()):
         xi = x[i].unsqueeze(0).to(torch.float32)
         wa = wa_T_all[lora_idx, layer_idx].transpose(-1, -2).to(torch.float32)
-        if not just_lora_a:
+        if wb_T_all is not None:
             wb = wb_T_all[lora_idx, layer_idx].transpose(-1,
                                                          -2).to(torch.float32)
 
         tmp = xi @ wa
         y_stage_1[i] = tmp.squeeze(0)
         y_final[i] += ((tmp @ wb).squeeze(0) *
-                       s if not just_lora_a else y_stage_1[i])
+                       s if wb_T_all is not None else y_stage_1[i])
     return y_final, y_stage_1
 
 
@@ -95,6 +94,7 @@ H1 = H2 = [
     128000,
     128256,
 ]
+H2 = [64] + H2
 R = [1, 2, 4]
 SEED = [0xabcdabcd987]
 CUDA_DEVICES = [
@@ -107,7 +107,7 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("r", R)
 @pytest.mark.parametrize("seed", SEED)
 @torch.inference_mode()
-def test_tp_lora_a_correctness(dtype_str, h1, r, seed):
+def test_lora_a_extra_shapes(dtype_str, h1, r, seed):
     torch.manual_seed(seed)
     num_loras = 4
     num_layers = 1
@@ -135,7 +135,7 @@ def test_tp_lora_a_correctness(dtype_str, h1, r, seed):
                        indices,
                        layer_idx,
                        1.0,
-                       just_lora_a=True)
+                       )
 
         y_our = y.clone()
         punica.bgmv(y_our, x, wa_T_all, indices, layer_idx, 1.0)
