@@ -55,10 +55,10 @@ def _get_gemma_act_fn(
                 "in the config JSON file when it was initially released. "
                 "Changing the activation function to approximate GeLU "
                 "(`gelu_pytorch_tanh`). If you want to use the legacy "
-                f"`{hidden_act}`, edit the config JSON to set "
-                f"`hidden_activation={hidden_act}` instead of `hidden_act`. "
+                "`%s`, edit the config JSON to set "
+                "`hidden_activation=%s` instead of `hidden_act`. "
                 "See https://github.com/huggingface/transformers/pull/29402 "
-                "for more details.")
+                "for more details.", hidden_act, hidden_act)
         return GeluAndMul(approximate="tanh")
     elif hidden_activation == "gelu_pytorch_tanh":
         return GeluAndMul(approximate="tanh")

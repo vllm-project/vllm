@@ -345,8 +345,8 @@ class LoRAModelManager:
         index, _ = first_free_slot
         self._active_loras[lora_id] = None
         lora_model = self._registered_loras[lora_id]
-        logger.debug(
-            f"Activating LoRA. int id: {lora_model.id}, slot index: {index}")
+        logger.debug("Activating LoRA. int id: %d, slot index: %d",
+                     lora_model.id, index)
         self.lora_index_to_id[index] = lora_model.id
         for module_name, module in self.modules.items():
             module_lora = lora_model.get_lora(module_name)
@@ -567,7 +567,7 @@ class LoRALRUCache(LRUCache[LoRAModel]):
         self.deactivate_lora_fn = deactivate_lora_fn
 
     def _on_remove(self, key: int, value: LoRAModel):
-        logger.debug(f"Removing LoRA. int id: {key}")
+        logger.debug("Removing LoRA. int id: %d", key)
         self.deactivate_lora_fn(key)
         return super()._on_remove(key, value)
 
