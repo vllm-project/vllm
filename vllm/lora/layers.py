@@ -349,7 +349,8 @@ class LinearWithLoRA(BaseLayerWithLoRA):
         self.indices_len: Optional[List[int]] = None
         self.output_dim = self.lora_b_stacked.shape[2]
 
-        self._output_size = 128 - self.output_size if self.output_size < 128 else 0
+        self._output_size = 128 - self.output_size \
+            if self.output_size < 128 else 0
         self._b = torch.zeros(max_loras,
                               1,
                               self._output_size,
@@ -457,7 +458,8 @@ class ReplicatedLinearWithLoRA(BaseLayerWithLoRA):
         self.indices_len: Optional[List[int]] = None
         self.output_dim = self.lora_b_stacked.shape[2]
 
-        self._output_size = 128 - self.output_size if self.output_size < 128 else 0
+        self._output_size = 128 - self.output_size \
+            if self.output_size < 128 else 0
         self._b = torch.zeros(max_loras,
                               1,
                               self._output_size,
