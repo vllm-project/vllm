@@ -193,6 +193,27 @@ def test_sampler_all_beam(seed: int, device: str):
 
 @pytest.mark.parametrize("seed", RANDOM_SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sampler_all_beam_temperature(seed: int, device: str):
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    batch_size = random.randint(1, 256)
+    _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
+
+    sampling_params = SamplingParams(
+        temperature=0.5,
+        best_of=2,
+        use_beam_search=True,
+    )
+    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params)
+    # no assertion here as I am not sure how to determine whether
+    # the outputs are expected - in other words, this just tests
+    # whether there are no exceptions in the sampler
+    # when handling an all-beam search case.
+    del model_runner
+
+
+@pytest.mark.parametrize("seed", RANDOM_SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_sampler_min_tokens_penalty(seed: int, device: str):
     seq_id_counter = Counter(start=random.randint(0, 100))
     set_random_seed(seed)
