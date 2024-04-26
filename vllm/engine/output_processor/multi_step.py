@@ -110,7 +110,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 # TODO emit logprobs in multi-step decoding.
                 # TODO get correct rank
                 logprobs={output_token_id: Logprob(
-                    logprob=0.0,
+                    logprob=0.1,
                     rank=1,
                     decoded_token="todo")},
             )
