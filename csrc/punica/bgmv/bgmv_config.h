@@ -154,8 +154,6 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 1) \
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 2) \
     FOR_INST_BGMV_NARROW(f, in_T, out_T, W_T, 4) \
-    // extra expand shapes, allow for higher 
-    // tensor parallel size (QKV can get below 128)
     f(in_T, out_T, W_T, 8, 64) \
     f(in_T, out_T, W_T, 16, 64) \
     f(in_T, out_T, W_T, 32, 64) \
