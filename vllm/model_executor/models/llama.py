@@ -390,6 +390,7 @@ class LlamaForCausalLM(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        print(f"params_dict: {params_dict}")
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
