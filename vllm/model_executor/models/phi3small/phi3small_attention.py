@@ -59,7 +59,7 @@ class BlockSparseFlashAttention(nn.Module):
             vert_stride == 0`
         where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
                 `block_idx = position_id // sparse_block_size`.
-        See `.blocksparse_attn.utils:get_sparse_attn_mask` for more detail.
+        See `.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
     **kwargs: not used, only for API compatibility.
     """
 

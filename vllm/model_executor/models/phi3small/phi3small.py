@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
+from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.model_executor.layers.linear import (LinearMethodBase,
@@ -22,7 +23,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-from transformers.configuration_utils import PretrainedConfig
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
@@ -72,6 +72,7 @@ def gegelu(input, limit: Optional[float] = None):
 
 
 class Phi3SmallMLP(nn.Module):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -106,6 +107,7 @@ class Phi3SmallMLP(nn.Module):
 
 
 class Phi3SmallSelfAttention(nn.Module):
+
     def __init__(self,
                  config: PretrainedConfig,
                  layer_idx: Optional[int] = None) -> None:
@@ -241,6 +243,7 @@ class Phi3SmallSelfAttention(nn.Module):
 
 
 class Phi3SmallDecoderLayer(nn.Module):
+
     def __init__(
         self,
         config: PretrainedConfig,

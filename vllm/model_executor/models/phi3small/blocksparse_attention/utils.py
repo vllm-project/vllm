@@ -1,14 +1,13 @@
+# Helper functions for 3D sparse pattern
+# These function are not optimized and very inefficient.
+# Avoid calling them too frequent or use a cache mechanism.
+
 from functools import lru_cache
 
 import torch
 import triton
 
 
-# helper functions for 3D sparse pattern
-# these function are not optimized and very inefficient.
-# Avoid calling them too frequent.
-# currently, it is only called within
-# `get_local_strided_sparse_attention_op`, which is cached.
 def dense_to_crow_col(x):
     """Turning a 2D/3D torch tensor (x) to CSR rows/cols indexing.
     param:
