@@ -15,6 +15,7 @@ DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
+SLIDING_WINDOW = [0, 512]
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -22,11 +23,13 @@ CUDA_DEVICES = [
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOW)
 @torch.inference_mode()
 def test_contexted_kv_attention(
     num_heads: int,
     num_queries_per_kv: int,
     head_size: int,
+    sliding_window: int,
     dtype: torch.dtype,
     device: str,
 ) -> None:
@@ -156,6 +159,9 @@ def test_contexted_kv_attention(
 
     attn_bias = BlockDiagonalCausalFromBottomRightMask.from_seqlens(
         subquery_lens, seq_lens)
+    if sliding_window > 0:
+        attn_bias = attn_bias.make_local_attention_from_bottomright(
+            sliding_window)
     output_ref = xops.memory_efficient_attention_forward(
         query,
         key,
