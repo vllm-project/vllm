@@ -6,8 +6,8 @@ from abc import ABC, abstractmethod
 from typing import (TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple,
                     Type)
 
+import huggingface_hub
 import torch
-from huggingface_hub.constants import HF_HUB_OFFLINE
 from torch import nn
 
 from vllm.config import (VLLM_USE_MODELSCOPE, DeviceConfig, LoadConfig,
@@ -136,7 +136,7 @@ class DefaultModelLoader(BaseModelLoader):
                 model_path = snapshot_download(
                     model_id=model,
                     cache_dir=self.load_config.download_dir,
-                    local_files_only=HF_HUB_OFFLINE,
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     revision=revision,
                 )
             else:
