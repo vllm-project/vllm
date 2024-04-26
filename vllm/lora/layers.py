@@ -389,10 +389,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -416,7 +415,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
                 if not self.base_layer.skip_bias_add else None)
 
         # Matrix multiply.
-        output_parallel = self.apply_weights(input_, bias)
+        output_parallel = self.apply(input_, bias)
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -523,10 +522,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 index, 0, :lora_b[1].shape[1], :lora_b[1].shape[0]].copy_(
                     lora_b[1].T, non_blocking=True)
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -765,10 +763,9 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 index, 0, :lora_a[2].shape[1], :lora_a[2].shape[0]].copy_(
                     lora_a[2].T, non_blocking=True)
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -862,9 +859,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
-    def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x)
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -897,7 +893,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
-        output_parallel = self.apply_weights(input_parallel)
+        output_parallel = self.apply(input_parallel)
         if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
