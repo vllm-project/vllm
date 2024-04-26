@@ -92,7 +92,9 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self._warmup_model()
 
     def _warmup_model(self) -> None:
-        self.model_runner.warmup_model(self.tpu_cache)
+        # NOTE(woosuk): Because of buffer donation, the reference to the cache
+        # should be updated after the warmup.
+        self.tpu_cache = self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
         head_size = self.model_config.get_head_size()
