@@ -296,8 +296,8 @@ def get_moe_configs(E: int, N: int,
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
-            logger.info(
-                f"Using configuration from {config_file_path} for MoE layer.")
+            logger.info("Using configuration from %s for MoE layer.",
+                        config_file_path)
             # If a configuration has been found, return it
             return {int(key): val for key, val in json.load(f).items()}
 
