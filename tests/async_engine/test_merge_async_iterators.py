@@ -1,11 +1,14 @@
 import asyncio
 from typing import AsyncIterator, Tuple
+
 import pytest
 
 from vllm.utils import merge_async_iterators
 
+
 @pytest.mark.asyncio
 async def test_merge_async_iterators():
+
     async def mock_async_iterator(idx: int) -> AsyncIterator[str]:
         try:
             while True:
@@ -15,7 +18,8 @@ async def test_merge_async_iterators():
             pass
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(*iterators)
+    merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(
+        *iterators)
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
@@ -23,13 +27,9 @@ async def test_merge_async_iterators():
 
     task = asyncio.create_task(stream_output(merged_iterator))
     await asyncio.sleep(0.5)
-    assert task.cancel()
-    try:
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
         await task
-    except asyncio.CancelledError:
-        # Make sure the task was cancelled.
-        pass
-    assert task.cancelled()
 
     for iterator in iterators:
         try:
@@ -37,5 +37,7 @@ async def test_merge_async_iterators():
         except StopAsyncIteration:
             # All iterators should be cancelled and print this message.
             print("Iterator was cancelled normally")
-        except (Exception, asyncio.CancelledError) as e:
-            assert False, "Iterator is not cancelled"
+        except Exception as e:
+            raise AssertionError() from e
+        except asyncio.CancelledError as e:
+            raise AssertionError() from e
