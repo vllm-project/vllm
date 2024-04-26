@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm.config import LoRAConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -367,11 +368,36 @@ class Qwen2MoeForCausalLM(nn.Module):
 
     fall_back_to_pt_during_load = False
 
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        "gate",
+        "shared_expert_gate",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
     def __init__(
         self,
         config: PretrainedConfig,
         linear_method: Optional[LinearMethodBase] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config
         super().__init__()
         self.config = config
         self.linear_method = linear_method
