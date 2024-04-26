@@ -154,6 +154,7 @@ class Attention(nn.Module):
 
         # Write the incoming keys and values to KV cache.
         k_cache, v_cache = cache
+        # FIXME(woosuk): Uncomment this.
         # k_cache, v_cache = write_to_kv_cache(
         #   key_proj, value_proj, k_cache, v_cache, slot_mapping)
 
