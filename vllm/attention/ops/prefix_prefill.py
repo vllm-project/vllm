@@ -125,9 +125,13 @@ if triton.__version__ >= "2.1.0":
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
             if SLIDING_WINDOW > 0:
+                # We can't use -inf here, because the
+                # sliding window may lead to the entire row being masked.
+                # This then makes m_ij contain -inf, which causes NaNs in
+                # exp().
                 qk = tl.where((cur_batch_ctx_len + offs_m[:, None]) -
                               (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk,
-                              float("-inf"))
+                              -10000)
             qk *= sm_scale
 
             # -- compute m_ij, p, l_ij
@@ -188,8 +192,7 @@ if triton.__version__ >= "2.1.0":
             if SLIDING_WINDOW > 0:
                 qk = tl.where(
                     offs_m[:, None] -
-                    (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk,
-                    float("-inf"))
+                    (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk, -10000)
 
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)

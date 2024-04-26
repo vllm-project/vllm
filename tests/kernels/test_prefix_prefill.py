@@ -126,12 +126,32 @@ def test_contexted_kv_attention(
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
-    context_attention_fwd(query, k, v, output, k_cache, v_cache, block_table,
-                          b_start_loc, b_seq_len, b_ctx_len, max_input_len)
+    context_attention_fwd(query,
+                          k,
+                          v,
+                          output,
+                          k_cache,
+                          v_cache,
+                          block_table,
+                          b_start_loc,
+                          b_seq_len,
+                          b_ctx_len,
+                          max_input_len,
+                          sliding_window=sliding_window)
     torch.cuda.synchronize()
     start_time = time.time()
-    context_attention_fwd(query, k, v, output, k_cache, v_cache, block_table,
-                          b_start_loc, b_seq_len, b_ctx_len, max_input_len)
+    context_attention_fwd(query,
+                          k,
+                          v,
+                          output,
+                          k_cache,
+                          v_cache,
+                          block_table,
+                          b_start_loc,
+                          b_seq_len,
+                          b_ctx_len,
+                          max_input_len,
+                          sliding_window=sliding_window)
     torch.cuda.synchronize()
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time)*1000:.2f} ms")
