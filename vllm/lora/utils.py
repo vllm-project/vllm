@@ -10,13 +10,14 @@ from vllm.lora.fully_sharded_layers import (
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
 # being imported for _all_lora_classes below
-from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
-                              LogitsProcessorWithLoRA,
-                              MergedColumnParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithLora,
-                              QKVParallelLinearWithLora,
-                              RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.lora.layers import (
+    BaseLayerWithLoRA, ColumnParallelLinearWithLoRA, LogitsProcessorWithLoRA,
+    MergedColumnParallelLinearWithLoRA, MergedQKVParallelLinearWithLora,
+    QKVParallelLinearWithLora, RowParallelLinearWithLoRA,
+    VocabParallelEmbeddingWithLoRA)
+# yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
