@@ -225,11 +225,18 @@ def merge_async_iterators(
     ]
 
     async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        try:
+            while not all(finished) or not queue.empty():
+                item = await queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        except (Exception, asyncio.CancelledError) as e:
+            for task in _tasks:
+                # NOTE: Pass the error msg in cancel()
+                # when only Python 3.9+ is supported.
+                task.cancel()
+            raise e
         await asyncio.gather(*_tasks)
 
     return consumer()
