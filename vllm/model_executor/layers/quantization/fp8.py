@@ -70,7 +70,7 @@ class Fp8Config(QuantizationConfig):
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
-    dynamic/scale activation scale.
+    dynamic/static activation scale.
 
     Also supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
