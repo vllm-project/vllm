@@ -7,8 +7,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearBase,
-                                               LinearMethodBase,
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -150,7 +149,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, is_sym)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
+            self,
+            layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQMarlinLinearMethod(self)
         return None
@@ -209,7 +209,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> Dict[str, Any]:
         del output_size
-        
+
         # Normalize group_size
         if self.quant_config.group_size != -1:
             group_size = self.quant_config.group_size
