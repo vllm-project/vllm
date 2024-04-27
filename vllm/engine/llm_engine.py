@@ -467,6 +467,10 @@ class LLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
+    def get_decoding_config(self) -> DecodingConfig:
+        """Gets the decoding configuration."""
+        return self.decoding_config
+
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
         return self.scheduler.get_num_unfinished_seq_groups()
