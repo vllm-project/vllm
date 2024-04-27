@@ -249,9 +249,8 @@ class LLM:
                     outputs.append(output)
                     if use_tqdm:
                         total_tokens += len(output.outputs[0].token_ids)
-                        pbar.postfix = (
-                            f"{(total_tokens / pbar.format_dict['elapsed']):.2f} toks/s"
-                        )
+                        speed = total_tokens / pbar.format_dict["elapsed"]
+                        pbar.postfix = f"{speed:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
