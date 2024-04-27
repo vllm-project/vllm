@@ -95,6 +95,13 @@ class ExecutorBase(ABC):
         exception."""
         raise NotImplementedError
 
+    def shutdown(self) -> None:
+        """Shutdown the executor."""
+        return
+
+    def __del__(self):
+        self.shutdown()
+
 
 class ExecutorAsyncBase(ExecutorBase):
 

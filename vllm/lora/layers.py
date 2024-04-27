@@ -176,6 +176,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
+        self.embeddings_slice: Optional[Tuple[int, int]]
+        self.embeddings_weights: Optional[torch.Tensor]
 
     def create_lora_weights(
             self,
@@ -233,9 +235,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
             self.lora_a_stacked.shape[2],
         )
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
-        self.embeddings_indices = None
+        # Lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
+        self.embeddings_indices: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -267,6 +270,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                     self.embeddings_tensors.shape[1],
                     self.embeddings_tensors.shape[2]
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
+                assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
     def set_mapping(
@@ -343,10 +347,11 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
         self.output_dim = self.lora_b_stacked.shape[2]
+
+        # lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -384,10 +389,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -411,7 +415,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
                 if not self.base_layer.skip_bias_add else None)
 
         # Matrix multiply.
-        output_parallel = self.apply_weights(input_, bias)
+        output_parallel = self.apply(input_, bias)
         if self.base_layer.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -475,8 +479,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 device=self.device,
             ) for _ in range(n_slices))
 
-        self.indices: Optional[torch.Tensor] = None
         self.output_dim = self.lora_b_stacked[0].shape[2]
+        # Lazily initialized.
+        self.indices: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
@@ -517,10 +522,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 index, 0, :lora_b[1].shape[1], :lora_b[1].shape[0]].copy_(
                     lora_b[1].T, non_blocking=True)
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -690,7 +694,8 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                               self.kv_proj_shard_size)
         self.packed_indices: Optional[torch.Tensor] = None
         self.standard_indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
+        # lazily initialized.
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
@@ -758,10 +763,9 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                 index, 0, :lora_a[2].shape[1], :lora_a[2].shape[0]].copy_(
                     lora_a[2].T, non_blocking=True)
 
-    def apply_weights(self, x: torch.Tensor,
-                      bias: Optional[torch.Tensor]) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x, bias)
+    def apply(self, x: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
         _apply_lora_packed_nslice(
             x,
             self.lora_a_stacked,
@@ -814,8 +818,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
+        # Lazily initialized
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -854,9 +859,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
-    def apply_weights(self, x: torch.Tensor) -> torch.Tensor:
-        output = self.base_layer.linear_method.apply_weights(
-            self.base_layer, x)
+    def apply(self, x: torch.Tensor) -> torch.Tensor:
+        output = self.base_layer.quant_method.apply(self.base_layer, x)
         _apply_lora(
             x,
             self.lora_a_stacked,
@@ -889,7 +893,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
-        output_parallel = self.apply_weights(input_parallel)
+        output_parallel = self.apply(input_parallel)
         if self.base_layer.reduce_results and self.base_layer.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)
         else:
@@ -991,9 +995,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
-        self.indices = None
-        self.indices_padded = None
-        self.indices_len = None
+        # Lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
+        self.indices_padded: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
