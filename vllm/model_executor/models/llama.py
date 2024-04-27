@@ -348,6 +348,7 @@ class LlamaForCausalLM(nn.Module):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            linear_method=linear_method,
         )
 
         logit_scale = getattr(config, "logit_scale", 1.0)
