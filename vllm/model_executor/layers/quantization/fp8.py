@@ -5,11 +5,15 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
+
+logger = init_logger(__name__)
 
 
 class Fp8Config(QuantizationConfig):
@@ -21,6 +25,10 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
     ) -> None:
         self.is_serialized = is_serialized
+        if is_serialized:
+            logger.warning(
+                "Detected fp8 checkpoint. Please note that the "
+                "format is experimental and subject to change.")
         assert activation_scheme in ACTIVATION_SCHEMES
         self.activation_scheme = activation_scheme
 
