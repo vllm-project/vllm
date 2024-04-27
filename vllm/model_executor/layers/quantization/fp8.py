@@ -96,29 +96,26 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # WEIGHT
         weight_dtype = torch.float8_e4m3fn if self.quant_config.is_serialized else params_dtype
-        weight = Parameter(torch.empty(output_size_per_partition,
-                                       input_size_per_partition,
-                                       dtype=weight_dtype),
-                           requires_grad=False)
+        weight = Parameter(
+            torch.empty(output_size_per_partition,
+                        input_size_per_partition,
+                        dtype=weight_dtype),
+            requires_grad=False)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {
             **extra_weight_attrs,
-            "input_dim": 1,
-            "output_dim": 0,
+            "input_dim": 1, "output_dim": 0,
         })
 
         # WEIGHT SCALE
-        weight_scale = Parameter(torch.empty(
-            len(output_partition_sizes),
-            dtype=torch.float32,
-        ),
-                                 requires_grad=False)
+        weight_scale = Parameter(
+            torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            requires_grad=False)
         layer.register_parameter("weight_scale", weight_scale)
-        set_weight_attrs(
-            weight_scale, {
-                **extra_weight_attrs,
-                "shard_indexer": self.scales_shard_indexer,
-            })
+        set_weight_attrs(weight_scale, {
+            **extra_weight_attrs,
+            "shard_indexer": self.scales_shard_indexer,
+        })
 
         # ACTIVATION SCALE
         if self.quant_config.activation_scheme == "static":
@@ -187,52 +184,28 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             qinput, x_scale = per_tensor_quantize_dynamic(x)
 
-        # # TODO: Inefficient loop over each shard since there is a per-tensor
-        # # scale for each shard.
-        # # To be replaced by cutlass gemm with epilogue fusion for performance.
-        # output = torch.zeros(x.shape[0],
-        #                      layer.weight.shape[0],
-        #                      dtype=x.dtype,
-        #                      device="cuda")
-        # start_offset = 0
-        # for _, (logical_width, w_scale) in enumerate(
-        #         zip(layer.logical_widths, layer.weight_scale)):
-        #     end_offset = start_offset + logical_width
+        # TODO: Inefficient loop over each shard since there is a per-tensor
+        # scale for each shard.
+        # To be replaced by cutlass gemm with epilogue fusion for performance.
+        output = torch.zeros(x.shape[0],
+                             layer.weight.shape[0],
+                             dtype=x.dtype,
+                             device="cuda")
+        start_offset = 0
+        for _, (logical_width, w_scale) in enumerate(
+                zip(layer.logical_widths, layer.weight_scale)):
+            end_offset = start_offset + logical_width
 
-        #     cuda_compute_capability = torch.cuda.get_device_capability()
-        #     if cuda_compute_capability >= (9, 0):
-        #         out, _ = torch._scaled_mm(
-        #             qinput,
-        #             layer.weight[start_offset:end_offset, :].t(),
-        #             out_dtype=x.dtype,
-        #             scale_a=x_scale,
-        #             scale_b=w_scale,
-        #         )
-        #     else:
-        #         out = torch.nn.functional.linear(
-        #             qinput.to(x.dtype) * x_scale.to(x.dtype),
-        #             layer.weight[start_offset:end_offset, :].to(x.dtype) * w_scale.to(x.dtype),
-        #         )
-
-        #     output[:, start_offset:end_offset] = out
-        #     start_offset = end_offset
-
-        w_scale = layer.weight_scale.max()
-
-        cuda_compute_capability = torch.cuda.get_device_capability()
-        if cuda_compute_capability >= (9, 0):
-            output, _ = torch._scaled_mm(
+            out, _ = torch._scaled_mm(
                 qinput,
-                layer.weight.t(),
+                layer.weight[start_offset:end_offset, :].t(),
                 out_dtype=x.dtype,
                 scale_a=x_scale,
                 scale_b=w_scale,
             )
-        else:
-            output = torch.nn.functional.linear(
-                qinput.to(x.dtype) * x_scale.to(x.dtype),
-                layer.weight.to(x.dtype) * w_scale.to(x.dtype),
-            )
+
+            output[:, start_offset:end_offset] = out
+            start_offset = end_offset
 
         if bias is not None:
             output = output + bias
