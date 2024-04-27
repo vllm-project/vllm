@@ -4,7 +4,12 @@ from transformers import AutoTokenizer
 
 from vllm import LLM
 
-choices = ["llama-static", "mistral-static", "mistral-dynamic", "mixtral-static", "tinyllama-fp16"]
+choices = ["llama-static", 
+           "mistral-static", 
+           "mistral-dynamic", 
+           "mixtral-static", 
+           "tinyllama-fp16",
+           "qwen-fp16"]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--type", choices=choices)
@@ -22,6 +27,8 @@ if __name__ == "__main__":
         model_name = "nm-testing/Mixtral-8x7B-Instruct-v0.1-FP8"
     elif args.type == 'tinyllama-fp16':
         model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    elif args.type == 'qwen-fp16':
+        model_name = "Qwen/CodeQwen1.5-7B-Chat"
     else:
         raise ValueError(f"--type should be in {choices}")
 
@@ -39,6 +46,5 @@ if __name__ == "__main__":
     print(f"----- Prompt: {prompt}")
 
     outputs = model.generate(prompt)
-    print(outputs)
     generation = outputs[0].outputs[0].text
     print(f"----- Generation: {generation}")

@@ -160,25 +160,40 @@ class Fp8LinearMethod(LinearMethodBase):
         if not hasattr(layer, "process_after_load") or not layer.process_after_load:
             return
 
-        # If the model was not serialized, quantize the weights.
+        # If the checkpoint is fp16/bf16 (not serialized fp8), quantize the weights.
         if not self.quant_config.is_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
-            layer.weight = Parameter(qweight, requires_grad=False)
+            layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.logical_widths = None
             layer.act_scale = None
             return
 
-        # If the model is serialized, cleanup the weight_scales / act_scales.
-        else:
+        # If the checkpoint is serialized fp8, cleanup state_dict --> apply_weights.
+        # TODO: this will be cleaned up once we have the cutlass kernels.
+        else: 
+            # WEIGHT
+            #   Tranpose weight for passing to torch._scaled_mm
+            weight = layer.weight
+            layer.weight = Parameter(weight.t(), requires_grad=False)
+            
+            # WEIGHT_SCALE
+            #   If we only have one logical shard, avoid the for loop in apply weights.
+            #   TODO: once we have the cutlass_gemm, this will be removed.
             if len(layer.logical_widths) == 1:
                 layer.weight_scale = Parameter(layer.weight_scale.max(), requires_grad=False)
                 layer.logical_widths = None
+        
             # ACT_SCALE
+            #   Dyanmic: set to None (required input to ops.scaled_fp8_quant).
+            #   Static:  set to max of the act_scales (since they are equal to eachoter).
             if self.quant_config.activation_scheme == "dynamic":
                 layer.act_scale = None
             elif self.quant_config.activation_scheme == "static":
-                # Act_scale for each logical input is the same, so take max().
+                if not all_close_1d(layer.act_scale):
+                    raise ValueError(
+                        "All the act_scales for the logical weights of a layer "
+                        f"must be equal. But got {layer.act_scale}")
                 layer.act_scale = Parameter(layer.act_scale.max(), requires_grad=False)
             else:
                 raise ValueError(f"Unknown activation_scheme {self.quant_config.activation_scheme}")
@@ -196,7 +211,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if layer.logical_widths is None:
             output, _ = torch._scaled_mm(
                 qinput,
-                layer.weight.t(),
+                layer.weight,
                 out_dtype=x.dtype,
                 scale_a=x_scale,
                 scale_b=layer.weight_scale,
@@ -206,7 +221,7 @@ class Fp8LinearMethod(LinearMethodBase):
         #   Current: inefficient for loop to apply each logical GEMM_DQ.
         #   TODO: replace will cutlass gemm_dq with epilogue fusion.
         else:
-            output = torch.empty(x.shape[0], layer.weight.shape[0],
+            output = torch.empty(x.shape[0], layer.weight.shape[1],
                                  dtype=x.dtype, device="cuda")
             start = 0
             # Loop over the N logical shards.
@@ -214,7 +229,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 end = start + logical_width
                 out, _ = torch._scaled_mm(
                     qinput,
-                    layer.weight[start:end, :].t(),
+                    layer.weight[:, start:end],
                     out_dtype=x.dtype,
                     scale_a=x_scale,
                     scale_b=w_scale,
@@ -226,3 +241,10 @@ class Fp8LinearMethod(LinearMethodBase):
             output.add_(bias)
 
         return output
+    
+def all_close_1d(x: torch.Tensor):
+    assert len(x.shape) == 1
+    for i in range(x.shape[0]):
+        if not torch.allclose(x[0], x[i]):
+            return False
+    return True
