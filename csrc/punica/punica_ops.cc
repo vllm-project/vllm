@@ -79,12 +79,12 @@ inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
   CASE_ONESIDE(in_T, out_T, W_T, wide, narrow)
 
     FOR_BGMV_WIDE_NARROW(CASE, _, _, _)
+    FOR_INST_BGMV_WIDE_NARROW(CASE_ONESIDE, _, _, _)
 #undef CASE
 #undef CASE_ONESIDE
   default:
     return false;
   }
-
   return true;
 }
 
