@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
@@ -52,7 +52,7 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks)
 
-    def execute_model(self, *args, **kwargs) -> SamplerOutput:
+    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
         all_outputs = self._run_workers("execute_model",
                                         driver_args=args,
                                         driver_kwargs=kwargs)
@@ -105,7 +105,8 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
         """Runs the given method on all workers."""
         raise NotImplementedError
 
-    async def execute_model_async(self, *args, **kwargs) -> SamplerOutput:
+    async def execute_model_async(self, *args,
+                                  **kwargs) -> List[SamplerOutput]:
         all_outputs = await self._run_workers_async("execute_model",
                                                     driver_args=args,
                                                     driver_kwargs=kwargs)
