@@ -232,6 +232,11 @@ class ColumnParallelLinear(torch.nn.Module):
             start_idx = tp_rank * shard_size
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
+        # TODO: canon
+        # This is for loading scales for fp8, which have no dims.
+        if len(loaded_weight.shape) == 0:
+            loaded_weight = loaded_weight.reshape(1)
+
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

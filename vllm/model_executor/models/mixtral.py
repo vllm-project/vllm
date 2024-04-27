@@ -39,7 +39,6 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.fp8_serialized import FP8LinearMethod
 from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod,
                                                          per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
