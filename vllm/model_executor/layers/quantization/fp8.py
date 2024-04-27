@@ -95,7 +95,7 @@ class Fp8LinearMethod(QuantizeMethodBase):
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)
 
-        layer.process_after_loading = True
+        layer.process_after_load = True
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
@@ -139,32 +139,29 @@ class Fp8LinearMethod(QuantizeMethodBase):
                         self.scales_shard_indexer,
                     })
 
-    def shard_id_as_int(self, shard_id: Union[str, int]) -> int:
-        if isinstance(shard_id, int):
-            return shard_id
-        assert isinstance(shard_id, str)
-        qkv_idxs = {"q": 0, "k": 1, "v": 2}
-        assert shard_id in qkv_idxs
-        return qkv_idxs[shard_id]
-
     def scales_shard_indexer(
-        self,
-        param: torch.Tensor,
-        loaded_weight: torch.Tensor,
-        shard_id: Union[str, int],
-        logical_widths: List[int],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        del logical_widths
-        return param[self.shard_id_as_int(shard_id)], loaded_weight
+            self, param: torch.Tensor, loaded_weight: torch.Tensor,
+            shard_id: Union[str, int]) -> Tuple[torch.Tensor, torch.Tensor]:
+        qkv_idxs = {"q": 0, "k": 1, "v": 2}
+
+        if isinstance(shard_id, int):
+            pass
+        elif isinstance(shard_id, str):
+            if shard_id not in qkv_idxs:
+                raise ValueError(f"Unknown shard_id: {shard_id}")
+            shard_id = qkv_idxs[shard_id]
+        else:
+            ValueError(f"Shard id must be int or str but got {type(shard_id)}")
+
+        return param[shard_id], loaded_weight
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Although the quant_method is propagated to all layers,
         # only linear layers invoke "create_weights". So we check
         # whether "weight_scale" is registered to determine
         # whether the layer is a linear layer that requires quantization.
-        if not hasattr(
-                layer,
-                "process_after_loading") or not layer.process_after_load:
+        if (not hasattr(layer, "process_after_load") or 
+            not layer.process_after_load):
             return
 
         # If checkpoint is fp1616 (not serialized fp8), quantize the weights.
