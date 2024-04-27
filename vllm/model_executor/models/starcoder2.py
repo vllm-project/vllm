@@ -136,7 +136,6 @@ class Starcoder2MLP(nn.Module):
             bias=config.use_bias,
             quant_config=quant_config,
         )
-        quant_config = getattr(quant_config, "quant_config", None)
         self.act = get_act_fn(config.hidden_act, quant_config,
                               config.intermediate_size)
 

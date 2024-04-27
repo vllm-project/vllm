@@ -203,7 +203,6 @@ class FalconMLP(nn.Module):
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   quant_config=quant_config)
-        quant_config = getattr(quant_config, "quant_config", None)
         self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
