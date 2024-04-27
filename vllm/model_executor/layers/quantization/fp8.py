@@ -175,8 +175,8 @@ class Fp8LinearMethod(QuantizeMethodBase):
             return
 
         # TODO: cutlass kernels will remove the need for much of this logic.
-        # If the checkpoint is serialized fp8, we already loaded quantized.
-        #   So, just cleanup the Parameters for easier use in apply()
+        # If the checkpoint is serialized fp8, we already loaded quantized,
+        # so, just cleanup the Parameters for easier use in apply().
         else:
             # WEIGHT
             #   Transpose weight for passing to torch._scaled_mm
