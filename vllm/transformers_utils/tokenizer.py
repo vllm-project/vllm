@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Union
 
+import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
@@ -76,6 +77,7 @@ def get_tokenizer(
                 model_id=tokenizer_name,
                 cache_dir=download_dir,
                 revision=revision,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 # Ignore weights - we only need the tokenizer.
                 ignore_file_pattern=["*.pt", "*.safetensors", "*.bin"])
             tokenizer_name = tokenizer_path

@@ -127,11 +127,14 @@ def get_quant_config(model_config: ModelConfig,
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = snapshot_download(model_name_or_path,
-                                          revision=model_config.revision,
-                                          allow_patterns="*.json",
-                                          cache_dir=load_config.download_dir,
-                                          tqdm_class=DisabledTqdm)
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                revision=model_config.revision,
+                allow_patterns="*.json",
+                cache_dir=load_config.download_dir,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                tqdm_class=DisabledTqdm,
+            )
     else:
         hf_folder = model_name_or_path
 
@@ -161,12 +164,14 @@ def get_quant_config(model_config: ModelConfig,
     return quant_cls.from_config(config)
 
 
-def download_weights_from_hf(model_name_or_path: str,
-                             cache_dir: Optional[str],
-                             allow_patterns: List[str],
-                             revision: Optional[str] = None) -> str:
+def download_weights_from_hf(
+    model_name_or_path: str,
+    cache_dir: Optional[str],
+    allow_patterns: List[str],
+    revision: Optional[str] = None,
+) -> str:
     """Download model weights from Hugging Face Hub.
-    
+
     Args:
         model_name_or_path (str): The model name or path.
         cache_dir (Optional[str]): The cache directory to store the model
@@ -179,26 +184,30 @@ def download_weights_from_hf(model_name_or_path: str,
     Returns:
         str: The path to the downloaded model weights.
     """
-    # Before we download we look at that is available:
-    fs = HfFileSystem()
-    file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+    if not huggingface_hub.constants.HF_HUB_OFFLINE:
+        # Before we download we look at that is available:
+        fs = HfFileSystem()
+        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-    # depending on what is available we download different things
-    for pattern in allow_patterns:
-        matching = fnmatch.filter(file_list, pattern)
-        if len(matching) > 0:
-            allow_patterns = [pattern]
-            break
+        # depending on what is available we download different things
+        for pattern in allow_patterns:
+            matching = fnmatch.filter(file_list, pattern)
+            if len(matching) > 0:
+                allow_patterns = [pattern]
+                break
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
-        hf_folder = snapshot_download(model_name_or_path,
-                                      allow_patterns=allow_patterns,
-                                      cache_dir=cache_dir,
-                                      tqdm_class=DisabledTqdm,
-                                      revision=revision)
+        hf_folder = snapshot_download(
+            model_name_or_path,
+            allow_patterns=allow_patterns,
+            cache_dir=cache_dir,
+            tqdm_class=DisabledTqdm,
+            revision=revision,
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
     return hf_folder
 
 
