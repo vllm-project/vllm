@@ -221,6 +221,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         self.block_sliding_window = None
         if sliding_window is not None:
+            # Round up to nearest block size to regularize sliding window
+            # allocation sizes.
             self.block_sliding_window = math.ceil(sliding_window / block_size)
 
         self.watermark = watermark
