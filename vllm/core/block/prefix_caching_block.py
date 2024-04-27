@@ -12,7 +12,7 @@ from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
 PrefixHash = int
 BlockId = int
 
-# By default, we init our block accsess time as _DEFAULT_LAST_ACCESSED_TIME
+# By default, we init our block access time as _DEFAULT_LAST_ACCESSED_TIME
 # so that if we find one block is still hold _DEFAULT_LAST_ACCESSED_TIME,
 # then we know this block hasn't been accessed yet.
 _DEFAULT_LAST_ACCESSED_TIME = -1
@@ -155,8 +155,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_id, content_hash_to_evict = self.evictor.evict()
 
             # Here we may have scenario that several blocks have
-            # the same content hash, but due to the latter comming block
-            # is comming from mutable to immutable path, their physical
+            # the same content hash, but due to the latter coming block
+            # is coming from mutable to immutable path, their physical
             # block is added into evictor.
             # However in this case, we shall not pop the _cached_blocks,
             # as the same content is still used by others, which means
