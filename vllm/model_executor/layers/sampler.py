@@ -169,19 +169,17 @@ def _apply_min_tokens_penalty(
 
         start_idx = sample_indices[0]
         min_tokens = sampling_params.min_tokens
-        if min_tokens > 0:
+        token_ids_to_penalize = sampling_params.all_stop_token_ids
+        if min_tokens > 0 and token_ids_to_penalize:
             seqs_to_penalize = []
-            for i, seq_id in enumerate(seq_ids):
+            for j, seq_id in enumerate(seq_ids):
                 seq_data = seq_group.seq_data[seq_id]
                 if len(seq_data.output_token_ids) < min_tokens:
-                    seqs_to_penalize.append(i)
+                    seqs_to_penalize.append(j)
 
             if seqs_to_penalize:
                 # convert to the index into logits
-                seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
-                # use set() to remove any duplicates
-                token_ids_to_penalize = set(sampling_params.stop_token_ids +
-                                            [sampling_params.eos_token_id])
+                seqs_to_penalize = [start_idx + j for j in seqs_to_penalize]
                 # itertools.product pairs each seq index with every token id
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
@@ -645,7 +643,7 @@ def _sample(
     Returns:
         (next_token_ids, parent_seq_ids) for each seq group in a batch.
             If sampling is skipped, it returns ([], [])
-        sampled_token_ids_tensor: A tensor of sampled token ids.    
+        sampled_token_ids_tensor: A tensor of sampled token ids.
     """
     return _sample_with_torch(
         probs,
