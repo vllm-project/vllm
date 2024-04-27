@@ -128,7 +128,6 @@ class GPTBigMLP(nn.Module):
             bias=True,
             quant_config=quant_config,
         )
-        quant_config = getattr(quant_config, "quant_config", None)
         self.act = get_act_fn(config.activation_function, quant_config,
                               intermediate_size)
 

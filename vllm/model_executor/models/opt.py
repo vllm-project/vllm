@@ -130,7 +130,6 @@ class OPTDecoderLayer(nn.Module):
             bias=config.enable_bias,
             quant_config=quant_config,
         )
-        quant_config = getattr(quant_config, "quant_config", None)
         self.activation_fn = get_act_fn(config.activation_function,
                                         quant_config, config.ffn_dim)
         self.fc2 = RowParallelLinear(
