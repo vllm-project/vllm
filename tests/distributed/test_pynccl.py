@@ -1,18 +1,19 @@
 import multiprocessing
-import os
 
 import pytest
 import torch
 
 from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
                                                           ncclGetUniqueId)
+from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.utils import update_environment_variables
 
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
     processes = []
     for i in range(number_of_processes):
-        env = os.environ.copy()
+        env = {}
         env['RANK'] = str(i)
         env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)
@@ -26,20 +27,23 @@ def distributed_run(fn, world_size):
     for p in processes:
         p.join()
 
+    for p in processes:
+        assert p.exitcode == 0
 
-def update_env(fn):
+
+def worker_fn_wrapper(fn):
     # `multiprocessing.Process` cannot accept environment variables directly
     # so we need to pass the environment variables as arguments
     # and update the environment variables in the function
-    def wrapper(env):
-        import os
-        os.environ.update(env)
+    def wrapped_fn(env):
+        update_environment_variables(env)
+        init_distributed_environment()
         fn()
 
-    return wrapper
+    return wrapped_fn
 
 
-@update_env
+@worker_fn_wrapper
 def worker_fn():
     comm = NCCLCommunicator()
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(comm.rank)
@@ -54,7 +58,7 @@ def test_pynccl():
     distributed_run(worker_fn, 2)
 
 
-@update_env
+@worker_fn_wrapper
 def worker_fn_with_cudagraph():
     with torch.no_grad():
         graph = torch.cuda.CUDAGraph()

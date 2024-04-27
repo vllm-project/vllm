@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 
@@ -24,9 +24,9 @@ class SpeculativeProposals:
 
     def __repr__(self):
         return (f"SpeculativeProposals("
-                f"proposal_token_ids={self.proposal_token_ids.shape}, "
+                f"proposal_token_ids={self.proposal_token_ids}, "
                 f"proposal_probs={self.proposal_probs.shape}, "
-                f"proposal_lens={self.proposal_lens.shape})")
+                f"proposal_lens={self.proposal_lens})")
 
 
 @dataclass
@@ -73,5 +73,5 @@ class SpeculativeScorer(ABC):
         blocks_to_copy: Optional[Dict[int, List[int]]],
         k: int,
         proposals: SpeculativeProposals,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> SpeculativeScores:
         raise NotImplementedError

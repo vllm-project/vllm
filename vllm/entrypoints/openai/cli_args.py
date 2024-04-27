@@ -9,7 +9,7 @@ import json
 import ssl
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.serving_engine import LoRA
+from vllm.entrypoints.openai.serving_engine import LoRAModulePath
 
 
 class LoRAParserAction(argparse.Action):
@@ -18,7 +18,7 @@ class LoRAParserAction(argparse.Action):
         lora_list = []
         for item in values:
             name, path = item.split('=')
-            lora_list.append(LoRA(name, path))
+            lora_list.append(LoRAModulePath(name, path))
         setattr(namespace, self.dest, lora_list)
 
 
@@ -54,11 +54,15 @@ def make_arg_parser():
                         help="If provided, the server will require this key "
                         "to be presented in the header.")
     parser.add_argument("--served-model-name",
+                        nargs="+",
                         type=str,
                         default=None,
-                        help="The model name used in the API. If not "
-                        "specified, the model name will be the same as "
-                        "the huggingface name.")
+                        help="The model name(s) used in the API. If multiple "
+                        "names are provided, the server will respond to any "
+                        "of the provided names. The model name in the model "
+                        "field of a response will be the first name in this "
+                        "list. If not specified, the model name will be the "
+                        "same as the `--model` argument.")
     parser.add_argument(
         "--lora-modules",
         type=str,

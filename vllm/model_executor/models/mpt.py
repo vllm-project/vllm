@@ -1,7 +1,7 @@
 # coding=utf-8
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,17 +12,17 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.mpt import MPTConfig
 
@@ -56,7 +56,7 @@ class MPTAttention(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -78,7 +78,7 @@ class MPTAttention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=not config.no_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         if self.qk_ln:
             norm_class = _get_norm_class(config)
@@ -88,7 +88,7 @@ class MPTAttention(nn.Module):
             self.d_model,
             self.d_model,
             bias=not config.no_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -159,7 +159,7 @@ class MPTMLP(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.d_model
@@ -169,15 +169,14 @@ class MPTMLP(nn.Module):
             hidden_size,
             intermediate_size,
             bias=not config.no_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn("gelu", quant_config, intermediate_size)
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=not config.no_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -192,9 +191,9 @@ class MPTGLU(MPTMLP):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
-        super().__init__(config=config, linear_method=linear_method)
+        super().__init__(config=config, quant_config=quant_config)
         hidden_size = config.d_model
         expansion_ratio = config.expansion_ratio
         intermediate_size = int(expansion_ratio * hidden_size)
@@ -203,7 +202,7 @@ class MPTGLU(MPTMLP):
             hidden_size,
             intermediate_size,
             bias=not config.no_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -225,16 +224,16 @@ class MPTBlock(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.d_model
         norm_class = _get_norm_class(config)
         self.norm_1 = norm_class(hidden_size)
-        self.attn = MPTAttention(config, linear_method)
+        self.attn = MPTAttention(config, quant_config)
         self.norm_2 = nn.LayerNorm(hidden_size)
         self.ffn = FFN_CLASS_REGISTRY[config.ffn_config["ffn_type"]](
-            config, linear_method)
+            config, quant_config)
 
     def forward(
         self,
@@ -262,7 +261,7 @@ class MPTModel(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         assert config.embedding_fraction == 1.0
@@ -272,7 +271,7 @@ class MPTModel(nn.Module):
             config.d_model,
         )
         self.blocks = nn.ModuleList(
-            [MPTBlock(config, linear_method) for _ in range(config.n_layers)])
+            [MPTBlock(config, quant_config) for _ in range(config.n_layers)])
         norm_class = _get_norm_class(config)
         self.norm_f = norm_class(config.d_model)
         if config.no_bias:
@@ -307,14 +306,14 @@ class MPTForCausalLM(nn.Module):
     def __init__(
         self,
         config: MPTConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
         assert config.tie_word_embeddings
-        self.linear_method = linear_method
+        self.quant_config = quant_config
 
-        self.transformer = MPTModel(config, linear_method)
+        self.transformer = MPTModel(config, quant_config)
         self.lm_head_weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -344,14 +343,9 @@ class MPTForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
