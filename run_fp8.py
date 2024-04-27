@@ -4,12 +4,10 @@ from transformers import AutoTokenizer
 
 from vllm import LLM
 
-choices = ["llama-static", 
-           "mistral-static", 
-           "mistral-dynamic", 
-           "mixtral-static", 
-           "tinyllama-fp16",
-           "qwen-fp16"]
+choices = [
+    "llama-static", "mistral-static", "mistral-dynamic", "mixtral-static",
+    "tinyllama-fp16", "qwen-fp16"
+]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--type", choices=choices)
@@ -39,10 +37,13 @@ if __name__ == "__main__":
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    prompt = tokenizer.apply_chat_template([{
-        "role": "user",
-        "content": "What is open source software?"
-    }], tokenize=False, add_generation_prompt=True)
+    prompt = tokenizer.apply_chat_template(
+        [{
+            "role": "user",
+            "content": "What is open source software?"
+        }],
+        tokenize=False,
+        add_generation_prompt=True)
     print(f"----- Prompt: {prompt}")
 
     outputs = model.generate(prompt)

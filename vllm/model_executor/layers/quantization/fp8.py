@@ -5,7 +5,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -45,7 +45,6 @@ class Fp8Config(QuantizationConfig):
         return []
 
     @classmethod
-
     def from_config(cls, config: Dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_serialized = ("fp8" in quant_method)
@@ -53,8 +52,7 @@ class Fp8Config(QuantizationConfig):
         return cls(is_serialized=is_serialized,
                    activation_scheme=activation_scheme)
 
-    def get_quant_method(
-            self, layer: torch.nn.Module) -> "Fp8LinearMethod":
+    def get_quant_method(self, layer: torch.nn.Module) -> "Fp8LinearMethod":
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
         return None
@@ -63,7 +61,7 @@ class Fp8Config(QuantizationConfig):
         return []
 
 
-class Fp8LinearMethod(LinearMethodBase):
+class Fp8LinearMethod(QuantizeMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/scale activation scale.
@@ -97,46 +95,49 @@ class Fp8LinearMethod(LinearMethodBase):
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)
 
-        layer.process_after_load = True
+        layer.process_after_loading = True
         layer.logical_widths = output_partition_sizes
-        
+
         # WEIGHT
-        weight_dtype = torch.float8_e4m3fn if self.quant_config.is_serialized else params_dtype
-        weight = Parameter(
-            torch.empty(output_size_per_partition,
-                        input_size_per_partition,
-                        dtype=weight_dtype),
-            requires_grad=False)
+        weight_dtype = (torch.float8_e4m3fn
+                        if self.quant_config.is_serialized else params_dtype)
+        weight = Parameter(torch.empty(output_size_per_partition,
+                                       input_size_per_partition,
+                                       dtype=weight_dtype),
+                           requires_grad=False)
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {
             **extra_weight_attrs,
-            "input_dim": 1, "output_dim": 0,
+            "input_dim": 1,
+            "output_dim": 0,
         })
 
-        # SCALES
-        #   We only need to load scales if the model is serialized FP8.
-        #   Otherwise, scale creation is delayed until `process_weights_after_loading`.
+        # If checkpoint is serialized fp8, load them.
+        # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_serialized:
             # WEIGHT SCALE
-            weight_scale = Parameter(
-                torch.empty(len(output_partition_sizes), dtype=torch.float32),
-                requires_grad=False)
+            weight_scale = Parameter(torch.empty(len(output_partition_sizes),
+                                                 dtype=torch.float32),
+                                     requires_grad=False)
             layer.register_parameter("weight_scale", weight_scale)
             set_weight_attrs(weight_scale, {
                 **extra_weight_attrs,
-                "shard_indexer": self.scales_shard_indexer,
+                "shard_indexer":
+                self.scales_shard_indexer,
             })
 
             # ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                act_scale = Parameter(
-                    torch.empty(len(output_partition_sizes), dtype=torch.float32),
-                    requires_grad=False)
+                act_scale = Parameter(torch.empty(len(output_partition_sizes),
+                                                  dtype=torch.float32),
+                                      requires_grad=False)
                 layer.register_parameter("act_scale", act_scale)
-                set_weight_attrs(act_scale, {
-                    **extra_weight_attrs,
-                    "shard_indexer": self.scales_shard_indexer,
-                })
+                set_weight_attrs(
+                    act_scale, {
+                        **extra_weight_attrs,
+                        "shard_indexer":
+                        self.scales_shard_indexer,
+                    })
 
     def shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
@@ -161,36 +162,40 @@ class Fp8LinearMethod(LinearMethodBase):
         # only linear layers invoke "create_weights". So we check
         # whether "weight_scale" is registered to determine
         # whether the layer is a linear layer that requires quantization.
-        if not hasattr(layer, "process_after_load") or not layer.process_after_load:
+        if not hasattr(
+                layer,
+                "process_after_loading") or not layer.process_after_load:
             return
 
-        # If the checkpoint is fp16/bf16 (not serialized fp8), quantize the weights.
+        # If checkpoint is fp1616 (not serialized fp8), quantize the weights.
         if not self.quant_config.is_serialized:
-            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
+                                                         scale=None)
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.logical_widths = None
             layer.act_scale = None
             return
 
-        # If the checkpoint is serialized fp8, cleanup state_dict --> apply_weights.
-        # TODO: this will be cleaned up once we have the cutlass kernels.
-        else: 
+        # TODO: cutlass kernels will remove the need for much of this logic.
+        # If the checkpoint is serialized fp8, we already loaded quantized.
+        #   So, just cleanup the Parameters for easier use in apply()
+        else:
             # WEIGHT
-            #   Tranpose weight for passing to torch._scaled_mm
+            #   Transpose weight for passing to torch._scaled_mm
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
-            
+
             # WEIGHT_SCALE
-            #   If we only have one logical shard, avoid the for loop in apply weights.
-            #   TODO: once we have the cutlass_gemm, this will be removed.
+            #   If we only have one logical shard, avoid the loop in apply().
             if len(layer.logical_widths) == 1:
-                layer.weight_scale = Parameter(layer.weight_scale.max(), requires_grad=False)
+                layer.weight_scale = Parameter(layer.weight_scale.max(),
+                                               requires_grad=False)
                 layer.logical_widths = None
-        
+
             # ACT_SCALE
-            #   Dyanmic: set to None (required input to ops.scaled_fp8_quant).
-            #   Static:  set to max of the act_scales (since they are equal to eachoter).
+            #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
+            #   Static:  set to max of the act_scales (since they are equal).
             if self.quant_config.activation_scheme == "dynamic":
                 layer.act_scale = None
             elif self.quant_config.activation_scheme == "static":
@@ -198,9 +203,11 @@ class Fp8LinearMethod(LinearMethodBase):
                     raise ValueError(
                         "All the act_scales for the logical weights of a layer "
                         f"must be equal. But got {layer.act_scale}")
-                layer.act_scale = Parameter(layer.act_scale.max(), requires_grad=False)
+                layer.act_scale = Parameter(layer.act_scale.max(),
+                                            requires_grad=False)
             else:
-                raise ValueError(f"Unknown activation_scheme {self.quant_config.activation_scheme}")
+                raise ValueError(
+                    f"Unknown scheme {self.quant_config.activation_scheme}")
 
     def apply(self,
               layer: torch.nn.Module,
@@ -220,16 +227,18 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale_a=x_scale,
                 scale_b=layer.weight_scale,
             )
-        
-        # TODO: replace will cutlass gemm_dq with epilogue fusion.
+
+        # TODO: replace naive loop with cutlass gemm_dq w/ epilogue fusion.
         # Case 2: We have N weigth_scales for N logical weights.
-        #   Current: inefficient for loop to apply each logical GEMM_DQ.
         else:
-            output = torch.empty(x.shape[0], layer.weight.shape[1],
-                                 dtype=x.dtype, device="cuda")
+            output = torch.empty(x.shape[0],
+                                 layer.weight.shape[1],
+                                 dtype=x.dtype,
+                                 device="cuda")
             start = 0
             # Loop over the N logical shards.
-            for logical_width, w_scale in zip(layer.logical_widths, layer.weight_scale):
+            for logical_width, w_scale in zip(layer.logical_widths,
+                                              layer.weight_scale):
                 end = start + logical_width
                 out, _ = torch._scaled_mm(
                     qinput,
@@ -245,10 +254,8 @@ class Fp8LinearMethod(LinearMethodBase):
             output.add_(bias)
 
         return output
-    
+
+
 def all_close_1d(x: torch.Tensor):
     assert len(x.shape) == 1
-    for i in range(x.shape[0]):
-        if not torch.allclose(x[0], x[i]):
-            return False
-    return True
+    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
