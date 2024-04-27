@@ -228,7 +228,7 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         # TODO: replace naive loop with cutlass gemm_dq w/ epilogue fusion.
-        # Case 2: We have N weigth_scales for N logical weights.
+        # Case 2: We have N weight_scales for N logical weights.
         else:
             output = torch.empty(x.shape[0],
                                  layer.weight.shape[1],
