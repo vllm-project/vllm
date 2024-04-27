@@ -4,7 +4,7 @@ from transformers import AutoTokenizer
 
 from vllm import LLM
 
-choices = ["llama-static", "mistral-static", "mistral-dynamic", "mixtral-static"]
+choices = ["llama-static", "mistral-static", "mistral-dynamic", "mixtral-static", "tinyllama-fp16"]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--type", choices=choices)
@@ -20,18 +20,21 @@ if __name__ == "__main__":
         model_name = "nm-testing/mistral-fp8-dynamic"
     elif args.type == 'mixtral-static':
         model_name = "nm-testing/Mixtral-8x7B-Instruct-v0.1-FP8"
+    elif args.type == 'tinyllama-fp16':
+        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     else:
         raise ValueError(f"--type should be in {choices}")
 
     model = LLM(model_name,
                 enforce_eager=True,
-                max_model_len=1024)
+                max_model_len=1024,
+                quantization="fp8")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     prompt = tokenizer.apply_chat_template([{
         "role": "user",
-        "content": "What is your name"
+        "content": "What is open source software?"
     }], tokenize=False, add_generation_prompt=True)
     print(f"----- Prompt: {prompt}")
 
