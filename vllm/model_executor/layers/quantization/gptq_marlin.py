@@ -364,7 +364,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         layer.is_k_full = is_k_full
         layer.marlin_state = GPTQMarlinState.REPACK
 
-    def apply_weights(
+    def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
