@@ -155,10 +155,6 @@ class Fp8LinearMethod(LinearMethodBase):
         return param[shard_id], loaded_weight
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # Although the quant_method is propagated to all layers,
-        # only linear layers invoke "create_weights". So we check
-        # whether "weight_scale" is registered to determine
-        # whether the layer is a linear layer that requires quantization.
         if (not hasattr(layer, "process_after_load")
                 or not layer.process_after_load):
             return
