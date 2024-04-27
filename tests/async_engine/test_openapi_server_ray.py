@@ -55,7 +55,7 @@ class ServerRunner:
             self.proc.terminate()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def server():
     ray.init()
     server_runner = ServerRunner.remote([
@@ -74,7 +74,7 @@ def server():
     ray.shutdown()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="class")
 def client():
     client = openai.AsyncOpenAI(
         base_url="http://localhost:8000/v1",
