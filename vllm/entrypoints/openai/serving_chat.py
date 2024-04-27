@@ -1,8 +1,11 @@
 import codecs
 import time
-from typing import AsyncGenerator, AsyncIterator, List, Optional, Union
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
+                    Optional, Tuple, TypedDict, Union, final)
 
 from fastapi import Request
+from openai.types.chat import (ChatCompletionContentPartParam,
+                               ChatCompletionRole)
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
@@ -10,7 +13,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -20,19 +24,40 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+@final  # So that it should be compatible with Dict[str, str]
+class ConversationMessage(TypedDict):
+    role: str
+    content: str
+
+
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model_names: List[str],
                  response_role: str,
-                 lora_modules: Optional[List[LoRA]] = None,
-                 chat_template=None):
+                 lora_modules: Optional[List[LoRAModulePath]] = None,
+                 chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules)
         self.response_role = response_role
         self._load_chat_template(chat_template)
+
+    def _parse_chat_message_content(
+        self,
+        role: ChatCompletionRole,
+        content: Optional[Union[str,
+                                Iterable[ChatCompletionContentPartParam]]],
+    ) -> Tuple[List[ConversationMessage], List[Awaitable[object]]]:
+        if content is None:
+            return [], []
+        if isinstance(content, str):
+            return [ConversationMessage(role=role, content=content)], []
+
+        # To be implemented: https://github.com/vllm-project/vllm/pull/3467
+        # To be implemented: https://github.com/vllm-project/vllm/pull/4200
+        raise NotImplementedError("Complex input not supported yet")
 
     async def create_chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
@@ -52,10 +77,19 @@ class OpenAIServingChat(OpenAIServing):
             return error_check_ret
 
         try:
+            conversation: List[ConversationMessage] = []
+
+            for m in request.messages:
+                messages, _ = self._parse_chat_message_content(
+                    m["role"], m["content"])
+
+                conversation.extend(messages)
+
             prompt = self.tokenizer.apply_chat_template(
-                conversation=request.messages,
+                conversation=conversation,
                 tokenize=False,
-                add_generation_prompt=request.add_generation_prompt)
+                add_generation_prompt=request.add_generation_prompt,
+            )
         except Exception as e:
             logger.error("Error in applying chat template from request: %s", e)
             return self.create_error_response(str(e))
@@ -105,9 +139,8 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput], request_id: str
-    ) -> Union[ErrorResponse, AsyncGenerator[str, None]]:
-
+            result_generator: AsyncIterator[RequestOutput],
+            request_id: str) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
@@ -252,7 +285,7 @@ class OpenAIServingChat(OpenAIServing):
 
         model_name = self.served_model_names[0]
         created_time = int(time.time())
-        final_res: RequestOutput = None
+        final_res: Optional[RequestOutput] = None
 
         async for res in result_generator:
             if await raw_request.is_disconnected():
@@ -317,7 +350,7 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    def _load_chat_template(self, chat_template):
+    def _load_chat_template(self, chat_template: Optional[str]):
         tokenizer = self.tokenizer
 
         if chat_template is not None:

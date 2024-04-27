@@ -15,6 +15,7 @@ import ray
 import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
+from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -768,6 +769,21 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
         content = resp.choices[0].message.content
         loaded = json.loads(content)
         assert loaded == {"result": 2}, loaded
+
+
+async def test_extra_fields(server, client: openai.AsyncOpenAI):
+    with pytest.raises(BadRequestError) as exc_info:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role": "system",
+                "content": "You are a helpful assistant.",
+                "extra_field": "0",
+            }],  # type: ignore
+            temperature=0,
+            seed=0)
+
+    assert "extra_forbidden" in exc_info.value.message
 
 
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
