@@ -89,7 +89,7 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
-            decoding_config = self.engine.engine.decoding_config
+            decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
