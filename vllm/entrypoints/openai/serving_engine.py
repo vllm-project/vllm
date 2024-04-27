@@ -188,7 +188,7 @@ class OpenAIServing:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _normalize_prompt_text_to_input(
         self,

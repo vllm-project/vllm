@@ -13,7 +13,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
@@ -251,7 +252,7 @@ class TensorizerAgent:
     """
 
     def __init__(self, tensorizer_config: TensorizerConfig,
-                 linear_method: LinearMethodBase, **extra_kwargs):
+                 quant_config: QuantizationConfig, **extra_kwargs):
         if tensorizer_load_fail is not None:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
@@ -262,10 +263,10 @@ class TensorizerAgent:
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
         self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("linear_method", None) is not None:
-            self.linear_method = extra_kwargs["linear_method"]
+        if extra_kwargs.get("quant_config", None) is not None:
+            self.quant_config = extra_kwargs["quant_config"]
         else:
-            self.linear_method = linear_method
+            self.quant_config = quant_config
         self.model = self._init_model()
 
     def _init_model(self):
@@ -274,7 +275,7 @@ class TensorizerAgent:
         with no_init_or_tensor():
             return self.tensorizer_config.model_class(
                 config=model_args,
-                linear_method=self.linear_method,
+                quant_config=self.quant_config,
                 **self.extra_kwargs)
 
     def _resize_lora_embeddings(self):
@@ -334,10 +335,10 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info(f"Deserialized {total_bytes_str} in "
-                    f"{end - start:0.2f}s, {per_second}/s")
-        logger.info(f"Memory usage before: {before_mem}")
-        logger.info(f"Memory usage after: {after_mem}")
+        logger.info("Deserialized %s in %0.2fs, %f/s", total_bytes_str,
+                    end - start, per_second)
+        logger.info("Memory usage before: %s", before_mem)
+        logger.info("Memory usage after: %s", after_mem)
 
         self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
