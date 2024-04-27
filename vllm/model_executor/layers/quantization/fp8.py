@@ -160,8 +160,8 @@ class Fp8LinearMethod(QuantizeMethodBase):
         # only linear layers invoke "create_weights". So we check
         # whether "weight_scale" is registered to determine
         # whether the layer is a linear layer that requires quantization.
-        if (not hasattr(layer, "process_after_load") or 
-            not layer.process_after_load):
+        if (not hasattr(layer, "process_after_load")
+                or not layer.process_after_load):
             return
 
         # If checkpoint is fp1616 (not serialized fp8), quantize the weights.

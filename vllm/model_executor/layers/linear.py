@@ -253,8 +253,9 @@ class ColumnParallelLinear(LinearBase):
                                                  shard_size)
         # Special case for Fp8 scales.
         elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(
-                param_data, loaded_weight, shard_id=0)
+            param_data, loaded_weight = shard_indexer(param_data,
+                                                      loaded_weight,
+                                                      shard_id=0)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -381,8 +382,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(0, shard_offset, shard_size)
         # Special case sharding for Fp8 scales.
         elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(
-                param_data, loaded_weight, loaded_shard_id)
+            param_data, loaded_weight = shard_indexer(param_data,
+                                                      loaded_weight,
+                                                      loaded_shard_id)
 
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
@@ -545,8 +547,9 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Special case for for Fp8 scales.
         elif shard_indexer is not None:
 
-            param_data, loaded_weight = shard_indexer(
-                param_data, loaded_weight, loaded_shard_id)
+            param_data, loaded_weight = shard_indexer(param_data,
+                                                      loaded_weight,
+                                                      loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -640,8 +643,9 @@ class RowParallelLinear(LinearBase):
                                                  shard_size)
         # Special case for Fp8 scales.
         elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(
-                param_data, loaded_weight, shard_id=0)
+            param_data, loaded_weight = shard_indexer(param_data,
+                                                      loaded_weight,
+                                                      shard_id=0)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
