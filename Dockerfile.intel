@@ -1,0 +1,19 @@
+# This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
+
+FROM intel/oneapi-basekit
+
+RUN apt-get update  -y \
+    && apt-get install -y git wget vim numactl  python3-pip 
+
+RUN pip install --upgrade pip \
+    && pip install wheel packaging ninja setuptools>=49.4.0 numpy
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+RUN VLLM_TARGET_DEVICE=cpu VLLM_PYTHON_EXECUTABLE=python3.10 CMAKE_CXX_COMPILER=icpx python3 setup.py install
+
+CMD ["/bin/bash"]

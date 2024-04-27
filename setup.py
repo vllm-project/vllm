@@ -17,7 +17,6 @@ ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
 VLLM_TARGET_DEVICE = os.getenv("VLLM_TARGET_DEVICE", "cuda")
-
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
     "linux"), "vLLM only supports Linux platform (including WSL)."
@@ -121,17 +120,20 @@ class cmake_build_ext(build_ext):
         verbose = bool(int(os.getenv('VERBOSE', '0')))
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
-
-        if is_sccache_available():
-            cmake_args += [
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
-            ]
-        elif is_ccache_available():
-            cmake_args += [
-                '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
-                '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
-            ]
+        force_compiler = os.getenv("CMAKE_CXX_COMPILER", None)
+        if force_compiler:
+            cmake_args += ['-DCMAKE_CXX_COMPILER={}'.format(force_compiler)]
+        else:
+            if is_sccache_available():
+                cmake_args += [
+                    '-DCMAKE_CXX_COMPILER_LAUNCHER=sccache',
+                    '-DCMAKE_CUDA_COMPILER_LAUNCHER=sccache',
+                ]
+            elif is_ccache_available():
+                cmake_args += [
+                    '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache',
+                    '-DCMAKE_CUDA_COMPILER_LAUNCHER=ccache',
+                ]
 
         # Pass the python executable to cmake so it can find an exact
         # match.
