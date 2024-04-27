@@ -98,8 +98,8 @@ class LRUEvictor(Evictor):
     def add(self, block_id: int, content_hash: int, num_hashed_tokens: int,
             last_accessed: int):
         self.free_table[block_id] = BlockMetaData(content_hash,
-                                                      num_hashed_tokens,
-                                                      last_accessed)
+                                                  num_hashed_tokens,
+                                                  last_accessed)
 
     def remove(self, block_id: int):
         if block_id not in self.free_table:
