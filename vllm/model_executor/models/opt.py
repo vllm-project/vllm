@@ -130,7 +130,7 @@ class OPTDecoderLayer(nn.Module):
             bias=config.enable_bias,
             quant_config=quant_config,
         )
-        quant_config = getattr(quant_config, "quant_config", None)
+        # quant_config = getattr(quant_config, "quant_config", None)
         self.activation_fn = get_act_fn(config.activation_function,
                                         quant_config, config.ffn_dim)
         self.fc2 = RowParallelLinear(
@@ -323,6 +323,7 @@ class OPTForCausalLM(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        print(params_dict.keys())
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 continue

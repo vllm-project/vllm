@@ -6,7 +6,7 @@ from vllm import LLM
 
 choices = [
     "llama-static", "mistral-static", "mistral-dynamic", "mixtral-static",
-    "tinyllama-fp16", "qwen-fp16"
+    "opt-static", "tinyllama-fp16", "qwen-fp16"
 ]
 
 parser = argparse.ArgumentParser()
@@ -21,8 +21,8 @@ if __name__ == "__main__":
         model_name = "nm-testing/mistral-fp8-static"
     elif args.type == "mistral-dynamic":
         model_name = "nm-testing/mistral-fp8-dynamic"
-    elif args.type == 'mixtral-static':
-        model_name = "nm-testing/Mixtral-8x7B-Instruct-v0.1-FP8"
+    elif args.type == "opt-static":
+        model_name = "nm-testing/opt-125m-fp8-static"
     elif args.type == 'tinyllama-fp16':
         model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     elif args.type == 'qwen-fp16':
@@ -36,14 +36,16 @@ if __name__ == "__main__":
                 quantization="fp8")
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    prompt = tokenizer.apply_chat_template(
-        [{
-            "role": "user",
-            "content": "What is open source software?"
-        }],
-        tokenize=False,
-        add_generation_prompt=True)
+    if tokenizer.chat_template is not None:
+        prompt = tokenizer.apply_chat_template(
+            [{
+                "role": "user",
+                "content": "What is open source software?"
+            }],
+            tokenize=False,
+            add_generation_prompt=True)
+    else:
+        prompt = "The best thing about"
     print(f"----- Prompt: {prompt}")
 
     outputs = model.generate(prompt)
