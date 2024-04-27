@@ -7,6 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
@@ -112,7 +113,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         # Get the embeddings.
         if self.linear_method is None:
             output_parallel = F.embedding(masked_input, self.weight)
-        else
+        else:
             output_parallel = self.linear_method.apply_weights(masked_input)
 
         # Mask the output embedding.
