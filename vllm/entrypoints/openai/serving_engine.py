@@ -22,17 +22,15 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LoRA:
+class LoRAModulePath:
     name: str
     local_path: str
 
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model_names: List[str],
-                 lora_modules=Optional[List[LoRA]]):
+    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]]):
         self.engine = engine
         self.served_model_names = served_model_names
         if lora_modules is None:
@@ -158,7 +156,9 @@ class OpenAIServing:
         })
         return json_str
 
-    async def _check_model(self, request) -> Optional[ErrorResponse]:
+    async def _check_model(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
@@ -168,14 +168,16 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
+    def _maybe_get_lora(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
         self,
