@@ -280,6 +280,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(
             qweight, {
+                **extra_weight_attrs,
                 "input_dim": 0,
                 "output_dim": 1,
                 "packed_dim": 0,
@@ -295,7 +296,10 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             requires_grad=False,
         )
         # Ignore warning from fused linear layers such as QKVParallelLinear.
-        set_weight_attrs(g_idx, {"input_dim": 0, "ignore_warning": True})
+        set_weight_attrs(g_idx, {
+            **extra_weight_attrs, "input_dim": 0,
+            "ignore_warning": True
+        })
 
         g_idx_sort_indices = Parameter(
             torch.empty(
@@ -304,6 +308,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
+        set_weight_attrs(g_idx_sort_indices, extra_weight_attrs)
 
         # Scales
         scales = Parameter(
@@ -314,10 +319,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(scales, {
-            "input_dim": scales_and_zp_input_dim,
-            "output_dim": 1,
-        })
+        set_weight_attrs(
+            scales, {
+                **extra_weight_attrs,
+                "input_dim": scales_and_zp_input_dim,
+                "output_dim": 1,
+            })
 
         # Quantized zero-points
         qzeros = Parameter(
@@ -330,6 +337,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         )
         set_weight_attrs(
             qzeros, {
+                **extra_weight_attrs,
                 "input_dim": scales_and_zp_input_dim,
                 "output_dim": 1,
                 "packed_dim": 1,
@@ -340,24 +348,16 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         max_workspace_size = (
             output_size_per_partition //
             self.quant_config.min_thread_n) * self.quant_config.max_parallel
-        workspace = Parameter(
-            torch.zeros(max_workspace_size, device="cuda", dtype=torch.int),
-            requires_grad=False,
-        )
+        workspace = torch.zeros(max_workspace_size,
+                                dtype=torch.int,
+                                requires_grad=False)
 
         layer.register_parameter("qweight", qweight)
-        set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("g_idx", g_idx)
-        set_weight_attrs(g_idx, extra_weight_attrs)
         layer.register_parameter("g_idx_sort_indices", g_idx_sort_indices)
-        set_weight_attrs(g_idx_sort_indices, extra_weight_attrs)
         layer.register_parameter("scales", scales)
-        set_weight_attrs(scales, extra_weight_attrs)
         layer.register_parameter("qzeros", qzeros)
-        set_weight_attrs(qzeros, extra_weight_attrs)
-        layer.register_parameter("workspace", workspace)
-        set_weight_attrs(workspace, extra_weight_attrs)
-
+        layer.workspace = workspace
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.input_size = input_size
