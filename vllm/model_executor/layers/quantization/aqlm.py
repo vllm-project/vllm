@@ -8,11 +8,11 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm import _custom_ops as ops
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 def get_int_dtype(nbits: int) -> torch.dtype:
@@ -207,8 +207,11 @@ class AQLMConfig(QuantizationConfig):
         return cls(in_group_size, nbits_per_codebook, num_code_books,
                    out_group_size)
 
-    def get_linear_method(self) -> "AQLMLinearMethod":
-        return AQLMLinearMethod(self)
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["AQLMLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return AQLMLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -321,7 +324,7 @@ class AQLMLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
         set_weight_attrs(scales, extra_weight_attrs)
 
-    def apply_weights(
+    def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

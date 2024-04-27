@@ -5,15 +5,15 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.utils import set_weight_attrs
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 
-class FP8Config(QuantizationConfig):
+class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
     def __init__(
@@ -45,15 +45,19 @@ class FP8Config(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "FP8Config":
+
+    def from_config(cls, config: Dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         return cls(is_serialized=is_serialized,
                    activation_scheme=activation_scheme)
 
-    def get_linear_method(self) -> "Fp8LinearMethod":
-        return Fp8LinearMethod(self)
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> "Fp8LinearMethod":
+        if isinstance(layer, LinearBase):
+            return Fp8LinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -77,7 +81,7 @@ class Fp8LinearMethod(LinearMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: FP8Config):
+    def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
 
     def create_weights(
@@ -153,7 +157,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return param[self.shard_id_as_int(shard_id)], loaded_weight
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        # Although the linear_method is propagated to all layers,
+        # Although the quant_method is propagated to all layers,
         # only linear layers invoke "create_weights". So we check
         # whether "weight_scale" is registered to determine
         # whether the layer is a linear layer that requires quantization.
@@ -198,10 +202,10 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 raise ValueError(f"Unknown activation_scheme {self.quant_config.activation_scheme}")
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
@@ -217,9 +221,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 scale_b=layer.weight_scale,
             )
         
+        # TODO: replace will cutlass gemm_dq with epilogue fusion.
         # Case 2: We have N weigth_scales for N logical weights.
         #   Current: inefficient for loop to apply each logical GEMM_DQ.
-        #   TODO: replace will cutlass gemm_dq with epilogue fusion.
         else:
             output = torch.empty(x.shape[0], layer.weight.shape[1],
                                  dtype=x.dtype, device="cuda")
