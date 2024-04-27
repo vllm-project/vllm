@@ -220,8 +220,9 @@ def moe_align_block_size(
 
 
 def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
-                            B_scale: torch.Tensor, topk_weights: torch.Tensor,
-                            topk_ids: torch.Tensor,
+                            A_scale: Optional[torch.Tensor],
+                            B_scale: Optional[torch.Tensor],
+                            topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                             sorted_token_ids: torch.Tensor,
                             expert_ids: torch.Tensor,
                             num_tokens_post_padded: torch.Tensor,
@@ -232,10 +233,10 @@ def invoke_fused_moe_kernel(A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
     assert sorted_token_ids.stride(0) == 1
 
     if not use_fp8:
-        A_scale = None
+        assert A_scale is None
         assert B_scale is None
     else:
-        A, A_scale = ops.scaled_fp8_quant(A)
+        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
 
     grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
@@ -318,6 +319,8 @@ def fused_moe(
     use_fp8: bool = False,
     w1_scale: Optional[torch.Tensor] = None,
     w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -434,6 +437,7 @@ def fused_moe(
     invoke_fused_moe_kernel(hidden_states,
                             w1,
                             intermediate_cache1,
+                            a1_scale,
                             w1_scale,
                             topk_weights,
                             topk_ids,
@@ -451,6 +455,7 @@ def fused_moe(
     invoke_fused_moe_kernel(intermediate_cache2,
                             w2,
                             intermediate_cache3,
+                            a2_scale,
                             w2_scale,
                             topk_weights,
                             topk_ids,

@@ -146,7 +146,12 @@ void gptq_shuffle(
   torch::Tensor q_perm,
   int bit);
 
-void scaled_fp8_quant(
+void static_scaled_fp8_quant(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& scale);
+
+void dynamic_scaled_fp8_quant(
   torch::Tensor& out,
   torch::Tensor& input,
   torch::Tensor& scale);
