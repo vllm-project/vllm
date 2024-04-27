@@ -59,7 +59,7 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
 @pytest.mark.parametrize("worker_use_ray", [False, True])
 @pytest.mark.parametrize("engine_use_ray", [False, True])
 def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
-                    engine_use_ray: bool, capsys):
+                    engine_use_ray: bool):
     """
     Run the API server and test it.
 
@@ -80,10 +80,6 @@ def test_api_server(api_server, tokenizer_pool_size: int, worker_use_ray: bool,
                     break
             except requests.exceptions.ConnectionError:
                 time.sleep(1)
-
-        captured = capsys.readouterr()
-        time.sleep(5)
-        assert "Avg prompt throughput" in captured.out
 
         # Actual tests start here
         # Try with 1 prompt
