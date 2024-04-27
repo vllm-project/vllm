@@ -70,12 +70,11 @@ class GPUExecutor(ExecutorBase):
         draft_worker_kwargs = self._get_worker_kwargs()
         # Override draft-model specific worker args.
         draft_worker_kwargs.update(
-            dict(
-                model_config=self.speculative_config.draft_model_config,
-                parallel_config=self.speculative_config.draft_parallel_config,
-                # TODO allow draft-model specific load config.
-                #load_config=self.load_config,
-            ))
+            model_config=self.speculative_config.draft_model_config,
+            parallel_config=self.speculative_config.draft_parallel_config,
+            # TODO allow draft-model specific load config.
+            #load_config=self.load_config,
+        )
         draft_worker = MultiStepWorker(**draft_worker_kwargs)
 
         spec_decode_worker = SpecDecodeWorker.from_workers(
