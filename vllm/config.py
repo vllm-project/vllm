@@ -207,13 +207,7 @@ class ModelConfig:
         if (hasattr(self.hf_text_config, "use_sliding_window")
                 and not self.hf_text_config.use_sliding_window):
             return None
-
-        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
-        # This is needed for Phi-3 models and bypasses issue
-        # https://github.com/vllm-project/vllm/issues/3385.
-        if sliding_window is not None and sliding_window % 2 != 0:
-            sliding_window += 1
-        return sliding_window
+        return getattr(self.hf_text_config, "sliding_window", None)
 
     def get_vocab_size(self) -> int:
         return self.hf_text_config.vocab_size
