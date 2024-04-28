@@ -25,12 +25,10 @@ class GPTQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         desc_act: bool,
-        lm_head_quantized: bool,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
-        self.lm_head_quantized = lm_head_quantized
         self.pack_factor = Fraction(32, self.weight_bits)
         if self.weight_bits not in [2, 3, 4, 8]:
             raise ValueError(
@@ -40,8 +38,7 @@ class GPTQConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act}), "
-                f"lm_head_quantized={self.lm_head_quantized})")
+                f"desc_act={self.desc_act})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -65,9 +62,7 @@ class GPTQConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"], False)
-        return cls(weight_bits, group_size, desc_act, lm_head_quantized)
-
+        return cls(weight_bits, group_size, desc_act)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
@@ -76,7 +71,6 @@ class GPTQConfig(QuantizationConfig):
                 (isinstance(layer, VocabParallelEmbedding) and self.lm_head_quantized)
         ):
             return GPTQLinearMethod(self)
-
         return None
 
     def get_scaled_act_names(self) -> List[str]:

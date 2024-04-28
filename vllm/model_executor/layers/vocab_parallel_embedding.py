@@ -130,7 +130,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             masked_input = input_
 
         # Get the embeddings.
-        if self.linear_method is None:
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
             output_parallel = F.embedding(masked_input, self.weight)
         else:
             output_parallel = self.linear_method.apply_weights(masked_input)
