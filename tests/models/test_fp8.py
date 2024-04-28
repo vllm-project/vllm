@@ -1,5 +1,4 @@
 # flake8: noqa
-
 """Tests fp8 models against ground truth generation
 """
 import os
