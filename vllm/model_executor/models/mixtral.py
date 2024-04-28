@@ -180,8 +180,8 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if "act_scale" in weight_name:
-            param_data[:] = param_data[:].max(loaded_weight)
+        if "act_scale" in weight_name or "weight_scale" in weight_name:
+            param_data[expert_id] = loaded_weight
 
     def _all_close_1d(self, x: torch.Tensor) -> bool:
         assert len(x.shape) == 1
@@ -215,9 +215,10 @@ class MixtralMoE(nn.Module):
             
             if (not self._all_close_1d(self.as_scale) or 
                 not self._all_close_1d(self.a2s_scale)):
-                raise ValueError(
-                    "All the act_scales for the logical weights of a layer "
-                    f"must be equal. But got {self.as_scale} and {self.a2s_scale}")
+                print_warning_once(
+                    "Found act_scales that are not all equal for fp8 MoE layer. "
+                    "Using the maximum scale across experts for each layer. "
+                )
 
             self.as_scale = nn.Parameter(self.as_scale.max(), requires_grad=False)
             self.a2s_scale = nn.Parameter(self.a2s_scale.max(), requires_grad=False)            
