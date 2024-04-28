@@ -76,7 +76,7 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @staticmethod
-    def get_from_keys_optional(config: Dict[str, Any], keys: List[str], default = None) -> Any:
+    def get_from_keys_optional(config: Dict[str, Any], keys: List[str], default: Any) -> Any:
         """Get a value from the model's quantization config."""
         for key in keys:
             if key in config:
@@ -93,13 +93,5 @@ class QuantizationConfig(ABC):
         """Returns the activation function names that should be post-scaled.
 
         For now, this is only used by AWQ.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def is_lm_head_quantized(self) -> bool:
-        """Returns if lm_head is quantized.
-
-        For now, this is only used by GPTQ.
         """
         raise NotImplementedError
