@@ -56,7 +56,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 linear_method: LinearMethodBase = UnquantizedLinearMethod,
+                 linear_method: LinearMethodBase = UnquantizedLinearMethod(),
                  ):
         super().__init__()
 
