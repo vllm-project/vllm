@@ -150,6 +150,3 @@ class JambaConfig(PretrainedConfig):
             tie_word_embeddings=tie_word_embeddings,
             **kwargs,
         )
-
-
-AutoConfig.register('jamba', JambaConfig)
