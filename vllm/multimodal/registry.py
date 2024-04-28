@@ -42,9 +42,10 @@ class MultiModalRegistry:
         data_type = plugin.get_data_type()
 
         if data_type in self._plugins_by_data_type:
-            logger.warning(f"A plugin is already registered for data type "
-                           f"{data_type}, and will be overwritten by the new "
-                           f"plugin {plugin}.")
+            logger.warning(
+                "A plugin is already registered for data type %s, "
+                "and will be overwritten by the new plugin %s.", data_type,
+                plugin)
 
         self._plugins_by_data_type[data_type] = plugin
 
@@ -62,8 +63,9 @@ class MultiModalRegistry:
         def wrapper(model_cls: N) -> N:
             if model_cls in self._dummy_factories_by_model_type:
                 logger.warning(
-                    f"Model class {model_cls} already has dummy data "
-                    f"registered to {self}. It is overwritten by the new one.")
+                    "Model class %s already has dummy data "
+                    "registered to %s. It is overwritten by the new one.",
+                    model_cls, self)
 
             self._dummy_factories_by_model_type[model_cls] = factory
 

@@ -167,12 +167,14 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
+  "csrc/quantization/fp8/fp8_cuda_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/pybind.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
+    "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/quantization/marlin/marlin_cuda_kernel.cu"
     "csrc/custom_all_reduce.cu")
@@ -210,23 +212,11 @@ define_gpu_extension_target(
 
 set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp16_fp16.cu"
   "csrc/punica/bgmv/bgmv_bf16_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_bf16_fp32_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp16_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp16_fp32_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_bf16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp32_bf16.cu"
-  "csrc/punica/bgmv/bgmv_fp32_fp32_fp16.cu"
   "csrc/punica/punica_ops.cc")
 
 #

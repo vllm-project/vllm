@@ -68,8 +68,9 @@ class MultiModalPlugin(ABC, Generic[D]):
         def wrapper(model_cls: N) -> N:
             if model_cls in self._input_processors:
                 logger.warning(
-                    f"Model class {model_cls} already has an input processor "
-                    f"registered to {self}. It is overwritten by the new one.")
+                    "Model class %s already has an input processor "
+                    "registered to %s. It is overwritten by the new one.",
+                    model_cls, self)
 
             self._input_processors[model_cls] = processor \
                 or self._default_input_processor
