@@ -7,7 +7,7 @@ from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
 
 from transformers import PreTrainedTokenizer
 
-from vllm.config import ModelConfig
+from vllm.config import DecodingConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
@@ -219,7 +219,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups)
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
         if self.log_stats:
@@ -696,6 +696,14 @@ class AsyncLLMEngine:
             return await self.engine.get_model_config.remote()  # type: ignore
         else:
             return self.engine.get_model_config()
+
+    async def get_decoding_config(self) -> DecodingConfig:
+        """Get the decoding configuration of the vLLM engine."""
+        if self.engine_use_ray:
+            return await self.engine.get_decoding_config.remote(  # type: ignore
+            )
+        else:
+            return self.engine.get_decoding_config()
 
     async def do_log_stats(self) -> None:
         if self.engine_use_ray:

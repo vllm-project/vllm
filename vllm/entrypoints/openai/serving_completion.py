@@ -11,7 +11,8 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               LogProbs, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -54,7 +55,7 @@ class OpenAIServingCompletion(OpenAIServing):
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRA]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]] = None):
         super().__init__(engine=engine,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules)
@@ -84,11 +85,11 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators = []
+        generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
-            decoding_config = self.engine.engine.decoding_config
+            decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
@@ -148,7 +149,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                     num_prompts=len(prompts))
 
         # Non-streaming response
-        final_res_batch: RequestOutput = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():

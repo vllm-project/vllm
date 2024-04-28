@@ -3,9 +3,9 @@ import copy
 import glob
 import os
 from abc import ABC, abstractmethod
-from typing import (TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple,
-                    Type)
+from typing import Any, Dict, Generator, List, Optional, Tuple, Type
 
+import huggingface_hub
 import torch
 from torch import nn
 
@@ -13,6 +13,8 @@ from vllm.config import (VLLM_USE_MODELSCOPE, DeviceConfig, LoadConfig,
                          LoadFormat, LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_serialized_tensorizer, load_with_tensorizer,
     tensorizer_weights_iterator)
@@ -24,9 +26,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.linear import LinearMethodBase
-
 _VISION_MODEL_CLASSES = [
     LlavaForConditionalGeneration,
 ]
@@ -34,11 +33,10 @@ _VISION_MODEL_CLASSES = [
 logger = init_logger(__name__)
 
 
-def _get_linear_method(
+def _get_quantization_config(
         model_config: ModelConfig,
-        load_config: LoadConfig) -> Optional["LinearMethodBase"]:
-    """Get the (maybe quantized) linear method."""
-    linear_method = None
+        load_config: LoadConfig) -> Optional[QuantizationConfig]:
+    """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
         capability = torch.cuda.get_device_capability()
@@ -55,9 +53,8 @@ def _get_linear_method(
                 f"{model_config.dtype} is not supported for quantization "
                 f"method {model_config.quantization}. Supported dtypes: "
                 f"{supported_dtypes}")
-
-        linear_method = quant_config.get_linear_method()
-    return linear_method
+        return quant_config
+    return None
 
 
 def _get_model_initialization_kwargs(
@@ -85,10 +82,10 @@ def _initialize_model(
         vision_language_config: Optional[VisionLanguageConfig]) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
-    linear_method = _get_linear_method(model_config, load_config)
+    quant_config = _get_quantization_config(model_config, load_config)
 
     return model_class(config=model_config.hf_config,
-                       linear_method=linear_method,
+                       quant_config=quant_config,
                        **_get_model_initialization_kwargs(
                            model_class, lora_config, vision_language_config))
 
@@ -135,7 +132,9 @@ class DefaultModelLoader(BaseModelLoader):
                 model_path = snapshot_download(
                     model_id=model,
                     cache_dir=self.load_config.download_dir,
-                    revision=revision)
+                    local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                    revision=revision,
+                )
             else:
                 model_path = model
             return model_path
@@ -229,9 +228,11 @@ class DefaultModelLoader(BaseModelLoader):
                                                "fall_back_to_pt_during_load",
                                                True)), )
             for _, module in model.named_modules():
-                linear_method = getattr(module, "linear_method", None)
-                if linear_method is not None:
-                    linear_method.process_weights_after_loading(module)
+                quant_method = getattr(module, "quant_method", None)
+                if quant_method is not None:
+                    quant_method.process_weights_after_loading(module)
+                # FIXME: Remove this after Mixtral is updated
+                # to use quant_method.
                 if hasattr(module, "process_weights_after_loading"):
                     module.process_weights_after_loading()
         return model.eval()
@@ -314,11 +315,11 @@ class TensorizerLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
-                linear_method = _get_linear_method(model_config,
-                                                   self.load_config)
+                quant_config = _get_quantization_config(
+                    model_config, self.load_config)
                 extra_kwargs = _get_model_initialization_kwargs(
                     model_class, lora_config, vision_language_config)
-                extra_kwargs["linear_method"] = linear_method
+                extra_kwargs["quant_config"] = quant_config
 
                 tensorizer_config = copy.copy(self.tensorizer_config)
                 tensorizer_config.model_class = model_class
