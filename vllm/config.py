@@ -280,7 +280,7 @@ class ModelConfig:
         num_layers = self.get_num_layers(parallel_config)
         is_mamba = self.hf_config.model_type in ["jamba"]
         if is_mamba:
-            attention_period = model_config.hf_config.attn_layer_period
+            attention_period = self.hf_config.attn_layer_period
             num_layers = max(num_layers // attention_period, 1)
         return num_layers
 
