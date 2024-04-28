@@ -431,7 +431,7 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
                               torch.full_like(positions, k)).long()
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
-        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(
+        self.long_short_cos_sin_cache: torch.Tensor = self.long_short_cos_sin_cache.to(
             idx.device)
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)

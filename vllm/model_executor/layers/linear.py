@@ -128,7 +128,7 @@ class LinearBase(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
         if quant_config is None:
-            self.quant_method = UnquantizedLinearMethod()
+            self.quant_method: QuantizeMethodBase = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self)
 

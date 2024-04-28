@@ -64,7 +64,7 @@ class TensorizerConfig:
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
-        return TensorizerArgs(**tensorizer_args)
+        return TensorizerArgs(**tensorizer_args)  # type: ignore
 
     def verify_with_parallel_config(
         self,
@@ -270,6 +270,7 @@ class TensorizerAgent:
         self.model = self._init_model()
 
     def _init_model(self):
+        assert self.tensorizer_config.hf_config is not None
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
         with no_init_or_tensor():
