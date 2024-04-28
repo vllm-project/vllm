@@ -75,6 +75,14 @@ class QuantizationConfig(ABC):
         raise ValueError(f"Cannot find any of {keys} in the model's "
                          "quantization config.")
 
+    @staticmethod
+    def get_from_keys_optional(config: Dict[str, Any], keys: List[str], default = None) -> Any:
+        """Get a value from the model's quantization config."""
+        for key in keys:
+            if key in config:
+                return config[key]
+        return default
+
     @abstractmethod
     def get_quant_method(self, layer: torch.nn.Module) -> QuantizeMethodBase:
         """Get the quantize method to use for the quantized layer."""
@@ -85,5 +93,13 @@ class QuantizationConfig(ABC):
         """Returns the activation function names that should be post-scaled.
 
         For now, this is only used by AWQ.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def is_lm_head_quantized(self) -> bool:
+        """Returns if lm_head is quantized.
+
+        For now, this is only used by GPTQ.
         """
         raise NotImplementedError

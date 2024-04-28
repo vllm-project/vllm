@@ -79,15 +79,20 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
 
+        self.quant_method = UnquantizedLinearMethod()
+
         if quant_config is None:
             self.quant_method = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self)
 
         self.quant_method.create_weights(self, self.embedding_dim,
-                                          [self.num_embeddings_per_partition], self.embedding_dim,
-                                          self.num_embeddings_per_partition, params_dtype,
-                                          weight_loader=self.weight_loader)
+                                         [self.num_embeddings_per_partition],
+                                         self.embedding_dim,
+                                         self.num_embeddings_per_partition,
+                                         params_dtype,
+                                         weight_loader=self.weight_loader)
+
         if isinstance(self.quant_method, UnquantizedLinearMethod):
             set_weight_attrs(self.weight, {
                 "parallel_dim": 0,
