@@ -536,12 +536,6 @@ class CacheConfig:
             raise NotImplementedError(
                 "Prefix caching is not supported for fp8 cache_dtype. "
                 "Run with --kv-cache-dtype auto to use prefix caching.")
-        compute_capability = torch.cuda.get_device_capability()
-        if compute_capability[0] < 8:
-            raise NotImplementedError(
-                "Prefix caching requires compute capability > 8.0 "
-                "but found compute capability "
-                f"{compute_capability[0]}.{compute_capability[1]}.")
 
     def verify_with_parallel_config(
         self,
