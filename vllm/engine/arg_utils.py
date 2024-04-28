@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -15,7 +15,7 @@ from vllm.utils import str_to_int_tuple
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
-    served_model_name: Optional[List[str]] = None
+    served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'

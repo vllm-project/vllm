@@ -94,7 +94,7 @@ class ModelConfig:
         max_context_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
-        served_model_name: Optional[List[str]] = None,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -117,14 +117,12 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
+        self.served_model_name = get_served_model_name(model,
+                                                       served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
-
-        # Simply take the first model_name in `served_model_name` for metrics
-        self.served_model_name = (served_model_name[0]
-                                  if served_model_name else self.model)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -1094,6 +1092,24 @@ def _get_and_verify_max_len(
                 "to incorrect model outputs or CUDA errors. Make sure the "
                 "value is correct and within the model context size.")
     return int(max_model_len)
+
+
+def get_served_model_name(model: str,
+                          served_model_name: Optional[Union[str, List[str]]]):
+    """
+    If the input is a non-empty list, the first model_name in 
+    `served_model_name` is taken. 
+    If the input is a non-empty string, it is used directly. 
+    For cases where the input is either an empty string or an 
+    empty list, the fallback is to use `self.model`.
+    """
+    if isinstance(served_model_name, list) and served_model_name:
+        model_name_res = served_model_name[0]
+    elif isinstance(served_model_name, str) and served_model_name:
+        model_name_res = served_model_name
+    else:
+        model_name_res = model
+    return model_name_res
 
 
 @dataclass
