@@ -36,7 +36,7 @@ class LogitsProcessor(nn.Module):
 
     def forward(
         self,
-        embedding: torch.Tensor,
+        lm_head,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,
@@ -48,8 +48,8 @@ class LogitsProcessor(nn.Module):
                                                  sampling_metadata)
 
             # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, embedding, embedding_bias)
-
+            # logits = self._get_logits(hidden_states, embedding, embedding_bias)
+            logits = lm_head.linear_method.apply_weights(lm_head, hidden_states, bias=embedding_bias)
         if logits is not None:
             logits *= self.scale
 

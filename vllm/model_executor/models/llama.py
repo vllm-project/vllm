@@ -369,7 +369,7 @@ class LlamaForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -411,6 +411,7 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                print("name",name,loaded_weight.shape)
                 if is_param_gptq_and_skippable(name, params_dict):
                     continue
                 param = params_dict[name]
