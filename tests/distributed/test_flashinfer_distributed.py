@@ -26,33 +26,25 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [True])
-def test_models(
-    hf_runner,
-    vllm_runner,
-    example_prompts,
-    model: str,
-    dtype: str,
-    max_tokens: int,
-    enforce_eager: bool
-) -> None:
+def test_models(hf_runner, vllm_runner, example_prompts, model: str,
+                dtype: str, max_tokens: int, enforce_eager: bool) -> None:
     try:
         import flash_attn  # noqa: F401
         import flashinfer  # noqa: F401
     except ImportError:
-        pytest.skip("Cannot use Flashinfer backend because the flashinfer package "
-                    "is not found. Please install both flashinfer and flash attention "
-                    "for running the test.")
+        pytest.skip(
+            "Cannot use Flashinfer backend because the flashinfer package "
+            "is not found. Please install both flashinfer and flash attention "
+            "for running the test.")
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=2,
-        enforce_eager=enforce_eager
-    )
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             tensor_parallel_size=2,
+                             enforce_eager=enforce_eager)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

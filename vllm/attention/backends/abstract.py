@@ -51,15 +51,17 @@ class AttentionBackend(ABC):
 class AttentionMetadataPerStage:
     """Attention metadata for a specific stage. I.e., prefill or decode."""
 
-    def asdict_zerocopy(self, skip_fileds: Set[str] = None) -> Dict[str, Any]:
+    def asdict_zerocopy(self,
+                        skip_fields: Optional[Set[str]] = None
+                        ) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
-        if skip_fileds is None:
-            skip_fileds = set()
+        if skip_fields is None:
+            skip_fields = set()
         # Note that if we add dataclasses as fields, they will need
         # similar handling.
         return {
             field.name: getattr(self, field.name)
-            for field in fields(self) if field.name not in skip_fileds
+            for field in fields(self) if field.name not in skip_fields
         }
 
 
@@ -119,7 +121,7 @@ class AttentionImpl(ABC):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata[AttentionMetadataPerStage],
+        attn_metadata: AttentionMetadata,
         kv_scale: float,
     ) -> torch.Tensor:
         raise NotImplementedError

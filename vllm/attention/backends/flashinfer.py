@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import flashinfer
 import torch
@@ -101,8 +101,13 @@ class FlashInferMetadata(AttentionMetadataPerStage):
                 pos_encoding_mode="NONE",
                 data_type=self.data_type)
 
-    def asdict_zerocopy(self) -> Dict[str, Any]:
-        return super().asdict_zerocopy({'decode_wrapper'})
+    def asdict_zerocopy(self,
+                        skip_fields: Optional[Set[str]] = None
+                        ) -> Dict[str, Any]:
+        if skip_fields is None:
+            skip_fields = set()
+        skip_fields.add('decode_wrapper')
+        return super().asdict_zerocopy(skip_fields)
 
 
 class FlashInferImpl(AttentionImpl):

@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple, Union
 
-from pydantic import conint
+from pydantic import Field
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import Annotated
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -20,17 +22,15 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LoRA:
+class LoRAModulePath:
     name: str
     local_path: str
 
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model_names: List[str],
-                 lora_modules=Optional[List[LoRA]]):
+    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]]):
         self.engine = engine
         self.served_model_names = served_model_names
         if lora_modules is None:
@@ -45,7 +45,8 @@ class OpenAIServing:
             ]
 
         self.max_model_len = 0
-        self.tokenizer = None
+        # Lazy initialized
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -92,7 +93,7 @@ class OpenAIServing:
     def _create_logprobs(
         self,
         token_ids: List[int],
-        top_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None,
+        top_logprobs: List[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: Optional[int] = None,
         initial_text_offset: int = 0,
     ) -> LogProbs:
@@ -108,6 +109,7 @@ class OpenAIServing:
                 token = self.tokenizer.decode(token_id)
                 logprobs.tokens.append(token)
                 logprobs.token_logprobs.append(None)
+                assert logprobs.top_logprobs is not None
                 logprobs.top_logprobs.append(None)
             else:
                 token_logprob = step_top_logprobs[token_id].logprob
@@ -116,6 +118,7 @@ class OpenAIServing:
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
+                    assert logprobs.top_logprobs is not None
                     logprobs.top_logprobs.append({
                         # Convert float("-inf") to the
                         # JSON-serializable float that OpenAI uses
@@ -153,31 +156,35 @@ class OpenAIServing:
         })
         return json_str
 
-    async def _check_model(self, request) -> Optional[ErrorResponse]:
+    async def _check_model(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
-            return
+            return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
-            return
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
+    def _maybe_get_lora(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
-            return
+            return None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
         self,
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt: Optional[str] = None,
         prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
@@ -201,6 +208,12 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         if request.max_tokens is None:
+            if token_num >= self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the messages, "
+                    f"Please reduce the length of the messages.", )
             request.max_tokens = self.max_model_len - token_num
 
         if token_num + request.max_tokens > self.max_model_len:
