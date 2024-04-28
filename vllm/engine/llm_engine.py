@@ -655,32 +655,40 @@ class LLMEngine:
         n_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
+        # NOTE: This loop assumes prefill seq_groups are before
+        # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
+            num_generation_tokens_from_prefill_groups = 0.
+            if scheduler_outputs.num_prefill_groups > 0 and len(
+                    scheduler_outputs.scheduled_seq_groups
+            ) != scheduler_outputs.num_prefill_groups:
+                print("DETECTED CHUNKED")
+
             for idx, scheduled_seq_group in enumerate(
                     scheduler_outputs.scheduled_seq_groups):
+                group_was_prefill = idx < scheduler_outputs.num_prefill_groups
                 seq_group = scheduled_seq_group.seq_group
 
-                # Here we assume the seq_groups are ordered prefill > decode.
-                is_prefill_group = idx < scheduler_outputs.num_prefill_groups
-
-                # Last token time (None is still in prefill phase).
-                # (n.b. updates seq_group.metrics.last_token_time)
-                latency = seq_group.maybe_get_last_latency(now)
-
-                # Number of tokens (for throughput calculations).
-                if is_prefill_group:
+                # NOTE: a seq_group that completed all of its prefill tokens
+                # in the last iteration will have seq_group.is_prefill() = False
+                # with group_was_prefill = True
+                if group_was_prefill:
+                    # Number of prompt tokens.
                     num_prompt_tokens_iter += (
                         scheduled_seq_group.token_chunk_size)
-                    if latency is not None:
+
+                    # If the seq_group just finished the prefill state
+                    # get TTFT.
+                    if not seq_group.is_prefill():
+                        latency = seq_group.get_last_latency(now)
                         time_to_first_tokens_iter.append(latency)
+
+                        # One generation token per finished prefill.
+                        num_generation_tokens_from_prefill_groups += (
+                            seq_group.num_seqs())
                 else:
-                    num_generation_tokens_iter += seq_group.num_unfinished_seqs(
-                    )
-                    if latency is None:
-                        raise ValueError(
-                            "seq_group.maybe_get_last_latency(now)=None "
-                            "which should only happen in prefill but detected "
-                            "that the current seq_group is in decode phase.")
+                    # TPOTs.
+                    latency = seq_group.get_last_latency(now)
                     time_per_output_tokens_iter.append(latency)
 
                 # Because of chunked prefill, we can have a single sequence
@@ -706,6 +714,16 @@ class LLMEngine:
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
                     ])
+
+            # Number of generation tokens.
+            #   num_batched_tokens equals the number of prompt_tokens plus the
+            #   number of decode_tokens in a single iteration. So,
+            #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
+            #   + num_generation_tokens_from_prefill_groups (since we generate
+            #   one token on prefills on iters where the prefill finishes).
+            num_generation_tokens_iter = (
+                scheduler_outputs.num_batched_tokens - num_prompt_tokens_iter +
+                num_generation_tokens_from_prefill_groups)
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.

@@ -442,11 +442,13 @@ class SequenceGroup:
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
-    def maybe_get_last_latency(self, now: float) -> Optional[float]:
+    def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, return None.
+        # If still in prefill phase, raise Error.
         if self.is_prefill():
-            return None
+            raise ValueError(
+                "seq_group.get_last_latency() should not be called "
+                "if the seq_group is in prefill phase.")
 
         # Otherwise return token latency.
         latency = now - self.metrics.last_token_time
