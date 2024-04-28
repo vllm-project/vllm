@@ -2,12 +2,16 @@ import pytest
 
 from vllm.config import ModelConfig
 
-MODEL_IDS = ["Qwen/Qwen1.5-7B", 
-             "mistralai/Mistral-7B-v0.1"]
+MODEL_IDS_EXPECTED = [
+    ("Qwen/Qwen1.5-7B", 32768),
+    ("mistralai/Mistral-7B-v0.1", 4096),
+    ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
+]
 
 
-@pytest.mark.parametrize("model_id", MODEL_IDS)
-def test_disable_sliding_window(model_id):
+@pytest.mark.parametrize("model_id_expected", MODEL_IDS_EXPECTED)
+def test_disable_sliding_window(model_id_expected):
+    model_id, expected = model_id_expected
     model_config = ModelConfig(
         model_id,
         model_id,
@@ -18,7 +22,7 @@ def test_disable_sliding_window(model_id):
         revision=None,
         disable_sliding_window=True,
     )
-    assert model_config.max_model_len <= model_config.hf_config.sliding_window
+    assert model_config.max_model_len == expected
 
 
 def test_get_sliding_window():

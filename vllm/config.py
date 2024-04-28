@@ -227,6 +227,9 @@ class ModelConfig:
         """
         # If user disables sliding window, return None.
         if self.disable_sliding_window:
+            logger.info("Sliding window is disabled per configuration. "
+                        "Model max length will be capped at sliding window "
+                        "length.")
             return None
         # Otherwise get the value from the hf config.
         return self.get_hf_config_sliding_window()
@@ -400,8 +403,8 @@ class ModelConfig:
             logger.warning(
                 "The model's config.json does not contain any of the following "
                 "keys to determine the original maximum length of the model: "
-                "%d. Assuming the model's maximum length is %d.", possible_keys,
-                default_max_len)
+                "%d. Assuming the model's maximum length is %d.",
+                possible_keys, default_max_len)
             derived_max_model_len = default_max_len
 
         rope_scaling = getattr(hf_config, "rope_scaling", None)
@@ -423,7 +426,7 @@ class ModelConfig:
         # If the user specified a max length, make sure it is smaller than the
         # derived length from the HF model config.
         if max_model_len is None:
-            max_model_len = derived_max_model_len
+            max_model_len = int(derived_max_model_len)
         elif max_model_len > derived_max_model_len:
             # Some models might have a separate key for specifying
             # model_max_length that will be bigger than derived_max_model_len.
