@@ -61,7 +61,7 @@ class LogitsProcessor(nn.Module):
     def _get_logits(self, hidden_states: torch.Tensor, lm_head: ParallelLMHead,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
+        logits = lm_head.linear_method.apply(lm_head, hidden_states, bias=embedding_bias)
         logits = tensor_model_parallel_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:

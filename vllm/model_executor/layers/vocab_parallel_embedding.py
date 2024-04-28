@@ -124,7 +124,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             masked_input = input_
 
         # Get the embeddings.
-        output_parallel = self.linear_method.apply_weights(masked_input)
+        output_parallel = F.embedding(masked_input, self.weight)
 
         # Mask the output embedding.
         if self.tp_size > 1:
