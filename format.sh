@@ -108,9 +108,9 @@ mypy vllm/spec_decode --config-file pyproject.toml
 mypy vllm/model_executor/*.py  --config-file pyproject.toml
 mypy vllm/lora --config-file pyproject.toml
 
-
 CODESPELL_EXCLUDES=(
     '--skip' '*docs/source/_build/**'
+    '--skip' '*tests/models/test_fp8.py'
 )
 
 # check spelling of specified files

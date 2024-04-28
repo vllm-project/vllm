@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 # flake8: noqa
 """Tests fp8 models against ground truth generation
 """
@@ -62,7 +63,7 @@ EXPECTED_STRS_MAP = {
         ' The Mona Lisa, painted by the renowned artist Leonardo da Vinci in the early ',
         ' Japanese: �� Phoenix は 早起き who が へ と'
     ],
-}
+}  # codespell:ignore
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]

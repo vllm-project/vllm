@@ -220,8 +220,8 @@ class MixtralMoE(nn.Module):
             if (not all_close_1d(self.as_scale)
                     or not all_close_1d(self.a2s_scale)):
                 print_warning_once(
-                    "Found act_scales that are not all equal for fp8 MoE layer. "
-                    "Using the maximum scale across experts for each layer. ")
+                    "Found act_scales that are not equal for fp8 MoE layer. "
+                    "Using the maximum across experts for each layer. ")
 
             self.as_scale = nn.Parameter(self.as_scale.max(),
                                          requires_grad=False)
@@ -285,13 +285,6 @@ class MixtralAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
-
-        # if isinstance(quant_config, Fp8Config):
-        #     print_warning_once(
-        #         "For Mixtral FP8 quantization, we currently do not quantize "
-        #         "the attention layers until their FP8 performance is improved."
-        #     )
-        #     quant_config = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
