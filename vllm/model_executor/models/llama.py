@@ -391,7 +391,6 @@ class LlamaForCausalLM(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        print(f"params_dict: {params_dict}")
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -411,7 +410,6 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                print("name",name,loaded_weight.shape)
                 if is_param_gptq_and_skippable(name, params_dict):
                     continue
                 param = params_dict[name]

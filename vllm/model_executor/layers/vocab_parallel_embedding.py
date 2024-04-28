@@ -79,7 +79,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
 
-        self.quant_method = UnquantizedLinearMethod()
+        self.quant_method = UnquantizedLinearMethod(separate_bias_add=True)
 
         # lm_head may be quantized
         if quant_config is not None:
