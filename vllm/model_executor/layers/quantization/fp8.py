@@ -186,7 +186,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
             # WEIGHT_SCALE
-            #   If all weight_scales are equal, use a single scale to avoid naive loop.
+            #   If all weight_scales are equal, use a single scale.
             if all_close_1d(layer.weight_scale):
                 layer.weight_scale = Parameter(layer.weight_scale.max(),
                                                requires_grad=False)
