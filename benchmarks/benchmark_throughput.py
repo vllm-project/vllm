@@ -10,6 +10,8 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+
 
 def sample_requests(
     dataset_path: str,
@@ -74,46 +76,49 @@ def run_vllm(
     quantization_param_path: Optional[str],
     device: str,
     enable_prefix_caching: bool,
+    enable_chunked_prefill: bool,
+    max_num_batched_tokens: int,
     gpu_memory_utilization: float = 0.9,
     download_dir: Optional[str] = None,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(model=model,
-              tokenizer=tokenizer,
-              quantization=quantization,
-              tensor_parallel_size=tensor_parallel_size,
-              seed=seed,
-              trust_remote_code=trust_remote_code,
-              dtype=dtype,
-              max_model_len=max_model_len,
-              gpu_memory_utilization=gpu_memory_utilization,
-              enforce_eager=enforce_eager,
-              kv_cache_dtype=kv_cache_dtype,
-              quantization_param_path=quantization_param_path,
-              device=device,
-              enable_prefix_caching=enable_prefix_caching,
-              download_dir=download_dir)
+    llm = LLM(
+        model=model,
+        tokenizer=tokenizer,
+        quantization=quantization,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=seed,
+        trust_remote_code=trust_remote_code,
+        dtype=dtype,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        kv_cache_dtype=kv_cache_dtype,
+        quantization_param_path=quantization_param_path,
+        device=device,
+        enable_prefix_caching=enable_prefix_caching,
+        download_dir=download_dir,
+        enable_chunked_prefill=enable_chunked_prefill,
+        max_num_batched_tokens=max_num_batched_tokens,
+    )
 
     # Add the requests to the engine.
+    prompts = []
+    sampling_params = []
     for prompt, _, output_len in requests:
-        sampling_params = SamplingParams(
-            n=n,
-            temperature=0.0 if use_beam_search else 1.0,
-            top_p=1.0,
-            use_beam_search=use_beam_search,
-            ignore_eos=True,
-            max_tokens=output_len,
-        )
-        # FIXME(woosuk): Do not use internal method.
-        llm._add_request(
-            prompt=prompt,
-            prompt_token_ids=None,
-            sampling_params=sampling_params,
-        )
+        prompts.append(prompt)
+        sampling_params.append(
+            SamplingParams(
+                n=n,
+                temperature=0.0 if use_beam_search else 1.0,
+                top_p=1.0,
+                use_beam_search=use_beam_search,
+                ignore_eos=True,
+                max_tokens=output_len,
+            ))
 
     start = time.perf_counter()
-    # FIXME(woosuk): Do not use internal method.
-    llm._run_engine(use_tqdm=True)
+    llm.generate(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()
     return end - start
 
@@ -213,15 +218,15 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype,
-                                args.quantization_param_path, args.device,
-                                args.enable_prefix_caching,
-                                args.gpu_memory_utilization, args.download_dir)
+        elapsed_time = run_vllm(
+            requests, args.model, args.tokenizer, args.quantization,
+            args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
+            args.trust_remote_code, args.dtype, args.max_model_len,
+            args.enforce_eager, args.kv_cache_dtype,
+            args.quantization_param_path, args.device,
+            args.enable_prefix_caching, args.enable_chunked_prefill,
+            args.max_num_batched_tokens, args.gpu_memory_utilization,
+            args.download_dir)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
@@ -261,7 +266,7 @@ if __name__ == "__main__":
     parser.add_argument("--tokenizer", type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
-                        choices=['awq', 'gptq', 'squeezellm', None],
+                        choices=[*QUANTIZATION_METHODS, None],
                         default=None)
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
@@ -329,12 +334,20 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="cuda",
-        choices=["cuda"],
-        help='device type for vLLM execution, supporting CUDA only currently.')
+        choices=["cuda", "cpu"],
+        help='device type for vLLM execution, supporting CUDA and CPU.')
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
         help="enable automatic prefix caching for vLLM backend.")
+    parser.add_argument("--enable-chunked-prefill",
+                        action='store_true',
+                        help="enable chunked prefill for vLLM backend.")
+    parser.add_argument('--max-num-batched-tokens',
+                        type=int,
+                        default=None,
+                        help='maximum number of batched tokens per '
+                        'iteration')
     parser.add_argument('--download-dir',
                         type=str,
                         default=None,

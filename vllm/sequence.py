@@ -28,7 +28,10 @@ class Logprob:
     decoded_token: Optional[str] = None
 
 
+# {token_id -> logprob} per each sequence group. None if the corresponding
+# sequence group doesn't require prompt logprob.
 PromptLogprobs = List[Optional[Dict[int, Logprob]]]
+# {token_id -> logprob} for each sequence group.
 SampleLogprobs = List[Dict[int, Logprob]]
 
 
@@ -160,7 +163,7 @@ class SequenceData:
         self._stage = SequenceStage.PREFILL
 
     def get_num_uncomputed_tokens(self) -> int:
-        """Return the number of prefil tokens that are not computed."""
+        """Return the number of prefill tokens that are not computed."""
         # we use `get_len()` which includes prompt_len + output_len instead
         # of prompt_len here. This is because during recompute we need to
         # prefill for both prompt and output.
@@ -171,10 +174,10 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> int:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.prompt_token_ids
 
-    def get_output_token_ids(self) -> int:
+    def get_output_token_ids(self) -> List[int]:
         return self.output_token_ids
 
     @property
@@ -215,7 +218,7 @@ class Sequence:
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data = SequenceData(prompt_token_ids)
+        self.data: SequenceData = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
@@ -234,6 +237,12 @@ class Sequence:
     @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
+
+    def get_output_text_to_return(self, buffer_length: int):
+        # We return the full output text if the sequence is finished.
+        truncate = buffer_length and not self.is_finished()
+        return self.output_text[:-buffer_length] if truncate else (
+            self.output_text)
 
     def hash_of_block(self, logical_idx: int) -> int:
         # TODO This can produce incorrect hash when block size > prompt size
@@ -339,12 +348,9 @@ class Sequence:
     def get_num_new_tokens(self) -> int:
         """Get the number of new tokens to be computed.
 
-        Args:
-            remainig_token_budget: The remaining token budgets.
         Returns:
-            The new number of tokens to be computed. I.e., 1 for decode, prompt
-            size for prefill. If there's not enough remainig_token_budget, it
-            can return the chunked number of new tokens.
+            The new number of tokens to be computed. I.e., 1 for decode, or
+            the remaining prompt size for prefill.
         """
         if self.data.stage == SequenceStage.DECODE:
             return 1
@@ -364,7 +370,7 @@ class SequenceGroupState:
     """Mutable state tied to a specific sequence group"""
 
     # torch.Generator used in seeded sampling
-    generator: Optional = None
+    generator: Optional = None  # type: ignore
 
 
 class MultiModalData:
@@ -500,10 +506,16 @@ class SequenceGroup:
     def get_num_uncomputed_tokens(self) -> int:
         num_uncomputed_tokens = 0
         for seq in self.get_seqs():
-            num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
+            if not seq.is_finished():
+                num_uncomputed_tokens += seq.data.get_num_uncomputed_tokens()
         return num_uncomputed_tokens
 
     def num_seqs(self, status: Optional[SequenceStatus] = None) -> int:
+        # Optimization. We don't need to call get_seqs if we don't need to
+        # filter by states.
+        if status is None:
+            return len(self.seqs_dict)
+
         return len(self.get_seqs(status))
 
     def num_unfinished_seqs(self) -> int:
@@ -550,6 +562,9 @@ class SequenceGroupMetadata:
         sampling_params: The sampling parameters used to generate the outputs.
         block_tables: The block tables. (Seq id -> list of physical block
             numbers)
+        do_sample: True if sampling is required. Sampling is not required when
+            e.g., prefill is chunked, and the current iteration only computes
+            query tokens for prefill, we don't need sampling.
         token_chunk_size: The number of tokens to be processed (per sequence).
             None if chunking is not required.
         state: Internal state tied to this sequence group.
@@ -564,6 +579,7 @@ class SequenceGroupMetadata:
         seq_data: Dict[int, SequenceData],
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
+        do_sample: bool = True,
         token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
@@ -580,6 +596,7 @@ class SequenceGroupMetadata:
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
+        self.do_sample = do_sample
 
         if self._token_chunk_size is None:
             if is_prompt:
@@ -592,7 +609,7 @@ class SequenceGroupMetadata:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     @property
-    def token_chunk_size(self) -> int:
+    def token_chunk_size(self) -> Optional[int]:
         """Return the number of tokens to be processed (chunk size)."""
         return self._token_chunk_size
 
@@ -641,6 +658,7 @@ class SequenceGroupOutput:
         prompt_logprobs: Optional[PromptLogprobs],
     ) -> None:
         self.samples = samples
+        # Prompt logprob for each prompt query token.
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
@@ -686,3 +704,16 @@ class SamplerOutput:
     def __eq__(self, other: object):
         return isinstance(other,
                           self.__class__) and self.outputs == other.outputs
+
+    def __repr__(self) -> str:
+        """Show the shape of a tensor instead of its values to reduce noise.
+        """
+        sampled_token_probs_repr = ("None" if self.sampled_token_probs is None
+                                    else self.sampled_token_probs.shape)
+        sampled_token_ids_repr = ("None" if self.sampled_token_ids is None else
+                                  self.sampled_token_ids.shape)
+        return (
+            f"SamplerOutput(outputs={self.outputs}, "
+            f"sampled_token_probs={sampled_token_probs_repr}, "
+            f"sampled_token_ids={sampled_token_ids_repr}, "
+            f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")

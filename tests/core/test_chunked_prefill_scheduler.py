@@ -104,10 +104,10 @@ def test_chunk():
     # One chunked prefill, and one decoding.
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert set(get_sequence_groups(out)) == set(running)
-    # The first one is decoding.
-    assert seq_group_meta[0].token_chunk_size == 1
+    # The first one is prefill. Scheduler guarantees ordering.
+    assert seq_group_meta[0].token_chunk_size == 56
     # The second one is a chunked prefill.
-    assert seq_group_meta[1].token_chunk_size == 56
+    assert seq_group_meta[1].token_chunk_size == 1
     assert out.num_prefill_groups == 1
     assert out.num_batched_tokens == 57
 
@@ -157,12 +157,12 @@ def test_complex():
     # Decoding & chunked prefill & first chunk of 3rd request is scheduled.
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert len(get_sequence_groups(out)) == 3
-    # The first one is decoding.
-    assert seq_group_meta[0].token_chunk_size == 1
-    # The second one is a chunked prefill.
+    # The first one is the first chunked prefill.
+    assert seq_group_meta[0].token_chunk_size == 7
+    # The second one is the second new chunked prefill.
     assert seq_group_meta[1].token_chunk_size == 56
-    # The third one is also chunked.
-    assert seq_group_meta[2].token_chunk_size == 7
+    # The last one is decode.
+    assert seq_group_meta[2].token_chunk_size == 1
     # Two of them are in chunked prefill.
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 64

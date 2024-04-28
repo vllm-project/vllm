@@ -1,12 +1,15 @@
 import time
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List, Optional, Protocol
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
                                disable_created_metrics)
 
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 logger = init_logger(__name__)
 
@@ -118,13 +121,21 @@ class Stats:
     time_per_output_tokens: List[float]
     time_e2e_requests: List[float]
 
+    spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
+
+class SupportsMetricsInfo(Protocol):
+
+    def metrics_info(self) -> Dict[str, str]:
+        ...
+
 
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
     def __init__(self, local_interval: float, labels: Dict[str, str]) -> None:
         # Metadata for logging locally.
-        self.last_local_log = time.monotonic()
+        self.last_local_log = time.time()
         self.local_interval = local_interval
 
         # Tracked stats over current local logging interval.
@@ -135,7 +146,7 @@ class StatLogger:
         self.labels = labels
         self.metrics = Metrics(labelnames=list(labels.keys()))
 
-    def info(self, type: str, obj: object) -> None:
+    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
             self.metrics.info_cache_config.info(obj.metrics_info())
 
@@ -216,16 +227,37 @@ class StatLogger:
 
             # Log to stdout.
             logger.info(
-                f"Avg prompt throughput: {prompt_throughput:.1f} tokens/s, "
-                f"Avg generation throughput: "
-                f"{generation_throughput:.1f} tokens/s, "
-                f"Running: {stats.num_running} reqs, "
-                f"Swapped: {stats.num_swapped} reqs, "
-                f"Pending: {stats.num_waiting} reqs, "
-                f"GPU KV cache usage: {stats.gpu_cache_usage * 100:.1f}%, "
-                f"CPU KV cache usage: {stats.cpu_cache_usage * 100:.1f}%")
+                "Avg prompt throughput: %.1f tokens/s, "
+                "Avg generation throughput: %.1f tokens/s, "
+                "Running: %d reqs, Swapped: %d reqs, "
+                "Pending: %d reqs, GPU KV cache usage: %.1f%%, "
+                "CPU KV cache usage: %.1f%%",
+                prompt_throughput,
+                generation_throughput,
+                stats.num_running,
+                stats.num_swapped,
+                stats.num_waiting,
+                stats.gpu_cache_usage * 100,
+                stats.cpu_cache_usage * 100,
+            )
 
             # Reset tracked stats for next interval.
             self.num_prompt_tokens = []
             self.num_generation_tokens = []
             self.last_local_log = stats.now
+
+            if stats.spec_decode_metrics is not None:
+                logger.info(
+                    self._format_spec_decode_metrics_str(
+                        stats.spec_decode_metrics))
+
+    def _format_spec_decode_metrics_str(
+            self, metrics: "SpecDecodeWorkerMetrics") -> str:
+
+        return ("Speculative metrics: "
+                f"Draft acceptance rate: {metrics.draft_acceptance_rate:.3f}, "
+                f"System efficiency: {metrics.system_efficiency:.3f}, "
+                f"Number of speculative tokens: {metrics.num_spec_tokens}, "
+                f"Number of accepted tokens: {metrics.accepted_tokens}, "
+                f"Number of draft tokens tokens: {metrics.draft_tokens}, "
+                f"Number of emitted tokens tokens: {metrics.emitted_tokens}.")
