@@ -58,6 +58,7 @@ def parse_args():
 metrics_app = make_asgi_app()
 app.mount("/metrics", metrics_app)
 
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc):
     err = openai_serving_chat.create_error_response(message=str(exc))

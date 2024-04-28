@@ -22,7 +22,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata, SequenceStatus)
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -655,29 +656,31 @@ class LLMEngine:
         finished_reason_requests: List[str] = []
 
         if scheduler_outputs is not None:
-            for idx, scheduled_seq_group in enumerate(scheduler_outputs.scheduled_seq_groups):
+            for idx, scheduled_seq_group in enumerate(
+                    scheduler_outputs.scheduled_seq_groups):
                 seq_group = scheduled_seq_group.seq_group
 
-                # Note: Here we assume the sequence groups are ordered prefill > decode.
+                # Here we assume the seq_groups are ordered prefill > decode.
                 is_prefill_group = idx < scheduler_outputs.num_prefill_groups
 
-                # Last token time (None is still in prefill phase).        
+                # Last token time (None is still in prefill phase).
                 # (n.b. updates seq_group.metrics.last_token_time)
                 latency = seq_group.maybe_get_last_latency(now)
 
                 # Number of tokens (for throughput calculations).
                 if is_prefill_group:
-                    num_prompt_tokens_iter += scheduled_seq_group.token_chunk_size
+                    num_prompt_tokens_iter += (
+                        scheduled_seq_group.token_chunk_size)
                     if latency is not None:
                         time_to_first_tokens_iter.append(latency)
                 else:
-                    num_generation_tokens_iter += seq_group.num_unfinished_seqs()
+                    num_generation_tokens_iter += seq_group.num_unfinished_seqs(
+                    )
                     if latency is None:
                         raise ValueError(
-                            "seq_group.maybe_get_last_latency(now) returned None, "
-                            "which should only happen in prefill phase but detected "
-                            "that the current seq_group is in decode phase."
-                        )
+                            "seq_group.maybe_get_last_latency(now)=None "
+                            "which should only happen in prefill but detected "
+                            "that the current seq_group is in decode phase.")
                     time_per_output_tokens_iter.append(latency)
 
                 # Because of chunked prefill, we can have a single sequence
@@ -691,13 +694,18 @@ class LLMEngine:
                                              seq_group.metrics.arrival_time)
 
                     # Metadata
-                    num_prompt_tokens_requests.append(len(seq_group.prompt_token_ids))
-                    num_generation_tokens_requests.extend(
-                       [seq.get_output_len() for seq in seq_group.get_finished_seqs()])
+                    num_prompt_tokens_requests.append(
+                        len(seq_group.prompt_token_ids))
+                    num_generation_tokens_requests.extend([
+                        seq.get_output_len()
+                        for seq in seq_group.get_finished_seqs()
+                    ])
                     best_of_requests.append(seq_group.sampling_params.best_of)
                     n_requests.append(seq_group.sampling_params.n)
-                    finished_reason_requests.extend(
-                        [SequenceStatus.get_finished_reason(seq.status) for seq in seq_group.get_finished_seqs()])
+                    finished_reason_requests.extend([
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs()
+                    ])
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.

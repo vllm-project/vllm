@@ -339,11 +339,11 @@ class StatLogger:
                 "CPU KV cache usage: %.1f%%",
                 prompt_throughput,
                 generation_throughput,
-                stats.num_running,
-                stats.num_swapped,
-                stats.num_waiting,
-                stats.gpu_cache_usage * 100,
-                stats.cpu_cache_usage * 100,
+                stats.num_running_sys,
+                stats.num_swapped_sys,
+                stats.num_waiting_sys,
+                stats.gpu_cache_usage_sys * 100,
+                stats.cpu_cache_usage_sys * 100,
             )
 
             # Reset tracked stats for next interval.
