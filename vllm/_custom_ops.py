@@ -168,10 +168,16 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
 
 
 # fp8
-def scaled_fp8_quant(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+def scaled_fp8_quant(
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
-    vllm_ops.scaled_fp8_quant(output, input, scale)
+    if scale is None:
+        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
+    else:
+        vllm_ops.static_scaled_fp8_quant(output, input, scale)
     return output, scale
 
 
