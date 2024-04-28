@@ -2,7 +2,8 @@ import pytest
 
 from vllm.config import ModelConfig
 
-MODEL_IDS = ["Qwen/Qwen1.5-7B", "mistralai/Mistral-7B-v0.1"]
+MODEL_IDS = ["Qwen/Qwen1.5-7B", 
+             "mistralai/Mistral-7B-v0.1"]
 
 
 @pytest.mark.parametrize("model_id", MODEL_IDS)
@@ -12,14 +13,11 @@ def test_disable_sliding_window(model_id):
         model_id,
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
         disable_sliding_window=True,
     )
-
     assert model_config.max_model_len <= model_config.hf_config.sliding_window
 
 

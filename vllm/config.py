@@ -25,6 +25,16 @@ logger = init_logger(__name__)
 VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
                                      "False").lower() == "true"
 
+_STR_DTYPE_TO_TORCH_DTYPE = {
+    "half": torch.float16,
+    "float16": torch.float16,
+    "float": torch.float32,
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+}
+
+_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+
 _GB = 1 << 30
 
 
@@ -116,8 +126,8 @@ class ModelConfig:
         self.dtype = self._get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = self._get_and_verify_max_len(
             self.hf_text_config, self.disable_sliding_window, max_model_len)
-        self._verify_load_format()
-        self._verify_tokenizer_mode()
+        if not self.skip_tokenizer_init:
+            self._verify_tokenizer_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -1138,15 +1148,19 @@ class VisionLanguageConfig:
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
 
-_STR_DTYPE_TO_TORCH_DTYPE = {
-    "half": torch.float16,
-    "float16": torch.float16,
-    "float": torch.float32,
-    "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-}
+@dataclass
+class DecodingConfig:
+    """Dataclass which contains the decoding strategy of the engine"""
 
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
+    guided_decoding_backend: str = 'outlines'
+
+    def __post_init__(self):
+        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        backend = self.guided_decoding_backend
+        if backend not in valid_guided_backends:
+            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+                             f"must be one of {valid_guided_backends}")
 
 
 @dataclass(frozen=True)
