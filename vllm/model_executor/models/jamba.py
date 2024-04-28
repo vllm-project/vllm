@@ -1,49 +1,39 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
-from torch import nn
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.layer import Attention
-from vllm.model_executor.mamba_metadata import MambaCacheParams
-
-from vllm.transformers_utils.configs.jamba import JambaConfig
-from torch.nn.parameter import Parameter
-from vllm.config import LoRAConfig
-from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    LinearMethodBase,
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-    ParallelLMHead,
-    DEFAULT_VOCAB_PADDING_SIZE,
-)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.weight_utils import (
-    default_weight_loader,
-    hf_model_weights_iterator,
-)
-from vllm.sequence import SamplerOutput
+from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
-from vllm.distributed import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
+from torch import nn
+from torch.nn.parameter import Parameter
+
+from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.attention.layer import Attention
+from vllm.config import LoRAConfig
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.mamba_metadata import MambaCacheParams
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.weight_utils import (default_weight_loader,
+                                              hf_model_weights_iterator)
+from vllm.sequence import SamplerOutput
+from vllm.transformers_utils.configs.jamba import JambaConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -51,10 +41,13 @@ KVCache = Tuple[torch.Tensor, torch.Tensor]
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 class JambaMambaMixer(nn.Module):
     """
-    Compute ∆, A, B, C, and D the state space parameters and compute the `contextualized_states`.
-    A, D are input independent (see Mamba paper [1] Section 3.5.2 "Interpretation of A" for why A isn't selective)
-    ∆, B, C are input-dependent (this is a key difference between Mamba and the linear time invariant S4,
-    and is why Mamba is called **selective** state spaces)
+    Compute ∆, A, B, C, and D the state space parameters and compute 
+    the `contextualized_states`. A, D are input independent 
+    (see Mamba paper [1] Section 3.5.2 "Interpretation of A" 
+    for why A isn't selective) ∆, B, C are input-dependent 
+    (this is a key difference between Mamba and the linear time 
+    invariant S4, and is why Mamba is called 
+    **selective** state spaces)
     """
 
     def __init__(self, config: JambaConfig, layer_idx):
@@ -82,7 +75,7 @@ class JambaMambaMixer(nn.Module):
         self.in_proj = MergedColumnParallelLinear(self.hidden_size,
                                                   [self.intermediate_size] * 2,
                                                   bias=self.use_bias)
-        # selective projection used to make dt, B and C input dependant
+        # selective projection used to make dt, B and C input dependent
         self.x_proj = RowParallelLinear(
             self.intermediate_size,
             self.time_step_rank + self.ssm_state_size * 2,
@@ -572,17 +565,19 @@ class JambaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
 
-        #   init each model layer, decide if it's mamba/attention and has experts and pass it down
+        #   init each model layer, decide if it's mamba/attention and
+        #   has experts and pass it down
 
         module_list = []
         for i in range(config.num_hidden_layers):
-            is_attn = (True if (i - self.config.attn_layer_offset) %
-                       self.config.attn_layer_period == 0 else False)
-            is_expert = (True if (i - self.config.expert_layer_offset) %
-                         self.config.expert_layer_period == 0 else False)
+            is_attn = ((i - self.config.attn_layer_offset) %
+                       self.config.attn_layer_period == 0)
+            is_expert = ((i - self.config.expert_layer_offset) %
+                         self.config.expert_layer_period == 0)
 
             actual_num_experts = config.num_experts if is_expert else 1
-            actual_num_experts_per_tok = config.num_experts_per_tok if is_expert else 1
+            actual_num_experts_per_tok = config.num_experts_per_tok \
+                if is_expert else 1
 
             if is_attn:
                 module_list.append(

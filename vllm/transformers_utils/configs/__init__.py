@@ -5,9 +5,8 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
-from vllm.transformers_utils.configs.mpt import MPTConfig
-
 from vllm.transformers_utils.configs.jamba import JambaConfig
+from vllm.transformers_utils.configs.mpt import MPTConfig
 
 __all__ = [
     "ChatGLMConfig", "DbrxConfig", "MPTConfig", "RWConfig", "JAISConfig",

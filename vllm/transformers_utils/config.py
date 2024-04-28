@@ -2,7 +2,9 @@ from typing import Dict, Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import ChatGLMConfig, DbrxConfig, JAISConfig, MPTConfig, RWConfig, JambaConfig
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             JAISConfig, JambaConfig,
+                                             MPTConfig, RWConfig)
 
 _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,

@@ -1,14 +1,15 @@
 """ Jamba model configuration"""
 import math
+
 from transformers.configuration_utils import PretrainedConfig
-from transformers import AutoConfig
 
 
 class JambaConfig(PretrainedConfig):
     r"""
     Args:
         vocab_size (`int`, *optional*, defaults to 65536):
-            Vocabulary size of the Jurassic model. Defines the number of different tokens that can be represented by the
+            Vocabulary size of the Jurassic model. Defines the 
+            number of different tokens that can be represented by the
             `inputs_ids` passed when calling [`JurassicModel`]
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
@@ -17,26 +18,31 @@ class JambaConfig(PretrainedConfig):
         num_hidden_layers (`int`, *optional*, defaults to 32):
             Number of hidden layers in the Transformer encoder.
         num_attention_heads (`int`, *optional*, defaults to 32):
-            Number of attention heads for each attention layer in the Transformer encoder.
+            Number of attention heads for each attention layer 
+            in the Transformer encoder.
         num_key_value_heads (`int`, *optional*, defaults to 8):
-            This is the number of key_value heads that should be used to implement Grouped Query Attention. If
-            `num_key_value_heads=num_attention_heads`, the model will use Multi Head Attention (MHA), if
-            `num_key_value_heads=1 the model will use Multi Query Attention (MQA) otherwise GQA is used. When
-            converting a multi-head checkpoint to a GQA checkpoint, each group key and value head should be constructed
-            by meanpooling all the original heads within that group. For more details checkout [this
-            paper](https://arxiv.org/pdf/2305.13245.pdf). If it is not specified, will default to `8`.
+            This is the number of key_value heads that should 
+            be used to implement Grouped Query Attention. If
+            `num_key_value_heads=num_attention_heads`, the model will use Multi 
+            Head Attention (MHA), if `num_key_value_heads=1 the model will use 
+            Multi Query Attention (MQA) otherwise GQA is used. When converting 
+            a multi-head checkpoint to a GQA checkpoint, each group key and 
+            value head should be constructed by meanpooling all the original 
+            heads within that group. For more details checkout 
+            [this paper](https://arxiv.org/pdf/2305.13245.pdf). 
+            If it is not specified, will default to `8`.
         hidden_act (`str` or `function`, *optional*, defaults to `"silu"`):
-            The non-linear activation function (function or string) in the decoder.
-        # max_position_embeddings (`int`, *optional*, defaults to `4096*32`):
-        #     The maximum sequence length that this model might ever be used with. Jurassic's sliding window attention
-        #     allows sequence of up to 4096*32 tokens.
+            The non-linear activation function (function or string) 
+            in the decoder.
         initializer_range (`float`, *optional*, defaults to 0.02):
-            The standard deviation of the truncated_normal_initializer for initializing all weight matrices.
+            The standard deviation of the truncated_normal_initializer for 
+            initializing all weight matrices.
         rms_norm_eps (`float`, *optional*, defaults to 1e-06):
             The epsilon used by the rms normalization layers.
         use_cache (`bool`, *optional*, defaults to `True`):
-            Whether or not the model should return the last key/values attentions (not used by all models). Only
-            relevant if `config.is_decoder=True`.
+            Whether or not the model should return the last key/values 
+            attentions (not used by all models). 
+            Only relevant if `config.is_decoder=True`.
         pad_token_id (`int`, *optional*):
             The id of the padding token.
         bos_token_id (`int`, *optional*, defaults to 1):
@@ -48,9 +54,11 @@ class JambaConfig(PretrainedConfig):
         rope_theta (`float`, *optional*, defaults to 1000000.0):
             The base period of the RoPE embeddings.
         sliding_window (`int`, *optional*):
-            Sliding window attention window size. If not specified, will default to `4096`.
+            Sliding window attention window size. If not specified, will 
+            default to `4096`.
         num_experts_per_tok (`int`, *optional*, defaults to 2):
-            The number of experts to root per-token, can be also interpreted as the `top-p` routing
+            The number of experts to root per-token, can be also interpreted 
+            as the `top-p` routing
             parameter
         num_experts (`int`, *optional*, defaults to 16):
             Number of experts per Sparse MLP layer.

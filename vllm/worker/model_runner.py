@@ -11,11 +11,9 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import (
-    broadcast_tensor_dict,
-    with_pynccl_for_all_reduce,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import (broadcast_tensor_dict,
+                              get_tensor_model_parallel_world_size,
+                              with_pynccl_for_all_reduce)
 from vllm.distributed.device_communicators import (custom_all_reduce,
                                                    pynccl_utils)
 from vllm.logger import init_logger
@@ -147,19 +145,16 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
         # cache in_wsl result
+        self.mamba_cache: Optional[Tuple[torch.Tensor, torch.Tensor]]
         self.is_mamba = self.model_config.hf_config.model_type == "jamba"
-        self.mamba_cache = None
-        self.mamba_cache4gc = None
         self.request2i: Dict[str, Dict[int, int]] = {}
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
 
-<<<<<<< HEAD
     @torch.inference_mode()
     def prepare_contiguous_mamba_cache(self, dtype):
-        is_mamba = self.model_config.hf_config.model_type == "jamba"
-        if not is_mamba or self.mamba_cache is not None:
+        if not self.is_mamba or self.mamba_cache is not None:
             return
         hf_config = self.model_config.hf_config
         num_layers = hf_config.num_hidden_layers
@@ -177,8 +172,6 @@ class ModelRunner:
             hf_config.mamba_expand * hf_config.hidden_size // world_size,
             hf_config.mamba_d_state,
         )
-        if self.mamba_cache is None:
-            self.mamba_cache = {}
         self.mamba_cache = (torch.empty(size=conv_state_shape,
                                         dtype=dtype,
                                         device="cuda"),
@@ -192,7 +185,6 @@ class ModelRunner:
                                            dtype=dtype,
                                            device="cuda"))
 
-
         # Lazy initialization
         self.model: torch.nn.Module  # Set after load_model
         self.block_size: int  # Set after initial profiling.
@@ -203,6 +195,7 @@ class ModelRunner:
         # The shape of the cached block table will be
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables: torch.Tensor  # Set after initial profiling.
+
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
@@ -597,7 +590,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[LoRARequest], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor, List[RequestInfo]]:
         if self.is_driver_worker:
             prefill_reqs = []
             decode_reqs = []
@@ -768,10 +761,7 @@ class ModelRunner:
     def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
             if req_id in self.request2i:
-                indices = self.request2i.pop(req_id)
-                logger.debug(
-                    f"Deleted { req_id } from mamba_cache with indices = {indices}"
-                )
+                self.request2i.pop(req_id)
 
     @torch.inference_mode()
     def execute_model(
@@ -826,7 +816,7 @@ class ModelRunner:
         if not self.is_driver_worker:
             return None
 
-        if self.is_mamba:
+        if self.is_mamba and self.mamba_cache is not None:
             for i, offset in enumerate(indices):
                 self.mamba_cache[0][:, offset].copy_(conv_state[:, i])
                 self.mamba_cache[1][:, offset].copy_(ssm_state[:, i])
@@ -839,19 +829,24 @@ class ModelRunner:
 
         return output
 
-    def _get_first_free_mamba_cache_index(self):
-        max_possible_bs = self.mamba_cache[0].shape[1]
-        occupied = [
-            id for seq_ids in self.request2i.values()
-            for id in seq_ids.values()
-        ]
-        first_free_index = [i not in occupied
-                            for i in range(max_possible_bs)].index(True)
-        return first_free_index
+    def _get_first_free_mamba_cache_index(self) -> int:
+        if self.is_mamba and self.mamba_cache is not None:
+            max_possible_bs = self.mamba_cache[0].shape[1]
+            occupied = [
+                id for seq_ids in self.request2i.values()
+                for id in seq_ids.values()
+            ]
+            first_free_index = [
+                i not in occupied for i in range(max_possible_bs)
+            ].index(True)
+            return first_free_index
+        return 0
 
     def _prepare_request_mamba_cache(self, requests_info: List[RequestInfo],
                                      batch_size: int):
         indices = []
+        if self.mamba_cache is None:
+            return
         max_possible_bs = self.mamba_cache[0].shape[1]
         for request_info in requests_info:
             cur_rid = request_info.request_id
@@ -873,7 +868,7 @@ class ModelRunner:
                             self.mamba_cache[1][:, i_exist])
                         self.request2i[cur_rid][seq_id] = f_free_index
                     indices.append(self.request2i[cur_rid][seq_id])
-        ## Pad the batch incase of running batch that was not captured via CG
+        ## Pad the batch in case of running batch that was not captured via CG
         padded_indices = indices
         for _ in range(batch_size - len(indices)):
             occu = [
@@ -1205,7 +1200,7 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.context_lens, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        if self.is_mamba:
+        if self.is_mamba and conv_state is not None and ssm_state is not None:
             self.input_buffers["conv_state"].copy_(conv_state,
                                                    non_blocking=True)
             self.input_buffers["ssm_state"].copy_(ssm_state, non_blocking=True)
@@ -1214,7 +1209,7 @@ class CUDAGraphRunner:
         self.graph.replay()
 
         # in-place edit of the mamba cache states as in the KV cache
-        if self.is_mamba:
+        if self.is_mamba and conv_state is not None and ssm_state is not None:
             ssm_state.copy_(self.input_buffers["ssm_state"])
             conv_state.copy_(self.input_buffers["conv_state"])
 
