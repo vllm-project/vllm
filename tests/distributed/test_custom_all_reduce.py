@@ -8,8 +8,9 @@ import torch.distributed as dist
 
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators import custom_all_reduce
-from vllm.test_utils import (init_test_distributed_environment,
-                             multi_process_tensor_parallel)
+
+from ..utils import (init_test_distributed_environment,
+                     multi_process_tensor_parallel)
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
