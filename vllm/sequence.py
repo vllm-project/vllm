@@ -444,7 +444,7 @@ class SequenceGroup:
 
     def maybe_get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
-        # If prompt not done, return None.
+        # If still in prefill phase, return None.
         if self.is_prefill():
             return None
 

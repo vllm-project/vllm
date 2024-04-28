@@ -12,7 +12,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
-from prometheus_fastapi_instrumentator import Instrumentator
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -48,18 +47,16 @@ async def lifespan(app: fastapi.FastAPI):
 
 
 app = fastapi.FastAPI(lifespan=lifespan)
-# Instrument the app with HTTP metrics
-Instrumentator().instrument(app)
-
-# Add prometheus ASGI middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
 
 
 def parse_args():
     parser = make_arg_parser()
     return parser.parse_args()
 
+
+# Add prometheus asgi middleware to route /metrics requests
+metrics_app = make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(_, exc):
