@@ -273,6 +273,7 @@ class TensorizerAgent:
         assert self.tensorizer_config.hf_config is not None
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
+        assert self.tensorizer_config.model_class is not None
         with no_init_or_tensor():
             return self.tensorizer_config.model_class(
                 config=model_args,
