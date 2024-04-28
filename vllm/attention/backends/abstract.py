@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from typing import Any, Dict, Generic, List, Optional, Tuple, Type, TypeVar
+from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
+                    TypeVar)
 
 import torch
 
@@ -15,7 +16,7 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
+    def make_metadata(*args, **kwargs) -> "AttentionMetadataPerStage":
         raise NotImplementedError
 
     @staticmethod
@@ -50,13 +51,15 @@ class AttentionBackend(ABC):
 class AttentionMetadataPerStage:
     """Attention metadata for a specific stage. I.e., prefill or decode."""
 
-    def asdict_zerocopy(self) -> Dict[str, Any]:
+    def asdict_zerocopy(self, skip_fileds: Set[str] = None) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
+        if skip_fileds is None:
+            skip_fileds = set()
         # Note that if we add dataclasses as fields, they will need
         # similar handling.
         return {
             field.name: getattr(self, field.name)
-            for field in fields(self)
+            for field in fields(self) if field.name not in skip_fileds
         }
 
 

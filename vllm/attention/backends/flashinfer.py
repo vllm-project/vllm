@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import flashinfer
 import torch
@@ -55,11 +55,54 @@ class FlashInferMetadata(AttentionMetadataPerStage):
 
     use_cuda_graph: bool = False
 
-    wrapper: Optional[flashinfer.BatchDecodeWithPagedKVCacheWrapper] = None
+    decode_wrapper: Optional[
+        flashinfer.BatchDecodeWithPagedKVCacheWrapper] = None
 
-    # Metadata for prefill stage since we still use flash attention for prefill.
+    # Metadata for the prefill stage since we still
+    # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
     max_prompt_len: Optional[int] = None
+
+    # Metadata for the decode stage
+    # Workspace buffer required by the kernel, the buffer should not
+    # be allocated/deacollated by the FalshInfermetadata
+    workspace_buffer: Optional[torch.Tensor] = None
+    #  The indptr of the paged kv cache, shape: [batch_size + 1]
+    paged_kv_indptr: Optional[torch.Tensor] = None
+    # The page indices of the paged kv cache
+    paged_kv_indices: Optional[torch.Tensor] = None
+    # The number of entries in the last page of each request in
+    # the paged kv cache, shape: [batch_size]
+    paged_kv_last_page_len: Optional[torch.Tensor] = None
+    # The number of query/output heads
+    num_qo_heads: Optional[int] = None
+    # The number of key/value heads
+    num_kv_heads: Optional[int] = None
+    # The dimension of the attention heads
+    head_dim: Optional[int] = None
+    # Block size of vllm
+    page_size: Optional[int] = None
+    # The data type of the paged kv cache
+    data_type: torch.dtype = None
+
+    def __post_init__(self):
+        if not self.is_prompt:
+            self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+                self.workspace_buffer, "NHD")
+            self.decode_wrapper.begin_forward(
+                self.paged_kv_indptr,
+                self.paged_kv_indices,
+                self.paged_kv_last_page_len,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.page_size,
+                # Disable flashinfer's pos encoding and use vllm's rope.
+                pos_encoding_mode="NONE",
+                data_type=self.data_type)
+
+    def asdict_zerocopy(self) -> Dict[str, Any]:
+        return super().asdict_zerocopy({'decode_wrapper'})
 
 
 class FlashInferImpl(AttentionImpl):
@@ -117,10 +160,10 @@ class FlashInferImpl(AttentionImpl):
             )
         else:
             assert attn_metadata.decode_metadata is not None
-            assert attn_metadata.decode_metadata.wrapper is not None
+            assert attn_metadata.decode_metadata.decode_wrapper is not None
             query = query.contiguous(
             )  # Flashinfer requires query to be contiguous
-            output = attn_metadata.decode_metadata.wrapper.forward(
+            output = attn_metadata.decode_metadata.decode_wrapper.forward(
                 query,
                 kv_cache,
                 sm_scale=self.scale,

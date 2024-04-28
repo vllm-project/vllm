@@ -403,7 +403,6 @@ class ModelRunner:
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=True,
                 use_cuda_graph=False,
-                wrapper=None,
                 seq_start_loc=seq_start_loc,
                 max_prompt_len=max_prompt_len)
         else:
@@ -548,18 +547,10 @@ class ModelRunner:
 
         flashinfer_wrapper = None
         if self.attn_backend is FlashInferBackend:
-            # Lazy import to avoid repetitive import
-            try:
-                flashinfer  # noqa: B018
-            except NameError:
-                import flashinfer
-
             if self.workspace_buffer is None:
                 self.workspace_buffer = torch.empty(16 * 1024 * 1024,
                                                     dtype=torch.uint8,
                                                     device=self.device)
-            flashinfer_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                self.workspace_buffer, "NHD")
             paged_kv_indptr = torch.tensor(paged_kv_indptr,
                                            dtype=torch.int,
                                            device=self.device)
@@ -571,21 +562,21 @@ class ModelRunner:
                                                   device=self.device)
             kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
                                                       self.model_config.dtype)
-            flashinfer_wrapper.begin_forward(
-                paged_kv_indptr,
-                paged_kv_indices,
-                paged_kv_last_page_len,
-                self.model_config.get_num_attention_heads(),
-                self.model_config.get_num_kv_heads(self.parallel_config),
-                self.model_config.get_head_size(),
-                self.block_size,
-                # Disable flashinfer's pos encoding and use vllm's rope.
-                pos_encoding_mode="NONE",
-                data_type=kv_cache_dtype)
+
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=False,
-                use_cuda_graph=use_captured_graph,
-                wrapper=flashinfer_wrapper)
+                use_cuda_graph=False,
+                workspace_buffer=self.workspace_buffer,
+                paged_kv_indptr=paged_kv_indptr,
+                paged_kv_indices=paged_kv_indices,
+                paged_kv_last_page_len=paged_kv_last_page_len,
+                num_qo_heads=self.model_config.get_num_attention_heads(
+                    self.parallel_config),
+                num_kv_heads=self.model_config.get_num_kv_heads(
+                    self.parallel_config),
+                head_dim=self.model_config.get_head_size(),
+                page_size=self.block_size,
+                data_type=kv_cache_dtype)
         else:
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=False,

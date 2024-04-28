@@ -1,15 +1,27 @@
-"""Compare the short outputs of HF and vLLM when using greedy sampling.
-
-Run `pytest tests/basic_correctness/test_flashinfer.py`.
+"""Compare the outputs of HF and distributed vLLM when using greedy sampling.
+vLLM will allocate all the available memory, so we need to run the tests one
+by one. The solution is to pass arguments (model name) by environment
+variables.
+Run:
+```sh
+TEST_DIST_MODEL=facebook/opt-125m pytest \
+    test_flashinfer_distributed.py
+TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
+    test_flashinfer_distributed.py
+```
 """
+import os
+
 import pytest
+import torch
 
 MODELS = [
-    "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    os.environ["TEST_DIST_MODEL"],
 ]
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
@@ -21,22 +33,26 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
-    enforce_eager: bool,
+    enforce_eager: bool
 ) -> None:
     try:
         import flash_attn  # noqa: F401
         import flashinfer  # noqa: F401
     except ImportError:
-        pytest.skip(
-            "Cannot use Flashinfer backend because the flashinfer package "
-            "is not found. Please install both flashinfer and flash attention "
-            "for running the test.")
+        pytest.skip("Cannot use Flashinfer backend because the flashinfer package "
+                    "is not found. Please install both flashinfer and flash attention "
+                    "for running the test.")
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=enforce_eager)
+    vllm_model = vllm_runner(
+        model,
+        dtype=dtype,
+        tensor_parallel_size=2,
+        enforce_eager=enforce_eager
+    )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
