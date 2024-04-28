@@ -166,7 +166,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 or not layer.process_after_load):
             return
 
-        # If checkpoint is fp1616 (not serialized fp8), quantize the weights.
+        # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
         if not self.quant_config.is_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
@@ -186,8 +186,8 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.weight = Parameter(weight.t(), requires_grad=False)
 
             # WEIGHT_SCALE
-            #   If we only have one logical shard, avoid the loop in apply().
-            if len(layer.logical_widths) == 1:
+            #   If all weight_scales are equal, use a single scale to avoid naive loop.
+            if all_close_1d(layer.weight_scale):
                 layer.weight_scale = Parameter(layer.weight_scale.max(),
                                                requires_grad=False)
                 layer.logical_widths = None
@@ -217,7 +217,7 @@ class Fp8LinearMethod(LinearMethodBase):
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
         qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
 
-        # Case 1: we have one single scale for N logical weights.
+        # Case 1: we have 1 weight_scale for N logical weights.
         if layer.logical_widths is None:
             output, _ = torch._scaled_mm(
                 qinput,
