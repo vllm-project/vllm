@@ -264,6 +264,7 @@ class LlamaModel(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
         )
         self.layers = nn.ModuleList([
             LlamaDecoderLayer(config, quant_config)
@@ -348,7 +349,7 @@ class LlamaForCausalLM(nn.Module):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         logit_scale = getattr(config, "logit_scale", 1.0)

@@ -7,8 +7,11 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.utils import set_weight_attrs
+
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, )
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -53,7 +56,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 linear_method: Optional[LinearMethodBase] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
                  ):
         super().__init__()
 
@@ -76,25 +79,23 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
 
-        if linear_method is not None:
-            self.linear_method = linear_method
-            self.linear_method.create_weights(self, self.embedding_dim,
-                                              [self.num_embeddings_per_partition], self.embedding_dim,
-                                              self.num_embeddings_per_partition, params_dtype,
-                                              weight_loader=self.weight_loader)
+        if quant_config is None:
+            self.quant_method = UnquantizedLinearMethod()
         else:
-            self.linear_method = None
-            self.weight = Parameter(
-                torch.empty(self.num_embeddings_per_partition,
-                            self.embedding_dim,
-                            dtype=params_dtype))
+            self.quant_method = quant_config.get_quant_method(self)
+
+        self.quant_method.create_weights(self, self.embedding_dim,
+                                          [self.num_embeddings_per_partition], self.embedding_dim,
+                                          self.num_embeddings_per_partition, params_dtype,
+                                          weight_loader=self.weight_loader)
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
             set_weight_attrs(self.weight, {
                 "parallel_dim": 0,
                 "weight_loader": self.weight_loader
             })
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if self.linear_method:
+        if not isinstance(self.quant_method, UnquantizedLinearMethod):
             tp_rank = get_tensor_model_parallel_rank()
             output_dim = getattr(param, "output_dim", None)
             param_data = param.data
@@ -160,9 +161,9 @@ class ParallelLMHead(VocabParallelEmbedding):
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 linear_method: Optional[LinearMethodBase] = None,):
+                 quant_config: Optional[QuantizationConfig] = None, ):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size, linear_method)
+                         org_num_embeddings, padding_size, quant_config)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,

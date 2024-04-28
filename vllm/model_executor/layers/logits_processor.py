@@ -49,7 +49,7 @@ class LogitsProcessor(nn.Module):
 
             # Get the logits for the next tokens.
             # logits = self._get_logits(hidden_states, embedding, embedding_bias)
-            logits = lm_head.linear_method.apply_weights(lm_head, hidden_states, bias=embedding_bias)
+            logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         if logits is not None:
             logits *= self.scale
 
