@@ -10,6 +10,10 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.utils import get_open_port
 
+# Path to root of repository. This is so that test utilities can be imported by
+# ray workers
+VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
+
 
 @ray.remote(num_gpus=1)
 class ServerRunner:
@@ -74,7 +78,7 @@ def multi_process_tensor_parallel(
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
     refs = []
