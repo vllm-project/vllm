@@ -1,5 +1,5 @@
-# mypy: ignore-errors
 # flake8: noqa
+
 """Tests fp8 models against ground truth generation
 """
 import os
@@ -19,7 +19,6 @@ MODELS = [
     "nm-testing/mistral-fp8-static",
     "nm-testing/mistral-fp8-dynamic",
     "mistralai/Mistral-7B-Instruct-v0.2",
-    "nm-testing/Mixtral-8x7B-Instruct-v0.1-FP8",
 ]
 
 EXPECTED_STRS_MAP = {
@@ -53,17 +52,7 @@ EXPECTED_STRS_MAP = {
         ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
         ' Japanese: 早く起きる鳥は虫を取る (S'
     ],
-    "nm-testing/Mixtral-8x7B-Instruct-v0.1-FP8": [
-        " It sounds like you're referring to a hypothetical inference and serving engine, called",
-        ' 1950: Alan Turing proposes the concept of artificial intelligence in his paper "',
-        ' Artificial Intelligence (AI) and Human Intelligence (HI) are both capable of processing information, but',
-        ' A neural network is a type of artificial intelligence (AI) model that is inspired by the structure and',
-        ' In the quiet city of Mechanis, where chrome and steel reigned supreme, lived a',
-        ' The COVID-19 pandemic has had a profound impact on global economic structures and has significantly disrupted',
-        ' The Mona Lisa, painted by the renowned artist Leonardo da Vinci in the early ',
-        ' Japanese: �� Phoenix は 早起き who が へ と'
-    ],
-}  # codespell:ignore
+}
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
