@@ -70,7 +70,7 @@ class Fp8Config(QuantizationConfig):
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
-    dynamic/scale activation scale.
+    dynamic/static activation scale.
 
     Also supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
@@ -228,7 +228,7 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         # TODO: replace naive loop with cutlass gemm_dq w/ epilogue fusion.
-        # Case 2: We have N weigth_scales for N logical weights.
+        # Case 2: We have N weight_scales for N logical weights.
         else:
             output = torch.empty(x.shape[0],
                                  layer.weight.shape[1],
