@@ -862,6 +862,7 @@ class SpeculativeConfig:
 class LoRAConfig:
     max_lora_rank: int
     max_loras: int
+    fully_sharded_loras: bool = False
     max_cpu_loras: Optional[int] = None
     lora_dtype: Optional[torch.dtype] = None
     lora_extra_vocab_size: int = 256

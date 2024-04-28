@@ -52,6 +52,7 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
@@ -376,6 +377,14 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+        parser.add_argument(
+            '--fully-sharded-loras',
+            action='store_true',
+            help=('By default, only half of the LoRA computation is '
+                  'sharded with tensor parallelism. '
+                  'Enabling this will use the fully sharded layers. '
+                  'At high sequence length, max rank or '
+                  'tensor parallel size, this is likely faster.'))
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -509,6 +518,7 @@ class EngineArgs:
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
+            fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras

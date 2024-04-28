@@ -379,9 +379,10 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
-        # inject the eos token id into the sampling_params to support min_tokens
+        # Add the eos token id into the sampling_params to support min_tokens
         # processing
-        sampling_params.eos_token_id = seq.eos_token_id
+        if seq.eos_token_id is not None:
+            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
         sampling_params.update_from_generation_config(
             self.generation_config_fields)
 
@@ -500,6 +501,10 @@ class LLMEngine:
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
         return self.model_config
+
+    def get_decoding_config(self) -> DecodingConfig:
+        """Gets the decoding configuration."""
+        return self.decoding_config
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
