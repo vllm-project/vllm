@@ -146,9 +146,10 @@ class ParallelLMHead(VocabParallelEmbedding):
                  bias: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
-                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE):
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+                 linear_method: Optional[LinearMethodBase] = None,):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size)
+                         org_num_embeddings, padding_size, linear_method)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
