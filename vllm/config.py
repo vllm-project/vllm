@@ -331,6 +331,15 @@ class ModelConfig:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
+    def get_num_attention_layers(self,
+                                 parallel_config: "ParallelConfig") -> int:
+        num_layers = self.get_num_layers(parallel_config)
+        is_mamba = self.hf_config.model_type in ["jamba"]
+        if is_mamba:
+            attention_period = model_config.hf_config.attn_layer_period
+            num_layers = max(num_layers // attention_period, 1)
+        return num_layers
+
 
 class CacheConfig:
     """Configuration for the KV cache.
