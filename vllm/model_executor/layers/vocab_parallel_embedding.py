@@ -78,9 +78,10 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         if linear_method is not None:
             self.linear_method = linear_method
-            self.linear_method.create_weights(self, self.input_size,
-                                              [self.output_size], self.input_size,
-                                              self.output_size, self.params_dtype)
+            self.linear_method.create_weights(self, self.embedding_dim,
+                                              [self.num_embeddings_per_partition], self.embedding_dim,
+                                              self.num_embeddings_per_partition, params_dtype,
+                                              weight_loader=self.weight_loader)
         else:
             self.linear_method = None
             self.weight = Parameter(
@@ -93,11 +94,23 @@ class VocabParallelEmbedding(torch.nn.Module):
             })
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        parallel_dim = param.parallel_dim
-        assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
-        loaded_weight = loaded_weight[self.vocab_start_index:self.
-                                      vocab_end_index]
-        param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+        if self.linear_method:
+            tp_rank = get_tensor_model_parallel_rank()
+            output_dim = getattr(param, "output_dim", None)
+            param_data = param.data
+            if output_dim is not None:
+                shard_size = param_data.shape[output_dim]
+                start_idx = tp_rank * shard_size
+                loaded_weight = loaded_weight.narrow(output_dim, start_idx,
+                                                     shard_size)
+
+            assert param_data.shape == loaded_weight.shape
+            param_data.copy_(loaded_weight)
+        else:
+            parallel_dim = param.parallel_dim
+            assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
+            loaded_weight = loaded_weight[self.vocab_start_index:self.vocab_end_index]
+            param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
     def forward(self, input_):
         if self.tp_size > 1:
