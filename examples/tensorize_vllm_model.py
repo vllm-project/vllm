@@ -209,11 +209,6 @@ initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
 
-eng_args_dict = {f.name: getattr(args, f.name) for f in
-                 dataclasses.fields(EngineArgs)}
-
-engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
-engine = LLMEngine.from_engine_args(engine_args)
 
 if args.model_loader_extra_config:
     config = json.loads(args.model_loader_extra_config)
@@ -223,6 +218,12 @@ else:
     tensorizer_args = None
 
 if args.command == "serialize":
+    eng_args_dict = {f.name: getattr(args, f.name) for f in
+                     dataclasses.fields(EngineArgs)}
+
+    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
+    engine = LLMEngine.from_engine_args(engine_args)
+
     input_dir = args.serialized_directory.rstrip('/')
     suffix = args.suffix if args.suffix else uuid.uuid4().hex
     base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
