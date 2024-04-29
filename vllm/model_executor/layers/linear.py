@@ -28,6 +28,7 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
+    QUANTIZED = False
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module,
@@ -68,6 +69,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         separate_bias_add: If true, add bias separately after matrix
                            multiplication.
     """
+
 
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add

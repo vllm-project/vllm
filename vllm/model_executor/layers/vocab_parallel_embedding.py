@@ -73,7 +73,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
 
         self.tp_size = get_tensor_model_parallel_world_size()
-        # Divide the weight matrix along the vocaburaly dimension.
+        # Divide the weight matrix along the vocabulary dimension.
         self.vocab_start_index, self.vocab_end_index = (
             vocab_range_from_global_vocab_size(
                 self.num_embeddings_padded, get_tensor_model_parallel_rank(),
@@ -88,13 +88,13 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           params_dtype,
                                           weight_loader=self.weight_loader)
 
-        if isinstance(self.linear_method, UnquantizedLinearMethod):
+        if not self.linear_method.QUANTIZED:
             set_weight_attrs(self.weight, {
                 "parallel_dim": 0,
             })
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if not isinstance(self.linear_method, UnquantizedLinearMethod):
+        if self.linear_method.QUANTIZED:
             tp_rank = get_tensor_model_parallel_rank()
             output_dim = getattr(param, "output_dim", None)
             param_data = param.data
@@ -124,6 +124,8 @@ class VocabParallelEmbedding(torch.nn.Module):
             masked_input = input_
 
         # Get the embeddings.
+        #  TODO: linear_method.apply_weights() is broken here for un-quantized
+        assert not self.linear_method.QUANTIZED
         output_parallel = F.embedding(masked_input, self.weight)
 
         # Mask the output embedding.
@@ -159,13 +161,9 @@ class ParallelLMHead(VocabParallelEmbedding):
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None, ):
 
-        linear_method = UnquantizedLinearMethod()
-
+        quant_method = quant_config.get_quant_method(self) if quant_config else None
         # lm_head may be quantized
-        if quant_config is not None:
-            method = quant_config.get_quant_method(self)
-            if method is not None:
-                linear_method = method
+        linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod()
 
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, linear_method)
