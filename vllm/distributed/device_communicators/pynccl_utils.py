@@ -2,7 +2,7 @@ import contextlib
 from typing import Optional
 
 import torch
-from torch.distributed import ProcessGroup, ReduceOp
+from torch.distributed import ReduceOp
 
 from vllm.logger import init_logger
 
@@ -20,11 +20,6 @@ except Exception as e:
 comm: Optional["NCCLCommunicator"] = None
 
 
-def is_initialized() -> bool:
-    """Returns whether the NCCL backend is initialized."""
-    return comm is not None
-
-
 @contextlib.contextmanager
 def set_pynccl_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
@@ -36,25 +31,8 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
         pass
 
 
-def init_process_group(group: Optional[ProcessGroup] = None) -> None:
-    assert not is_initialized()
-    global comm
-    comm = NCCLCommunicator(group=group)
-    logger.info("vLLM is using nccl==%s", comm.nccl.ncclGetVersion())
-
-
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
     assert input_.is_cuda, f"{input_} should be a cuda tensor"
     assert comm is not None
     comm.all_reduce(input_, op)
-
-
-def get_world_size() -> int:
-    """Returns the world size."""
-    assert comm is not None
-    return comm.world_size
-
-
-def get_nccl_backend() -> Optional["NCCLCommunicator"]:
-    return comm

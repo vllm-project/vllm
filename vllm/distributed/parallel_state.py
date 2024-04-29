@@ -154,6 +154,8 @@ def initialize_model_parallel(
     assert _TP_NCCL_COMMUNICATOR is None, (
         "tensor model parallel nccl communicator is already initialized")
     _TP_NCCL_COMMUNICATOR = NCCLCommunicator(group=_TP_CPU_GROUP)
+    logger.info("vLLM is using nccl==%s",
+                _TP_NCCL_COMMUNICATOR.nccl.ncclGetVersion())
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -166,6 +168,13 @@ def initialize_model_parallel(
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
+
+
+def warmpup_model_parallel():
+    assert _TP_NCCL_COMMUNICATOR is not None
+    # A small all_reduce for warmup.
+    torch.distributed.all_reduce(torch.zeros(1).cuda(), group=_TP_DEVICE_GROUP)
+    _TP_NCCL_COMMUNICATOR.all_reduce(torch.zeros(1).cuda())
 
 
 def ensure_model_parallel_initialized(
