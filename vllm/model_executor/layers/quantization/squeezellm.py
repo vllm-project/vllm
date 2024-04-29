@@ -52,7 +52,7 @@ class SqueezeLLMConfig(QuantizationConfig):
         return cls(weight_bits)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+            self, layer: torch.nn.Module) -> Optional[QuantizableMethodBase]:
         if isinstance(layer, LinearBase):
             return SqueezeLLMLinearMethod(self)
         return None
