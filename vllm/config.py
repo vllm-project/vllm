@@ -168,7 +168,7 @@ class ModelConfig:
                         if self.quantization == "marlin":
                             self.quantization = quant_method
 
-            # Verify.
+            # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:

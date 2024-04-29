@@ -15,6 +15,10 @@
  * limitations under the License.
  */
 
+/*
+ * Adapted from https://github.com/IST-DASLab/marlin
+ */
+
 #include "gptq_marlin.cuh"
 
 template <typename T> inline std::string str(T x) { return std::to_string(x); }

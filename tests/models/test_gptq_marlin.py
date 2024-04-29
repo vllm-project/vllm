@@ -14,9 +14,10 @@ import os
 
 import pytest
 import torch
-from compare_utils import check_logprobs_close
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+
+from .utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -87,7 +88,6 @@ def test_models(
 
     del gptq_model
 
-    # Compare
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
         outputs_1_lst=gptq_marlin_outputs,

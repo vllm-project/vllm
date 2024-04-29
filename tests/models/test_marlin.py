@@ -14,9 +14,10 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-from compare_utils import check_logprobs_close
 
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+
+from .utils import check_logprobs_close
 
 capability = torch.cuda.get_device_capability()
 capability = capability[0] * 10 + capability[1]
@@ -74,8 +75,6 @@ def test_models(
     # Delete model and clear associated memory.
     del gptq_model
 
-    # loop through the prompts
-    # use logprobs or else this will consistently run out of memory
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
         outputs_1_lst=marlin_outputs,
