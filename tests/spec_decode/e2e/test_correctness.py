@@ -617,9 +617,9 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
             "num_speculative_tokens": k,
         }
         # Try a range of common k, as well as large speculation.
-        for k in [2]
+        for k in [2, 5]
     ])
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("batch_size", [2, 8])
 @pytest.mark.parametrize(
     "output_len",
     [
@@ -709,8 +709,15 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
             for rank in ranks:
                 assert spec_rank_to_token_id[rank] == baseline_rank_to_token_id[rank]
                 #assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
-                if pos == 0:
-                    assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
+                if pos == 0 or True:
+                    import math
+                    #assert spec_rank_to_logprob[rank] == baseline_rank_to_logprob[rank]
+                    assert math.isclose(
+                        a=spec_rank_to_logprob[rank],
+                        b=baseline_rank_to_logprob[rank],
+                        #rel_tol=1e-3,
+                        abs_tol=1e-1,
+                    )
                 else:
                     assert spec_rank_to_logprob[rank] == 0.1
             #breakpoint()

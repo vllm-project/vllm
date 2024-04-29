@@ -422,21 +422,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #breakpoint()
 
         sampler_output_list = []
-        for token_ids_by_step in accepted_token_ids_by_step:
+        for token_ids_by_step, logprobs_by_step in zip(accepted_token_ids_by_step, target_logprobs_by_step):
             if all(token_id == -1 for token_id in token_ids_by_step):
                 break
 
             step_output_token_ids = []
-            for token_id, seq_id in zip(token_ids_by_step, seq_ids):
+            for token_id, seq_id, pos_logprobs in zip(token_ids_by_step, seq_ids, logprobs_by_step):
                 step_output_token_ids.append(
                     SequenceGroupOutput(
                         samples=[
                             SequenceOutput(
                                 parent_seq_id=seq_id,
                                 output_token=token_id,
-                                # TODO Add verifier logprobs.
                                 logprobs={token_id: Logprob(
-                                    logprob=0.1,
+                                    logprob=pos_logprobs[token_id],
                                     rank=1,
                                     decoded_token="TODO",
                                 )},
