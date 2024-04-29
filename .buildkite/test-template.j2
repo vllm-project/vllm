@@ -57,6 +57,11 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 18"
 
+  - label: "AMD Benchmarks Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 23"
+
   - label: "Neuron Test"
     agents:
       queue: neuron

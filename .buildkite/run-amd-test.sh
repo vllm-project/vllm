@@ -110,6 +110,23 @@ case ${2} in
     # AMD Engine Test
     #################
 
+    # Setup cleanup
+    remove_docker_container() { docker rm -f rocm_${1}_test_engine || true; \
+                                docker rm -f rocm_${1}_test_tokenization || true; \
+                                docker rm -f rocm_${1}_test_sequence || true; \
+                                docker rm -f rocm_${1}_test_config || true;}
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
+
+    # Run the image
+    #docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_engine \
+    #        rocm_${1} python3 -m pytest -v -s vllm/tests/engine
+    docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_tokenization \
+            -e HF_TOKEN rocm_${1} python3 -m pytest -v -s vllm/tests/tokenization
+    docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_sequence \
+            rocm_${1} python3 -m pytest -v -s vllm/tests/test_sequence.py
+    docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_config \
+            rocm_${1} python3 -m pytest -v -s vllm/tests/test_config.py
     ;;
     9)
     # AMD Entrypoints Test
@@ -122,21 +139,21 @@ case ${2} in
 
     # Setup cleanup
     remove_docker_container() { docker rm -f rocm_${1}_test_offline_inference || true; \
-                    docker rm -f rocm_test_${1}_offline_inference_with_prefix || true; \
-                    docker rm -f rocm_test_${1}_llm_engine_example || true; \
-                    docker rm -f rocm_test_${1}_llava_example || true;}
+                    docker rm -f rocm_${1}_test_offline_inference_with_prefix || true; \
+                    docker rm -f rocm_${1}_test_llm_engine_example || true; \
+                    docker rm -f rocm_test_llava_example || true;}
     trap "remove_docker_container ${1}" EXIT
     remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host \
-        --name rocm_test_${1}_offline_inference rocm_${1} python3 vllm/examples/offline_inference.py
+        --name rocm_${1}_test_offline_inference rocm_${1} python3 vllm/examples/offline_inference.py
     docker run --device /dev/kfd --device /dev/dri --network host \
-        --name rocm_test_${1}_offline_inference_with_prefix rocm_${1} python3 vllm/examples/offline_inference_with_prefix.py
+        --name rocm_${1}_test_offline_inference_with_prefix rocm_${1} python3 vllm/examples/offline_inference_with_prefix.py
     docker run --device /dev/kfd --device /dev/dri --network host \
-        --name rocm_test_${1}_llm_engine_example rocm_${1} python3 vllm/examples/llm_engine_example.py
+        --name rocm_${1}_test_llm_engine_example rocm_${1} python3 vllm/examples/llm_engine_example.py
     docker run --device /dev/kfd --device /dev/dri --network host \
-        --name rocm_test_${1}_llava_example rocm_${1} /bin/bash -c "pip install awscli; python3 vllm/examples/llava_example.py"
+        --name rocm_${1}_test_llava_example rocm_${1} /bin/bash -c "pip install awscli; python3 vllm/examples/llava_example.py"
     ;;
     11)
     # AMD Kernels Test
@@ -147,6 +164,23 @@ case ${2} in
     # AMD Models Test
     #################
 
+    # Setup cleanup
+    remove_docker_container() { docker rm -f rocm_${1}_test_models || true; \
+                docker rm -f rocm_${1}_test_oot_registration || true; \
+                docker rm -f rocm_${1}_test_models_py || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
+
+    # Run the image
+    #docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_models \
+    #    -e HF_TOKEN rocm_${1} /bin/bash -c "cd vllm/tests; /bin/bash ../.buildkite/download-images.sh; \
+    #    python3 -m pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py"
+
+    docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_oot_registration \
+                rocm_${1} python3 -m pytest -v -s vllm/tests/models/test_oot_registration.py
+
+    #docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_models_py \
+    #                    -e HF_TOKEN rocm_${1} python3 -m pytest -v -s vllm/tests/models/test_models.py
     ;;
     13)
     # AMD Llava Test
@@ -239,9 +273,9 @@ case ${2} in
     remove_docker_container() { docker rm -f rocm_${1}_test_benchmarks || true; }
     trap "remove_docker_container ${1}" EXIT
     remove_docker_container ${1}
-    
+
     # Run the image
-    docker run --device /dev/kfd --device /dev/dri --network host --name rocm-${1}_test_benchmarks \
+    docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_benchmarks \
         -e HF_TOKEN rocm_${1} /bin/bash -c "/bin/bash vllm/.buildkite/run-benchmarks.sh"
     ;;
 esac
