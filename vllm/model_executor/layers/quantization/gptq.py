@@ -7,10 +7,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class GPTQConfig(QuantizationConfig):
@@ -63,8 +63,11 @@ class GPTQConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         return cls(weight_bits, group_size, desc_act)
 
-    def get_linear_method(self) -> "GPTQLinearMethod":
-        return GPTQLinearMethod(self)
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return GPTQLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -194,10 +197,10 @@ class GPTQLinearMethod(LinearMethodBase):
 
         layer.exllama_state = exllama_state
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
         reshaped_x = x.reshape(-1, x.shape[-1])

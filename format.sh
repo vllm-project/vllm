@@ -105,8 +105,8 @@ mypy vllm/transformers_utils --config-file pyproject.toml
 mypy vllm/engine  --config-file pyproject.toml
 mypy vllm/worker --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/model_executor/*.py  --config-file pyproject.toml
-# mypy vllm/lora/*.py --config-file pyproject.toml
+mypy vllm/model_executor  --config-file pyproject.toml
+mypy vllm/lora --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
