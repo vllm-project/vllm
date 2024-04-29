@@ -56,7 +56,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 linear_method: LinearMethodBase = None,
+                 quant_config: Optional[QuantizationConfig] = None,
                  ):
         super().__init__()
 
@@ -67,7 +67,9 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                     padding_size)
         self.embedding_dim = embedding_dim
 
-        self.linear_method = linear_method if linear_method is not None else UnquantizedLinearMethod()
+        quant_method = quant_config.get_quant_method(self) if quant_config else None
+        # lm_head may be quantized
+        self.linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -160,13 +162,8 @@ class ParallelLMHead(VocabParallelEmbedding):
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None, ):
-
-        quant_method = quant_config.get_quant_method(self) if quant_config else None
-        # lm_head may be quantized
-        linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod()
-
         super().__init__(num_embeddings, embedding_dim, params_dtype,
-                         org_num_embeddings, padding_size, linear_method)
+                         org_num_embeddings, padding_size, quant_config)
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
