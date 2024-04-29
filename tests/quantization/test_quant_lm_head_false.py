@@ -1,3 +1,7 @@
+"""Tests whether gptq models with non-quantized lm_head can be loaded.
+
+Run `pytest tests/quantization/test_quant_lm_head_false.py --forked`.
+"""
 from typing import Optional
 
 import pytest
@@ -8,7 +12,7 @@ MODEL = "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit"
 MAX_TOKENS = 100
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture
 def vllm_model(vllm_runner):
     return vllm_runner(
         MODEL,
@@ -16,7 +20,6 @@ def vllm_model(vllm_runner):
     )
 
 
-@pytest.mark.skip_global_cleanup
 def test_lm_head_false(vllm_model):
     llm_engine = vllm_model.model.llm_engine
 
