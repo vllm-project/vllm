@@ -1,15 +1,14 @@
 """Token blocks."""
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, FrozenSet, Iterable, List, Optional
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
-from vllm.core.block.interfaces import Block, BlockAllocator
+from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 
 PrefixHash = int
-BlockId = int
 
 
 class PrefixCachingBlockAllocator(BlockAllocator):
@@ -46,7 +45,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         # An allocator for blocks that do not have prefix hashes.
         self._hashless_allocator = NaiveBlockAllocator(
-            create_block=self._create_block,
+            create_block=self._create_block,  # type: ignore
             num_blocks=num_blocks,
             block_size=block_size,
             block_ids=block_ids,
@@ -84,8 +83,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             prefix_caching_allocator=allocator,
         )
 
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int]) -> Block:
+    def allocate_immutable(self,
+                           prev_block: Optional[Block],
+                           token_ids: List[int],
+                           device: Optional[Device] = None) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
 
@@ -96,6 +97,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated immutable block.
         """
+        assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
         block = self._create_block(
@@ -120,16 +122,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return block
 
-    def allocate_mutable(self, prev_block: Block) -> Block:
+    def allocate_mutable(self,
+                         prev_block: Optional[Block],
+                         device: Optional[Device] = None) -> Block:
         """Allocates a mutable block. If there are no free blocks, this will
         evict unused cached blocks.
 
         Args:
             prev_block (Block): The previous block in the sequence.
+                None is not allowed unlike it is super class.
 
         Returns:
             Block: The allocated mutable block.
         """
+        assert prev_block is not None
+        assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
         try:
@@ -228,18 +235,18 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         return forked_blocks
 
-    def get_num_free_blocks(self) -> int:
+    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
+        assert device is None
         # The number of free blocks is the number of hashless free blocks
         # plus the number of hashful blocks that are unused.
         return self._hashless_allocator.get_num_free_blocks() + len(
             self._unused_cached_blocks)
 
     @property
-    def all_block_ids(self) -> frozenset[int]:
+    def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids
 
-    def promote_to_immutable_block(self,
-                                   block: "PrefixCachingBlock") -> BlockId:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
         block. This means that its content can be referenced by future blocks
         having the same prefix.
@@ -249,7 +256,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block.
 
         Args:
-            block (PrefixCachingBlock): The mutable block to be promoted.
+            block: The mutable block to be promoted.
 
         Returns:
             BlockId: Either the original block index, or the block index of
@@ -315,7 +322,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             takewhile(lambda block_id: computed(block_id), seq[:-1])
             for seq in seq_block_ids
         ]
-        return commonprefix([ids for ids in ids_list if ids != []])
+        # It returns a list of int although type annotation says list of string.
+        return commonprefix([
+            ids for ids in ids_list  # type: ignore
+            if ids != []
+        ])
 
 
 class PrefixCachingBlock(Block):
@@ -332,7 +343,7 @@ class PrefixCachingBlock(Block):
         token_ids (List[int]): The initial token IDs to be stored in the block.
         block_size (int): The maximum number of token IDs that can be stored in
             the block.
-        prefix_caching_allocator (PrefixCachingBlockAllocator): The prefix
+        prefix_caching_allocator (BlockAllocator): The prefix
             caching block allocator associated with this block.
         block_id (Optional[int], optional): The physical block index
             of this block. Defaults to None.
@@ -340,10 +351,10 @@ class PrefixCachingBlock(Block):
 
     def __init__(
         self,
-        prev_block: Optional["PrefixCachingBlock"],
+        prev_block: Optional[Block],
         token_ids: List[int],
         block_size: int,
-        prefix_caching_allocator: PrefixCachingBlockAllocator,
+        prefix_caching_allocator: BlockAllocator,
         block_id: Optional[int] = None,
     ):
         assert_prefix_caching_block_or_none(prev_block)
@@ -352,6 +363,7 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
 
+        assert prev_block is not None
         self._block = NaiveBlock(
             prev_block=prev_block,
             token_ids=token_ids,
@@ -427,10 +439,12 @@ class PrefixCachingBlock(Block):
         if not self.is_full:
             return None
 
-        is_first_block = self._prev_block is None
-        prev_block_hash = (None if is_first_block else
-                           self._prev_block.content_hash)
+        if self._prev_block is not None:
+            prev_block_hash = self._prev_block.content_hash
+        else:
+            prev_block_hash = None
 
+        is_first_block = prev_block_hash is None
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
         if prev_block_hash is None and not is_first_block:

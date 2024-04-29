@@ -192,7 +192,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         assert all(b is not None for b in block_ids)
-        return block_ids
+        return block_ids  # type: ignore
 
     def access_all_blocks_in_seq(self, seq, now):
         # TODO add prefix caching support.
@@ -220,8 +220,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         seq_block_ids = [
             self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
         ]
+        # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
-            seq_block_ids)
+            seq_block_ids)  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]

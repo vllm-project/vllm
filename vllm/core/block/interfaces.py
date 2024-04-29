@@ -3,6 +3,8 @@ from typing import Dict, FrozenSet, List, Optional, Protocol
 
 from vllm.utils import Device
 
+BlockId = int
+
 
 class Block(ABC):
 
@@ -14,6 +16,11 @@ class Block(ABC):
     @abstractmethod
     def block_id(self) -> Optional[int]:
         pass
+
+    @block_id.setter
+    @abstractmethod
+    def block_id(self, value: Optional[int]) -> None:
+        self._block_id = value
 
     @property
     @abstractmethod
@@ -48,16 +55,28 @@ class Block(ABC):
         ) -> "Block":
             pass
 
+    @property
+    @abstractmethod
+    def content_hash(self) -> Optional[int]:
+        """If the block doesn't support content hash, it should raise an
+            exception.
+        """
+        pass
+
 
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable(self,
+                         prev_block: Optional[Block],
+                         device: Optional[Device] = None) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+    def allocate_immutable(self,
+                           prev_block: Optional[Block],
+                           token_ids: List[int],
+                           device: Optional[Device] = None) -> Block:
         pass
 
     @abstractmethod
@@ -69,7 +88,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_free_blocks(self, device: Device) -> int:
+    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
         pass
 
     @property
@@ -90,6 +109,14 @@ class BlockAllocator(ABC):
             self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
 
+    @abstractmethod
+    def cow_block_if_not_appendable(self, block: Block) -> Optional["BlockId"]:
+        pass
+
+    @abstractmethod
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -97,14 +124,18 @@ class BlockAllocator(ABC):
 class DeviceAwareBlockAllocator(BlockAllocator):
 
     @abstractmethod
-    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
+    def allocate_mutable(self,
+                         prev_block: Optional[Block],
+                         device: Optional[Device] = None) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self, prev_block: Optional[Block],
-                           token_ids: List[int], device: Device) -> Block:
+    def allocate_immutable(self,
+                           prev_block: Optional[Block],
+                           token_ids: List[int],
+                           device: Optional[Device] = None) -> Block:
         pass
 
     @abstractmethod
-    def get_num_free_blocks(self, device: Device) -> int:
+    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
         pass

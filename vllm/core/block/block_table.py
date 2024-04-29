@@ -40,7 +40,9 @@ class BlockTable:
     ):
         self._block_size = block_size
         self._allocator = block_allocator
-        self._blocks: Optional[List[Block]] = _blocks
+        if _blocks is None:
+            _blocks = []
+        self._blocks: List[Block] = _blocks
 
         # Use helper method instead of directly calculating, as blocks
         # may not be allocated.
@@ -177,10 +179,10 @@ class BlockTable:
         assert self._is_allocated
         for block in self._blocks:
             self._allocator.free(block)
-        self._blocks = None
+        self._blocks = []
 
     @property
-    def physical_block_ids(self) -> List[int]:
+    def physical_block_ids(self) -> List[Optional[int]]:
         """Returns a list of physical block indices for the blocks in the
         BlockTable.
 
@@ -235,7 +237,7 @@ class BlockTable:
 
     def _get_all_token_ids(self) -> List[int]:
         # NOTE: This function is O(seq_len); use sparingly.
-        token_ids = []
+        token_ids: List[int] = []
 
         if not self._is_allocated:
             return token_ids

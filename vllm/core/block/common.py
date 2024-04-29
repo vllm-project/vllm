@@ -7,7 +7,19 @@ BlockId = int
 RefCount = int
 
 
-class RefCounter:
+class RefCounterInterface:
+
+    def incr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def decr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def get(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+
+class RefCounter(RefCounterInterface):
     """A class for managing reference counts for a set of block indices.
 
     The RefCounter class maintains a dictionary that maps block indices to their
@@ -54,7 +66,7 @@ class RefCounter:
         return ReadOnlyRefCounter(self)
 
 
-class ReadOnlyRefCounter:
+class ReadOnlyRefCounter(RefCounterInterface):
     """A read-only view of the RefCounter class.
 
     The ReadOnlyRefCounter class provides a read-only interface to access the
@@ -96,7 +108,7 @@ class CopyOnWriteTracker:
 
     def __init__(
         self,
-        refcounter: RefCounter,
+        refcounter: RefCounterInterface,
         allocator: BlockAllocator,
     ):
         self._copy_on_writes: Dict[BlockId, List[BlockId]] = defaultdict(list)
