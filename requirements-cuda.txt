@@ -2,7 +2,6 @@
 -r requirements-common.txt
 
 # Dependencies for NVIDIA GPUs
-ray >= 2.9
 nvidia-ml-py # for pynvml package
 torch == 2.3.0
 # These must be updated alongside torch
