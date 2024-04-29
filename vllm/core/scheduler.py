@@ -14,6 +14,8 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
 from vllm.utils import merge_dicts
 
 logger = init_logger(__name__)
+import os
+CHUNK_SIZE = int(os.getenv("VLLM_CHUNK_SIZE", 10000000))
 
 
 class PreemptionMode(enum.Enum):
@@ -119,6 +121,7 @@ class SchedulerOutputs:
     ignored_seq_groups: List[SequenceGroup]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
+    num_preempted: int
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -769,6 +772,7 @@ class Scheduler:
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            num_preempted=len(running_scheduled.preempted),
         )
 
     def _schedule_chunked_prefill(self):
@@ -855,6 +859,7 @@ class Scheduler:
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            num_preempted=len(running_scheduled.preempted),
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -1126,5 +1131,6 @@ class Scheduler:
         # decode phase. Do not chunk in that case.
         if enable_chunking and len(seqs) == 1:
             num_new_tokens = min(num_new_tokens,
+                                 CHUNK_SIZE,
                                  budget.remaining_token_budget())
         return num_new_tokens

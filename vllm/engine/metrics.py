@@ -109,6 +109,7 @@ class Stats:
 
     # System stats.
     num_running: int
+    num_preempted: int
     num_waiting: int
     num_swapped: int
     gpu_cache_usage: float
@@ -229,13 +230,14 @@ class StatLogger:
             logger.info(
                 "Avg prompt throughput: %.1f tokens/s, "
                 "Avg generation throughput: %.1f tokens/s, "
-                "Running: %d reqs, Swapped: %d reqs, "
+                "Running: %d reqs, Swapped: %d reqs, Preempted: %d requs, "
                 "Pending: %d reqs, GPU KV cache usage: %.1f%%, "
                 "CPU KV cache usage: %.1f%%",
                 prompt_throughput,
                 generation_throughput,
                 stats.num_running,
                 stats.num_swapped,
+                stats.num_preempted,
                 stats.num_waiting,
                 stats.gpu_cache_usage * 100,
                 stats.cpu_cache_usage * 100,

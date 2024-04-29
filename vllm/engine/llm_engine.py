@@ -129,6 +129,8 @@ class LLMEngine:
             model_config.seed,
         )
         # TODO(woosuk): Print more configs in debug mode.
+        self.b_size = 0
+        self.num_steps = 0
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -578,6 +580,11 @@ class LLMEngine:
             >>>         break
         """
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
+        self.b_size += scheduler_outputs.num_batched_tokens
+        self.num_steps += 1
+        if self.num_steps % 100 == 0:
+            print(f"SANG-TODO avg b size {(self.b_size // self.num_steps)}")
+            print(f"SANG-TODO {(self.num_steps)=}")
 
         if not scheduler_outputs.is_empty():
             output = self.model_executor.execute_model(
@@ -622,7 +629,10 @@ class LLMEngine:
         # KV Cache Usage in %.
         num_total_gpu = self.cache_config.num_gpu_blocks
         num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        num_total_gpu = self.scheduler.block_manager.num_total_gpu_blocks
+        # gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage = (num_free_gpu / num_total_gpu)
+
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage = 0.
@@ -633,6 +643,7 @@ class LLMEngine:
 
         # Scheduler State
         num_running = len(self.scheduler.running)
+        num_preempted = scheduler_outputs.num_preempted
         num_swapped = len(self.scheduler.swapped)
         num_waiting = len(self.scheduler.waiting)
 
@@ -684,6 +695,7 @@ class LLMEngine:
         return Stats(
             now=now,
             num_running=num_running,
+            num_preempted=num_preempted,
             num_swapped=num_swapped,
             num_waiting=num_waiting,
             gpu_cache_usage=gpu_cache_usage,
