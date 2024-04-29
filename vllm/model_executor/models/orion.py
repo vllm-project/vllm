@@ -252,7 +252,9 @@ class OrionForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = OrionModel(config, quant_config)
-        self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 

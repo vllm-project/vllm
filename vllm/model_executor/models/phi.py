@@ -235,7 +235,8 @@ class PhiForCausalLM(nn.Module):
 
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      bias=True)
+                                      bias=True,
+                                      quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 

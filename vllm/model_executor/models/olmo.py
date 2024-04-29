@@ -284,6 +284,7 @@ class OlmoForCausalLM(nn.Module):
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
+                quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

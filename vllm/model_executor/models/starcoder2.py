@@ -241,6 +241,7 @@ class Starcoder2ForCausalLM(nn.Module):
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)

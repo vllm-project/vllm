@@ -301,7 +301,8 @@ class Qwen2ForCausalLM(nn.Module):
             self.lm_head = self.model.embed_tokens
         else:
             self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size)
+                                          config.hidden_size,
+                                          quant_config=quant_config)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

@@ -296,7 +296,8 @@ class ChatGLMModel(nn.Module):
         self.encoder = GLMTransformer(config, quant_config)
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
-                                           config.hidden_size)
+                                           config.hidden_size,
+                                           quant_config=quant_config)
 
     def forward(
         self,

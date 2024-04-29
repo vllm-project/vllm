@@ -219,6 +219,7 @@ class GPTJForCausalLM(nn.Module):
             config.vocab_size,
             config.n_embd,
             bias=True,
+            quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

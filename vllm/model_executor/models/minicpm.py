@@ -436,6 +436,7 @@ class MiniCPMForCausalLM(nn.Module):
                 # We need bigger padding if using lora for kernel
                 # compatibility
                 if not lora_config else lora_config.lora_vocab_padding_size,
+                quant_config=quant_config,
             )
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 

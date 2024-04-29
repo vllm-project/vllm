@@ -246,7 +246,9 @@ class InternLM2ForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = InternLM2Model(config, quant_config)
-        self.output = ParallelLMHead(config.vocab_size, config.hidden_size)
+        self.output = ParallelLMHead(config.vocab_size,
+                                     config.hidden_size,
+                                     quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 

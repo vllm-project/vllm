@@ -90,7 +90,8 @@ class LlavaForConditionalGeneration(nn.Module):
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.text_config.hidden_size,
-            org_num_embeddings=self.language_model.org_vocab_size)
+            org_num_embeddings=self.language_model.org_vocab_size,
+            quant_config=quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
