@@ -3,8 +3,8 @@ import multiprocessing
 import pytest
 import torch
 
-from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
-                                                          ncclGetUniqueId)
+from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.utils import update_environment_variables
 
@@ -84,7 +84,8 @@ def test_pynccl_with_cudagraph():
 
 
 def test_ncclGetUniqueId():
-    unique_id = ncclGetUniqueId()
+    library = NCCLLibrary()
+    unique_id = library.ncclGetUniqueId()
     # `list(unique_id.internal)` is something like this:
     # [34, -16, 23, 83, 109, -19, 59, 95, 2, 0, -86, 55, 10, -128, 0, 29, 0,
     # 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
