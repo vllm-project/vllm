@@ -90,7 +90,7 @@ def test_logits_processors(seed: int, device: str):
         device=model_runner.device,
         pin_memory=model_runner.pin_memory)
     logits_processor_output = logits_processor(
-        embedding=None,
+        lm_head=None,
         hidden_states=input_tensor,
         sampling_metadata=sampling_metadata)
 
