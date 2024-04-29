@@ -50,7 +50,7 @@ def _get_perms():
 
     perm = numpy.array(perm)
     interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel()
+    perm = perm.reshape((-1, 8))[:, interleave].ravel() # type: ignore
     perm = torch.from_numpy(perm)
     scale_perm = []
     for i in range(8):
@@ -195,7 +195,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         quant_config: The GPTQ Marlin quantization config.
     """
 
-    def __init__(self, quant_config: GPTQMarlinConfig):
+    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
 
     def create_weights(
@@ -207,7 +207,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
-    ) -> Dict[str, Any]:
+    ) -> None:
         del output_size
 
         # Normalize group_size
