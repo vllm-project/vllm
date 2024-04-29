@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -192,7 +192,7 @@ class GPTBigCodeModel(nn.Module):
 
         self.embed_dim = config.hidden_size
 
-        self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
+        self.wte = ParallelLMHead(config.vocab_size, self.embed_dim)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
             GPTBigCodeBlock(config, quant_config)
@@ -230,7 +230,7 @@ class GPTBigCodeForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, quant_config)
-        self.lm_head_weight = self.transformer.wte.weight
+        self.lm_head= self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -247,7 +247,7 @@ class GPTBigCodeForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

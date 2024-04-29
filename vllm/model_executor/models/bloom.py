@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -220,7 +220,7 @@ class BloomModel(nn.Module):
         self.embed_dim = config.hidden_size
 
         # Embedding + LN Embedding
-        self.word_embeddings = VocabParallelEmbedding(
+        self.word_embeddings = ParallelLMHead(
             config.vocab_size,
             self.embed_dim,
         )
@@ -268,7 +268,7 @@ class BloomForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = BloomModel(config, quant_config)
-        self.lm_head_weight = self.transformer.word_embeddings.weight
+        self.lm_head = self.transformer.word_embeddings
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -285,7 +285,7 @@ class BloomForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 

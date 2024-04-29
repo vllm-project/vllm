@@ -263,7 +263,7 @@ class InternLM2ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.output.weight, hidden_states,
+        logits = self.logits_processor(self.output, hidden_states,
                                        sampling_metadata)
         return logits
 

@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -321,7 +321,7 @@ class FalconModel(nn.Module):
         self.use_alibi = config.alibi
 
         # Embedding + LN Embedding
-        self.word_embeddings = VocabParallelEmbedding(
+        self.word_embeddings = ParallelLMHead(
             config.vocab_size,
             self.embed_dim,
         )
@@ -366,7 +366,7 @@ class FalconForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = FalconModel(config, quant_config)
-        self.lm_head_weight = self.transformer.word_embeddings.weight
+        self.lm_head = self.transformer.word_embeddings
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -387,7 +387,7 @@ class FalconForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
