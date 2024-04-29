@@ -50,14 +50,15 @@ class VocabParallelEmbedding(torch.nn.Module):
         padding_size: padding size for the vocabulary.
     """
 
-    def __init__(self,
-                 num_embeddings: int,
-                 embedding_dim: int,
-                 params_dtype: Optional[torch.dtype] = None,
-                 org_num_embeddings: Optional[int] = None,
-                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 ):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        params_dtype: Optional[torch.dtype] = None,
+        org_num_embeddings: Optional[int] = None,
+        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
 
         # Keep the input dimensions.
@@ -67,9 +68,11 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                     padding_size)
         self.embedding_dim = embedding_dim
 
-        quant_method = quant_config.get_quant_method(self) if quant_config else None
+        quant_method = quant_config.get_quant_method(
+            self) if quant_config else None
         # lm_head may be quantized
-        self.linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod()
+        self.linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod(
+        )
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -83,7 +86,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
 
-        self.linear_method.create_weights(self, self.embedding_dim,
+        self.linear_method.create_weights(self,
+                                          self.embedding_dim,
                                           [self.num_embeddings_per_partition],
                                           self.embedding_dim,
                                           self.num_embeddings_per_partition,
@@ -111,7 +115,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         else:
             parallel_dim = param.parallel_dim
             assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
-            loaded_weight = loaded_weight[self.vocab_start_index:self.vocab_end_index]
+            loaded_weight = loaded_weight[self.vocab_start_index:self.
+                                          vocab_end_index]
             param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
     def forward(self, input_):
@@ -154,14 +159,16 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: padding size for the vocabulary.
     """
 
-    def __init__(self,
-                 num_embeddings: int,
-                 embedding_dim: int,
-                 bias: bool = False,
-                 params_dtype: Optional[torch.dtype] = None,
-                 org_num_embeddings: Optional[int] = None,
-                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
-                 quant_config: Optional[QuantizationConfig] = None, ):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        bias: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        org_num_embeddings: Optional[int] = None,
+        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config)
         if bias:

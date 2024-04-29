@@ -69,7 +69,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
                            multiplication.
     """
 
-
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
