@@ -254,8 +254,8 @@ def test_empty_seq_group():
 @pytest.fixture
 def distributed_init():
     init_distributed_environment(
-        1,
-        0,
+        world_size=1,
+        rank=0,
         distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
         local_rank=0)
 
