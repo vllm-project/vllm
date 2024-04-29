@@ -20,37 +20,42 @@ steps:
   - label: "AMD Default Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 1"
 
   - label: "AMD Core Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_core.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 5"
+
+  - label: "AMD Distributed Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 7"
 
   - label: "AMD Examples Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_examples.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 10"
 
   - label: "AMD Prefix Caching Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_prefix_caching.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 14"
 
   - label: "AMD Logits Processor Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_logits_processor.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 16"
 
   - label: "AMD Worker Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_worker.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 17"
 
   - label: "AMD Speculative Decoding Test"
     agents:
       queue: amd
-    command: "bash .buildkite/run-amd-test_speculative_decoding.sh"
+    command: "bash .buildkite/run-amd-test.sh ${docker_image_ROCm} 18"
 
   - label: "Neuron Test"
     agents:
