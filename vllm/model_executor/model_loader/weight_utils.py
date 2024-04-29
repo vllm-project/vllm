@@ -370,3 +370,8 @@ def initialize_dummy_weights(
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
             param.data.uniform_(low, high)
+
+
+# Skip loading extra modules for GPTQ models.
+def skip_gptq_extra_param(param_name: str, params: dict):
+    return param_name.endswith(".bias") and param_name not in params

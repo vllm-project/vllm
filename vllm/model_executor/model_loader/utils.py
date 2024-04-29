@@ -39,8 +39,3 @@ def get_model_architecture(
 
 def get_architecture_class_name(model_config: ModelConfig) -> str:
     return get_model_architecture(model_config)[1]
-
-
-# Skip loading extra modules for GPTQ models.
-def skip_gptq_extra_param(param_name: str, params: dict):
-    return param_name.endswith(".bias") and param_name not in params
