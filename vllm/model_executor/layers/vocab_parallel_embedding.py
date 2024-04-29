@@ -7,7 +7,8 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod, adjust_marlin_shard
+from vllm.model_executor.layers.linear import (UnquantizedLinearMethod,
+                                               adjust_marlin_shard)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
@@ -98,7 +99,10 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           params_dtype,
                                           weight_loader=self.weight_loader)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, loaded_shard_id: Optional[int] = None):
+    def weight_loader(self,
+                      param: Parameter,
+                      loaded_weight: torch.Tensor,
+                      loaded_shard_id: Optional[int] = None):
         if self.linear_method.QUANTIZED:
             param_data = param.data
             output_dim = getattr(param, "output_dim", None)
@@ -112,12 +116,13 @@ class VocabParallelEmbedding(torch.nn.Module):
                 current_shard_offset = 0
                 shard_offsets = []
                 for i, output_size in enumerate(self.output_sizes):
-                    shard_offsets.append((i, current_shard_offset, output_size))
+                    shard_offsets.append(
+                        (i, current_shard_offset, output_size))
                     current_shard_offset += output_size
                 packed_dim = getattr(param, "packed_dim", None)
                 for shard_id, shard_offset, shard_size in shard_offsets:
-                    # If quantized, we need to adjust the offset and size to account
-                    # for the packing.
+                    # If quantized, we need to adjust the offset and size to
+                    # account for the packing.
                     if packed_dim == output_dim:
                         shard_size = shard_size // param.pack_factor
                         shard_offset = shard_offset // param.pack_factor
@@ -136,7 +141,8 @@ class VocabParallelEmbedding(torch.nn.Module):
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
             if output_dim is not None:
-                shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+                shard_offset = sum(
+                    self.output_sizes[:loaded_shard_id]) // tp_size
                 shard_size = self.output_sizes[loaded_shard_id] // tp_size
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
@@ -163,10 +169,9 @@ class VocabParallelEmbedding(torch.nn.Module):
             else:
                 ignore_warning = getattr(param, "ignore_warning", False)
                 if not ignore_warning:
-                    print(
-                        "Loading a weight without `output_dim` attribute in "
-                        "MergedColumnParallelLinear, assume the weight is "
-                        "the same for all partitions.")
+                    print("Loading a weight without `output_dim` attribute in "
+                          "MergedColumnParallelLinear, assume the weight is "
+                          "the same for all partitions.")
             assert param_data.shape == loaded_weight.shape
             param_data.copy_(loaded_weight)
         else:
