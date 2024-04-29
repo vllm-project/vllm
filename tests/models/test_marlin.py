@@ -60,18 +60,13 @@ def test_models(
                                quantization="marlin")
     marlin_outputs = marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
-
-    # Delete model and clear associated memory.
     del marlin_model
 
     gptq_model = vllm_runner(model_pair.model_gptq,
                              dtype=dtype,
                              quantization="gptq")
-    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
-                                                       max_tokens,
-                                                       num_logprobs)
-
-    # Delete model and clear associated memory.
+    gptq_outputs = gptq_model.generate_greedy_logprobs(
+        example_prompts, max_tokens, num_logprobs)
     del gptq_model
 
     check_logprobs_close(
