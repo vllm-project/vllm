@@ -346,55 +346,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
-        #logprobs = proposal_scores.probs.log()
         logprobs = proposal_scores.spec_logprobs
-
-        #torch.cat(
-        #    [
-        #        proposal_scores.probs[spec_indices],
-        #        proposal_scores.probs[non_spec_indices],
-        #    ]
-        #).log()
-
-        # TODO need to map the logprobs of the accepted tokens
-        # need a way to determine prob batch index for a given sequence
-        # I forget the order of the probs
-        """
-        (Pdb) accepted_token_ids
-        tensor([[29889,    -1,    -1],
-                [  697,  1058,    -1]], device='cuda:0')
-        (Pdb) proposal_scores.probs
-        tensor([[[0., 0., 0.,  ..., 0., 0., 0.],
-                 [0., 0., 0.,  ..., 0., 0., 0.],
-                 [0., 0., 0.,  ..., 0., 0., 0.]],
-        
-                [[0., 0., 0.,  ..., 0., 0., 0.],
-                 [0., 0., 0.,  ..., 0., 0., 0.],
-                 [0., 0., 0.,  ..., 0., 0., 0.]]], device='cuda:0')
-        (Pdb) proposal_scores.probs.shape
-        torch.Size([2, 3, 32000])
-        (Pdb) accepted_token_ids.shape
-        torch.Size([2, 3])
-        (Pdb) proposal_scores.probs[0]
-        tensor([[0., 0., 0.,  ..., 0., 0., 0.],
-                [0., 0., 0.,  ..., 0., 0., 0.],
-                [0., 0., 0.,  ..., 0., 0., 0.]], device='cuda:0')
-        (Pdb) proposal_scores.probs[0].shape
-        torch.Size([3, 32000])
-        (Pdb) proposal_scores.probs[0][0][29889]
-        tensor(1., device='cuda:0')
-
-        [batch][k][token]
-        I think non spec sequences are in same order
-        """
-
-        #breakpoint()
 
         # Rearrange so that results are in the order of the original seq group
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
         return accepted_token_ids, logprobs
+
 
     def _create_output_sampler_list(
         self,
@@ -408,37 +367,63 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
+        
+        def get_all_num_logprobs(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+            
+            all_num_logprobs = []
+            for seq_group_metadata in seq_group_metadata_list:
+                num_logprobs = seq_group_metadata.sampling_params.logprobs
+                if seq_group_metadata.sampling_params.logprobs is None:
+                    num_logprobs = 0
+                all_num_logprobs.append(num_logprobs)
+
+            return all_num_logprobs
+
         seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
+        num_topk = self.scorer_worker.model_config.max_logprobs
 
         # shape: [k+1, batch_size]
         accepted_token_ids_by_step = accepted_token_ids.transpose(0,
                                                                   1).tolist()
-        # Need to get logprobs of accepted token ids according to target model
-        # what is rank? how is order determined
-        # 
-        target_logprobs_by_step = target_logprobs.transpose(0, 1).tolist()
-        # TODO need to get unmodified logprobs (not probs )
-
-        #breakpoint()
+        topk_logprobs, topk_indices = target_logprobs.transpose(0, 1).topk(
+            k=num_topk,
+            dim=-1,
+        )
+        topk_logprobs_by_step = topk_logprobs.tolist()
+        topk_indices_by_step = topk_indices.tolist()
 
         sampler_output_list = []
-        for token_ids_by_step, logprobs_by_step in zip(accepted_token_ids_by_step, target_logprobs_by_step):
+        for token_ids_by_step, topk_indices, topk_logprobs in zip(accepted_token_ids_by_step, topk_indices_by_step, topk_logprobs_by_step):
             if all(token_id == -1 for token_id in token_ids_by_step):
                 break
 
             step_output_token_ids = []
-            for token_id, seq_id, pos_logprobs in zip(token_ids_by_step, seq_ids, logprobs_by_step):
+            for token_id, seq_id, num_logprob, logprobs, logprob_indices in zip(token_ids_by_step, seq_ids, num_logprobs_per_seq, topk_logprobs, topk_indices):
+
+                logprobs = {
+                    t: Logprob(
+                        logprob=logprobs[r],
+                        rank=(r + 1),
+                        decoded_token="TODO",)
+                    for r, t in enumerate(logprob_indices[:num_logprob])
+                }
+
+                # TODO get rank for sampled token.
+                #if token_id not in topk_indices:
+                #    logprobs[token_id] = Logprob(
+                #        logprob=logprobs[r],
+                #        rank=(r + 1),
+                #        decoded_token="TODO",
+                #    )
+
                 step_output_token_ids.append(
                     SequenceGroupOutput(
                         samples=[
                             SequenceOutput(
                                 parent_seq_id=seq_id,
                                 output_token=token_id,
-                                logprobs={token_id: Logprob(
-                                    logprob=pos_logprobs[token_id],
-                                    rank=1,
-                                    decoded_token="TODO",
-                                )},
+                                logprobs=logprobs
                             )
                         ],
                         prompt_logprobs=None,
