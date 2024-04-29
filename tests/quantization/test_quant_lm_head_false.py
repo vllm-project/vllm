@@ -10,7 +10,10 @@ MAX_TOKENS = 100
 
 @pytest.fixture(scope="session")
 def vllm_model(vllm_runner):
-    return vllm_runner(MODEL)
+    return vllm_runner(
+        MODEL,
+        enforce_eager=True,
+    )
 
 
 @pytest.mark.skip_global_cleanup
@@ -21,13 +24,13 @@ def test_lm_head_false(vllm_model):
     assert not quantization_config.get("lm_head")
 
     llm_engine.add_request(
-        "id", "A story about vLLM:\n",
+        "id", "A story about life in 1978:\n",
         SamplingParams(
             temperature=0.0,
             max_tokens=MAX_TOKENS,
         ), None)
 
-    expected_output = "\nIn the year 2020, a group of scientists"
+    expected_output = "\nIn 1978, I was a freshman in high school."
 
     output: Optional[CompletionOutput] = None
     output_text = ""
