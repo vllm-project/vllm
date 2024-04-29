@@ -80,8 +80,9 @@ def test_models(
                              max_model_len=MAX_MODEL_LEN,
                              tensor_parallel_size=1,
                              disable_custom_all_reduce=True)
-    gptq_outputs = gptq_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
+    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
+                                                       max_tokens,
+                                                       num_logprobs)
     del gptq_model
 
     check_logprobs_close(
