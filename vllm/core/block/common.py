@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Protocol
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -7,7 +7,7 @@ BlockId = int
 RefCount = int
 
 
-class RefCounterInterface:
+class RefCounterProtocol(Protocol):
 
     def incr(self, block_id: BlockId) -> RefCount:
         raise NotImplementedError
@@ -19,7 +19,7 @@ class RefCounterInterface:
         raise NotImplementedError
 
 
-class RefCounter(RefCounterInterface):
+class RefCounter(RefCounterProtocol):
     """A class for managing reference counts for a set of block indices.
 
     The RefCounter class maintains a dictionary that maps block indices to their
@@ -66,7 +66,7 @@ class RefCounter(RefCounterInterface):
         return ReadOnlyRefCounter(self)
 
 
-class ReadOnlyRefCounter(RefCounterInterface):
+class ReadOnlyRefCounter(RefCounterProtocol):
     """A read-only view of the RefCounter class.
 
     The ReadOnlyRefCounter class provides a read-only interface to access the
@@ -108,7 +108,7 @@ class CopyOnWriteTracker:
 
     def __init__(
         self,
-        refcounter: RefCounterInterface,
+        refcounter: RefCounterProtocol,
         allocator: BlockAllocator,
     ):
         self._copy_on_writes: Dict[BlockId, List[BlockId]] = defaultdict(list)

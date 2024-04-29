@@ -249,7 +249,7 @@ class BlockTable:
 
     @property
     def _is_allocated(self) -> bool:
-        return self._blocks is not None
+        return len(self._blocks) > 0
 
     @property
     def _num_empty_slots(self) -> int:

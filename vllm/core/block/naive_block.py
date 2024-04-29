@@ -226,7 +226,7 @@ class NaiveBlock(Block):
     """
 
     def __init__(self,
-                 prev_block: Block,
+                 prev_block: Optional[Block],
                  token_ids: List[int],
                  block_size: int,
                  allocator: BlockAllocator,

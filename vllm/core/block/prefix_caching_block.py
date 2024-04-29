@@ -135,7 +135,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated mutable block.
         """
-        assert prev_block is not None
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -363,7 +362,6 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
 
-        assert prev_block is not None
         self._block = NaiveBlock(
             prev_block=prev_block,
             token_ids=token_ids,
