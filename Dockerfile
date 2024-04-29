@@ -5,8 +5,17 @@
 # prepare basic build environment
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
 
+# Install Python
+ARG python_version=3.11
+ENV DEBIAN_FRONTEND=noninteractive
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Chicago' | debconf-set-selections
 RUN apt-get update -y \
-    && apt-get install -y python3-pip git
+    && apt-get install -y software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && apt-get update -y \
+    && apt-get install -y python${python_version} python${python_version}-dev python${python_version}-venv python3-pip git \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${python_version} 1
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
@@ -45,7 +54,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
-RUN apt-get update -y && apt-get install -y ccache
+RUN apt-get update -y && apt-get install -y sccache
 
 # files and directories related to build wheels
 COPY csrc csrc
@@ -58,17 +67,20 @@ COPY pyproject.toml pyproject.toml
 COPY vllm vllm
 
 # max jobs used by Ninja to build extensions
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# number of threads used by nvcc
-ARG nvcc_threads=8
-ENV NVCC_THREADS=$nvcc_threads
+# ARG max_jobs=2
+# ENV MAX_JOBS=${max_jobs}
+# # number of threads used by nvcc
+# ARG nvcc_threads=8
+# ENV NVCC_THREADS=$nvcc_threads
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
 ENV CCACHE_DIR=/root/.cache/ccache
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/pip \
+ENV SCCACHE_GCS_BUCKET=vllm-build-artifacts
+ENV SCCACHE_GCS_RW_MODE=READ_WRITE
+ENV SCCACHE_GCS_KEY_PREFIX=sccache/docker-build/
+RUN sccache --show-stats
+RUN --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist
 
 # the `vllm_nccl` package must be installed from source distribution
