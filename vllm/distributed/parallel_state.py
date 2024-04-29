@@ -290,10 +290,12 @@ def get_pipeline_model_parallel_prev_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP_DEVICE_GROUP
+    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
     if _TP_DEVICE_GROUP:
         torch.distributed.destroy_process_group(_TP_DEVICE_GROUP)
+        torch.distributed.destroy_process_group(_TP_CPU_GROUP)
     _TP_DEVICE_GROUP = None
+    _TP_CPU_GROUP = None
     global _TP_NCCL_COMMUNICATOR
     del _TP_NCCL_COMMUNICATOR
     _TP_NCCL_COMMUNICATOR = None
