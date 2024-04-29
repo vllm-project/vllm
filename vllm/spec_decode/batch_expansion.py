@@ -94,8 +94,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
         
-        print(f"batch expansion {non_spec_indices=}")
-
         all_tokens, all_probs, spec_logprobs = self._contract_batch(
             contracted_bs=len(seq_group_metadata_list),
             target_sampler_output=target_sampler_output,
