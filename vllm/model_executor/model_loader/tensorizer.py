@@ -13,7 +13,8 @@ from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
@@ -63,7 +64,7 @@ class TensorizerConfig:
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
-        return TensorizerArgs(**tensorizer_args)
+        return TensorizerArgs(**tensorizer_args)  # type: ignore
 
     def verify_with_parallel_config(
         self,
@@ -251,7 +252,7 @@ class TensorizerAgent:
     """
 
     def __init__(self, tensorizer_config: TensorizerConfig,
-                 linear_method: LinearMethodBase, **extra_kwargs):
+                 quant_config: QuantizationConfig, **extra_kwargs):
         if tensorizer_load_fail is not None:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
@@ -262,19 +263,21 @@ class TensorizerAgent:
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
         self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("linear_method", None) is not None:
-            self.linear_method = extra_kwargs["linear_method"]
+        if extra_kwargs.get("quant_config", None) is not None:
+            self.quant_config = extra_kwargs["quant_config"]
         else:
-            self.linear_method = linear_method
+            self.quant_config = quant_config
         self.model = self._init_model()
 
     def _init_model(self):
+        assert self.tensorizer_config.hf_config is not None
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
+        assert self.tensorizer_config.model_class is not None
         with no_init_or_tensor():
             return self.tensorizer_config.model_class(
                 config=model_args,
-                linear_method=self.linear_method,
+                quant_config=self.quant_config,
                 **self.extra_kwargs)
 
     def _resize_lora_embeddings(self):
