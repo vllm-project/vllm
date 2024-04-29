@@ -67,6 +67,7 @@ class Fp8LinearMethod(LinearMethodBase):
     Args:
         quant_config: The quantization config.
     """
+    QUANTIZED = True
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config

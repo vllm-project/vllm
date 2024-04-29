@@ -78,6 +78,7 @@ class AWQLinearMethod(LinearMethodBase):
     Args:
         quant_config: The AWQ quantization config.
     """
+    QUANTIZED = True
 
     def __init__(self, quant_config: AWQConfig):
         self.quant_config = quant_config

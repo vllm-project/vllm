@@ -223,6 +223,7 @@ class AQLMLinearMethod(LinearMethodBase):
     Args:
         quant_config: The AQLM quantization config.
     """
+    QUANTIZED = True
 
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config

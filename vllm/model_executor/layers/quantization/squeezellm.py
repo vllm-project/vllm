@@ -68,6 +68,7 @@ class SqueezeLLMLinearMethod(QuantizeMethodBase):
     Args:
         quant_config: The SqueezeLLM quantization config.
     """
+    QUANTIZED = True
 
     def __init__(self, quant_config: SqueezeLLMConfig):
         self.quant_config = quant_config
