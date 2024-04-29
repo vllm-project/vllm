@@ -70,6 +70,15 @@ def sampler_output_to_torch(
         dim=0,
     ).transpose(0, 1)
 
+    # shape: [batch_size, num_sampler_output, vocab_size]
+    sampled_token_logprobs = torch.stack(
+        [
+            sampler_output.spec_logprobs
+            for sampler_output in sampler_output_list
+        ],
+        dim=0,
+    ).transpose(0, 1)
+
     # shape: [batch_size, num_sampler_output]
     sampled_token_ids = torch.stack(
         [
@@ -79,7 +88,7 @@ def sampler_output_to_torch(
         dim=0,
     ).transpose(0, 1)
 
-    return sampled_token_ids, sampled_token_probs
+    return sampled_token_ids, sampled_token_probs, sampled_token_logprobs
 
 
 def maybe_mock_device_tensors(sampler_output: SamplerOutput, batch_size: int,

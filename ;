@@ -180,8 +180,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             spec_expanded_bs, k + 1)
         target_probs = target_probs.squeeze().reshape(spec_expanded_bs, k + 1,
                                                       self._vocab_size)
-        target_logprobs = target_logprobs.squeeze().reshape(spec_expanded_bs, k + 1,
-                                                      self._vocab_size)
 
         all_tokens = torch.full(size=(contracted_bs, k + 1),
                                 fill_value=-1,
@@ -192,22 +190,20 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                                 self._vocab_size,
                                 device=self._device,
                                 dtype=torch.float32)
-        all_logprobs = torch.full(size=(contracted_bs, k + 1, self._vocab_size,),
-                                fill_value=-float("inf"),
-                                device=self._device,
-                                dtype=torch.float32)
+
+        all_logprobs = torch.zeros_like(all_probs)
 
         if non_spec_indices:
             all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
             all_probs[non_spec_indices, :1, :] = non_spec_target_probs
-            all_logprobs[non_spec_indices, :1, :] = non_spec_target_logprobs
 
         if spec_indices:
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
-            all_logprobs[spec_indices] = target_logprobs
 
-        return all_tokens, all_probs, all_logprobs
+        spec_logprobs = None
+
+        return all_tokens, all_probs, spec_logprobs
 
     def _create_scoring_model_input(
         self,

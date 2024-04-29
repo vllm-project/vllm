@@ -632,6 +632,7 @@ def test_logprobs(baseline_llm_generator, test_llm_generator, batch_size: int,
     """Verify that speculative decoding produces exact equality to without spec
     decode with many different values of k.
     """
+    # TODO need to test for skipped speculation
     run_greedy_logprobs_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,

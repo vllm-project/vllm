@@ -346,8 +346,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
-        logprobs = proposal_scores.probs.log()
-        #logprobs = proposal_scores.spec_logprobs
+        #logprobs = proposal_scores.probs.log()
+        logprobs = proposal_scores.spec_logprobs
+
         #torch.cat(
         #    [
         #        proposal_scores.probs[spec_indices],
@@ -418,7 +419,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         target_logprobs_by_step = target_logprobs.transpose(0, 1).tolist()
         # TODO need to get unmodified logprobs (not probs )
 
-        breakpoint()
+        #breakpoint()
 
         sampler_output_list = []
         for token_ids_by_step in accepted_token_ids_by_step:
