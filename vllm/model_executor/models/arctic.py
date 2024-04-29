@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.deepspeedfp import (
-    DeepSpeedFPLinearMethod, DeepSpeedFPQuantizedParameter)
+    DeepSpeedFPLinearMethod, DeepSpeedFPParameter)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -117,24 +117,20 @@ class ArcticMoE(nn.Module):
 
             # Create it on CPU and later quantize it to GPU.
             if self.is_quant:
-                self.ws = DeepSpeedFPQuantizedParameter(
-                    torch.empty(self.num_experts,
-                                2 * self.intermediate_size,
-                                self.hidden_size,
-                                dtype=self.params_dtype),
-                    requires_grad=False,
-                    quantization=linear_method.quant_config,
+                self.ws = DeepSpeedFPParameter(
+                    torch.Size(self.num_experts,
+                               2 * self.intermediate_size,
+                               self.hidden_size,
+                               dtype=self.params_dtype),
+                    quant_config=linear_method.quant_config,
                 )
-                torch.cuda.empty_cache()
-                self.w2s = DeepSpeedFPQuantizedParameter(
-                    torch.empty(self.num_experts,
-                                self.hidden_size,
-                                self.intermediate_size,
-                                dtype=self.params_dtype),
-                    requires_grad=False,
-                    quantization=linear_method.quant_config,
+                self.w2s = DeepSpeedFPParameter(
+                    torch.Size(self.num_experts,
+                               self.hidden_size,
+                               self.intermediate_size,
+                               dtype=self.params_dtype),
+                    quant_config=linear_method.quant_config,
                 )
-                torch.cuda.empty_cache()
             else:
                 self.ws = nn.Parameter(
                     torch.empty(self.num_experts,
@@ -183,9 +179,9 @@ class ArcticMoE(nn.Module):
         if self.is_quant:
             if 2 * num_tokens <= self.num_experts:
                 # If much fewer tokens than experts, use selective dequantize.
-                ws_dequantized = self.ws.selective_dequantized(
+                ws_dequantized = self.ws.ds_selective_dequantize(
                     topk_ids.flatten())
-                w2s_dequantized = self.w2s.selective_dequantized(
+                w2s_dequantized = self.w2s.ds_selective_dequantize(
                     topk_ids.flatten())
                 # We gathered the experts to the tokens so update the mapping.
                 topk_ids = torch.arange(
@@ -194,8 +190,8 @@ class ArcticMoE(nn.Module):
                     device=topk_ids.device,
                 ).reshape(topk_ids.shape)
             else:
-                ws_dequantized = self.ws.dequantized()
-                w2s_dequantized = self.w2s.dequantized()
+                ws_dequantized = self.ws.ds_dequantize()
+                w2s_dequantized = self.w2s.ds_dequantize()
 
         final_hidden_states = fused_experts(
             hidden_states,

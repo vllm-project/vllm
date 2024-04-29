@@ -85,10 +85,6 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: DeepSpeedFPConfig):
         self.quant_config = quant_config
         self.weight = None
-        self.q_weight = None
-        # create the quantizer
-        from deepspeed.ops.fp_quantizer import FP_Quantize
-        self.quantizer = FP_Quantize(group_size=self.quant_config.group_size, )
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -96,12 +92,10 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         del output_size
-        weight = DeepSpeedFPQuantizedParameter(
-            torch.empty(output_size_per_partition,
-                        input_size_per_partition,
-                        dtype=params_dtype),
-            requires_grad=False,
-            quantization=self.quant_config,
+        weight = DeepSpeedFPParameter(
+            torch.Size(output_size_per_partition,
+                       input_size_per_partition),
+            quant_config=self.quant_config,
         )
         set_weight_attrs(weight, {
             "input_dim": 1,
@@ -115,132 +109,53 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight
-        y = weight.dequantized()
+        y = weight.ds_dequantize()
         return F.linear(x, y, bias)
 
-    def dequantize(self, weight):
-        assert (weight.data.dtype == torch.int8
-                and weight.data.device.type == "cuda")
-        with torch.cuda.stream(torch.cuda.current_stream(weight.data.device)):
-            return self.quantizer.dequantize(weight.data, self.scales)
 
-    def quantize(self, weight, return_meta_tensor=True):
-        with torch.cuda.stream(torch.cuda.current_stream(weight.data.device)):
-            return self.quantizer.quantize(
-                weight.data, return_meta_tensor=return_meta_tensor)
-
-
-class DeepSpeedFPQuantizedParameter(nn.Parameter):
+class DeepSpeedFPParameter(nn.Parameter):
     """
     DeepSpeedFP quantized parameter class that implements fp8/fp6
     quantization deepspeed. Weights are stored in quantized form on
     GPUs, and can be dequantized on-the-fly when needed by the model.
-    The weights are actually quantized during any `.to(device)` if
-    `device` is a cuda device.
     """
 
-    def __new__(
-            cls,
-            data,
-            requires_grad:
-        bool = False,  # quantized weights should be frozen by default
-            quantization: DeepSpeedFPConfig = None,
-            quantizer=None,  # HF expects this argument.
-    ):
-        if quantization is None:
-            quantization = DeepSpeedFPConfig()
-        self = torch.Tensor._make_subclass(cls, data, requires_grad)
-        self.quant_config = quantization
-        self.data = data
+    def __new__(cls, orig_shape: torch.Size, quant_config: DeepSpeedFPConfig):
         from deepspeed.ops.fp_quantizer import FP_Quantize
-        if quantizer is not None:
-            self.quantizer = quantizer
-        else:
-            self.quantizer = FP_Quantize(group_size=quantization.group_size, )
-        self._ensure_quantized(self)
+        data = torch.empty((
+            orig_shape.numel() // quant_config.group_size,
+            quant_config.group_size * quant_config.weight_bits // 8 + 4,
+        ))
+        self = torch.Tensor._make_subclass(cls, data, requires_grad=False)
+        self.orig_shape = orig_shape
+        self.quant_config = quant_config
+        self.fp_quantizer = FP_Quantize(group_size=quant_config.group_size)
         return self
 
-    def _ensure_quantized(self, tensor: torch.Tensor):
-        # If the tensor is on a cuda device and is not quantized,
-        # then quantize it in-place.
-        if tensor.device.type == "cuda" and tensor.dtype != torch.int8:
-            with torch.cuda.stream(torch.cuda.current_stream(tensor.device)):
-                tensor.data = self.quantizer.quantize(
-                    tensor.data, q_bits=self.quant_config.weight_bits)
-            assert tensor.dtype == torch.int8
+    def ds_quantize_(self, tensor: torch.Tensor):
+        assert tensor.device.type == "cuda" and tensor.dtype != torch.int8
+        return self.data.copy_(
+            self.fp_quantizer.quantize(
+                tensor.data,
+                q_bits=self.quant_config.weight_bits,
+            )
+        )
 
-    def dequantized(self, fp_out=None) -> torch.Tensor:
+    def ds_dequantize(self, fp_out=None) -> torch.Tensor:
         """
         Return a tensor containing the dequantized weights of this parameter.
         """
-        if self.data.device.type == "cuda" and self.data.dtype == torch.int8:
-            with torch.cuda.stream(torch.cuda.current_stream(
-                    self.data.device)):
-                return self.quantizer.dequantize(
-                    self.data,
-                    fp_out=fp_out,
-                    q_bits=self.quant_config.weight_bits)
-        return self.data
+        assert self.data.device.type == "cuda" and self.data.dtype == torch.int8
+        return self.fp_quantizer.dequantize(
+            self.data, fp_out=fp_out,
+            q_bits=self.quant_config.weight_bits)
 
-    def selective_dequantized(self, indices, fp_out=None) -> torch.Tensor:
+    def ds_selective_dequantize(self, indices, fp_out=None) -> torch.Tensor:
         """
         Return a tensor where only the weights at `indices` are dequantized
         (to save HBM -> SRAM bandwidth).
         """
-        if self.data.device.type == "cuda" and self.data.dtype == torch.int8:
-            with torch.cuda.stream(torch.cuda.current_stream(
-                    self.data.device)):
-                return self.quantizer.selective_dequantize(
-                    self.data,
-                    indices,
-                    fp_out=fp_out,
-                    q_bits=self.quant_config.weight_bits)
-        return self.data
-
-    def __getstate__(self):
-        state = self.__dict__
-        state["data"] = self.data
-        state["requires_grad"] = self.requires_grad
-        return state
-
-    def __setstate__(self, state):
-        self.quantizer = state["quantizer"]
-        self.data = state["data"]
-        self.requires_grad = state["requires_grad"]
-
-    def __deepcopy__(self, memo):
-        new_instance = type(self).__new__(type(self))
-        state = self.__getstate__()
-        new_instance.__setstate__(state)
-        new_instance.quantizer = copy.deepcopy(state["quantizer"])
-        new_instance.data = copy.deepcopy(state["data"])
-        return new_instance
-
-    def __copy__(self):
-        new_instance = type(self).__new__(type(self))
-        state = self.__getstate__()
-        new_instance.__setstate__(state)
-        return new_instance
-
-    def cuda(self, device=None, non_blocking=False):
-        return self.to(device="cuda" if device is None else device,
-                       non_blocking=non_blocking)
-
-    def to(self, *args, **kwargs):
-        """
-        Move the parameter to the given device. Then, if the device
-        is a cuda device, quantize it.
-        """
-        tensor = super().to(*args, **kwargs)
-        self._ensure_quantized(tensor)
-        return tensor
-
-    @property
-    def is_arctic(self):
-        return True
-
-    def cuda_parameter(self, device=None, non_blocking=False):
-        a = self.to(device="cuda" if device is None else device,
-                    non_blocking=non_blocking)
-        return torch.Tensor._make_subclass(DeepSpeedFPQuantizedParameter, a,
-                                           self.requires_grad)
+        assert self.data.device.type == "cuda" and self.data.dtype == torch.int8
+        return self.fp_quantizer.selective_dequantize(
+            self.data, indices, fp_out=fp_out,
+            q_bits=self.quant_config.weight_bits)
