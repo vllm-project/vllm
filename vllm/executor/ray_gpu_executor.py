@@ -10,7 +10,8 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
-from vllm.utils import get_ip, get_vllm_instance_id, make_async
+from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
+                        get_vllm_instance_id, make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -149,11 +150,15 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
 
+        distributed_init_method = get_distributed_init_method(
+            driver_ip, get_open_port())
+
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [
             self._get_worker_kwargs(
                 local_rank=node_workers[node_id].index(rank),
                 rank=rank,
+                distributed_init_method=distributed_init_method,
             ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
         ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
