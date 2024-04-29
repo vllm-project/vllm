@@ -36,11 +36,10 @@ To serialize a model, install vLLM from source, then run something
 like this from the root level of this repository:
 
 python -m examples.tensorize_vllm_model \
-   --model EleutherAI/gpt-j-6B \
-   --dtype float16 \
+   --model facebook/opt-125m \
    serialize \
-   --serialized-directory s3://my-bucket/ \
-   --suffix vllm
+   --serialized-directory /tmp/ \
+   --suffix v1
    
 Which downloads the model from HuggingFace, loads it into vLLM, serializes it,
 and saves it to your S3 bucket. A local directory can also be used. This

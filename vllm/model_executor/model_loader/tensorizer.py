@@ -410,6 +410,6 @@ def serialize_vllm_model(engine: "LLMEngine",
         serializer = TensorSerializer(stream, encryption=encryption_params)
         serializer.write_module(model)
         serializer.close()
-    logger.info(f"Successfully serialized model "
-                f"to {tensorizer_args.tensorizer_uri}")
+    logger.info("Successfully serialized model to %s",
+                str(tensorizer_args.tensorizer_uri))
     return model
