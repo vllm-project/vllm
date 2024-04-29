@@ -12,7 +12,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig, QuantizableMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 logger = init_logger(__name__)
@@ -26,7 +26,7 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
-class LinearMethodBase(QuantizeMethodBase):
+class LinearMethodBase(QuantizableMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod

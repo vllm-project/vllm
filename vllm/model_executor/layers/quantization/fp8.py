@@ -7,7 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig, QuantizableMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -45,7 +45,7 @@ class Fp8Config(QuantizationConfig):
         return cls(activation_scheme)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+            self, layer: torch.nn.Module) -> Optional["QuantizableMethodBase"]:
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
         return None

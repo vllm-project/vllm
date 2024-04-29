@@ -5,8 +5,8 @@ import torch
 from torch import nn
 
 
-class QuantizeMethodBase(ABC):
-    """Base class for different quantized methods."""
+class QuantizableMethodBase(ABC):
+    """Base class for different methods that may be quantized."""
     QUANTIZED = False
 
     @abstractmethod
@@ -86,7 +86,7 @@ class QuantizationConfig(ABC):
         return default
 
     @abstractmethod
-    def get_quant_method(self, layer: torch.nn.Module) -> QuantizeMethodBase:
+    def get_quant_method(self, layer: torch.nn.Module) -> QuantizableMethodBase:
         """Get the quantize method to use for the quantized layer."""
         raise NotImplementedError
 
