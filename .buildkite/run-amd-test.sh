@@ -24,9 +24,9 @@ case ${2} in
     ##################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_default || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_default || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_default rocm_${1} python3 -m vllm.entrypoints.api_server &
@@ -70,9 +70,9 @@ case ${2} in
     ###############
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_core || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_test_core || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_core \
@@ -88,11 +88,11 @@ case ${2} in
     ######################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_distributed || true; \
+    remove_docker_container() { docker rm -f rocm_${1}_test_distributed || true; \
                             docker rm -f rocm_${1}_test_basic_distributed_correctness_opt || true; \
                             docker rm -f rocm_${1}_test_basic_distributed_correctness_opt || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     #docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_distributed \
@@ -121,12 +121,12 @@ case ${2} in
     ##################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_offline_inference || true; \
+    remove_docker_container() { docker rm -f rocm_${1}_test_offline_inference || true; \
                     docker rm -f rocm_test_${1}_offline_inference_with_prefix || true; \
                     docker rm -f rocm_test_${1}_llm_engine_example || true; \
                     docker rm -f rocm_test_${1}_llava_example || true;}
-    trap remove_docker_container EXIT
-    remove_docker_container
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host \
@@ -158,9 +158,9 @@ case ${2} in
     #########################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_prefix_caching || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_test_prefix_caching || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_prefix_caching \
@@ -176,9 +176,9 @@ case ${2} in
     ##########################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_logits_processor || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_test_logits_processor || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_logits_processor \
@@ -191,9 +191,9 @@ case ${2} in
     #################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_worker || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_test_worker || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_worker \
@@ -203,9 +203,9 @@ case ${2} in
     # AMD Speculative Decoding Test
     ###############################
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_speculative_decoding || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
+    remove_docker_container() { docker rm -f rocm_${1}_test_speculative_decoding || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_speculative_decoding \
@@ -236,10 +236,10 @@ case ${2} in
     #####################
 
     # Setup cleanup
-    remove_docker_container(${1}) { docker rm -f rocm_${1}_test_benchmarks || true; }
-    trap remove_docker_container EXIT
-    remove_docker_container
-
+    remove_docker_container() { docker rm -f rocm_${1}_test_benchmarks || true; }
+    trap "remove_docker_container ${1}" EXIT
+    remove_docker_container ${1}
+    
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm-${1}_test_benchmarks \
         -e HF_TOKEN rocm_${1} /bin/bash -c "/bin/bash vllm/.buildkite/run-benchmarks.sh"
