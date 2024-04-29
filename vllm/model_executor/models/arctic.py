@@ -453,35 +453,30 @@ class ArcticForCausalLM(nn.Module):
         expert_params_mapping = []
         num_layers = self.config.num_hidden_layers
 
-        for i in range(num_layers):
-            for weight_name in ["w1", "w3"]:
-                mapping = (f"layers.{i}.residual_mlp.w13.weight",
-                           f"layers.{i}.residual_mlp.{weight_name}.weight",
-                           0 if weight_name == "w1" else 1)
-                mlp_params_mapping.append(mapping)
-            if i % 2 == 0:
+        for layer in range(num_layers):
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w1.weight", 0))
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w3.weight", 1))
+            if layer % 2 == 0:
                 # MLP layers
-                for weight_name in ["w1", "w3"]:
-                    mapping = (
-                        f"layers.{i}.block_sparse_moe.mlp.w13.weight",
-                        f"layers.{i}.block_sparse_moe.mlp.{weight_name}.weight",
-                        0 if weight_name == "w1" else 1)
-                    mlp_params_mapping.append(mapping)
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w1.weight", 0))
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w3.weight", 1))
             else:
                 # MoE layers
                 for expert_id in range(self.config.num_local_experts):
-                    for weight_name in ["w1", "w2", "w3"]:
-                        if weight_name in ["w1", "w3"]:
-                            mapping = (
-                                "ws",
-                                f"experts.{expert_id}.{weight_name}.weight",
-                                expert_id)
-                        else:
-                            mapping = (
-                                "w2s",
-                                f"experts.{expert_id}.{weight_name}.weight",
-                                expert_id)
-                        expert_params_mapping.append(mapping)
+                    expert_params_mapping.append((
+                        "ws", f"experts.{expert_id}.w1.weight", expert_id))
+                    expert_params_mapping.append((
+                        "w2s", f"experts.{expert_id}.w2.weight", expert_id))
+                    expert_params_mapping.append((
+                        "ws", f"experts.{expert_id}.w3.weight", expert_id))
 
         params_dict = dict(self.named_parameters())
 
