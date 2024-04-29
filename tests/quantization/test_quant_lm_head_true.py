@@ -36,8 +36,8 @@ def test_lm_head_true(vllm_model):
     output: Optional[CompletionOutput] = None
     output_text = ""
     while llm_engine.has_unfinished_requests():
-        (request_output,) = llm_engine.step()
-        (output,) = request_output.outputs
+        (request_output, ) = llm_engine.step()
+        (output, ) = request_output.outputs
 
         # Ensure we don't backtrack
         assert output.text.startswith(output_text)

@@ -230,7 +230,7 @@ class GPTBigCodeForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(config, quant_config)
-        self.lm_head= self.transformer.wte
+        self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
