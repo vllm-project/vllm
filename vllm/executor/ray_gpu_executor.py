@@ -183,6 +183,9 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
+    def __del__(self):
+        self._run_workers("cleanup_device")
+
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],

@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
+                              destroy_model_parallel,
                               warmpup_model_parallel)
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
@@ -112,6 +113,11 @@ class Worker(WorkerBase):
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+    def cleanup_device(self) -> None:
+        if self.device_config.device.type == "cuda":
+            torch.cuda.empty_cache()
+            destroy_model_parallel()
 
     def load_model(self):
         self.model_runner.load_model()
