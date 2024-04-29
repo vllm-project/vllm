@@ -2,24 +2,19 @@ import argparse
 import dataclasses
 import json
 import os
-import time
 import uuid
 from functools import partial
-from typing import Type
 
 import torch
-import torch.nn as nn
-from tensorizer import DecryptionParams, TensorDeserializer, stream_io
-from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
-from transformers import AutoConfig, PretrainedConfig
+from tensorizer import stream_io
 
+from vllm import LLM
 from vllm.distributed import initialize_model_parallel
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
                                                          serialize_vllm_model)
-from vllm.model_executor.models import ModelRegistry
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -38,7 +33,7 @@ like this from the root level of this repository:
 python -m examples.tensorize_vllm_model \
    --model facebook/opt-125m \
    serialize \
-   --serialized-directory /tmp/ \
+   --serialized-directory s3://my-bucket \
    --suffix v1
    
 Which downloads the model from HuggingFace, loads it into vLLM, serializes it,
@@ -59,7 +54,7 @@ python -m examples.tensorize_vllm_model \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    deserialize \
-   --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/vllm/model.tensors
+   --path-to-tensors s3://my-bucket/vllm/EleutherAI/gpt-j-6B/v1/model.tensors
 
 Which downloads the model tensors from your S3 bucket and deserializes them.
 
@@ -169,52 +164,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
-    architectures = getattr(config, "architectures", [])
-    for arch in architectures:
-        model_cls = ModelRegistry.load_model_cls(arch)
-        if model_cls is not None:
-            return model_cls
-    raise ValueError(
-        f"Model architectures {architectures} are not supported for now. "
-        f"Supported architectures: {ModelRegistry.get_supported_archs()}")
-
-
 
 def deserialize():
-    config = AutoConfig.from_pretrained(model_ref)
-
-    with no_init_or_tensor():
-        model_class = _get_vllm_model_architecture(config)
-        model = model_class(config)
-
-    before_mem = get_mem_usage()
-    start = time.time()
-
-    if keyfile:
-        with _read_stream(keyfile) as stream:
-            key = stream.read()
-            decryption_params = DecryptionParams.from_key(key)
-            tensorizer_args.deserializer_params['encryption'] = \
-                decryption_params
-
-    with (_read_stream(model_path)) as stream, TensorDeserializer(
-            stream, **tensorizer_args.deserializer_params) as deserializer:
-        deserializer.load_into_module(model)
-        end = time.time()
-
-    # Brag about how fast we are.
-    total_bytes_str = convert_bytes(deserializer.total_tensor_bytes)
-    duration = end - start
-    per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
-    after_mem = get_mem_usage()
-    print(
-        f"Deserialized {total_bytes_str} in {end - start:0.2f}s, {per_second}/s"
+    llm = LLM(model=args.model,
+              load_format="tensorizer",
+              model_loader_extra_config=tensorizer_config
     )
-    print(f"Memory usage before: {before_mem}")
-    print(f"Memory usage after: {after_mem}")
-    del model.vllm_tensorized_marker
-    return model
+    return llm
+
 
 
 args = parse_args()
@@ -276,13 +233,11 @@ if args.command == "serialize":
     serialize_vllm_model(engine, tensorizer_config, keyfile)
 elif args.command == "deserialize":
     if not tensorizer_args:
-        tensorizer_args = TensorizerConfig(
+        tensorizer_config = TensorizerConfig(
             tensorizer_uri=args.path_to_tensors,
             encryption_keyfile = keyfile,
             **credentials
-        )._construct_tensorizer_args()
-        tensorizer_args.tensorizer_uri = args.path_to_tensors
-    model_path = args.path_to_tensors
+        )
     deserialize()
 else:
     raise ValueError("Either serialize or deserialize must be specified.")
