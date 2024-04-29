@@ -154,17 +154,17 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
         w1 = w1.to(torch.float8_e4m3fn)
         w2 = w2.to(torch.float8_e4m3fn)
         w1_scale = torch.ones(num_total_experts,
-            device=hidden_states.device,
-            dtype=torch.float32)
+                              device=hidden_states.device,
+                              dtype=torch.float32)
         w2_scale = torch.ones(num_total_experts,
-            device=hidden_states.device,
-            dtype=torch.float32)
+                              device=hidden_states.device,
+                              dtype=torch.float32)
         a1_scale = torch.ones(1,
-            device=hidden_states.device,
-            dtype=torch.float32)
+                              device=hidden_states.device,
+                              dtype=torch.float32)
         a2_scale = torch.ones(1,
-            device=hidden_states.device,
-            dtype=torch.float32)
+                              device=hidden_states.device,
+                              dtype=torch.float32)
 
     gating_output = F.softmax(torch.rand(
         (num_calls, bs, num_total_experts),
