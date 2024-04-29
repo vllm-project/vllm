@@ -176,6 +176,9 @@ def broadcast_tensor_dict(
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
                 metadata_list.append((key, value))
+        # `metadata_list` lives in CPU memory.
+        # `broadcast_object_list` involves serialization and deserialization,
+        # all happening on CPU. Therefore, we can use the CPU group.
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
                                                 group=cpu_group)
