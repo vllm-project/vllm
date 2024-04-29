@@ -4,7 +4,8 @@ import pytest
 
 from vllm import CompletionOutput, SamplingParams
 
-MODEL = "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse"
+MODEL = ("LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-"
+         "symFalse")
 MAX_TOKENS = 20
 
 
@@ -14,10 +15,11 @@ def vllm_model(vllm_runner):
 
 
 @pytest.mark.skip_global_cleanup
-def test_quant_lm_head_layer(vllm_model):
+def test_lm_head_true(vllm_model):
     llm_engine = vllm_model.model.llm_engine
 
-    assert llm_engine.model_config.hf_config.quantization_config["lm_head"] == True
+    quantization_config = llm_engine.model_config.hf_config.quantization_config
+    assert quantization_config.get("lm_head")
 
     llm_engine.add_request(
         "id", "A story about vLLM:\n",
@@ -44,5 +46,4 @@ def test_quant_lm_head_layer(vllm_model):
 
 if __name__ == "__main__":
     import pytest
-
     pytest.main([__file__])
