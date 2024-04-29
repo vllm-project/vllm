@@ -680,6 +680,8 @@ class SamplerOutput:
     # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional["torch.Tensor"] = None
 
+    spec_logprobs: Optional["torch.Tensor"] = None
+
     # Spec decode metrics populated by workers.
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 

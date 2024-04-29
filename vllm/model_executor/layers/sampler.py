@@ -87,7 +87,7 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results, maybe_sampled_tokens_tensor = _sample(
+        sample_results, maybe_sampled_tokens_tensor, maybe_logprobs_tensor = _sample(
             probs,
             logprobs,
             sampling_metadata,
@@ -99,7 +99,10 @@ class Sampler(nn.Module):
         if self.include_gpu_probs_tensor:
             assert maybe_sampled_tokens_tensor is not None
             sampled_tokens_tensor = maybe_sampled_tokens_tensor
-            on_device_tensors = (probs, sampled_tokens_tensor)
+
+            assert maybe_logprobs_tensor is not None
+            spec_logprobs_tensor = maybe_logprobs_tensor
+            on_device_tensors = (probs, sampled_tokens_tensor, spec_logprobs_tensor)
         else:
             on_device_tensors = None
 
@@ -419,7 +422,9 @@ def _sample_with_torch(
                                                1,
                                                dtype=torch.long,
                                                device=logprobs.device)
+        spec_logprobs = logprobs.clone()
     else:
+        spec_logprobs = None
         sampled_token_ids_tensor = None
 
     # Counterintiutively, having two loops here is actually faster.
@@ -502,7 +507,7 @@ def _sample_with_torch(
         sample_results_dict[i]
         for i in range(len(sampling_metadata.seq_groups))
     ]
-    return sample_results, sampled_token_ids_tensor
+    return sample_results, sampled_token_ids_tensor, spec_logprobs
 
 
 def _sample_with_triton_kernel(
@@ -845,12 +850,13 @@ def _build_sampler_output(
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:
-        sampled_token_probs, sampled_token_ids = on_device_tensors
+        sampled_token_probs, sampled_token_ids, spec_logprobs = on_device_tensors
     else:
-        sampled_token_probs, sampled_token_ids = (None, None)
+        sampled_token_probs, sampled_token_ids, spec_logprobs = (None, None, None)
 
     return SamplerOutput(
         outputs=sampler_output,
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
+        spec_logprobs=spec_logprobs,
     )

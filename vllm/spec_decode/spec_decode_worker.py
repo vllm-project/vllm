@@ -238,6 +238,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
         sampler_output.sampled_tokens = None
+        sampler_output.spec_logprobs = None
         return [sampler_output]
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -278,12 +279,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
 
         logger.info("verify proposals")
-        accepted_token_ids = self._verify_tokens(seq_group_metadata_list,
+        accepted_token_ids, target_logprobs = self._verify_tokens(seq_group_metadata_list,
                                                  proposal_scores, proposals, k)
 
         logger.info("create output list")
         return self._create_output_sampler_list(seq_group_metadata_list,
-                                                accepted_token_ids, k)
+                                                accepted_token_ids, 
+                                                target_logprobs=target_logprobs,
+                                                k=k)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -292,9 +295,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
+
+        Returns TODO
         """
         proposal_lens_list = proposals.proposal_lens.tolist()
 
@@ -341,6 +346,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
+        logprobs = proposal_scores.probs.log()
+        #logprobs = proposal_scores.spec_logprobs
+        #torch.cat(
+        #    [
+        #        proposal_scores.probs[spec_indices],
+        #        proposal_scores.probs[non_spec_indices],
+        #    ]
+        #).log()
 
         # TODO need to map the logprobs of the accepted tokens
         # need a way to determine prob batch index for a given sequence
@@ -380,12 +393,13 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
-        return accepted_token_ids
+        return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
+        target_logprobs: torch.Tensor, # shape: [batch_size, k+1, vocab_size]
         k: int,
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
@@ -401,6 +415,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # Need to get logprobs of accepted token ids according to target model
         # what is rank? how is order determined
         # 
+        target_logprobs_by_step = target_logprobs.transpose(0, 1).tolist()
+        # TODO need to get unmodified logprobs (not probs )
+
+        breakpoint()
 
         sampler_output_list = []
         for token_ids_by_step in accepted_token_ids_by_step:

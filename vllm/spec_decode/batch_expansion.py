@@ -94,7 +94,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 
-        all_tokens, all_probs = self._contract_batch(
+        all_tokens, all_probs, spec_logprobs = self._contract_batch(
             contracted_bs=len(seq_group_metadata_list),
             target_sampler_output=target_sampler_output,
             proposals=proposals,
@@ -107,6 +107,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return SpeculativeScores(
             probs=all_probs,
             token_ids=all_tokens,
+            spec_logprobs=spec_logprobs,
         )
 
     def _expand_batch(
@@ -198,7 +199,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             all_tokens[spec_indices] = target_token_ids
             all_probs[spec_indices] = target_probs
 
-        return all_tokens, all_probs
+        spec_logprobs = None
+
+        return all_tokens, all_probs, spec_logprobs
 
     def _create_scoring_model_input(
         self,
@@ -328,6 +331,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
          ) = sampler_output.sampled_token_probs.split(split_sizes)
         (spec_sampled_tokens, non_spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
+        #(spec_logprobs, non_spec_logprobs,
+        # ) = sampler_output.spec_logprobs.flatten().split(split_sizes)
 
         # Convert scores to tensors.
         sampler_output.sampled_token_probs = spec_probs

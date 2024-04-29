@@ -42,6 +42,8 @@ class SpeculativeScores:
     # tokens and also non-speculative normal decoding.
     token_ids: torch.Tensor
 
+    spec_logprobs: torch.Tensor
+
     def __repr__(self):
         return (f"SpeculativeScores("
                 f"probs={self.probs.shape}, "
