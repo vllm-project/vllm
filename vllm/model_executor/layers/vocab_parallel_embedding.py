@@ -97,11 +97,6 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           params_dtype,
                                           weight_loader=self.weight_loader)
 
-        if not self.linear_method.QUANTIZED:
-            set_weight_attrs(self.weight, {
-                "parallel_dim": 0,
-            })
-
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         if self.linear_method.QUANTIZED:
             tp_rank = get_tensor_model_parallel_rank()
@@ -116,7 +111,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             assert param_data.shape == loaded_weight.shape
             param_data.copy_(loaded_weight)
         else:
-            parallel_dim = param.parallel_dim
+            parallel_dim = getattr(param, "parallel_dim", 0)
             assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
             loaded_weight = loaded_weight[self.vocab_start_index:self.
                                           vocab_end_index]
