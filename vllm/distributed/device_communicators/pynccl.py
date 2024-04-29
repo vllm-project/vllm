@@ -19,6 +19,7 @@
 # changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
 # variable in the code.
 
+from contextlib import contextmanager
 from typing import Optional, Union
 
 # ===================== import region =====================
@@ -113,3 +114,11 @@ class NCCLCommunicator:
 
     def __del__(self):
         self.nccl.ncclCommDestroy(self.comm)
+
+    @contextmanager
+    def switch_stream(self, stream: torch.cuda.Stream):
+        """Switch the stream for communication."""
+        old_stream = self.stream
+        self.stream = stream
+        yield
+        self.stream = old_stream

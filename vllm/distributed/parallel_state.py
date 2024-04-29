@@ -325,7 +325,6 @@ _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
-    from vllm.distributed.device_communicators import pynccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -338,7 +337,8 @@ def with_pynccl_for_all_reduce():
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
 
         stream = torch.cuda.current_stream()
-        with pynccl_utils.set_pynccl_stream(stream):
+        assert _TP_NCCL_COMMUNICATOR is not None
+        with _TP_NCCL_COMMUNICATOR.switch_stream(stream):
             yield
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 
