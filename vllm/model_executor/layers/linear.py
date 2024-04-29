@@ -28,7 +28,6 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
-    QUANTIZED = False
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module,
