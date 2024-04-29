@@ -10,7 +10,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.utils import get_open_port
 
-# Path to root of repository, so that utilities can be imported by ray workers
+# Path to root of repository so that utilities can be imported by ray workers
 VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
 
 
