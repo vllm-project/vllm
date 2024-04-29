@@ -9,10 +9,9 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
+from vllm.distributed import (broadcast_tensor_dict, destroy_model_parallel,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
-                              destroy_model_parallel,
                               warmpup_model_parallel)
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
