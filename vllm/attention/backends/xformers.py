@@ -288,6 +288,7 @@ class XFormersImpl(AttentionImpl):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
+        assert attn_metadata.prompt_lens is not None
         original_query = query
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].

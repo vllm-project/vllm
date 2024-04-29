@@ -1,9 +1,11 @@
 """A block manager that manages token blocks."""
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Sequence as GenericSequence
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
@@ -219,9 +221,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         self.block_sliding_window = None
         if sliding_window is not None:
-            assert sliding_window % block_size == 0, (sliding_window,
-                                                      block_size)
-            self.block_sliding_window = sliding_window // block_size
+            # Round up to nearest block size to regularize sliding window
+            # allocation sizes.
+            self.block_sliding_window = math.ceil(sliding_window / block_size)
 
         self.watermark = watermark
         assert watermark >= 0.0
