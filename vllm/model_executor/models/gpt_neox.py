@@ -229,7 +229,7 @@ class GPTNeoXForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.gpt_neox = GPTNeoXModel(config, quant_config)
-        self.lm_head = ParallelLMHead(
+        self.embed_out = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
         )
@@ -249,7 +249,7 @@ class GPTNeoXForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head, hidden_states,
+        logits = self.logits_processor(self.embed_out, hidden_states,
                                        sampling_metadata)
         return logits
 
