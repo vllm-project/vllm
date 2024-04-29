@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead)
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -208,7 +208,7 @@ class MPTModel(nn.Module):
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
 
-        self.wte = ParallelLMHead(
+        self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
         )
