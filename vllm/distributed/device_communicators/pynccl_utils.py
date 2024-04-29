@@ -50,11 +50,6 @@ def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     comm.all_reduce(input_, op)
 
 
-def destroy_process_group() -> None:
-    global comm
-    comm = None
-
-
 def get_world_size() -> int:
     """Returns the world size."""
     assert comm is not None

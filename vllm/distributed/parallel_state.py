@@ -9,12 +9,18 @@ from typing import Optional
 
 import torch
 
+from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 # Tensor model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
+# the tensor model parallel group will have a nccl communicator
+# for communication of tensors in the group.
+# it is created and destroyed along with the group.
+_TP_NCCL_COMMUNICATOR: Optional[NCCLCommunicator] = None
+
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
@@ -141,6 +147,12 @@ def initialize_model_parallel(
         group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
+
+    global _TP_NCCL_COMMUNICATOR
+    assert _TP_NCCL_COMMUNICATOR is None, (
+        "tensor model parallel nccl communicator is already initialized")
+    _TP_NCCL_COMMUNICATOR = NCCLCommunicator(
+        group=_TENSOR_MODEL_PARALLEL_GROUP)
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -281,16 +293,16 @@ def destroy_model_parallel():
     if _TENSOR_MODEL_PARALLEL_GROUP:
         torch.distributed.destroy_process_group(_TENSOR_MODEL_PARALLEL_GROUP)
     _TENSOR_MODEL_PARALLEL_GROUP = None
+    global _TP_NCCL_COMMUNICATOR
+    del _TP_NCCL_COMMUNICATOR
+    _TP_NCCL_COMMUNICATOR = None
+
     global _PIPELINE_MODEL_PARALLEL_GROUP
     if _PIPELINE_MODEL_PARALLEL_GROUP:
         torch.distributed.destroy_process_group(_PIPELINE_MODEL_PARALLEL_GROUP)
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
-    from vllm.distributed.device_communicators import pynccl_utils
-
-    # Destroy the pynccl states if any.
-    pynccl_utils.destroy_process_group()
 
 
 # Whether to use pynccl for nccl all reduce.
