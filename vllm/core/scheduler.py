@@ -320,7 +320,7 @@ class Scheduler:
             for seq_group in state_queue:
                 if not request_ids:
                     # Using 'break' here may add two extra iterations,
-                    # but is acceptable to reduce complexity .
+                    # but is acceptable to reduce complexity.
                     break
                 if seq_group.request_id in request_ids:
                     # Appending aborted group into pending list.
