@@ -79,6 +79,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_size: int,
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
+        computed: Optional[bool] = False,
     ) -> Block:
         # Bind block to self.
         allocator = self
@@ -89,6 +90,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             block_size=block_size,
             block_id=block_id,
             prefix_caching_allocator=allocator,
+            computed=computed,
         )
 
     def allocate_immutable(self, prev_block: Optional[Block],
@@ -116,8 +118,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             block.block_id = cached_block_id
-            self._incr_refcount_cached_block(block.content_hash,
-                                             block.block_id)
+            self._incr_refcount_cached_block(block, block.block_id)
             return block
 
         block = self.allocate_mutable(prev_block)
@@ -169,12 +170,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 assert _block_id == block_id
 
             self._refcounter.incr(block_id)
+
+            # the block comes from evictor already contain computed result
             block = self._create_block(
                 prev_block=prev_block,
                 token_ids=[],
                 block_size=self._block_size,
                 allocator=self,
                 block_id=block_id,
+                computed=True,
             )
             assert block.content_hash is None
 
@@ -185,12 +189,15 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
-    def _incr_refcount_cached_block(self, content_hash: int,
-                                    block_id: BlockId) -> None:
-        refcount = self._refcounter.incr(block_id)
+    def _incr_refcount_cached_block(self, block: Block, block_id: BlockId) -> None:
+        # since block is already computed, mark it
+        block.computed = True
 
+        refcount = self._refcounter.incr(block_id)
         if refcount == 1:
             self.evictor.remove(block_id)
+            self._blocks[block_id] = block
+
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -291,8 +298,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._cached_blocks[block.content_hash] = block.block_id
         else:
             self._free_block_id_for_block(block.block_id, block)
-            self._incr_refcount_cached_block(
-                block.content_hash, self._cached_blocks[block.content_hash])
+            self._incr_refcount_cached_block(block, self._cached_blocks[block.content_hash])
 
         return self._cached_blocks[block.content_hash]
 
@@ -321,20 +327,46 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def mark_blocks_as_accessed(self, block_ids: List[int],
                                 now: float) -> None:
-        """Mark blocks as accessed, used in prefix caching."""
+        """Mark blocks as accessed, used in prefix caching.
+
+        If the block is added into evictor, we need to update corresponding
+        info in evictor's metadata.
+        """
 
         for block_id in block_ids:
             if block_id in self._blocks:
                 self._blocks[block_id].last_accessed = now
+            elif block_id in self.evictor:
+                self.evictor.update(block_id, now)
             else:
                 raise ValueError(
                     "Mark block as accessed which is not belonged to GPU")
+
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
+        """Mark blocks as computed, used in prefix caching."""
+
+        for block_id in block_ids:
+            if block_id in self._blocks:
+                # only those full block is valid for prefix caching
+                if self._blocks[block_id].is_full:
+                    self._blocks[block_id].computed = True
+            elif block_id not in self.evictor:
+                raise ValueError(
+                    f"Mark {block_id=} as computed which is not belonged to GPU")
+
+    def block_is_computed(self, block_id: int) -> bool:
+        if block_id in self._blocks:
+            return self._blocks[block_id].computed
+        elif block_id in self.evictor:
+            return True
+        else:
+            return False
 
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
         """Return the block ids that are common for a given sequence group.
 
-        Only those blocks that are immutable, aka has content_hash would be
+        Only those blocks that are immutable and already be marked compyted would be
         taken consideration.
         """
 
@@ -345,10 +377,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         ids_list = [
             list(
                 takewhile(
-                    lambda block_id: self._blocks[block_id].content_hash is
-                    not None, seq[:-1])) for seq in seq_block_ids
+                    lambda block_id: self.block_is_computed(block_id), seq[:-1])) for seq in seq_block_ids
         ]
-        return commonprefix([ids for ids in ids_list if ids != []])
+        res = commonprefix([ids for ids in ids_list if ids != []])
+        return res
 
 
 class PrefixCachingBlock(Block):
@@ -378,6 +410,7 @@ class PrefixCachingBlock(Block):
         block_size: int,
         prefix_caching_allocator: PrefixCachingBlockAllocator,
         block_id: Optional[int] = None,
+        computed: Optional[bool] = False,
     ):
         assert_prefix_caching_block_or_none(prev_block)
 
@@ -386,6 +419,7 @@ class PrefixCachingBlock(Block):
         self._cached_num_tokens_total: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
         self.last_accessed = _DEFAULT_LAST_ACCESSED_TIME
+        self.computed = computed
 
         self._block = NaiveBlock(
             prev_block=prev_block,

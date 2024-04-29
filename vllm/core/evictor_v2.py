@@ -20,7 +20,7 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def __contains__(self, content_hash: int) -> bool:
+    def __contains__(self, block_id: int) -> bool:
         pass
 
     @abstractmethod
@@ -37,8 +37,8 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
-    def remove(self, block_id: int):
-        """remove block_id from the evictor"""
+    def update(self, block_id: int, last_accessed: int):
+        """Update corresponding block's access time in metadata"""
         pass
 
     @abstractproperty
@@ -100,6 +100,9 @@ class LRUEvictor(Evictor):
         self.free_table[block_id] = BlockMetaData(content_hash,
                                                   num_hashed_tokens,
                                                   last_accessed)
+
+    def update(self, block_id: int, last_accessed: int):
+        self.free_table[block_id].last_accessed = last_accessed
 
     def remove(self, block_id: int):
         if block_id not in self.free_table:

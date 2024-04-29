@@ -86,6 +86,10 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
+    def mark_blocks_as_computed(self) -> None:
+        pass
+
+    @abstractmethod
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
         pass

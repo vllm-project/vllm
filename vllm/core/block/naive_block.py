@@ -183,6 +183,14 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         pass
 
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
+        """Mark blocks as computed, used in prefix caching.
+
+        Since the naive allocator does not implement prefix caching, we do
+        nothing.
+        """
+        pass
+
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
         """Determine blocks that can be skipped in prefill.
