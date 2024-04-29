@@ -21,11 +21,11 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_serialized: bool = False,
+        is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
     ) -> None:
-        self.is_serialized = is_serialized
-        if is_serialized:
+        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        if is_checkpoint_fp8_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
                            "format is experimental and subject to change.")
         if activation_scheme not in ACTIVATION_SCHEMES:
@@ -55,9 +55,9 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_serialized = ("fp8" in quant_method)
+        is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        return cls(is_serialized=is_serialized,
+        return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme)
 
     def get_quant_method(self, layer: torch.nn.Module) -> "Fp8LinearMethod":
@@ -108,7 +108,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # WEIGHT
         weight_dtype = (torch.float8_e4m3fn
-                        if self.quant_config.is_serialized else params_dtype)
+                        if self.quant_config.is_checkpoint_fp8_serialized else
+                        params_dtype)
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
                                        dtype=weight_dtype),
@@ -122,17 +123,18 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
-        if self.quant_config.is_serialized:
+        if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
             weight_scale = Parameter(torch.empty(len(output_partition_sizes),
                                                  dtype=torch.float32),
                                      requires_grad=False)
             layer.register_parameter("weight_scale", weight_scale)
-            set_weight_attrs(weight_scale, {
-                **extra_weight_attrs,
-                "shard_indexer":
-                self.scales_shard_indexer,
-            })
+            set_weight_attrs(
+                weight_scale, {
+                    **extra_weight_attrs,
+                    "fp8_scales_shard_indexer":
+                    self.scales_shard_indexer,
+                })
 
             # ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
@@ -143,7 +145,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 set_weight_attrs(
                     act_scale, {
                         **extra_weight_attrs,
-                        "shard_indexer":
+                        "fp8_scales_shard_indexer":
                         self.scales_shard_indexer,
                     })
 
@@ -169,7 +171,7 @@ class Fp8LinearMethod(LinearMethodBase):
             return
 
         # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
-        if not self.quant_config.is_serialized:
+        if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
             layer.weight = Parameter(qweight.t(), requires_grad=False)
