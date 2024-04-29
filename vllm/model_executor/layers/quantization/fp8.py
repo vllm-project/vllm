@@ -28,7 +28,8 @@ class Fp8Config(QuantizationConfig):
         if is_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
                            "format is experimental and subject to change.")
-        assert activation_scheme in ACTIVATION_SCHEMES
+        if activation_scheme not in ACTIVATION_SCHEMES:
+            raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
 
     @classmethod
