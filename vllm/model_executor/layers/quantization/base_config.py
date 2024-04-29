@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -76,8 +76,16 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @abstractmethod
-    def get_quant_method(self, layer: torch.nn.Module) -> QuantizeMethodBase:
-        """Get the quantize method to use for the quantized layer."""
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+        """Get the quantize method to use for the quantized layer.
+        
+        Args:
+            layer: The layer for the quant method.
+        Returns:
+            The quantize method. None if the given layer doesn't support quant
+            method.
+        """
         raise NotImplementedError
 
     @abstractmethod
