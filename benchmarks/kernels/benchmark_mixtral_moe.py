@@ -211,4 +211,5 @@ if __name__ == "__main__":
         choices=['float8', 'float16'],
         help='Data type used for fused_moe kernel computations'
     )
-    sys.exit(main(parser.dtype))
+    args = parser.parse_args()
+    sys.exit(main(args.dtype))
