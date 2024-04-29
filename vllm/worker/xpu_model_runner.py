@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -8,12 +8,15 @@ from vllm.attention import get_attn_backend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
-from vllm.utils import make_tensor_with_pad, maybe_expand_dim
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import CudaMemoryProfiler, make_tensor_with_pad
 from vllm.worker.model_runner import (AttentionMetadata, SamplingMetadata,
                                       _prepare_fake_inputs)
+
+logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
 _BATCH_SIZE_ALIGNMENT = 8
@@ -67,14 +70,20 @@ class XPUModelRunner():
         self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
-        self.model = get_model(
-            model_config=self.model_config,
-            load_config=self.load_config,
-            device_config=self.device_config,
-            vision_language_config=self.vision_language_config,
-            lora_config=self.lora_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config)
+        with CudaMemoryProfiler() as m:
+            self.model = get_model(
+                model_config=self.model_config,
+                device_config=self.device_config,
+                load_config=self.load_config,
+                lora_config=self.lora_config,
+                vision_language_config=self.vision_language_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+            )
+
+        self.model_memory_usage = m.consumed_memory
+        logger.info("Loading model weights took %.4f GB",
+                    self.model_memory_usage / float(2**30))
 
     @property
     def vocab_size(self) -> int:
@@ -149,8 +158,15 @@ class XPUModelRunner():
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
                 prompt_lens = []
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list,
+                prompt_lens,
+                # subquery_lens is not needed if chunked prefill is not
+                # supported. Since CPU worker doesn't support chunked prefill
+                # just use prompt_lens instead.
+                prompt_lens,
+                self.device,
+                pin_memory=False)
             # Broadcast the metadata.
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -267,100 +283,6 @@ class XPUModelRunner():
             attn_metadata,
         )
 
-    def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-    ) -> SamplingMetadata:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        selected_token_indices: List[int] = []
-        generators: List[torch.Generator] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices: Dict[SamplingType,
-                                         List[Tuple[int, int]]] = {
-                                             t: []
-                                             for t in SamplingType
-                                         }
-        categorized_sample_indices_start_idx = 0
-        categorized_sampled_token_indices_start_idx = 0
-
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            if seq_group_metadata.is_prompt:
-                assert len(seq_ids) == 1
-                subquery_len = prompt_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].append(
-                        (categorized_sample_indices_start_idx,
-                         categorized_sampled_token_indices_start_idx))
-                categorized_sample_indices_start_idx += 1
-                categorized_sampled_token_indices_start_idx += 1
-
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += subquery_len
-
-                if sampling_params.seed is not None:
-                    seq_group_metadata.state.generator = torch.Generator(
-                        device=self.device).manual_seed(sampling_params.seed)
-            else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        zip(
-                            range(
-                                categorized_sample_indices_start_idx,
-                                categorized_sample_indices_start_idx +
-                                num_seqs),
-                            range(
-                                categorized_sampled_token_indices_start_idx,
-                                categorized_sampled_token_indices_start_idx +
-                                num_seqs)))
-                categorized_sample_indices_start_idx += num_seqs
-                categorized_sampled_token_indices_start_idx += num_seqs
-
-            if sampling_params.seed is not None:
-                generators.append(seq_group_metadata.state.generator)
-
-        selected_token_indices = torch.tensor(selected_token_indices,
-                                              dtype=torch.long,
-                                              device="xpu")
-
-        categorized_sample_indices = {
-            t: maybe_expand_dim(torch.tensor(seq_ids, dtype=torch.int), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        sampling_metadata = SamplingMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
-        return sampling_metadata
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -387,7 +309,7 @@ class XPUModelRunner():
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
+        if not self.is_driver_worker:
             return None
 
         # Sample the next token.

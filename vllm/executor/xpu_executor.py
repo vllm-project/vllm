@@ -1,13 +1,13 @@
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional
 
 import torch
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.executor_base import ExecutorAsyncBase
+from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
@@ -15,7 +15,7 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
 logger = init_logger(__name__)
 
 
-class XPUExecutor(ExecutorBase):
+class XPUExecutor(GPUExecutor):
 
     def __init__(
         self,
@@ -43,14 +43,15 @@ class XPUExecutor(ExecutorBase):
         self.scheduler_config = scheduler_config
         self.device_config = device_config
         self.vision_language_config = vision_language_config
+        self.speculative_config = None
 
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
 
-    def _init_executor(self) -> None:
-        self._init_worker()
+    def _init_spec_worker(self):
+        logger.error("not support speculative for XPU executor!")
 
-    def _init_worker(self):
+    def _init_non_spec_worker(self):
         from vllm.worker.xpu_worker import XPUWorker
 
         assert self.parallel_config.world_size == 1, (
@@ -75,23 +76,6 @@ class XPUExecutor(ExecutorBase):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
-        """Initialize the KV cache by invoking the underlying worker.
-        """
-        # NOTE: This is logged in the executor because there can be >1 worker
-        # with other executors. We could log in the engine level, but work
-        # remains to abstract away the device for non-GPU configurations.
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
-
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
-
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks by invoking the
-        underlying worker.
-        """
-        return self.driver_worker.determine_num_available_blocks()
-
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
@@ -105,22 +89,6 @@ class XPUExecutor(ExecutorBase):
             blocks_to_copy=blocks_to_copy,
         )
         return output
-
-    def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self.driver_worker.add_lora(lora_request)
-
-    def remove_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self.driver_worker.remove_lora(lora_id)
-
-    def list_loras(self) -> Set[int]:
-        return self.driver_worker.list_loras()
-
-    def check_health(self) -> None:
-        # XPUExecutor will always be healthy as long as
-        # it's running.
-        return
 
 
 class XPUExecutorAsync(XPUExecutor, ExecutorAsyncBase):

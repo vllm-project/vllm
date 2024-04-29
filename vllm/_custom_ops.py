@@ -50,6 +50,37 @@ def hint_on_error(fn):
 
     return wrapper
 
+with contextlib.suppress(ImportError):
+    import vllm._moe_C
+
+with contextlib.suppress(ImportError):
+    # ruff: noqa: F401
+    import vllm._punica_C
+
+
+def is_custom_op_supported(op_name: str) -> bool:
+    op, overloads = torch._C._jit_get_operation(op_name)
+    return op is not None
+
+
+def hint_on_error(fn):
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except AttributeError as e:
+            msg = (
+                "Error in calling custom op %s: %s\n"
+                "Possibly you have built or installed an obsolete version of vllm.\n"
+                "Please try a clean build and install of vllm,"
+                "or remove old built files such as vllm/*cpython*.so and build/ ."
+            )
+            logger.error(msg, fn.__name__, e)
+            raise e
+
+    return wrapper
+
 
 # activation ops
 def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:

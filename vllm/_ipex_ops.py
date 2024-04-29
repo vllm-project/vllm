@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import intel_extension_for_pytorch as ipex
 import torch
@@ -7,7 +7,8 @@ import torch
 class ipex_ops:
 
     @staticmethod
-    def reshape_activation_tensor(x: torch.Tensor):
+    def _reshape_activation_tensor(
+            x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         num = x.size(0)
         d = x.size(1) // 2
         x = x.reshape(num, 2, d)
@@ -17,15 +18,15 @@ class ipex_ops:
         return x1, x2
 
     def silu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops.reshape_activation_tensor(x)
+        x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.silu_mul(x1, x2, out)
 
     def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops.reshape_activation_tensor(x)
+        x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.gelu_mul(x1, x2, out, "none")
 
     def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
-        x1, x2 = ipex_ops.reshape_activation_tensor(x)
+        x1, x2 = ipex_ops._reshape_activation_tensor(x)
         ipex.llm.functional.gelu_mul(x1, x2, out, "tanh")
 
     def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
@@ -175,6 +176,28 @@ class ipex_ops:
         tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
                                                epsilon, True)
         input.copy_(tmp)
+
+    def varlen_attention(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        out: torch.Tensor,
+        seqlen_q: torch.Tensor,
+        seqlen_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        pdropout: float,
+        softmax_scale: float,
+        zero_tensors: bool,
+        is_causal: bool,
+        return_softmax: bool,
+        gen_: torch.Generator,
+    ) -> None:
+        ipex.llm.functional.varlen_attention(query, key, value, out, seqlen_q,
+                                             seqlen_k, max_seqlen_q,
+                                             max_seqlen_k, pdropout,
+                                             softmax_scale, zero_tensors,
+                                             is_causal, return_softmax, gen_)
 
 
 class ipex_cache_ops:
