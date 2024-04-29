@@ -21,12 +21,10 @@ pytest-rerunfailures
 pytest-shard
 httpx
 einops # required for MPT
-openai
 requests
 ray
 peft
 awscli
-ai2-olmo # required for OLMo
 
 # Benchmarking
 aiohttp
