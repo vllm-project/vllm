@@ -48,4 +48,3 @@ def test_lm_head_true(vllm_model):
 
     assert output is not None
     assert output_text.startswith(expected_output)
-    

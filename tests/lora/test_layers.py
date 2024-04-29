@@ -416,31 +416,33 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
                              lora_dtype=torch.float16)
 
     def _pretest():
-        linear = ParallelLMHead(vocab_size + lora_config.lora_extra_vocab_size,
-                                1024,
-                                vocab_size,
-                                params_dtype=torch.float16)
-        linear.weight.data = torch.rand_like(linear.weight.data)
-        linear.weight.data[:, vocab_size:] = 0
+        lm_head = ParallelLMHead(vocab_size +
+                                 lora_config.lora_extra_vocab_size,
+                                 1024,
+                                 vocab_size,
+                                 params_dtype=torch.float16)
+        lm_head.weight.data = torch.rand_like(lm_head.weight.data)
+        lm_head.weight.data[:, vocab_size:] = 0
         logits_processor = LogitsProcessor(
             vocab_size + lora_config.lora_extra_vocab_size, vocab_size)
         lora_logits_processor = LogitsProcessorWithLoRA(
-            logits_processor, 1024, linear.weight.dtype, linear.weight.device)
+            logits_processor, 1024, lm_head.weight.dtype,
+            lm_head.weight.device)
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
-        return linear, logits_processor, lora_logits_processor
+        return lm_head, logits_processor, lora_logits_processor
 
     for i in range(10):
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, logits_processor, lora_logits_processor = _pretest()
+        lm_head, logits_processor, lora_logits_processor = _pretest()
 
         # NOTE: all the generated loras share the same embeddings tensor.
         lora_dict, _ = populate_loras(
             id_to_index,
             layer=lora_logits_processor,
-            layer_weights=linear.weight,
+            layer_weights=lm_head.weight,
             generate_embeddings_tensor=1024,
         )
         embeddings_tensor = list(lora_dict.values())[0].embeddings_tensor
@@ -467,14 +469,14 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=linear.weight,
+            lm_head=lm_head,
             embedding_bias=None)
 
-        original_weight = linear.weight.clone()
+        original_lm_head = deepcopy(lm_head)
 
-        linear.weight[logits_processor.
-                      org_vocab_size:logits_processor.org_vocab_size +
-                      embeddings_tensor_len] = embeddings_tensor
+        lm_head.weight[logits_processor.
+                       org_vocab_size:logits_processor.org_vocab_size +
+                       embeddings_tensor_len] = embeddings_tensor
 
         logits_processor.org_vocab_size = (vocab_size +
                                            lora_config.lora_extra_vocab_size)
@@ -482,7 +484,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(hidden_states=input_,
-                                                  embedding=linear.weight,
+                                                  lm_head=lm_head,
                                                   embedding_bias=None)
             result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
             result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
@@ -511,11 +513,11 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=original_weight,
+            lm_head=original_lm_head,
             embedding_bias=None)[:, :vocab_size]
         expected_result = logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
-            embedding=original_weight,
+            lm_head=original_lm_head,
             embedding_bias=None)
 
         rtol, atol = TOLERANCES[lora_result.dtype]
