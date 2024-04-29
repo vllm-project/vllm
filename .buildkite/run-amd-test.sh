@@ -90,7 +90,7 @@ case ${2} in
     # Setup cleanup
     remove_docker_container() { docker rm -f rocm_${1}_test_distributed || true; \
                             docker rm -f rocm_${1}_test_basic_distributed_correctness_opt || true; \
-                            docker rm -f rocm_${1}_test_basic_distributed_correctness_opt || true; }
+                            docker rm -f rocm_${1}_test_basic_distributed_correctness_llama || true; }
     trap "remove_docker_container ${1}" EXIT
     remove_docker_container ${1}
 
@@ -126,7 +126,7 @@ case ${2} in
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_sequence \
             rocm_${1} python3 -m pytest -v -s vllm/tests/test_sequence.py
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_config \
-            rocm_${1} python3 -m pytest -v -s vllm/tests/test_config.py
+            -e HF_TOKEN rocm_${1} python3 -m pytest -v -s vllm/tests/test_config.py
     ;;
     9)
     # AMD Entrypoints Test
@@ -141,7 +141,7 @@ case ${2} in
     remove_docker_container() { docker rm -f rocm_${1}_test_offline_inference || true; \
                     docker rm -f rocm_${1}_test_offline_inference_with_prefix || true; \
                     docker rm -f rocm_${1}_test_llm_engine_example || true; \
-                    docker rm -f rocm_test_llava_example || true;}
+                    docker rm -f rocm_${1}_test_llava_example || true;}
     trap "remove_docker_container ${1}" EXIT
     remove_docker_container ${1}
 
