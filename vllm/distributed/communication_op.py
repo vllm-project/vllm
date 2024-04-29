@@ -5,6 +5,7 @@ import torch
 from torch.distributed import ProcessGroup
 
 from .parallel_state import (get_tensor_model_parallel_group,
+                             get_cpu_world_group,
                              get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
                              is_pynccl_enabled_for_all_reduce)
@@ -146,6 +147,11 @@ def broadcast_tensor_dict(
     group: Optional[ProcessGroup] = None,
 ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """Broadcast the input tensor dictionary."""
+    if group is None:
+        group = torch.distributed.group.WORLD
+        cpu_group = get_cpu_world_group()
+    else:
+        cpu_group = group
     group = group or torch.distributed.group.WORLD
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
@@ -172,7 +178,7 @@ def broadcast_tensor_dict(
                 metadata_list.append((key, value))
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
-                                                group=group)
+                                                group=cpu_group)
         async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
@@ -189,7 +195,7 @@ def broadcast_tensor_dict(
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
-                                                group=group)
+                                                group=cpu_group)
         assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
