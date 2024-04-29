@@ -68,11 +68,15 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                     padding_size)
         self.embedding_dim = embedding_dim
 
-        quant_method = quant_config.get_quant_method(
-            self) if quant_config else None
+        quant_method = None
+        if quant_config is not None:
+            quant_method = quant_config.get_quant_method(self)
+
         # lm_head may be quantized
-        self.linear_method = quant_method if quant_method is not None else UnquantizedLinearMethod(
-        )
+        if quant_method is not None:
+            self.linear_method = quant_method
+        else:
+            self.linear_method = UnquantizedLinearMethod()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
