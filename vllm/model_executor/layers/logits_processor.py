@@ -37,7 +37,7 @@ class LogitsProcessor(nn.Module):
 
     def forward(
         self,
-        lm_head,
+        lm_head: ParallelLMHead,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         embedding_bias: Optional[torch.Tensor] = None,

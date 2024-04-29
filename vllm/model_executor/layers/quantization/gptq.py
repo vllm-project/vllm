@@ -96,7 +96,7 @@ class GPTQLinearMethod(LinearMethodBase):
     Args:
         quant_config: The GPTQ quantization config.
     """
-    QUANTIZED = False
+    QUANTIZED = True
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
