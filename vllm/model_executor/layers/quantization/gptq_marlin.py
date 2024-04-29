@@ -50,7 +50,7 @@ def _get_perms():
 
     perm = numpy.array(perm)
     interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel() # type: ignore
+    perm = perm.reshape((-1, 8))[:, interleave].ravel()  # type: ignore
     perm = torch.from_numpy(perm)
     scale_perm = []
     for i in range(8):
