@@ -1,7 +1,15 @@
 from typing import Dict, List, Optional, Tuple
 
-import intel_extension_for_pytorch as ipex
 import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+try:
+    import intel_extension_for_pytorch as ipex
+except ImportError as e:
+    logger.warning("Import error msg: %s", e.msg)
 
 
 class ipex_ops:
