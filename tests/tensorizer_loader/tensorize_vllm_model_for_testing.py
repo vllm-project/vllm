@@ -226,7 +226,7 @@ model_name = model_ref.split("/")[1]
 os.environ["MASTER_ADDR"] = "127.0.0.1"
 os.environ["MASTER_PORT"] = "8080"
 
-init_distributed_environment(world_size=1, rank=0)
+init_distributed_environment(world_size=1, rank=0, local_rank=0)
 initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
