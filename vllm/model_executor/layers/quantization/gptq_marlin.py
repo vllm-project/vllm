@@ -24,8 +24,8 @@ GPTQ_MARLIN_SUPPORTED_SYM = [True]
 
 # Precompute permutations for Marlin weight and scale shuffling
 #
-# Marlin works on [16,64] tiles. The goal of the permutations is
-# to reorder the weight data so that it is compatible
+# Marlin works on [16,64] tiles. The goal of the permutations
+# is to reorder the weight data so that it is compatible
 # with the tensor-core format that is described here:
 # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type # noqa: E501
 #
