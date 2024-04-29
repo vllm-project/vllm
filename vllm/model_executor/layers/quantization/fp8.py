@@ -60,7 +60,8 @@ class Fp8Config(QuantizationConfig):
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme)
 
-    def get_quant_method(self, layer: torch.nn.Module) -> "Fp8LinearMethod":
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["Fp8LinearMethod"]:
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
         return None
