@@ -124,7 +124,7 @@ class VocabParallelEmbedding(torch.nn.Module):
             masked_input = input_
 
         # Get the embeddings.
-        #  TODO: linear_method.apply_weights() is broken here for un-quantized
+        # TODO: linear_method base class does not have embedding api
         assert not self.linear_method.QUANTIZED
         output_parallel = F.embedding(masked_input, self.weight)
 
