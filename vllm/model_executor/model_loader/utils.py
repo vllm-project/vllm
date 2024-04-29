@@ -42,5 +42,5 @@ def get_architecture_class_name(model_config: ModelConfig) -> str:
 
 
 # Skip loading extra modules for GPTQ models.
-def is_param_gptq_and_skippable(name: str, params: dict):
+def is_gptq_param_and_skippable(name: str, params: dict):
     return name.endswith(".bias") and name not in params

@@ -43,7 +43,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.utils import is_param_gptq_and_skippable
+from vllm.model_executor.model_loader.utils import is_gptq_param_and_skippable
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -403,14 +403,14 @@ class LlamaForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                if is_param_gptq_and_skippable(name, params_dict):
+                if is_gptq_param_and_skippable(name, params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if is_param_gptq_and_skippable(name, params_dict):
+                if is_gptq_param_and_skippable(name, params_dict):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
