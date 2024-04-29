@@ -29,7 +29,6 @@ from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
-from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -57,6 +56,8 @@ class NCCLCommunicator:
 
         self.nccl = NCCLLibrary(library_path)
         assert dist.is_initialized()
+        from vllm.distributed.parallel_state import (get_cpu_world_group,
+                                                     get_local_rank)
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "NCCLCommunicator should be attached to a non-NCCL group.")
