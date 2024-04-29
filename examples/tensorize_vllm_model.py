@@ -14,8 +14,9 @@ from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from transformers import AutoConfig, PretrainedConfig
 
 from vllm.distributed import initialize_model_parallel
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
 from vllm.model_executor.models import ModelRegistry
 
@@ -102,7 +103,7 @@ def parse_args():
         "extremely quickly. Tensor encryption and decryption is "
         "also supported, although libsodium must be installed to "
         "use it.")
-    parser = EngineArgs.add_cli_args(parser)
+    parser = AsyncEngineArgs.add_cli_args(parser)
     subparsers = parser.add_subparsers(dest='command')
 
     serialize_parser = subparsers.add_parser(
@@ -181,9 +182,11 @@ def _get_vllm_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 def serialize():
 
     eng_args_dict = {f.name: getattr(args, f.name) for f in
-                     dataclasses.fields(EngineArgs)}
-    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
-    engine = LLMEngine.from_engine_args(engine_args)
+                     dataclasses.fields(AsyncEngineArgs)}
+    #engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
+    engine_args = AsyncEngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
+    #engine = LLMEngine.from_engine_args(engine_args)
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
 
     model = (engine.model_executor.driver_worker.
              model_runner.model)
@@ -241,30 +244,30 @@ def deserialize():
 
 args = parse_args()
 
-s3_access_key_id = (args.s3_access_key_id or os.environ.get("S3_ACCESS_KEY_ID")
-                    or None)
-s3_secret_access_key = (args.s3_secret_access_key
-                        or os.environ.get("S3_SECRET_ACCESS_KEY") or None)
-
-s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL") or None)
+#s3_access_key_id = (args.s3_access_key_id or os.environ.get("S3_ACCESS_KEY_ID")
+#                    or None)
+#s3_secret_access_key = (args.s3_secret_access_key
+#                        or os.environ.get("S3_SECRET_ACCESS_KEY") or None)
+#
+#s3_endpoint = (args.s3_endpoint or os.environ.get("S3_ENDPOINT_URL") or None)
 
 _read_stream, _write_stream = (partial(
     stream_io.open_stream,
     mode=mode,
-    s3_access_key_id=s3_access_key_id,
-    s3_secret_access_key=s3_secret_access_key,
-    s3_endpoint=s3_endpoint,
+#    s3_access_key_id=s3_access_key_id,
+#    s3_secret_access_key=s3_secret_access_key,
+#    s3_endpoint=s3_endpoint,
 ) for mode in ("rb", "wb+"))
 
 model_ref = args.model
 
 model_name = model_ref.split("/")[1]
 
-os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["MASTER_PORT"] = "8080"
+#os.environ["MASTER_ADDR"] = "127.0.0.1"
+#os.environ["MASTER_PORT"] = "8080"
 
-torch.distributed.init_process_group(world_size=1, rank=0)
-initialize_model_parallel()
+#torch.distributed.init_process_group(world_size=1, rank=0)
+#initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
 

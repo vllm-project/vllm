@@ -99,7 +99,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
         weight = DeepSpeedFPQuantizedParameter(
             torch.empty(output_size_per_partition,
                         input_size_per_partition,
-                        dtype=params_dtype).cpu(),
+                        dtype=params_dtype),
             requires_grad=False,
             quantization=self.quant_config,
         )

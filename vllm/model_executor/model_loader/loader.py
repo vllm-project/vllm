@@ -339,6 +339,31 @@ class TensorizerLoader(BaseModelLoader):
                                              vision_language_config)
 
 
+class StateDictLoader(BaseModelLoader):
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(f"Model loader extra config is not supported for "
+                             f"load format {load_config.load_format}")
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   vision_language_config: Optional[VisionLanguageConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig) -> nn.Module:
+        from safetensors.torch import load_model
+        from vllm.distributed import get_tensor_model_parallel_rank
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, vision_language_config)
+            rank = get_tensor_model_parallel_rank()
+            load_model(model, f"{model_config.model}/model.{rank}.safetensors")
+        return model.eval()
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -350,5 +375,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.TENSORIZER:
         return TensorizerLoader(load_config)
+
+    if load_config.load_format == LoadFormat.STATE_DICT:
+        return StateDictLoader(load_config)
 
     return DefaultModelLoader(load_config)
