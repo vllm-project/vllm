@@ -191,7 +191,7 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
             renormalize=True,
             inplace=True,
             override_config=config,
-            use_fp8=dtype=="float8",
+            use_fp8=dtype == "float8",
         )
     end_event.record()
     end_event.synchronize()
@@ -210,7 +210,7 @@ if __name__ == "__main__":
         type=str,
         default='auto',
         choices=['float8', 'float16'],
-        help='Data type used for fused_moe kernel computations'
+        help='Data type used for fused_moe kernel computations',
     )
     args = parser.parse_args()
     sys.exit(main(args.dtype))
