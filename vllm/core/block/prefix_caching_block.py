@@ -189,15 +189,18 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No block available in hashless allocator, nor in unused cache blocks.
         raise BlockAllocator.NoFreeBlocksError()
 
-    def _incr_refcount_cached_block(self, block: Block, block_id: BlockId) -> None:
+    def _incr_refcount_cached_block(self, block: Block,
+                                    block_id: BlockId) -> None:
         # since block is already computed, mark it
         block.computed = True
 
         refcount = self._refcounter.incr(block_id)
         if refcount == 1:
-            self.evictor.remove(block_id)
+            # if block get refered, then it shall not be in evictor
+            # and put it into _blocks for tracking
+            if block_id in self.evictor:
+                self.evictor.remove(block_id)
             self._blocks[block_id] = block
-
 
     def free(self, block: Block) -> None:
         """Decrement the refcount of the block. If the decremented refcount is
@@ -218,7 +221,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert isinstance(block, PrefixCachingBlock)
 
         if block.content_hash is None:
-            del self._blocks[block.block_id]
+            refcount = self._refcounter.get(block_id)
+            # We have fork case where block would get more than one ref,
+            # so we cannot free it from tracking if ref cnt large than 1
+            if refcount <= 1:
+                del self._blocks[block.block_id]
             return self._hashless_allocator.free(block)
 
         refcount = self._refcounter.decr(block_id)
@@ -298,7 +305,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._cached_blocks[block.content_hash] = block.block_id
         else:
             self._free_block_id_for_block(block.block_id, block)
-            self._incr_refcount_cached_block(block, self._cached_blocks[block.content_hash])
+            self._incr_refcount_cached_block(
+                block, self._cached_blocks[block.content_hash])
 
         return self._cached_blocks[block.content_hash]
 
@@ -351,23 +359,21 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 if self._blocks[block_id].is_full:
                     self._blocks[block_id].computed = True
             elif block_id not in self.evictor:
-                raise ValueError(
-                    f"Mark {block_id=} as computed which is not belonged to GPU")
+                raise ValueError(f"Mark {block_id=} as computed which "
+                                 "is not belonged to GPU")
 
     def block_is_computed(self, block_id: int) -> bool:
         if block_id in self._blocks:
             return self._blocks[block_id].computed
-        elif block_id in self.evictor:
-            return True
         else:
-            return False
+            return block_id in self.evictor
 
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
         """Return the block ids that are common for a given sequence group.
 
-        Only those blocks that are immutable and already be marked compyted would be
-        taken consideration.
+        Only those blocks that are immutable and already be marked
+        compyted would be taken consideration.
         """
 
         # NOTE We exclude the last block to avoid the case where the entire
@@ -376,8 +382,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         ids_list = [
             list(
-                takewhile(
-                    lambda block_id: self.block_is_computed(block_id), seq[:-1])) for seq in seq_block_ids
+                takewhile(lambda block_id: self.block_is_computed(block_id),
+                          seq[:-1])) for seq in seq_block_ids
         ]
         res = commonprefix([ids for ids in ids_list if ids != []])
         return res

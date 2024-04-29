@@ -376,6 +376,7 @@ class TestPrefixCachingBlockAllocator:
 
         # Create token ids that will exhaust all blocks.
         token_ids = list(range(num_blocks_to_consume * block_size))
+        blocks = list(range(num_blocks_to_consume))
 
         first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -383,9 +384,13 @@ class TestPrefixCachingBlockAllocator:
             allocator=allocator,
         )
 
+        # mark all blocks in first chain as computed
+        allocator.mark_blocks_as_computed(blocks)
+
         # After zero_point, second_chain's token_ids would be set -1, which
         # make it different from here comparing with first_chain
         zero_point = random.randint(1, len(token_ids) - 1)
+        zero_point_blocks = zero_point // block_size
         token_ids[zero_point:] = [-1] * (len(token_ids) - zero_point)
 
         second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
@@ -403,7 +408,7 @@ class TestPrefixCachingBlockAllocator:
         res = allocator.get_common_computed_block_ids(
             [first_computed_ids, second_computed_ids])
 
-        assert (len(res) == zero_point // block_size)
+        assert (len(res) == zero_point_blocks)
 
     # Test case where two last accessed times are equal
     @staticmethod
