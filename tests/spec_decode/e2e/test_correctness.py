@@ -618,6 +618,15 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         }
         # Try a range of common k, as well as large speculation.
         for k in [2, 5]
+    ] + [
+        {
+            "speculative_model": "JackFram/llama-160m",
+            "num_speculative_tokens": 3,
+
+            # Artificially limit the draft model max model len; this forces vLLM
+            # to skip speculation once the sequences grow beyond 32-k tokens.
+            "speculative_max_model_len": 32,
+        }
     ])
 @pytest.mark.parametrize("batch_size", [2, 8])
 @pytest.mark.parametrize(
@@ -632,7 +641,6 @@ def test_logprobs(baseline_llm_generator, test_llm_generator, batch_size: int,
     """Verify that speculative decoding produces exact equality to without spec
     decode with many different values of k.
     """
-    # TODO need to test for skipped speculation
     run_greedy_logprobs_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
