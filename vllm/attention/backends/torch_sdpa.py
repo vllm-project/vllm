@@ -57,8 +57,6 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # Need to make KV cache read-only for cross-attention
-    is_cross_attn: bool
     slot_mapping: torch.Tensor
     prompt_lens: Optional[List[int]]
 

@@ -76,9 +76,6 @@ class AttentionMetadata(Generic[T]):
     # The attention metadata for prefill requests in a batch.
     # None if there's no prefill requests in a batch.
     prefill_metadata: Optional[T]
-    # The attention metadata for encode operations required by
-    # prefill requests in a batch. None if encoding is not required.
-    encode_metadata: Optional[T]
     # The attention metadata for decode requests in a batch.
     # None if there's no decode requests in a batch.
     decode_metadata: Optional[T]
@@ -89,6 +86,10 @@ class AttentionMetadata(Generic[T]):
     slot_mapping: torch.Tensor
     # The kv cache's data type.
     kv_cache_dtype: str
+
+    # The attention metadata for encode operations required by
+    # prefill requests in a batch. None if encoding is not required.
+    encode_metadata: Optional[T] = None
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:

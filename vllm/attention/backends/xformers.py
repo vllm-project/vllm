@@ -66,8 +66,6 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # Need to make KV cache read-only for cross-attention
-    is_cross_attn: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.
@@ -104,6 +102,9 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
+    # Need to make KV cache read-only for cross-attention
+    is_cross_attn: bool = False
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
