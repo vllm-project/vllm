@@ -32,10 +32,20 @@ steps:
       queue: amd
     command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 7"
 
+  - label: "AMD Engine Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 8"
+
   - label: "AMD Examples Test"
     agents:
       queue: amd
     command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 10"
+
+  - label: "AMD Models Test"
+    agents:
+      queue: amd
+    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 12"
 
   - label: "AMD Prefix Caching Test"
     agents:

@@ -276,6 +276,6 @@ case ${2} in
 
     # Run the image
     docker run --device /dev/kfd --device /dev/dri --network host --name rocm_${1}_test_benchmarks \
-        -e HF_TOKEN rocm_${1} /bin/bash -c "/bin/bash vllm/.buildkite/run-benchmarks.sh"
+        -e HF_TOKEN rocm_${1} /bin/bash -c "cd /vllm-workspace/.buildkite; /bin/bash run-benchmarks.sh"
     ;;
 esac
