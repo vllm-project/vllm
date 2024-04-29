@@ -150,8 +150,8 @@ def run_timing(num_calls: int, bs: int, d_model: int, num_total_experts: int,
     a2_scale = None
 
     if dtype == "float8":
-        w1 = ws.to(torch.float8_e4m3fn)
-        w2 = w2s.to(torch.float8_e4m3fn)
+        w1 = w1.to(torch.float8_e4m3fn)
+        w2 = w2.to(torch.float8_e4m3fn)
         w1_scale = torch.ones(num_total_experts,
             device=hidden_states.device,
             dtype=torch.float32)
