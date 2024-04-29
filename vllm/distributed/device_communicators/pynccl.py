@@ -114,5 +114,5 @@ class NCCLCommunicator:
     def __del__(self):
         # `dist` module might have been already destroyed
         if hasattr(dist, 'destroy_process_group'):
-            dist.destroy_process_group()
+            dist.destroy_process_group(self.group)
         self.nccl.ncclCommDestroy(self.comm)
