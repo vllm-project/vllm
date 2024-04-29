@@ -196,7 +196,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.incr(block_id)
         if refcount == 1:
-            # if block get refered, then it shall not be in evictor
+            # if block get referred, then it shall not be in evictor
             # and put it into _blocks for tracking
             if block_id in self.evictor:
                 self.evictor.remove(block_id)
