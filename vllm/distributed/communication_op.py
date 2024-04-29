@@ -145,14 +145,15 @@ def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
+    metadata_group: Optional[ProcessGroup] = None
 ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
-    """Broadcast the input tensor dictionary."""
-    if group is None:
-        group = torch.distributed.group.WORLD
-        cpu_group = get_cpu_world_group()
-    else:
-        cpu_group = group
+    """Broadcast the input tensor dictionary.
+    `group` is used to broadcast the tensors, while `metadata_group` is used
+     to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
+     dtypes).
+    """
     group = group or torch.distributed.group.WORLD
+    metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
 
@@ -181,7 +182,7 @@ def broadcast_tensor_dict(
         # all happening on CPU. Therefore, we can use the CPU group.
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
-                                                group=cpu_group)
+                                                group=metadata_group)
         async_handles = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
@@ -198,7 +199,7 @@ def broadcast_tensor_dict(
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
-                                                group=cpu_group)
+                                                group=metadata_group)
         assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
