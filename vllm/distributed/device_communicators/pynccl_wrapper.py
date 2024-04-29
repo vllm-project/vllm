@@ -23,6 +23,9 @@ import ctypes
 from dataclasses import dataclass
 from typing import Any, List
 
+import torch
+from torch.distributed import ReduceOp
+
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
 # https://github.com/NVIDIA/nccl/blob/master/src/nccl.h.in
@@ -37,7 +40,6 @@ class ncclUniqueId(ctypes.Structure):
 
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
-
 
 ncclDataType_t = ctypes.c_int
 
@@ -79,7 +81,6 @@ class ncclDataTypeEnum:
         if dtype == torch.bfloat16:
             return cls.ncclBfloat16
         raise ValueError(f"Unsupported dtype: {dtype}")
-
 
 
 ncclRedOp_t = ctypes.c_int
@@ -176,27 +177,35 @@ class NCCLLibrary:
 
     def ncclGetUniqueId(self) -> ncclUniqueId:
         unique_id = ncclUniqueId()
-        self.NCCL_CHECK(self._funcs["ncclGetUniqueId"](ctypes.byref(unique_id)))
+        self.NCCL_CHECK(self._funcs["ncclGetUniqueId"](
+            ctypes.byref(unique_id)))
         return unique_id
 
     def ncclCommInitRank(self, world_size: int, unique_id: ncclUniqueId,
                          rank: int) -> ncclComm_t:
         comm = ncclComm_t()
         self.NCCL_CHECK(self._funcs["ncclCommInitRank"](ctypes.byref(comm),
-                                                 world_size, unique_id, rank))
+                                                        world_size, unique_id,
+                                                        rank))
         return comm
 
     def ncclAllReduce(self, sendbuff: buffer_type, recvbuff: buffer_type,
-                      count: int, datatype: ncclDataType_t, op: ncclRedOp_t,
-                      comm: ncclComm_t, stream: cudaStream_t) -> None:
+                      count: int, datatype: int, op: int, comm: ncclComm_t,
+                      stream: cudaStream_t) -> None:
+        # `datatype` actually should be `ncclDataType_t`
+        # and `op` should be `ncclRedOp_t`
+        # both are aliases of `ctypes.c_int`
+        # when we pass int to a function, it will be converted to `ctypes.c_int`
+        # by ctypes automatically
         self.NCCL_CHECK(self._funcs["ncclAllReduce"](sendbuff, recvbuff, count,
-                                              datatype, op, comm, stream))
+                                                     datatype, op, comm,
+                                                     stream))
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
 
 
 __all__ = [
-    "NCCLLibrary", "ncclDataType_t", "ncclRedOp_t", "ncclUniqueId",
+    "NCCLLibrary", "ncclDataTypeEnum", "ncclRedOpTypeEnum", "ncclUniqueId",
     "ncclComm_t", "cudaStream_t", "buffer_type"
 ]

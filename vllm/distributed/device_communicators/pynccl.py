@@ -19,7 +19,6 @@
 # changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
 # variable in the code.
 
-import ctypes
 import platform
 from typing import Optional, Union
 
@@ -28,15 +27,18 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup, ReduceOp
 
+from vllm.distributed.device_communicators.pynccl_wrapper import (
+    NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
+    ncclRedOpTypeEnum, ncclUniqueId)
 from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
 from vllm.utils import find_nccl_library, nccl_integrity_check
-from vllm.distributed.device_communicators.pynccl_wrapper import (
-    NCCLLibrary, ncclDataType_t, ncclRedOp_t, ncclUniqueId, ncclComm_t, cudaStream_t, buffer_type)
 
 logger = init_logger(__name__)
 
+
 class NCCLCommunicator:
+
     def __init__(
         self,
         group: Optional[ProcessGroup] = None,
@@ -107,8 +109,8 @@ class NCCLCommunicator:
         # `torch.cuda.device` is a context manager that changes the
         # current cuda device to the specified one
         with torch.cuda.device(device):
-            self.comm = self.nccl.ncclCommInitRank(self.world_size, self.unique_id,
-                                       self.rank)
+            self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
+                self.world_size, self.unique_id, self.rank)
             self.stream = torch.cuda.Stream()
 
     def all_reduce(self,
@@ -124,8 +126,7 @@ class NCCLCommunicator:
         if stream is None:
             stream = self.stream
         self.nccl.ncclAllReduce(buffer_type(tensor.data_ptr()),
-                                buffer_type(tensor.data_ptr()),
-                                tensor.numel(),
+                                buffer_type(tensor.data_ptr()), tensor.numel(),
                                 ncclDataTypeEnum.from_torch(tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
