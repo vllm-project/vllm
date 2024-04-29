@@ -504,9 +504,9 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
+        worker_use_ray: Whether to use Ray for model workers. Will default to
             True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+            greater than 1 and Ray is installed.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -522,7 +522,7 @@ class ParallelConfig:
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
@@ -539,8 +539,11 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if self.worker_use_ray is None:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.worker_use_ray = ray_found and self.world_size > 1
+
         self._verify_args()
 
     def _verify_args(self) -> None:

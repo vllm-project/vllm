@@ -281,9 +281,11 @@ class LLMEngine:
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
             executor_class = RayGPUExecutor
+        elif engine_config.parallel_config.world_size > 1:
+            from vllm.executor.multiproc_gpu_executor import (
+                MultiprocessingGPUExecutor)
+            executor_class = MultiprocessingGPUExecutor
         else:
-            assert engine_config.parallel_config.world_size == 1, (
-                "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
 
