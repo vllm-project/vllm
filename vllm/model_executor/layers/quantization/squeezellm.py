@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizableMethodBase)
+    QuantizableMethodBase, QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
 

@@ -8,10 +8,9 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.utils import set_weight_attrs
-
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, )
+    QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
