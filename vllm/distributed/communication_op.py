@@ -22,7 +22,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
-    from vllm.distributed.device_communicators import pynccl_utils
     from vllm.distributed.device_communicators.custom_all_reduce import (
         custom_all_reduce)
 
@@ -33,8 +32,10 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if out is not None:
         return out
     if is_pynccl_enabled_for_all_reduce():
-        # TODO: support multiple parallel groups.
-        pynccl_utils.all_reduce(input_)
+        # `_TP_NCCL_COMMUNICATOR` knows the group it is working on.
+        from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
+        assert _TP_NCCL_COMMUNICATOR is not None
+        _TP_NCCL_COMMUNICATOR.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())
