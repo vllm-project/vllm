@@ -7,7 +7,7 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod, adjust_marlin_shard
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
@@ -89,6 +89,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_per_partition = (self.vocab_end_index -
                                              self.vocab_start_index)
 
+        self.output_sizes = [self.num_embeddings_per_partition]
         self.linear_method.create_weights(self,
                                           self.embedding_dim,
                                           [self.num_embeddings_per_partition],
@@ -97,17 +98,75 @@ class VocabParallelEmbedding(torch.nn.Module):
                                           params_dtype,
                                           weight_loader=self.weight_loader)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, loaded_shard_id: Optional[int] = None):
         if self.linear_method.QUANTIZED:
-            tp_rank = get_tensor_model_parallel_rank()
-            output_dim = getattr(param, "output_dim", None)
             param_data = param.data
+            output_dim = getattr(param, "output_dim", None)
+            is_metadata = getattr(param, "is_metadata", False)
+            if loaded_shard_id is None:
+                # Loaded weight is already packed.
+                if output_dim is None:
+                    assert param_data.shape == loaded_weight.shape
+                    param_data.copy_(loaded_weight)
+                    return
+                current_shard_offset = 0
+                shard_offsets = []
+                for i, output_size in enumerate(self.output_sizes):
+                    shard_offsets.append((i, current_shard_offset, output_size))
+                    current_shard_offset += output_size
+                packed_dim = getattr(param, "packed_dim", None)
+                for shard_id, shard_offset, shard_size in shard_offsets:
+                    # If quantized, we need to adjust the offset and size to account
+                    # for the packing.
+                    if packed_dim == output_dim:
+                        shard_size = shard_size // param.pack_factor
+                        shard_offset = shard_offset // param.pack_factor
+
+                        # If marlin, we need to adjust the offset and size to
+                        # account for the tiling.
+                        shard_size, shard_offset = adjust_marlin_shard(
+                            param, shard_size, shard_offset)
+
+                    loaded_weight_shard = loaded_weight.narrow(
+                        output_dim, shard_offset, shard_size)
+                    self.weight_loader(param, loaded_weight_shard, shard_id)
+                return
+
+            assert loaded_shard_id < len(self.output_sizes)
+            tp_rank = get_tensor_model_parallel_rank()
+            tp_size = get_tensor_model_parallel_world_size()
             if output_dim is not None:
-                shard_size = param_data.shape[output_dim]
+                shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+                shard_size = self.output_sizes[loaded_shard_id] // tp_size
+                # If quantized, we need to adjust the offset and size to account
+                # for the packing.
+                packed_dim = getattr(param, "packed_dim", None)
+                if packed_dim == output_dim:
+                    shard_size = shard_size // param.pack_factor
+                    shard_offset = shard_offset // param.pack_factor
+
+                    # If marlin, we need to adjust the offset and size to
+                    # account for the tiling.
+                    shard_size, shard_offset = adjust_marlin_shard(
+                        param, shard_size, shard_offset)
+
+                param_data = param_data.narrow(output_dim, shard_offset,
+                                               shard_size)
                 start_idx = tp_rank * shard_size
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                      shard_size)
-
+            elif is_metadata:
+                # metadata indicates fixed size concatenated along dim 0
+                shard_size = loaded_weight.shape[0]
+                shard_offset = loaded_shard_id * shard_size
+                param_data = param_data.narrow(0, shard_offset, shard_size)
+            else:
+                ignore_warning = getattr(param, "ignore_warning", False)
+                if not ignore_warning:
+                    print(
+                        "Loading a weight without `output_dim` attribute in "
+                        "MergedColumnParallelLinear, assume the weight is "
+                        "the same for all partitions.")
             assert param_data.shape == loaded_weight.shape
             param_data.copy_(loaded_weight)
         else:
