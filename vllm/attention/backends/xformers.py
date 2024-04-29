@@ -66,6 +66,8 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
+    # Need to make KV cache read-only for cross-attention
+    is_cross_attn: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
     prompt_lens: Optional[List[int]]
     # prompt_lens stored as a tensor.

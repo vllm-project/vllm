@@ -76,6 +76,9 @@ class AttentionMetadata(Generic[T]):
     # The attention metadata for prefill requests in a batch.
     # None if there's no prefill requests in a batch.
     prefill_metadata: Optional[T]
+    # The attention metadata for encode operations required by
+    # prefill requests in a batch. None if encoding is not required.
+    encode_metadata: Optional[T]
     # The attention metadata for decode requests in a batch.
     # None if there's no decode requests in a batch.
     decode_metadata: Optional[T]

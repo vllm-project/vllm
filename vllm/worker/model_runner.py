@@ -37,6 +37,32 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
 
+class PrepareEncodeMetadata(NamedTuple):
+    input_tokens: List[int]
+    input_positions: List[int]
+    attn_metadata: Optional[AttentionMetadataPerStage]
+    prompt_lens: List[int]
+    subquery_lens: List[int]
+    lora_index_mapping: List[int]
+    lora_prompt_mapping: List[int]
+    lora_requests: Set[LoRARequest]
+    multi_modal_input: Optional[torch.Tensor]
+    slot_mapping: List[int]
+
+    @classmethod
+    def empty(cls):
+        return PreparePromptMetadata(
+            input_tokens=[],
+            input_positions=[],
+            attn_metadata=None,
+            prompt_lens=[],
+            subquery_lens=[],
+            lora_index_mapping=[],
+            lora_prompt_mapping=[],
+            lora_requests=set(),
+            multi_modal_input=None,
+            slot_mapping=[],
+        )
 
 class PreparePromptMetadata(NamedTuple):
     input_tokens: List[int]
