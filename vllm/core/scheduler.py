@@ -1,4 +1,6 @@
 import enum
+import os
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -14,6 +16,13 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
 from vllm.utils import merge_dicts
 
 logger = init_logger(__name__)
+
+# Test-only. If configured, decode is preempted with
+# ARTIFICIAL_PREEMPTION_PROB% probability.
+ENABLE_ARTIFICIAL_PREEMPT = bool(
+    os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
+ARTIFICIAL_PREEMPTION_PROB = 0.5
+ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 
 class PreemptionMode(enum.Enum):
@@ -286,6 +295,13 @@ class Scheduler:
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
 
+        # The following field is test-only. It is used to inject artificial
+        # preemption.
+        self.enable_artificial_preemption = ENABLE_ARTIFICIAL_PREEMPT
+        self.artificial_preempt_cnt = (ARTIFICIAL_PREEMPTION_MAX_CNT
+                                       if self.enable_artificial_preemption
+                                       else 0)
+
     @property
     def lora_enabled(self) -> bool:
         return bool(self.lora_config)
@@ -545,7 +561,6 @@ class Scheduler:
                     ScheduledSequenceGroup(seq_group,
                                            token_chunk_size=num_new_tokens))
             else:
-                assert num_new_tokens == 1
                 decode_seq_groups.append(
                     ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
@@ -868,6 +883,13 @@ class Scheduler:
         """Determine whether or not we have enough space in the KV cache to
         continue generation of the sequence group.
         """
+        # It is True only for testing case to trigger artificial preemption.
+        if (self.enable_artificial_preemption
+                and random.uniform(0, 1) < ARTIFICIAL_PREEMPTION_PROB
+                and self.artificial_preempt_cnt > 0):
+            self.artificial_preempt_cnt -= 1
+            return False
+
         # Appending slots only occurs in decoding.
         is_prefill = False
 
