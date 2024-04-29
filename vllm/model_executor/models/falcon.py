@@ -41,6 +41,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.model_loader.utils import skip_gptq_extra_param
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -412,8 +413,7 @@ class FalconForCausalLM(nn.Module):
             if name == "lm_head.weight":
                 # Falcon uses tied embeddings.
                 continue
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
+            if skip_gptq_extra_param(name, params_dict):
                 continue
             param = params_dict[name]
             if "query_key_value" in name:

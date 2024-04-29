@@ -23,6 +23,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.utils import skip_gptq_extra_param
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -377,8 +378,7 @@ class ChatGLMForCausalLM(nn.Module):
                 continue
             if "word_embeddings" in name:
                 name = name.replace(".word_embeddings", "")
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
+            if skip_gptq_extra_param(name, params_dict):
                 continue
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader",

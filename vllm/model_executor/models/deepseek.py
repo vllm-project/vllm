@@ -45,6 +45,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.utils import skip_gptq_extra_param
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
@@ -413,8 +414,7 @@ class DeepseekForCausalLM(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if skip_gptq_extra_param(name, params_dict):
                     continue
                 # Skip experts that are not assigned to this worker.
                 if (("mlp.experts." in name or "mlp.shared_experts." in name)
@@ -425,8 +425,7 @@ class DeepseekForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                if skip_gptq_extra_param(name, params_dict):
                     continue
                 # Skip experts that are not assigned to this worker.
                 if (("mlp.experts." in name or "mlp.shared_experts." in name)
