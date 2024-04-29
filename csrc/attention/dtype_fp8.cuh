@@ -3,14 +3,15 @@
 #include "attention_generic.cuh"
 
 #include <stdint.h>
-#ifdef ENABLE_FP8_E5M2
+#ifdef ENABLE_FP8
+#ifndef USE_ROCM 
 #include <cuda_fp8.h>
-#endif
+#endif // USE_ROCM
+#endif // ENABLE_FP8
 
 namespace vllm {
-#if defined(ENABLE_FP8_E5M2) || defined(ENABLE_FP8_E4M3)
-// fp8 vector types for quantization of kv cache
 
+// fp8 vector types for quantization of kv cache
 template<>
 struct Vec<uint8_t, 1> {
     using Type = uint8_t;
@@ -30,6 +31,5 @@ template<>
 struct Vec<uint8_t, 8> {
     using Type = uint2;
 };
-#endif // ENABLE_FP8_E5M2
 
 } // namespace vllm
