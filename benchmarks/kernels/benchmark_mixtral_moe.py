@@ -109,7 +109,7 @@ def run_grid(bs, method, dtype: str):
     # holds Dict[str, Dict[str, int]]
     filename = get_config_file_name(num_total_experts,
                                     model_intermediate_size // tp_size,
-                                    "float8")
+                                    "float8" if dtype == "float8" else None)
     print(f"writing config to file {filename}")
     existing_content = {}
     if os.path.exists(filename):
