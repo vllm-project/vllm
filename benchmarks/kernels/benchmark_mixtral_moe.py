@@ -89,6 +89,7 @@ def run_grid(bs, method, dtype: str):
                 model_intermediate_size=model_intermediate_size,
                 method=method,
                 config=config,
+                dtype=dtype,
             )
 
             kernel_dur_us = 1000 * kernel_dur_ms
