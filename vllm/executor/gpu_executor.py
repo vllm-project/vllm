@@ -28,7 +28,7 @@ class GPUExecutor(ExecutorBase):
                            rank: int = 0) -> Dict[str, Any]:
         """Return worker init args for a given rank."""
         distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port()),
+            get_ip(), get_open_port())
         return dict(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
