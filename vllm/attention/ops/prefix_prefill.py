@@ -664,8 +664,8 @@ if triton.__version__ >= "2.1.0":
                               b_seq_len,
                               b_ctx_len,
                               max_input_len,
-                              sliding_window=None,
-                              alibi_slopes=None):
+                              alibi_slopes=None,
+                              sliding_window=None):
 
         cap = torch.cuda.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
