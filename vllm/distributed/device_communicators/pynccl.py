@@ -19,7 +19,6 @@
 # changing the environment variable `VLLM_NCCL_SO_PATH`, or the `so_file`
 # variable in the code.
 
-import platform
 from typing import Optional, Union
 
 # ===================== import region =====================
@@ -32,7 +31,6 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclRedOpTypeEnum, ncclUniqueId)
 from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
-from vllm.utils import find_nccl_library, nccl_integrity_check
 
 logger = init_logger(__name__)
 
@@ -56,27 +54,8 @@ class NCCLCommunicator:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
         """
-        so_file = library_path or find_nccl_library()
 
-        try:
-            # load the library in another process.
-            # if it core dumps, it will not crash the current process
-            nccl_integrity_check(so_file)
-            self.nccl = NCCLLibrary(so_file)
-        except Exception as e:
-            logger.error(
-                "Failed to load NCCL library from %s ."
-                "It is expected if you are not running on NVIDIA/AMD GPUs."
-                "Otherwise, the nccl library might not exist, be corrupted "
-                "or it does not support the current platform %s."
-                "One solution is to download libnccl2 version 2.18 from "
-                "https://developer.download.nvidia.com/compute/cuda/repos/ "
-                "and extract the libnccl.so.2 file. If you already have the "
-                "library, please set the environment variable VLLM_NCCL_SO_PATH"
-                " to point to the correct nccl library path.", so_file,
-                platform.platform())
-            raise e
-
+        self.nccl = NCCLLibrary(library_path)
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (

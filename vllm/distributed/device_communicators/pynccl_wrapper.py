@@ -20,11 +20,17 @@
 # variable in the code.
 
 import ctypes
+import platform
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 from torch.distributed import ReduceOp
+
+from vllm.logger import init_logger
+from vllm.utils import find_nccl_library, nccl_integrity_check
+
+logger = init_logger(__name__)
 
 # === export types and functions from nccl to Python ===
 # for the original nccl definition, please check
@@ -148,8 +154,29 @@ class NCCLLibrary:
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
     ]
 
-    def __init__(self, so_file: str):
-        self.lib = ctypes.CDLL(so_file)
+    def __init__(self, so_file: Optional[str] = None):
+
+        so_file = so_file or find_nccl_library()
+
+        try:
+            # load the library in another process.
+            # if it core dumps, it will not crash the current process
+            nccl_integrity_check(so_file)
+            self.lib = ctypes.CDLL(so_file)
+        except Exception as e:
+            logger.error(
+                "Failed to load NCCL library from %s ."
+                "It is expected if you are not running on NVIDIA/AMD GPUs."
+                "Otherwise, the nccl library might not exist, be corrupted "
+                "or it does not support the current platform %s."
+                "One solution is to download libnccl2 version 2.18 from "
+                "https://developer.download.nvidia.com/compute/cuda/repos/ "
+                "and extract the libnccl.so.2 file. If you already have the "
+                "library, please set the environment variable VLLM_NCCL_SO_PATH"
+                " to point to the correct nccl library path.", so_file,
+                platform.platform())
+            raise e
+
         self._funcs = {}
         for func in self.exported_functions:
             f = getattr(self.lib, func.name)
