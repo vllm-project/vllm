@@ -231,6 +231,9 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -238,7 +241,7 @@ class OPTDecoder(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.get_input_embeddings(input_ids)
         pos_embeds = self.embed_positions(positions)
         if self.project_in is not None:
             inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -286,7 +289,16 @@ class OPTForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.model = OPTModel(config, quant_config)
-        self.lm_head = self.model.decoder.embed_tokens
+
+        # TODO de-duplicate lm_head and embed_tokens if they are the same
+        #  in terms of weights shape and value
+        self.lm_head = ParallelVocabEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config)
+
+        self.model.decoder.embed_tokens = self.lm_head
+
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -324,8 +336,6 @@ class OPTForCausalLM(nn.Module):
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            if "lm_head" in name:
-                continue
             if name.startswith("decoder."):
                 name = "model." + name
 
