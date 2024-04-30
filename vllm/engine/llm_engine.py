@@ -1895,7 +1895,10 @@ class LLMEngine:
                         for seq in seq_group.get_finished_seqs()
                     ])
                     max_num_generation_tokens_requests.append(
-                        max(seq.get_output_len() for seq in seq_group.get_seqs())
+                        max(
+                            seq.get_output_len()
+                            for seq in seq_group.get_seqs()
+                        )
                     )
                     if seq_group.sampling_params is not None:
                         best_of_requests.append(
