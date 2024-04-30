@@ -47,10 +47,14 @@ class GPUExecutor(ExecutorBase):
             is_driver_worker=rank == 0,
         )
 
-    def _create_worker(self, local_rank: int = 0, rank: int = 0):
+    def _create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
         # Lazy import to avoid CUDA init issues
         from vllm.worker.worker import Worker
-        return Worker(**self._get_worker_kwargs(local_rank, rank))
+        return Worker(**self._get_worker_kwargs(local_rank, rank,
+                                                distributed_init_method))
 
     def _init_non_spec_worker(self):
         assert self.parallel_config.world_size == 1, (
