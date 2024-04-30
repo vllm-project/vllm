@@ -158,7 +158,7 @@ class ModelRunner:
         self.graph_block_tables: torch.Tensor  # Set after initial profiling.
 
         # Set if the backend is flashinfer.
-        self.workspace_buffer = None
+        self.flashinfer_workspace_buffer: torch.Tensor
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -443,7 +443,21 @@ class ModelRunner:
         lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
+
+        # The following fields are only for flashinfer
+        # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
+        # for the precise definition of the following fields.
+        # An example:
+        # request 1, page indices [0, 5, 8]
+        # request 2, page indices [1, 6, 7]
+        # request 3, page indices [3, 4]
+        # paged_kv_indices is a concatenation of page indices of all requests:
+        # [0, 5, 8, 1, 6, 7, 3, 4]
+        # paged_kv_indptr is used to index into paged_kv_indices:
+        # [0, 3, 6, 8]
+        # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_indices: List[int] = []
+        # 0 is always in paged_kv_indptr because the
         paged_kv_indptr: List[int] = [0]
         paged_kv_last_page_len: List[int] = []
 
@@ -489,10 +503,10 @@ class ModelRunner:
 
                 paged_kv_indices.extend(block_table)
                 paged_kv_indptr.append(paged_kv_indptr[-1] + len(block_table))
-                last_len = seq_data.get_len() % self.block_size
-                if last_len == 0:
-                    last_len = self.block_size
-                paged_kv_last_page_len.append(last_len)
+                last_page_len = seq_data.get_len() % self.block_size
+                if last_page_len == 0:
+                    last_page_len = self.block_size
+                paged_kv_last_page_len.append(last_page_len)
 
         # vLLM uses cuda graph only for decoding requests.
         # See `capture_model` API for more details.
@@ -544,12 +558,12 @@ class ModelRunner:
                 device=self.device,
             )
 
-        flashinfer_wrapper = None
         if self.attn_backend is FlashInferBackend:
-            if self.workspace_buffer is None:
-                self.workspace_buffer = torch.empty(16 * 1024 * 1024,
-                                                    dtype=torch.uint8,
-                                                    device=self.device)
+            if not hasattr(self, "flashinfer_workspace_buffer"):
+                # Allocate 16MB workspace buffer
+                # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
+                self.flashinfer_workspace_buffer = torch.empty(
+                    16 * 1024 * 1024, dtype=torch.uint8, device=self.device)
             paged_kv_indptr = torch.tensor(paged_kv_indptr,
                                            dtype=torch.int,
                                            device=self.device)
@@ -565,7 +579,7 @@ class ModelRunner:
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=False,
                 use_cuda_graph=False,
-                workspace_buffer=self.workspace_buffer,
+                workspace_buffer=self.flashinfer_workspace_buffer,
                 paged_kv_indptr=paged_kv_indptr,
                 paged_kv_indices=paged_kv_indices,
                 paged_kv_last_page_len=paged_kv_last_page_len,
@@ -588,8 +602,7 @@ class ModelRunner:
                 seq_start_loc=None,
                 context_lens=context_lens_tensor,
                 block_tables=block_tables,
-                use_cuda_graph=use_captured_graph,
-                wrapper=flashinfer_wrapper)
+                use_cuda_graph=use_captured_graph)
         return PrepareDecodeMetadata(
             input_tokens=input_tokens,
             input_positions=input_positions,

@@ -1,7 +1,7 @@
 import pytest
 
 from vllm.utils import (create_kv_caches_with_random,
-                        create_kv_caches_with_random_flashinfer)
+                        create_kv_caches_with_random_flash)
 
 
 @pytest.fixture()
@@ -11,4 +11,4 @@ def kv_cache_factory():
 
 @pytest.fixture()
 def kv_cache_factory_flashinfer():
-    return create_kv_caches_with_random_flashinfer
+    return create_kv_caches_with_random_flash

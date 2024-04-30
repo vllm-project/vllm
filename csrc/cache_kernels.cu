@@ -318,7 +318,7 @@ void reshape_and_cache_flash(
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
-  if (kv_cache_dtype != "auto") {
+  if (kv_cache_dtype != "auto" || kv_cache_dtype == "fp8" ) {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
   int num_tokens = key.size(0);

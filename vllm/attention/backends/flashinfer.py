@@ -5,7 +5,7 @@ import flashinfer
 import torch
 from flash_attn import flash_attn_varlen_func
 
-from vllm._C import cache_ops
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
@@ -49,8 +49,6 @@ class FlashInferBackend(AttentionBackend):
 @dataclass
 class FlashInferMetadata(AttentionMetadataPerStage):
 
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
     is_prompt: bool
 
     use_cuda_graph: bool = False
@@ -106,6 +104,8 @@ class FlashInferMetadata(AttentionMetadataPerStage):
                         ) -> Dict[str, Any]:
         if skip_fields is None:
             skip_fields = set()
+        # We need to skip the decode_wrapper field since it cannot be
+        # broadcasted with nccl when TP is enabled.
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
 
@@ -121,8 +121,9 @@ class FlashInferImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
     ) -> None:
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        if sliding_window is not None:
+            raise ValueError("Sliding window is not supported in FlashInfer.")
+        self.sliding_window = (-1, -1)
         self.alibi_slopes = alibi_slopes
         self.scale = scale
         self.num_heads = num_heads
@@ -138,9 +139,16 @@ class FlashInferImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        if attn_metadata.num_prefill_tokens > 0:
+            assert attn_metadata.num_decode_tokens == 0, (
+                "chunked prefill is not supported with flash infer yet")
+        if attn_metadata.num_decode_tokens > 0:
+            assert attn_metadata.num_prefill_tokens == 0, (
+                "chunked prefill is not supported with flash infer yet")
+
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
-            cache_ops.reshape_and_cache_flash(
+            ops.reshape_and_cache_flash(
                 key,
                 value,
                 kv_cache[:, 0],
@@ -149,15 +157,15 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.kv_cache_dtype,
             )
 
-        if attn_metadata.prefill_metadata:
+        if prefill_metadata := attn_metadata.prefill_metadata:
             output = flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
-                cu_seqlens_q=attn_metadata.prefill_metadata.seq_start_loc,
-                cu_seqlens_k=attn_metadata.prefill_metadata.seq_start_loc,
-                max_seqlen_q=attn_metadata.prefill_metadata.max_prompt_len,
-                max_seqlen_k=attn_metadata.prefill_metadata.max_prompt_len,
+                cu_seqlens_q=prefill_metadata.seq_start_loc,
+                cu_seqlens_k=prefill_metadata.seq_start_loc,
+                max_seqlen_q=prefill_metadata.max_prompt_len,
+                max_seqlen_k=prefill_metadata.max_prompt_len,
                 softmax_scale=self.scale,
                 causal=True,
                 window_size=self.sliding_window,

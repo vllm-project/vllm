@@ -377,7 +377,7 @@ def get_kv_cache_torch_dtype(
     return torch_dtype
 
 
-def create_kv_caches_with_random_flashinfer(
+def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
     num_layers: int,
