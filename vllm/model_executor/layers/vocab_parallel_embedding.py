@@ -36,7 +36,7 @@ def vocab_range_from_global_vocab_size(global_vocab_size: int, rank: int,
                                                      rank)
 
 
-class VocabParallelEmbedding(torch.nn.Module):
+class ParallelVocabEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
@@ -206,7 +206,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         return output
 
 
-class ParallelLMHead(VocabParallelEmbedding):
+class ParallelLMHead(ParallelVocabEmbedding):
     """Parallelized LM head.
 
     Output logits weight matrices used in the Sampler. The weight and bias

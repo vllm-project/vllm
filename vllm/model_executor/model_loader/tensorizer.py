@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelVocabEmbedding)
 
 tensorizer_load_fail = None
 
@@ -284,7 +284,7 @@ class TensorizerAgent:
         """Modify LoRA embedding layers to use bigger tensors
         to allow for adapter added tokens."""
         for child in self.model.modules():
-            if (isinstance(child, VocabParallelEmbedding)
+            if (isinstance(child, ParallelVocabEmbedding)
                     and child.weight.shape[0] <
                     child.num_embeddings_per_partition):
                 new_weight = torch.empty(child.num_embeddings_per_partition,

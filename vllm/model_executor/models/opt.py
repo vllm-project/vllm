@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelVocabEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -190,7 +190,7 @@ class OPTDecoder(nn.Module):
         self.max_target_positions = config.max_position_embeddings
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = VocabParallelEmbedding(
+        self.embed_tokens = ParallelVocabEmbedding(
             config.vocab_size,
             config.word_embed_proj_dim,
         )

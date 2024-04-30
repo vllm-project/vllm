@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    ParallelVocabEmbedding)
 
 if TYPE_CHECKING:
     pass
@@ -196,7 +196,7 @@ class BaseLayerWithLoRA(nn.Module):
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
-    def __init__(self, base_layer: VocabParallelEmbedding) -> None:
+    def __init__(self, base_layer: ParallelVocabEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.embeddings_slice: Optional[Tuple[int, int]]
@@ -336,7 +336,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def can_replace_layer(cls, source_layer: nn.Module,
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
-        return type(source_layer) is VocabParallelEmbedding
+        return type(source_layer) is ParallelVocabEmbedding
 
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
@@ -1122,7 +1122,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        lm_head: VocabParallelEmbedding,
+        lm_head: ParallelVocabEmbedding,
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.

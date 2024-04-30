@@ -30,7 +30,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead, ParallelVocabEmbedding)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
@@ -184,7 +184,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(vocab_size, 256)
+        embedding = ParallelVocabEmbedding(vocab_size, 256)
         embedding.weight.data = torch.rand_like(embedding.weight.data)
         embedding.weight.data[vocab_size:, :] = 0
         lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
@@ -281,11 +281,11 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(vocab_size, 256)
+        embedding = ParallelVocabEmbedding(vocab_size, 256)
         embedding_data = torch.rand_like(embedding.weight.data)
         embedding.weight.data = embedding_data
         embedding.weight.data[vocab_size:, :] = 0
-        expanded_embedding = VocabParallelEmbedding(
+        expanded_embedding = ParallelVocabEmbedding(
             vocab_size + lora_config.lora_extra_vocab_size * max_loras,
             256,
             org_num_embeddings=vocab_size)
