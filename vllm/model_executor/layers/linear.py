@@ -1,4 +1,4 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -224,7 +224,7 @@ class ColumnParallelLinear(LinearBase):
         layer_name: Optional[str] = None
     ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
-                         quant_config)
+                         quant_config, layer_name)
 
         self.gather_output = gather_output
 

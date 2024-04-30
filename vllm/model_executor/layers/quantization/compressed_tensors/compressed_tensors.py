@@ -147,7 +147,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
 
         layer.scheme = scheme
         
-    def apply_weights(self,
+    def apply(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None):
