@@ -40,17 +40,24 @@ from .conftest import get_output_from_llm_generator
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
-    [{
-        # Use a small model for a fast test.
-        # Note this is repeated in the test body; to initialize a tokenizer.
-        "model": "JackFram/llama-68m",
+    [
+        {
+            # Use a small model for a fast test.
+            # Note this is repeated in the test body; to initialize a tokenizer.
+            "model": "JackFram/llama-68m",
 
-        # Skip cuda graph recording for fast test.
-        "enforce_eager": True,
+            # Skip cuda graph recording for fast test.
+            "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True
-    }])
+            # Required for spec decode.
+            "use_v2_block_manager": True,
+
+            # whether use AsyncLLM engine
+            "use_async": async_mode,
+        }
+        # Try both async and sync engine execution
+        for async_mode in [True, False]
+    ])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
     [

@@ -109,12 +109,14 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        num_lookahead_slots: int,
     ) -> List[SamplerOutput]:
         output = await make_async(self.driver_worker.execute_model)(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy)
+            blocks_to_copy=blocks_to_copy,
+            num_lookahead_slots=num_lookahead_slots)
         return output
 
     async def check_health_async(self) -> None:

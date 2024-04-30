@@ -42,10 +42,17 @@ def test_spec_decode_xfail_ray(test_llm_generator):
         temperature=temperature,
     )
 
-    with pytest.raises(AssertionError,
-                       match="Speculative decoding not yet supported for "):
-        get_output_from_llm_generator(test_llm_generator, prompts,
-                                      sampling_params)
+    try:
+        with pytest.raises(
+                AssertionError,
+                match="Speculative decoding not yet supported for "):
+            get_output_from_llm_generator(test_llm_generator, prompts,
+                                          sampling_params)
+    finally:
+        # we need to free up ray resource,
+        # so that latter test could use the gpu we allocated here
+        import ray
+        ray.shutdown()
 
 
 @pytest.mark.parametrize(
