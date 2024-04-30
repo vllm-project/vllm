@@ -3,11 +3,13 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
+import copy
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionMetadataPerStage
 
 from vllm.attention.backends.xformers import XFormersBackend
+from vllm.attention.backends.abstract import AttentionBackend
 
 from vllm._C import ops, cache_ops
 from vllm.utils import get_max_shared_memory_bytes
@@ -163,25 +165,66 @@ def make_golden_prompt_run(prompt_len):
 def build_attention_metadata():
     pass
 
-def make_backend(backend_name: str):
+def make_backend(backend_name: str) -> AttentionBackend:
     if backend_name == "xformers":
         return XFormersBackend()
     assert False, f"Unrecognized backend_name {backend_name} for unit test"
 
-def make_metadata(attn_backend):
-    attn_backend.make_metadata(
-                is_prompt=True,
-                prompt_lens=prompt_lens,
-                prompt_lens_tensor=prompt_lens_tensor,
-                max_subquery_len=max_subquery_len,
-                max_context_len=None,
-                max_prompt_len=max_prompt_len,
-                subquery_start_loc=subquery_start_loc,
-                seq_start_loc=seq_start_loc,
-                context_lens=context_lens_tensor,
-                block_tables=block_tables,
-                use_cuda_graph=False,
-            )
+def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0') -> AttentionMetadataPerStage:
+    '''
+    Assumptions:
+    * No chunked prefill
+    * No (automatic) prefix caching
+    * Packed variable-length sequences
+    '''
+    prompt_lens_tensor=torch.tensor(prompt_lens,
+                                    dtype=torch.int,
+                                    device=device)
+    context_lens_tensor=torch.tensor(context_lens, 
+                              dtype=torch.int,
+                              device=device)
+    max_subquery_len=None if prompt_lens is None else max(prompt_lens)
+    max_context_len=None if context_lens is None else max(context_lens)
+    max_prompt_len=max_subquery_len
+     
+
+    seq_start_loc = torch.cumsum(prompt_lens_tensor,
+                                 dim=0,
+                                 dtype=seq_start_loc.dtype,
+                                 out=seq_start_loc[1:])
+    subquery_start_loc = copy.deepcopy(seq_start_loc)
+
+    return attn_backend.make_metadata(
+                            is_prompt=is_prompt,
+                            prompt_lens=prompt_lens,
+                            prompt_lens_tensor=prompt_lens_tensor,
+                            max_subquery_len=max_subquery_len,
+                            max_context_len=max_context_len,
+                            max_prompt_len=max_prompt_len,
+                            subquery_start_loc=subquery_start_loc,
+                            seq_start_loc=seq_start_loc,
+                            context_lens=context_lens_tensor,
+                            block_tables=block_tables,
+                            use_cuda_graph=False,
+                        )
+
+def make_metadata(is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0'):
+        '''
+        Assumptions:
+        * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
+        '''
+
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0')
+
+        attn_metadata = AttentionMetadata(
+            num_prefills=num_prefills,
+            slot_mapping=slot_mapping,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            prefill_metadata=prefill_attn_metadata,
+            decode_metadata=decode_attn_metadata,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
 def make_attention(num_heads: int, head_size: int):
     # Attention operator instance
