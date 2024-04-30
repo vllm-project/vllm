@@ -114,23 +114,21 @@ class ArcticMoE(nn.Module):
                                          bias=False,
                                          params_dtype=self.params_dtype,
                                          linear_method=linear_method)
-
-            # Create it on CPU and later quantize it to GPU.
             if self.is_quant:
                 self.ws = DeepSpeedFPParameter(
-                    torch.Size(self.num_experts,
-                               2 * self.intermediate_size,
-                               self.hidden_size,
-                               dtype=self.params_dtype),
+                    torch.Size((self.num_experts,
+                                2 * self.intermediate_size,
+                                self.hidden_size)),
                     quant_config=linear_method.quant_config,
                 )
+                torch.cuda.empty_cache()
                 self.w2s = DeepSpeedFPParameter(
-                    torch.Size(self.num_experts,
-                               self.hidden_size,
-                               self.intermediate_size,
-                               dtype=self.params_dtype),
+                    torch.Size((self.num_experts,
+                                self.hidden_size,
+                                self.intermediate_size)),
                     quant_config=linear_method.quant_config,
                 )
+                torch.cuda.empty_cache()
             else:
                 self.ws = nn.Parameter(
                     torch.empty(self.num_experts,
@@ -154,7 +152,25 @@ class ArcticMoE(nn.Module):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param.data
+        if self.is_quant:
+            # Create it on CPU and later quantize it to GPU.
+            if not hasattr(self, "ws_cpu"):
+                self.ws_cpu = torch.empty(
+                    self.ws.orig_shape,
+                    dtype=self.params_dtype,
+                    device="cpu",
+                )
+                self.w2s_cpu = torch.empty(
+                    self.w2s.orig_shape,
+                    dtype=self.params_dtype,
+                    device="cpu",
+                )
+            if weight_name.endswith("w2.weight"):
+                param_data = self.w2s_cpu
+            else:
+                param_data = self.ws_cpu
+        else:
+            param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
@@ -526,12 +542,7 @@ class ArcticForCausalLM(nn.Module):
                                                     default_weight_loader)
                             weight_loader(param, loaded_weight)
 
-        # For Arctic, we run a post quantization on 16 bits weights.
-        # Iterate in order of largest to smallest params to reduce
-        # pytorch fragmentation issues.
-        for name, param in sorted(self.named_parameters(),
-                                  key=lambda v: -v[1].numel()):
-            if hasattr(param, "is_arctic") and param.is_arctic:
-                # do quantization after loading and moe to GPU
-                assert param.device.type != "cuda"
-                param.data = param.cuda()
+        for name, module in self.named_modules():
+            if isinstance(module, ArcticMoE) and module.is_quant:
+                module.ws.ds_quantize_(module.ws_cpu.cuda())
+                module.w2s.ds_quantize_(module.w2s_cpu.cuda())

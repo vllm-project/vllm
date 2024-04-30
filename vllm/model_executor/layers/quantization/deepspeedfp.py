@@ -90,11 +90,11 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_size_per_partition: int, input_size: int,
                        output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+                       weight_loader=None, **extra_weight_attrs):
         del output_size
         weight = DeepSpeedFPParameter(
-            torch.Size(output_size_per_partition,
-                       input_size_per_partition),
+            torch.Size((output_size_per_partition,
+                        input_size_per_partition)),
             quant_config=self.quant_config,
         )
         set_weight_attrs(weight, {
@@ -102,6 +102,18 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
             "output_dim": 0,
         })
         layer.register_parameter("weight", weight)
+
+        def quant_weight_loader(param, loaded_weight, *args, **kwargs):
+            # Calls the original weight loader (if any), quantizes the result,
+            # and then loads the quantized parameter.
+            if weight_loader is not None:
+                orig_param_data = param.data
+                param.data = torch.empty(weight.orig_shape, dtype=params_dtype)
+                weight_loader(param, loaded_weight, *args, **kwargs)
+                param.data, loaded_weight = orig_param_data, param.data
+            param.ds_quantize_(loaded_weight.cuda())
+
+        extra_weight_attrs["weight_loader"] = quant_weight_loader
         set_weight_attrs(weight, extra_weight_attrs)
 
     def apply_weights(self,
@@ -125,8 +137,8 @@ class DeepSpeedFPParameter(nn.Parameter):
         data = torch.empty((
             orig_shape.numel() // quant_config.group_size,
             quant_config.group_size * quant_config.weight_bits // 8 + 4,
-        ))
-        self = torch.Tensor._make_subclass(cls, data, requires_grad=False)
+        ), dtype=torch.int8)
+        self = torch.Tensor._make_subclass(cls, data, data.requires_grad)
         self.orig_shape = orig_shape
         self.quant_config = quant_config
         self.fp_quantizer = FP_Quantize(group_size=quant_config.group_size)
