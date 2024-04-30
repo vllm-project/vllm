@@ -359,6 +359,16 @@ class Phi3SmallForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
+        # tokens in tiktoken but not used
+        if hasattr(config, 'dummy_token_indices'):
+            device = self.lm_head.weight.device
+            self.register_buffer(
+                'dummy_token_indices',
+                torch.LongTensor(config.dummy_token_indices).to(device),
+                persistent=False)
+        else:
+            self.dummy_token_indices = None
+
     def get_input_embeddings(self):
         return self.model.embed_tokens
 
@@ -381,6 +391,8 @@ class Phi3SmallForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head.weight, hidden_states,
                                        sampling_metadata)
+        if self.dummy_token_indices is not None:
+            logits.index_fill_(-1, self.dummy_token_indices, -torch.inf)
         return logits
 
     def forward(
