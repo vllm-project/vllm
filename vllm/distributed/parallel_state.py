@@ -323,3 +323,20 @@ def is_pynccl_enabled_for_all_reduce():
     """check if pynccl is enabled for all reduce"""
     global _ENABLE_PYNCCL_FOR_ALL_REDUCE
     return _ENABLE_PYNCCL_FOR_ALL_REDUCE
+
+
+class _Destructor:
+    """
+    Python does not support destructors for modules. This class is a
+     workaround to ensure that the model parallel groups are destroyed.
+    This is needed because many Python objects hold resources that live
+     outside of Python's garbage collection system, e.g. process groups,
+     NCCL communicators, etc.
+    """
+
+    def __del__(self):
+        destroy_model_parallel()
+
+# When `_destructor` is garbage collected, the model parallel groups will be
+# destroyed.
+_destructor = _Destructor()
