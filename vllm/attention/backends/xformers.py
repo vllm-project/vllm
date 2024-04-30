@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
+                                         BlockDiagonalMask,
                                          BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
@@ -105,6 +106,11 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
 
     # Need to make KV cache read-only for cross-attention
     is_cross_attn: bool = False
+
+    # (batch_size,). The "cross-prompt-length" per sequence,i.e. the key/value
+    # prompt length (usually encoder prompt length) in the cross-attention
+    # computation. None if it is self-attention
+    cross_prompt_lens: Optional[List[int]] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -315,11 +321,11 @@ class XFormersImpl(AttentionImpl):
                     # Non-causal cross-attention
                     # Each block is a rectangle of size
                     # (decoder prompt len) x (encoder prompt len)
-                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                        attn_metadata.prompt_lens)
+                    attn_bias = BlockDiagonalMask.from_seqlens(
+                        attn_metadata.prompt_lens,attn_metadata.cross_prompt_lens)
                 else:
                     # Causal self-attention
-                    # Each block is a square
+                    # Each block is a square (prompt len) on a side
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
                         attn_metadata.prompt_lens)
                 if self.sliding_window is not None:
