@@ -24,6 +24,12 @@ Express your support on Twitter if vLLM aids you, or simply offer your appreciat
 pip install -e .  # This may take several minutes.
 ```
 
+> [!NOTE]
+> If you run into out-of-memory errors, you might need to adjust the number of default
+> threads used for compilation by cmake and NVCC using `MAX_THREADS` and `NVCC_THREADS`
+> environment variables.
+
+
 ### Testing
 
 ```bash
