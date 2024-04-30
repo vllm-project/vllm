@@ -65,14 +65,16 @@ class NCCLCommunicator:
         self.group = group
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
-        if self.rank == 0:
+        ranks = torch.distributed.get_process_group_ranks(group)
+        self.rank_inside_group = ranks.index(self.rank)
+        if self.rank_inside_group == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
         tensor = torch.ByteTensor(list(self.unique_id.internal))
-        dist.broadcast(tensor, src=0, group=group)
+        dist.broadcast(tensor, src=ranks[0], group=group)
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
@@ -91,7 +93,7 @@ class NCCLCommunicator:
         # current cuda device to the specified one
         with torch.cuda.device(device):
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                self.world_size, self.unique_id, self.rank)
+                self.world_size, self.unique_id, self.rank_inside_group)
             self.stream = torch.cuda.Stream()
 
     def all_reduce(self,
