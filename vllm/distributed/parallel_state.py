@@ -337,6 +337,7 @@ class _Destructor:
     def __del__(self):
         destroy_model_parallel()
 
+
 # When `_destructor` is garbage collected, the model parallel groups will be
 # destroyed.
 _destructor = _Destructor()
