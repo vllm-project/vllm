@@ -2,10 +2,15 @@ import multiprocessing
 
 import pytest
 import torch
+import torch.distributed as dist
 
+from vllm.distributed.communication_op import (
+    change_model_parallel_pynccl_allreduce, tensor_model_parallel_all_reduce)
 from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
-from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.distributed.parallel_state import (destroy_model_parallel,
+                                             init_distributed_environment,
+                                             initialize_model_parallel)
 from vllm.utils import update_environment_variables
 
 
@@ -81,6 +86,28 @@ def worker_fn_with_cudagraph():
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl_with_cudagraph():
     distributed_run(worker_fn_with_cudagraph, 2)
+
+
+@worker_fn_wrapper
+def worker_fn_with_multiple_tp_groups():
+    change_model_parallel_pynccl_allreduce(enable=True)
+    initialize_model_parallel(2, 2)
+    rank = dist.get_rank()
+
+    a = torch.ones((4, 4), device=f'cuda:{rank}') * rank
+    b = tensor_model_parallel_all_reduce(a)
+    if rank in [0, 1]:
+        assert b.mean().cpu().item() == 0 + 1
+    else:
+        assert b.mean().cpu().item() == 2 + 3
+
+    destroy_model_parallel()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+def test_pynccl_with_multiple_tp_groups():
+    distributed_run(worker_fn_with_multiple_tp_groups, 4)
 
 
 def test_ncclGetUniqueId():
