@@ -6,10 +6,10 @@ import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from functools import lru_cache, partial
 from platform import uname
-from typing import (Any, Awaitable, Callable, Dict, Generic, Hashable, List,
+from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
                     Optional, Tuple, TypeVar, Union)
 
 import psutil
@@ -452,21 +452,18 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: Dict[Any, List[Any]],
-                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
-    # Create a new dictionary to hold the merged results
-    merged_dict = dict()
+def merge_dicts(dict1: dict[Any, list[Any]],
+                dict2: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
+    """Merge 2 dicts that have key -> List of items.
+    
+    When a key conflicts, the values in dict1 is prioritized.
+    """
+    merged_dict = defaultdict(list)
 
     for key, value in dict1.items():
-        if key in merged_dict:
-            merged_dict[key].extend(value)
-        else:
-            merged_dict[key] = value
+        merged_dict[key].extend(value)
 
     for key, value in dict2.items():
-        if key in merged_dict:
-            merged_dict[key].extend(value)
-        else:
-            merged_dict[key] = value
+        merged_dict[key].extend(value)
 
-    return merged_dict
+    return dict(merged_dict)
