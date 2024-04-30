@@ -240,11 +240,13 @@ class ModelRunner:
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
 
+        is_prompt = False
         for seq_group_metadata in seq_group_metadata_list:
-            assert seq_group_metadata.is_prompt
+            # assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
-            assert len(seq_ids) == 1
+            # assert len(seq_ids) == 1
             seq_id = seq_ids[0]
+            is_prompt = seq_group_metadata.is_prompt
 
             computed_block_nums = seq_group_metadata.computed_block_nums
             if (self.scheduler_config is not None
@@ -273,7 +275,8 @@ class ModelRunner:
                 computed_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[computed_len:]
                 prefix_block_tables.append(computed_block_nums)
-            elif self.scheduler_config.chunked_prefill_enabled:
+            # elif self.scheduler_config.chunked_prefill_enabled:
+            else:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
@@ -281,11 +284,11 @@ class ModelRunner:
                 else:
                     # The first prefill.
                     prefix_block_tables.append([])
-            else:
-                prefix_block_tables.append([])
-                # Right now, prefill start is always 0. However, this
-                # assumption can be changed once chunked prefill is introduced.
-                assert computed_len == 0
+            # else:
+            #     prefix_block_tables.append([])
+            #     # Right now, prefill start is always 0. However, this
+            #     # assumption can be changed once chunked prefill is introduced.
+            #     assert computed_len == 0
 
             # actual prompt lens
             context_lens.append(computed_len)
@@ -377,7 +380,7 @@ class ModelRunner:
                                          device=self.device)
 
         prompt_lens_tensor = torch.tensor(prompt_lens,
-                                          dtype=torch.long,
+                                          dtype=torch.int,
                                           device=self.device)
         seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
@@ -394,11 +397,11 @@ class ModelRunner:
                      out=seq_start_loc[1:])
 
         attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=True,
+            is_prompt=is_prompt,
             prompt_lens=prompt_lens,
             prompt_lens_tensor=prompt_lens_tensor,
             max_subquery_len=max_subquery_len,
-            max_context_len=None,
+            max_context_len=max(context_lens),
             max_prompt_len=max_prompt_len,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
@@ -573,15 +576,27 @@ class ModelRunner:
                 multi_modal_input,
                 slot_mapping,
             ) = self._prepare_prompt(prefill_reqs)
+            # (
+            #     decode_input_tokens,
+            #     decode_input_positions,
+            #     decode_attn_metadata,
+            #     decode_lora_index_mapping,
+            #     decode_lora_prompt_mapping,
+            #     decode_lora_requests,
+            #     decode_slot_mapping,
+            # ) = self._prepare_decode(decode_reqs)
             (
                 decode_input_tokens,
                 decode_input_positions,
                 decode_attn_metadata,
+                _,
+                _,
                 decode_lora_index_mapping,
                 decode_lora_prompt_mapping,
                 decode_lora_requests,
+                _,
                 decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
+            ) = self._prepare_prompt(decode_reqs)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, prompt_lens, subquery_lens,
                 self.device, self.pin_memory)

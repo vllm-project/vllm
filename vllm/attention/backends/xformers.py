@@ -256,7 +256,7 @@ class XFormersImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.context_lens,
+                decode_meta.prompt_lens_tensor,
                 decode_meta.max_context_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
