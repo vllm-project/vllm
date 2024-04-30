@@ -16,41 +16,30 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 MAX_MODEL_LEN = 1024
 
 MODELS = [
-    "nm-testing/mistral-fp8-static",
-    "nm-testing/mistral-fp8-dynamic",
-    "mistralai/Mistral-7B-Instruct-v0.2",
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
 ]
 
 EXPECTED_STRS_MAP = {
-    "nm-testing/mistral-fp8-static": [
-        ' VLLM (Vulcan Language Model) is an open-source inference and serving engine',
-        ' 1. 1950s: The Concept of AI is Born: The term',
-        ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
-        ' A neural network is a type of machine learning model inspired by the structure and function of the human brain',
-        ' In the heart of the bustling city of Neo-Tokyo, nestled among the tow',
-        ' The COVID-19 pandemic has had a profound impact on global economic structures and has forced businesses to',
-        ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
-        ' Japanese: 早く起きる'
+    "nm-testing/Meta-Llama-3-8B-Instruct-FP8": [
+        'LLaMA is a high-throughput and memory-efficient inference and serving engine for Large Language Models (',
+        'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
+        'Artificial intelligence (AI) and human intelligence (HI) differ significantly in how they process information.',
+        'A neural network is a complex system modeled after the human brain, composed of interconnected nodes or "ne',
+        'Zeta-5, a highly advanced robot designed for menial labor, whirred and beep',
+        'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. Here',
+        'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
+        'Here are the translations:\n\n**Japanese:** (Haya tori, nemuri nemuri)\n\n**'
     ],
-    "nm-testing/mistral-fp8-dynamic": [
-        ' VLLM (Vulcan Language Model) is an open-source, high-throughput',
-        ' 1. 1950s: The Concept of AI is Born: The term',
-        ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
-        " A neural network is a type of machine learning model inspired by the human brain's structure and function",
-        ' Once upon a time, in the heart of a bustling city, there was a robot named B',
-        ' The COVID-19 pandemic has had a profound impact on global economic structures and has forced businesses to',
-        ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
-        ' Japanese: 早く起きる鳥は虫を取る (S'
-    ],
-    "mistralai/Mistral-7B-Instruct-v0.2": [
-        ' VLLM (Vulcan Language Model) is an open-source, high-throughput',
-        ' 1. 1950s: The Concept of AI is Born: The term',
-        ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
-        " A neural network is a type of machine learning model inspired by the human brain's structure and function",
-        ' In the heart of the bustling city of Neo-Tokyo, nestled among the tow',
-        ' The COVID-19 pandemic has had a profound impact on global economic structures and has forced businesses to',
-        ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
-        ' Japanese: 早く起きる鳥は虫を取る (S'
+    "meta-llama/Meta-Llama-3-8B-Instruct": [
+        'LLM (Large Language Model) is a type of artificial intelligence (AI) model that is trained',
+        'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
+        'Artificial intelligence (AI) and human intelligence (HI) differ significantly in how they process information.',
+        'A neural network is a complex system modeled after the human brain, composed of interconnected nodes or "ne',
+        'In the year 2154, the robotics lab at NeuroSpark Industries was on the cusp of',
+        'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. The',
+        'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
+        'Here are the translations:\n\n**Japanese:** (Haya aki wa mushi o tsukamu'
     ],
 }
 

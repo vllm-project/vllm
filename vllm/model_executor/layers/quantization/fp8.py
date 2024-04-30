@@ -186,21 +186,27 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.act_scale = None
             return
 
-        # TODO: cutlass kernels will remove the need for much of this logic.
-        # If the checkpoint is serialized fp8, we already loaded quantized,
-        # so, just cleanup the Parameters for easier use in apply().
+        # If checkpoint is fp8, requantize the separately quantized logical
+        # weights into a single fp8 weight with a single weight scale.
         else:
+            # WEIGHT_SCALE / WEIGHT
+            #   Loop over logical weights, requantizing with single scale.
+            max_w_scale = layer.weight_scale.max()
+            start = 0
+            for idx, logical_width in enumerate(layer.logical_widths):
+                end = start + logical_width
+                weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
+                                                  layer.weight_scale[idx])
+
+                layer.weight[start:end, :] = per_tensor_quantize(
+                    weight_dq, layer.weight_scale.max())
+                start = end
+            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+
             # WEIGHT
             #   Transpose weight for passing to torch._scaled_mm
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
-
-            # WEIGHT_SCALE
-            #   If all weight_scales are equal, use a single scale.
-            if all_close_1d(layer.weight_scale):
-                layer.weight_scale = Parameter(layer.weight_scale.max(),
-                                               requires_grad=False)
-                layer.logical_widths = None
 
             # ACT_SCALE
             #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
@@ -227,37 +233,14 @@ class Fp8LinearMethod(LinearMethodBase):
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
         qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
 
-        # Case 1: we have 1 weight_scale for N logical weights.
-        if layer.logical_widths is None:
-            output, _ = torch._scaled_mm(
-                qinput,
-                layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-            )
-
-        # TODO: replace naive loop with cutlass gemm_dq w/ epilogue fusion.
-        # Case 2: We have N weight_scales for N logical weights.
-        else:
-            output = torch.empty(x.shape[0],
-                                 layer.weight.shape[1],
-                                 dtype=x.dtype,
-                                 device="cuda")
-            start = 0
-            # Loop over the N logical shards.
-            for logical_width, w_scale in zip(layer.logical_widths,
-                                              layer.weight_scale):
-                end = start + logical_width
-                out, _ = torch._scaled_mm(
-                    qinput,
-                    layer.weight[:, start:end],
-                    out_dtype=x.dtype,
-                    scale_a=x_scale,
-                    scale_b=w_scale,
-                )
-                output[:, start:end] = out
-                start = end
+        # Fused GEMM_DQ
+        output, _ = torch._scaled_mm(
+            qinput,
+            layer.weight,
+            out_dtype=x.dtype,
+            scale_a=x_scale,
+            scale_b=layer.weight_scale,
+        )
 
         if bias is not None:
             output.add_(bias)
@@ -265,6 +248,20 @@ class Fp8LinearMethod(LinearMethodBase):
         return output
 
 
-def all_close_1d(x: torch.Tensor):
+def all_close_1d(x: torch.Tensor) -> bool:
     assert len(x.shape) == 1
     return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
+
+
+def per_tensor_quantize(tensor: torch.Tensor,
+                        inv_scale: float) -> torch.Tensor:
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    qweight = (tensor / inv_scale).clamp(min=finfo.min, max=finfo.max)
+    return qweight.to(torch.float8_e4m3fn)
+
+
+def per_tensor_dequantize(tensor: torch.Tensor,
+                          inv_scale: float) -> torch.Tensor:
+    fake_qweight = tensor.to(torch.float16)
+    dq_weight = fake_qweight * inv_scale
+    return dq_weight
