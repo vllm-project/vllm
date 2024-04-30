@@ -2,7 +2,8 @@
 # to run the OpenAI compatible server.
 
 # Please update any changes made here to
-# docs/source/dev/dockerfile/dockerfile.rst
+# docs/source/dev/dockerfile/dockerfile.rst and
+# docs/source/assets/dev/dockerfile-stages-dependency.png
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
