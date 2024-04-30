@@ -661,7 +661,6 @@ if triton.__version__ >= "2.1.0":
 
         num_warps = 8 if Lk <= 64 else 8
         if alibi_slopes is not None:
-            assert Lk == Lk_padded
             _fwd_kernel_alibi[grid](
                 q,
                 k,
@@ -706,6 +705,7 @@ if triton.__version__ >= "2.1.0":
                 num_queries_per_kv=num_queries_per_kv,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
+                BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
                 num_warps=num_warps,
                 num_stages=1,
