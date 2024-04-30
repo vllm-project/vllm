@@ -65,9 +65,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        assert sliding_window is None, "Sliding window not yet supported"
-
-        self.block_sliding_window = None
+        self.sliding_window = sliding_window
+        # block_sliding_window is the max number of blocks that need to be allocated
+        # We generally need up 1 block more due to the way BlockTable works
+        self.block_sliding_window = sliding_window // block_size + 1 if sliding_window is not None else None
 
         self.watermark = watermark
         assert watermark >= 0.0
@@ -125,7 +126,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
-            sliding_window=self.block_sliding_window,
+            sliding_window=self.sliding_window,
         )
 
         block_table.allocate(seq.get_token_ids())

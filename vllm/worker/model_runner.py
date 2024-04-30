@@ -325,9 +325,9 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert computed_len == 0, (
+                assert self.scheduler_config.use_v2_block_manager or computed_len == 0, (
                     "Prefix caching is currently not supported with "
-                    "sliding window attention")
+                    "sliding window attention in V1 block manager")
                 start_idx = max(0, prompt_len - self.sliding_window)
 
             for i in range(computed_len, prefill_end):
