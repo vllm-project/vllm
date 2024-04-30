@@ -57,6 +57,7 @@ runs:
       fi
       # sdist
       python3 setup.py sdist || SUCCESS=$?
+      pyenv uninstall --force ${{ inputs.python}}/envs/${VENV}
       ls -alh dist
       TAR_FILEPATH=$(find dist -type f -iname "*.tar.gz")
       echo "${TAR_FILEPATH}"
