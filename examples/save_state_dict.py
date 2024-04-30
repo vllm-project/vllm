@@ -1,28 +1,42 @@
-from vllm import LLM, SamplingParams
+import argparse
+import dataclasses
+import os
+import shutil
+from pathlib import Path
 
-# Sample prompts.
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
-# Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+from vllm import LLM, EngineArgs
 
-# Create an LLM.
-llm = LLM(
-    model="/data-fast/2b-v30",
-    quantization="deepspeedfp",
-    tensor_parallel_size=8,
-)
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
-outputs = llm.generate(prompts, sampling_params)
-# Print the outputs.
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+"""
+Example usage
 
-llm.llm_engine.model_executor._run_workers("save_model", path="/data-fast/2b-v30-fp8")
+python save_state_dict.py \
+    --model /path/to/model \
+    --quantization deepspeedfp \
+    --tensor-parallel-size 8
+"""
+
+parser = argparse.ArgumentParser()
+EngineArgs.add_cli_args(parser)
+parser.add_argument("--output", "-o", required=True, type=str, help="path to output checkpoint")
+
+
+def main(args):
+    engine_args = EngineArgs.from_cli_args(args)
+    model_path = engine_args.model
+    if not Path(model_path).is_dir():
+        raise ValueError("model path must be a local directory")
+    # Create LLM instance from arguments
+    llm = LLM(**dataclasses.asdict(engine_args))
+    # Prepare output directory
+    Path(args.output).mkdir(exist_ok=True)
+    # Dump worker states to output directory
+    model_executor = llm.llm_engine.model_executor
+    model_executor._run_workers("save_model", path=args.output)
+    # Copy metadata files to output directory
+    for file in os.listdir(model_path):
+        if not any(file.endswidth(ext) for ext in (".bin", ".pt", ".safetensors")):
+            shutil.copy(f"{model_path}/{file}", args.output)
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    main(args)
