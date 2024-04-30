@@ -206,6 +206,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        layer_name: Optional[str] = None,
         **extra_weight_attrs,
     ) -> None:
         del output_size

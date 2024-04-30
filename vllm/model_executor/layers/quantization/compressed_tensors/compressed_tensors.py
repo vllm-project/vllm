@@ -5,11 +5,9 @@ import torch
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
-
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsW8A8StaticTensor, CompressedTensorsUnquantized,
-    CompressedTensorsScheme)
-from vllm.model_executor.utils import set_weight_attrs
+    CompressedTensorsScheme, CompressedTensorsUnquantized,
+    CompressedTensorsW8A8StaticTensor)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -138,8 +136,8 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
                        layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         """
-        Use the CompressedTensorsScheme associated with each layer to create the 
-        necessary parameters for the layer.
+        Use the CompressedTensorsScheme associated with each layer to create 
+        the necessary parameters for the layer.
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -160,8 +158,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None):
         """
-        Use the output of create_weights and the CompressedTensorsScheme associated with 
-        the layer to apply the forward pass with the layer input.
+        Use the output of create_weights and the CompressedTensorsScheme 
+        associated with the layer to apply the forward pass with the 
+        layer input.
         """
 
         if bias is not None:

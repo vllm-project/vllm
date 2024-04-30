@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -38,7 +38,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        output_size: int,
                        params_dtype: torch.dtype,
                        layer_name: Optional[str] = None,
-                       **extra_weight_attrs) -> Dict[str, Any]:
+                       **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
         
@@ -84,7 +84,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_size: int,
                        params_dtype: torch.dtype,
                        layer_name: Optional[str] = None,
-                       **extra_weight_attrs) -> Dict[str, Any]:
+                       **extra_weight_attrs):
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        dtype=params_dtype),
@@ -413,7 +413,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             param_data = param_data.narrow(0, shard_offset, shard_size)
         # If a param_shard_splitter is defined by the LinearMethod, use it.
         elif param_shard_splitter is not None:
-            logical_widths = getattr(param, "logical_widths")
+            logical_widths = getattr(param, "logical_widths", None)
             param_data, loaded_weight = param_shard_splitter(
                 param_data, loaded_weight, loaded_shard_id, logical_widths)
 
@@ -601,7 +601,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                                            shard_size)
         # If a param_shard_splitter is defined by the LinearMethod, use it.
         elif param_shard_splitter is not None:
-            logical_widths = getattr(param, "logical_widths")
+            logical_widths = getattr(param, "logical_widths", None)
             param_data, loaded_weight = param_shard_splitter(
                 param_data, loaded_weight, loaded_shard_id, logical_widths)
 

@@ -1,9 +1,9 @@
-import cutlass
-from cutlass import Tensor as FakeTensor
-import cutlass.epilogue
+from typing import Any, Dict, Optional, Tuple, Union
 
+import cutlass
+import cutlass.epilogue
 import torch
-from typing import Optional, Tuple, Dict, Union, Any
+from cutlass import Tensor as FakeTensor
 
 from vllm.logger import init_logger
 

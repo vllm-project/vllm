@@ -1,12 +1,14 @@
+from typing import Callable, List, Tuple, Union
+
 import torch
-from typing import List, Union, Tuple, Callable
-from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (
+from torch.nn import Parameter
+
+from vllm._C import ops
+from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
     cutlass_gemm_dq)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
-from torch.nn import Parameter
-from vllm._C import ops
 
 __all__ = ["CompressedTensorsW8A8StaticTensor"]
 
@@ -94,7 +96,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
 
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        # Register parameter with the layer; register weight loader with each parameter
+
         set_weight_attrs(weight, {"weight_loader": weight_loader})
         set_weight_attrs(weight, {"logical_widths": output_partition_sizes})
 
@@ -122,8 +124,8 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         x_q = self._quantize_single(x, act_scale[0].item())
 
         # Weight quantize
-        # TODO : try not to remove device-to-host copy. i.e. keep the non-duplicated version
-        # of scales in the CPU
+        # TODO : try not to remove device-to-host copy.
+        # i.e. keep the non-duplicated version of scales in the CPU
         if self.fake_quant:
             w_scales = [
                 weight_scale[sum(logical_widths[:i])].item()
