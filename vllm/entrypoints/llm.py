@@ -237,7 +237,7 @@ class LLM:
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=f"{0} toks/s",
+                postfix=f"{0:.2f} toks/s",
             )
         # Run the engine.
         outputs: List[RequestOutput] = []
