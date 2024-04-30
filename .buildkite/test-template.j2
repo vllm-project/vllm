@@ -20,12 +20,12 @@ steps:
   - group: "AMD Tests"
     steps:
     {% for step in steps %}
-    {% if step.mirror_hardwares && "amd" in step.mirror_hardwares %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
       - label: "AMD: {{ step.label }}"
         agents:
           queue: amd
         command: bash .buildkite/run-amd-test.sh "{{ step.command or (step.commands | join(' && ')) }}"
-    {% enfif %}
+    {% endif %}
     {% endfor %}
 
   - label: "Neuron Test"
