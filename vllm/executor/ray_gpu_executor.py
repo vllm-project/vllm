@@ -196,6 +196,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
+                "num_lookahead_slots": num_lookahead_slots,
             },
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
