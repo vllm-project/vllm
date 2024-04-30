@@ -402,11 +402,12 @@ class Scheduler:
         # groups to preempt.
         now = time.time()
         running_queue = policy.sort_by_priority(now, running_queue)
-
+        print(f"SANG-TODO schedule running {len(running_queue)=}")
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
+            print(f"SANG-TODO {num_running_tokens=} {budget.remaining_token_budget()=}")
 
             # We can have up to 1 running prefill at any given time in running
             # queue, which means we can guarantee chunk size is at least 1.
@@ -1047,6 +1048,7 @@ class Scheduler:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
+        print(f"SANG-TODO preempted! {preemption_mode=}")
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
