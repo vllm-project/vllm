@@ -314,3 +314,14 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
+
+
+class _Destructor:
+    """
+    Python does not support destructors for modules. This class is a
+     workaround to ensure that the model parallel groups are destroyed.
+    """
+    def __del__(self):
+        destroy_model_parallel()
+
+_destructor = _Destructor()

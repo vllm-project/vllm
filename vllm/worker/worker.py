@@ -117,11 +117,6 @@ class Worker(WorkerBase):
         change_model_parallel_pynccl_allreduce(
             enable=not self.model_config.enforce_eager)
 
-    def cleanup_device(self) -> None:
-        if self.device_config.device.type == "cuda":
-            torch.cuda.empty_cache()
-            destroy_model_parallel()
-
     def load_model(self):
         self.model_runner.load_model()
 
