@@ -14,6 +14,15 @@ python save_state_dict.py \
     --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --output /path/to/save
+
+Then, the model can be loaded with
+
+llm = LLM(
+    model="/path/to/save",
+    load_format="state_dict",
+    quantization="deepspeedfp",
+    tensor_parallel_size=8,
+)
 """
 
 parser = argparse.ArgumentParser()
