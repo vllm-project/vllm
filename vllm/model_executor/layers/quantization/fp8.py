@@ -43,10 +43,7 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # TODO: PyTorch 2.3.0+ is required to run FP8 on
-        # SM 89 (e.g. Ada) GPUs. Specifically, this PR has to
-        # be included: https://github.com/pytorch/pytorch/pull/118881
-        return 90
+        return 89
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -91,6 +88,24 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
 
+    def _create_scale_param(
+        self,
+        scale_name: str,
+        layer: torch.nn.Module,
+        output_partition_sizes: List[int],
+        **extra_weight_attrs,
+    ) -> None:
+        scale = Parameter(torch.empty(len(output_partition_sizes),
+                                      dtype=torch.float32),
+                          requires_grad=False)
+        layer.register_parameter(scale_name, scale)
+        set_weight_attrs(
+            scale, {
+                **extra_weight_attrs,
+                "fp8_scales_shard_indexer":
+                self.scales_shard_indexer,
+            })
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -126,29 +141,19 @@ class Fp8LinearMethod(LinearMethodBase):
         # Otherwise, wait until process_weights_after_loading.
         if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            weight_scale = Parameter(torch.empty(len(output_partition_sizes),
-                                                 dtype=torch.float32),
-                                     requires_grad=False)
-            layer.register_parameter("weight_scale", weight_scale)
-            set_weight_attrs(
-                weight_scale, {
-                    **extra_weight_attrs,
-                    "fp8_scales_shard_indexer":
-                    self.scales_shard_indexer,
-                })
+            self._create_scale_param(
+                scale_name="weight_scale",
+                layer=layer,
+                output_partition_sizes=output_partition_sizes,
+                **extra_weight_attrs)
 
             # ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                act_scale = Parameter(torch.empty(len(output_partition_sizes),
-                                                  dtype=torch.float32),
-                                      requires_grad=False)
-                layer.register_parameter("act_scale", act_scale)
-                set_weight_attrs(
-                    act_scale, {
-                        **extra_weight_attrs,
-                        "fp8_scales_shard_indexer":
-                        self.scales_shard_indexer,
-                    })
+                self._create_scale_param(
+                    scale_name="act_scale",
+                    layer=layer,
+                    output_partition_sizes=output_partition_sizes,
+                    **extra_weight_attrs)
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,

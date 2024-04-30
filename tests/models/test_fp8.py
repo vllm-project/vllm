@@ -1,5 +1,6 @@
 # flake8: noqa
 """Tests fp8 models against ground truth generation
+Note: these tests will only pass on L4 GPU.
 """
 import os
 
@@ -22,27 +23,27 @@ MODELS = [
 
 EXPECTED_STRS_MAP = {
     "nm-testing/mistral-fp8-static": [
-        ' VLLM (Vulcan Learning Machine) is a high-performance and memory-efficient',
+        ' VLLM (Vulcan Language Model) is an open-source inference and serving engine',
         ' 1. 1950s: The Concept of AI is Born: The term',
         ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
-        " A neural network is a type of artificial intelligence model inspired by the human brain's structure and function",
-        ' In the heart of a sprawling industrial city, nestled among the hum of machinery and the rhythm',
+        ' A neural network is a type of machine learning model inspired by the structure and function of the human brain',
+        ' In the heart of the bustling city of Neo-Tokyo, nestled among the tow',
         ' The COVID-19 pandemic has had a profound impact on global economic structures and has forced businesses to',
         ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
         ' Japanese: 早く起きる'
     ],
     "nm-testing/mistral-fp8-dynamic": [
-        ' VLLM (Vulcan Learning Machine) is a high-performance and memory-efficient',
+        ' VLLM (Vulcan Language Model) is an open-source, high-throughput',
         ' 1. 1950s: The Concept of AI is Born: The term',
         ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
-        " A neural network is a type of artificial intelligence model inspired by the human brain's structure and function",
-        ' In the heart of the bustling city of Neo-Tokyo, nestled among the tow',
+        " A neural network is a type of machine learning model inspired by the human brain's structure and function",
+        ' Once upon a time, in the heart of a bustling city, there was a robot named B',
         ' The COVID-19 pandemic has had a profound impact on global economic structures and has forced businesses to',
         ' The Mona Lisa painting, created by the Italian artist Leonardo da Vinci between 15',
         ' Japanese: 早く起きる鳥は虫を取る (S'
     ],
     "mistralai/Mistral-7B-Instruct-v0.2": [
-        ' VLLM (Vulcan Learning Machine) is a high-performance and memory-efficient',
+        ' VLLM (Vulcan Language Model) is an open-source, high-throughput',
         ' 1. 1950s: The Concept of AI is Born: The term',
         ' Artificial Intelligence (AI) and Human Intelligence (HI) are two distinct ways of processing information.',
         " A neural network is a type of machine learning model inspired by the human brain's structure and function",
@@ -91,6 +92,7 @@ def test_models(
         generations.append(outputs[0].outputs[0].text)
     del model
 
+    print(generations)
     expected_strs = EXPECTED_STRS_MAP[model_name]
     for i in range(len(example_prompts)):
         generated_str = generations[i]
