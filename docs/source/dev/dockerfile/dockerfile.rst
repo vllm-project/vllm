@@ -1,7 +1,10 @@
 Dockerfile
 ====================
 
--  A visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
+See `here <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_ for the main Dockerfile to construct 
+the image for running an OpenAI compatible server with vLLM.
+
+-  Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
 
    - All build stages
    - The default build target (highlighted in grey)
@@ -20,7 +23,7 @@ Dockerfile
 
    Made using: https://github.com/patrickhoefler/dockerfilegraph
 
-   Commands to regenerate it (make sure to run it from the `root` directory where the dockerfile is present):
+   Commands to regenerate the build graph (make sure to run it **from the `root` directory of the vLLM repository** where the dockerfile is present):
 
    .. code:: bash
 
