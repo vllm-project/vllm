@@ -1808,11 +1808,16 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_queue_requests: List[float] = []
+        time_inference_requests: List[float] = []
+        time_prefill_requests: List[float] = []
+        time_decode_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
         best_of_requests: List[int] = []
         n_requests: List[int] = []
+        max_num_generation_tokens_requests = []
         finished_reason_requests: List[str] = []
 
         # NOTE: This loop assumes prefill seq_groups are before
@@ -1869,6 +1874,19 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    time_queue_requests.append(
+                        seq_group.metrics.first_scheduled_time -
+                        seq_group.metrics.arrival_time)
+                    time_prefill_requests.append(
+                        seq_group.metrics.first_token_time - 
+                        seq_group.metrics.first_scheduled_time
+                    )
+                    time_decode_requests.append(
+                        now - 
+                        seq_group.metrics.first_token_time
+                    )
+                    time_inference_requests.append(
+                        now - seq_group.metrics.first_scheduled_time)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1876,6 +1894,9 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    max_num_generation_tokens_requests.append(
+                        max(seq.get_output_len() for seq in seq_group.get_seqs())
+                    )
                     if seq_group.sampling_params is not None:
                         best_of_requests.append(
                             seq_group.sampling_params.best_of)
@@ -1928,11 +1949,16 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_queue_requests=time_queue_requests,
+            time_inference_requests=time_inference_requests,
+            time_prefill_requests=time_prefill_requests,
+            time_decode_requests=time_decode_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
             best_of_requests=best_of_requests,
             n_requests=n_requests,
+            max_num_generation_tokens_requests=max_num_generation_tokens_requests,
             finished_reason_requests=finished_reason_requests,
         )
 
