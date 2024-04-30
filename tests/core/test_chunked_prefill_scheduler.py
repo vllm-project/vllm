@@ -561,3 +561,46 @@ def test_chunked_prefill_max_seqs():
     assert len(get_sequence_groups(out)) == max_seqs
     assert not running[0].is_prefill()
     assert not running[1].is_prefill()
+
+
+def test_chunked_prefill_running_out_of_budget():
+    block_size = 4
+    max_seqs = 60
+    max_model_len = 80
+    max_num_batched_tokens = 6
+    scheduler_config = SchedulerConfig(max_num_batched_tokens,
+                                       max_seqs,
+                                       max_model_len,
+                                       enable_chunked_prefill=True)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i), prompt_length=5)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Verify the second request is chunked.
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert seq_group_meta[0].token_chunk_size == 60
+    # Verify it is chunked.
+    assert seq_group_meta[1].token_chunk_size == 4
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 64
+    # Only the first seq group has a new token appended.
+    append_new_token(running[0], 1)
+
+    # One chunked prefill, and one decoding.
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    # The first one is prefill. Scheduler guarantees ordering.
+    assert seq_group_meta[0].token_chunk_size == 56
+    # The second one is a chunked prefill.
+    assert seq_group_meta[1].token_chunk_size == 1
+    assert out.num_prefill_groups == 1
+    assert out.num_batched_tokens == 57

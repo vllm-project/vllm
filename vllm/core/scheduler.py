@@ -402,16 +402,13 @@ class Scheduler:
         # groups to preempt.
         now = time.time()
         running_queue = policy.sort_by_priority(now, running_queue)
-        print(f"SANG-TODO schedule running {len(running_queue)=}")
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
-            print(f"SANG-TODO {num_running_tokens=} {budget.remaining_token_budget()=}")
 
-            # We can have up to 1 running prefill at any given time in running
-            # queue, which means we can guarantee chunk size is at least 1.
-            assert num_running_tokens != 0
+            if num_running_tokens == 0:
+                break
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
@@ -465,9 +462,6 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
-
-        # Make sure all queues are updated.
-        assert len(running_queue) == 0
 
         return running_queue, SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -1048,7 +1042,6 @@ class Scheduler:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
-        print(f"SANG-TODO preempted! {preemption_mode=}")
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
@@ -1140,11 +1133,14 @@ class Scheduler:
         if `enable_chunking` is True. If a sequence group has multiple
         sequences (e.g., running beam search), it means it is in decoding
         phase, so chunking doesn't happen.
+
+        Returns 0 if the new token cannot be computed due to token budget.
         """
         num_new_tokens = 0
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
+        assert num_new_tokens > 0
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.

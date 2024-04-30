@@ -66,7 +66,6 @@ def test_chunked_prefill_recompute(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
 
 
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
