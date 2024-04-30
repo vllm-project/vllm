@@ -106,10 +106,13 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
 @pytest.mark.parametrize("block_size", [8])
 @pytest.mark.parametrize("num_cpu_blocks", [4])
 @pytest.mark.parametrize("num_gpu_blocks", [4])
-@pytest.mark.parametrize("num_lookahead_slots", [2])
+@pytest.mark.parametrize("num_lookahead_slots", [0, 2])
 @pytest.mark.parametrize("enable_caching", [False])
 def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
               enable_caching):
+    """Verify blocks number on src/desc device is correct after swapping in/out
+        sequence group (not missing or extra blocks).
+    """
     block_manager = BlockSpaceManagerV2(block_size,
                                         num_cpu_blocks,
                                         num_gpu_blocks,
@@ -142,7 +145,7 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     assert block_manager.can_swap_in(seq_group, num_lookahead_slots)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
-    mapping = block_manager.swap_in(seq_group, num_lookahead_slots)
+    mapping = block_manager.swap_in(seq_group)
     cpu_blocks = block_manager.get_block_table(prompt)
     assert list(mapping.keys()) == [cpu_blocks[0]]
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Dict, Iterable, List, Optional, Set
 
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
@@ -143,6 +141,19 @@ class NaiveBlockAllocator(BlockAllocator):
         if refcount == 0:
             self._free_block_indices.add(block_id)
 
+    def get_device_related_block_id(self, absolute_id: int) -> int:
+        """Returns the relative block id on certain block allocator
+        given the absolute block id.
+
+        Args:
+            absolute_id (int): The absolute block id for the block 
+            in whole allocator.
+
+        Returns:
+            int: The relative block id on certain device.
+        """
+        return sorted(self._all_block_indices).index(absolute_id)
+
     @property
     def refcounter(self):
         return self._refcounter
@@ -191,11 +202,11 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return []
 
-    def can_swap(self,
-                 blocks: List[Block],
-                 num_lookahead_slots: int = 0,
-                 watermark_blocks: int = 0) -> bool:
-        """Determine can we swap in/out the given blocks from certain sequence
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               num_lookahead_slots: int = 0) -> int:
+        """Determine the number of blocks that will be touched by
+        swapping in/out the given blocks from certain sequence
         group with the provided num_lookahead_slots.
 
         Args:
@@ -204,8 +215,8 @@ class NaiveBlockAllocator(BlockAllocator):
                 out).
         
         Returns:
-            bool: whether the allocator has capacity to accept the swap 
-                with given blocks and num_lookahead_slots.
+            int: the number of blocks that will be touched by
+                swapping in/out the given blocks and num_lookahead_slots.
         """
         # NOTE: for naive block, we use set to eliminate common blocks among
         # seqs, also we compare the empty slots in the mutable blocks with
@@ -222,8 +233,7 @@ class NaiveBlockAllocator(BlockAllocator):
             else:
                 old_block_set.add(block.block_id)
         num_touched_blocks = new_block_count + len(old_block_set)
-        return self.get_num_free_blocks(
-        ) - num_touched_blocks >= watermark_blocks
+        return num_touched_blocks
 
     def swap_out(self, blocks: List[Block]) -> None:
         for block in blocks:

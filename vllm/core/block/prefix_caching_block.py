@@ -236,6 +236,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self._hashless_allocator.get_num_free_blocks() + len(
             self._unused_cached_blocks)
 
+    def get_device_related_block_id(self, absolute_id: int) -> int:
+        """Returns the relative block id on certain block allocator
+        given the absolute block id.
+
+        Args:
+            absolute_id (int): The absolute block id for the block 
+                in whole allocator.
+
+        Returns:
+            int: The relative block id on certain device.
+        """
+        return sorted(self._all_block_indices).index(absolute_id)
+
     @property
     def all_block_ids(self) -> frozenset[int]:
         return self._hashless_allocator.all_block_ids
@@ -326,9 +339,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def can_swap(self,
                  blocks: List[Block],
-                 num_lookahead_slots: int = 0,
-                 watermark_blocks: int = 0) -> bool:
-        """Determine can we swap in/out the given blocks from certain sequence
+                 num_lookahead_slots: int = 0) -> int:
+        """Determine the number of blocks that will be touched by
+        swapping in/out the given blocks from certain sequence
         group with the provided num_lookahead_slots.
 
         Args:
@@ -337,8 +350,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 swap out).
         
         Returns:
-            bool: whether the allocator has capacity to accept the swap 
-                with given blocks and num_lookahead_slots.
+            int: the number of blocks that will be touched by
+                swapping in/out the given blocks and num_lookahead_slots.
         """
         num_touched_blocks = 0
         for block in blocks:
@@ -350,14 +363,26 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             else:
                 if not self.is_block_cached(block):
                     num_touched_blocks += 1
-        return self.get_num_free_blocks(
-        ) - num_touched_blocks >= watermark_blocks
+        return num_touched_blocks
 
     def swap_out(self, blocks: List[Block]) -> None:
+        """Execute the swap out actions. Basically just free the 
+        given blocks.
+
+        Args:
+            blocks: List of blocks to be swapped out.
+        """
         for block in blocks:
             self.free(block)
 
     def swap_in(self, blocks: List[Block]) -> None:
+        """Execute the swap int actions. Change the block id from 
+        old allocator to current allocator for each block to finish 
+        the block table update. 
+
+        Args:
+            blocks: List of blocks to be swapped in.
+        """
         for block in blocks:
             if block.is_full:
                 alloc = self.allocate_immutable(block.prev_block,

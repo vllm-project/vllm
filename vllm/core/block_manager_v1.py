@@ -453,12 +453,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         num_required_blocks = len(blocks) + num_swapped_seqs
         return num_free_blocks - num_required_blocks >= self.watermark_blocks
 
-    def swap_in(self,
-                seq_group: SequenceGroup,
-                num_lookahead_slots: int = 0) -> Dict[int, int]:
-        assert (num_lookahead_slots == 0
-                ), "BlockSpaceManagerV1 does not support lookahead allocation"
-
+    def swap_in(self, seq_group: SequenceGroup) -> Dict[int, int]:
         # CPU block -> GPU block.
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):

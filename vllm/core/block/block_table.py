@@ -65,9 +65,6 @@ class BlockTable:
         """
         return cdiv(len(token_ids), block_size)
 
-    def get_blocks(self) -> Optional[List[Block]]:
-        return self._blocks
-
     def allocate(self,
                  token_ids: List[int],
                  device: Device = Device.GPU) -> None:
@@ -251,6 +248,10 @@ class BlockTable:
     @property
     def _is_allocated(self) -> bool:
         return self._blocks is not None
+
+    @property
+    def blocks(self) -> Optional[List[Block]]:
+        return self._blocks
 
     @property
     def _num_empty_slots(self) -> int:

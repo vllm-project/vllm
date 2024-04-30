@@ -178,8 +178,32 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_num_free_blocks()
 
+    def get_device_related_block_id(self, device: Device,
+                                    absolute_id: int) -> int:
+        """Returns the relative block id on certain device given the absolute 
+        block id.
+
+        Args:
+            device (Device): The device for which to query relative block id.
+                absolute_id (int): The absolute block id for the block in 
+                whole allocator.
+
+        Returns:
+            int: The relative block id on certain device.
+        """
+        return self._allocators[device].get_device_related_block_id(
+            absolute_id)
+
     def swap(self, blocks: List[Block], source_device: Device,
              dest_device: Device) -> None:
+        """Execute the swap for the given blocks from source_device
+        on to dest_device, and save the swap mapping.
+
+        Args:
+            blocks: List of blocks to be swapped.
+            source_device (Device): Device to swap the 'blocks' from.
+            dest_device (Device): Device to swap the 'blocks' to.
+        """
         source_block_ids = [block.block_id for block in blocks]
         self._allocators[source_device].swap_out(blocks)
         self._allocators[dest_device].swap_in(blocks)
@@ -189,13 +213,25 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             for src, dest in zip(source_block_ids, dest_block_ids)
         }
 
-    def can_swap(self,
-                 blocks: List[Block],
-                 device: Device,
-                 num_lookahead_slots: int = 0,
-                 watermark_blocks: int = 0) -> bool:
-        return self._allocators[device].can_swap(blocks, num_lookahead_slots,
-                                                 watermark_blocks)
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               device: Device,
+                               num_lookahead_slots: int = 0) -> int:
+        """Returns the number of blocks that will be touched by
+        swapping in/out the given blocks on to the 'device'.
+
+        Args:
+            blocks: List of blocks to be swapped.
+            device (Device): Device to swap the 'blocks' on.
+            num_lookahead_slots (int): Number of lookahead slots used in 
+                speculative decoding, default to 0.
+
+        Returns:
+            int: the number of blocks that will be touched by
+        swapping in/out the given blocks on to the 'device'.
+        """
+        return self._allocators[device].get_num_blocks_touched(
+            blocks, num_lookahead_slots)
 
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
@@ -224,7 +260,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def all_block_ids(self) -> frozenset[int]:
         return frozenset(self._block_ids_to_allocator.keys())
 
-    def get_and_reset_swaps(self) -> dict:
+    def get_and_reset_swaps(self) -> dict[int, int]:
+        """Returns and clears the mapping of source to destination block IDs.
+        Will be called after every swapping operations for now, and after every
+        schedule when BlockManagerV2 become default.
+
+        Returns:
+            Dict[int, int]: A mapping of source to destination block IDs.
+        """
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
         return mapping
