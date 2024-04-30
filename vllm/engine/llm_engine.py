@@ -662,7 +662,7 @@ class LLMEngine:
             if scheduler_outputs.num_prefill_groups > 0 and len(
                     scheduler_outputs.scheduled_seq_groups
             ) != scheduler_outputs.num_prefill_groups:
-                print("DETECTED CHUNKED")
+                logger.info("DETECTED CHUNKED")
 
             for idx, scheduled_seq_group in enumerate(
                     scheduler_outputs.scheduled_seq_groups):
