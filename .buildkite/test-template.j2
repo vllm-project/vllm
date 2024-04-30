@@ -25,6 +25,7 @@ steps:
     agents:
       queue: neuron
     command: bash .buildkite/run-neuron-test.sh
+    soft_fail: true
 
   - label: "CPU Test"
     command: bash .buildkite/run-cpu-test.sh

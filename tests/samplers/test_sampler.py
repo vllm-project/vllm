@@ -207,7 +207,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     def create_sampling_params(min_tokens,
                                eos_token_id=0,
                                *,
-                               stop_token_ids: Optional[List[str]] = None,
+                               stop_token_ids: Optional[List[int]] = None,
                                prompt_logprobs: Optional[int] = None):
         sampling_params = SamplingParams(
             min_tokens=min_tokens,
@@ -216,7 +216,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             # requesting prompt_logprobs changes the structure of `logits`
             prompt_logprobs=prompt_logprobs,
         )
-        sampling_params.eos_token_id = eos_token_id
+        sampling_params.all_stop_token_ids.add(eos_token_id)
         return sampling_params
 
     def create_sequence_data(num_input=3, num_generated=0):
@@ -461,10 +461,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         for logits_idx, (should_penalize, sampling_params) in enumerate(
                 zip(expected_penalization, sampling_params_per_row)):
 
-            tokens_to_check = [sampling_params.eos_token_id]
-            if sampling_params.stop_token_ids:
-                tokens_to_check.extend(sampling_params.stop_token_ids)
-            tokens_to_check = set(tokens_to_check)
+            tokens_to_check = sampling_params.all_stop_token_ids
 
             if should_penalize:
                 for token_id in tokens_to_check:
