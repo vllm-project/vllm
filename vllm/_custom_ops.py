@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 
@@ -151,6 +151,50 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 size_n: int, size_k: int) -> torch.Tensor:
     return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
                                 size_n, size_k)
+
+
+# aqlm
+def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
+              codebooks: torch.Tensor, scales: torch.Tensor,
+              codebook_partition_sizes: torch.Tensor,
+              bias: Optional[torch.Tensor]) -> torch.Tensor:
+    return vllm_ops.aqlm_gemm(input, codes, codebooks, scales,
+                              codebook_partition_sizes, bias)
+
+
+def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
+                 codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
+    return vllm_ops.aqlm_dequant(codes, codebooks, codebook_partition_sizes)
+
+
+# gptq_marlin
+def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                       size_k: int, size_n: int) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n)
+
+
+def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor, g_idx: torch.Tensor,
+                     perm: torch.Tensor, workspace: torch.Tensor, size_m: int,
+                     size_n: int, size_k: int,
+                     is_k_full: bool) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
+                                     workspace, size_m, size_n, size_k,
+                                     is_k_full)
+
+
+# fp8
+def scaled_fp8_quant(
+    input: torch.Tensor,
+    scale: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    if scale is None:
+        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
+    else:
+        vllm_ops.static_scaled_fp8_quant(output, input, scale)
+    return output, scale
 
 
 # moe

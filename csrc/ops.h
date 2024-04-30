@@ -86,6 +86,21 @@ void gelu_fast(
   torch::Tensor& input);
 
 #ifndef USE_ROCM
+torch::Tensor aqlm_gemm(
+  const torch::Tensor& input,
+  const torch::Tensor& codes,
+  const torch::Tensor& codebooks,
+  const torch::Tensor& scales,
+  const torch::Tensor& codebook_partition_sizes,
+  const std::optional<torch::Tensor>& bias
+);
+
+torch::Tensor aqlm_dequant(
+  const torch::Tensor& codes,
+  const torch::Tensor& codebooks,
+  const torch::Tensor& codebook_partition_sizes
+);
+
 torch::Tensor awq_gemm(
   torch::Tensor _in_feats,
   torch::Tensor _kernel,
@@ -109,6 +124,24 @@ torch::Tensor marlin_gemm(
     int64_t size_m, 
     int64_t size_n, 
     int64_t size_k);
+
+torch::Tensor gptq_marlin_gemm(
+  torch::Tensor &a,
+  torch::Tensor &b_q_weight,
+  torch::Tensor &b_scales,
+  torch::Tensor &g_idx,
+  torch::Tensor &perm,
+  torch::Tensor &workspace,
+  int64_t size_m,
+  int64_t size_n,
+  int64_t size_k,
+  bool is_k_full);
+
+torch::Tensor gptq_marlin_repack(
+  torch::Tensor &b_q_weight,
+  torch::Tensor &perm,
+  int64_t size_k,
+  int64_t size_n);
 #endif
 
 void squeezellm_gemm(
@@ -130,6 +163,16 @@ void gptq_shuffle(
   torch::Tensor q_weight,
   torch::Tensor q_perm,
   int bit);
+
+void static_scaled_fp8_quant(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& scale);
+
+void dynamic_scaled_fp8_quant(
+  torch::Tensor& out,
+  torch::Tensor& input,
+  torch::Tensor& scale);
 
 void moe_align_block_size(
   torch::Tensor topk_ids,

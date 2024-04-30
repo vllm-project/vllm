@@ -15,6 +15,7 @@ import ray
 import requests
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
+from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -723,20 +724,66 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
-async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
-    resp = await client.chat.completions.create(
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
+                                           guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        "The best language for type-safe systems programming is "
+    }]
+    chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
-        messages=[{
-            "role":
-            "user",
-            "content": ('what is 1+1? please respond with a JSON object, '
-                        'the format is {"result": 2}')
-        }],
-        response_format={"type": "json_object"})
+        messages=messages,
+        max_tokens=10,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body=dict(guided_choice=TEST_CHOICE,
+                        guided_decoding_backend=guided_decoding_backend))
+    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
 
-    content = resp.choices[0].message.content
-    loaded = json.loads(content)
-    assert loaded == {"result": 2}, loaded
+    # -9999.0 is the minimum logprob returned by OpenAI
+    assert all(
+        isinstance(logprob, float) and logprob >= -9999.0
+        for token_dict in top_logprobs
+        for token, logprob in token_dict.items())
+
+
+async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role":
+                "user",
+                "content": ('what is 1+1? please respond with a JSON object, '
+                            'the format is {"result": 2}')
+            }],
+            response_format={"type": "json_object"})
+
+        content = resp.choices[0].message.content
+        loaded = json.loads(content)
+        assert loaded == {"result": 2}, loaded
+
+
+async def test_extra_fields(server, client: openai.AsyncOpenAI):
+    with pytest.raises(BadRequestError) as exc_info:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{
+                "role": "system",
+                "content": "You are a helpful assistant.",
+                "extra_field": "0",
+            }],  # type: ignore
+            temperature=0,
+            seed=0)
+
+    assert "extra_forbidden" in exc_info.value.message
 
 
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):

@@ -1,9 +1,10 @@
 from typing import Dict, List, Set, Tuple
 
-from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
@@ -48,10 +49,13 @@ class NeuronExecutor(ExecutorBase):
                       seq_group_metadata_list: List[SequenceGroupMetadata],
                       blocks_to_swap_in: Dict[int, int],
                       blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+                      blocks_to_copy: Dict[int, List[int]],
+                      num_lookahead_slots: int) -> List[SamplerOutput]:
         assert (blocks_to_swap_in == {} and blocks_to_swap_out == {}
                 and blocks_to_copy == {}), (
                     "Cache operations are not supported for Neuron backend.")
+        assert num_lookahead_slots == 0, (
+            "lookahead not supported for Neuron backend.")
 
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list)
@@ -67,6 +71,26 @@ class NeuronExecutor(ExecutorBase):
         return self.driver_worker.list_loras()
 
     def check_health(self) -> None:
+        # NeuronExecutor will always be healthy as long as
+        # it's running.
+        return
+
+
+class NeuronExecutorAsync(NeuronExecutor, ExecutorAsyncBase):
+
+    async def execute_model_async(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        blocks_to_swap_in: Dict[int, int],
+        blocks_to_swap_out: Dict[int, int],
+        blocks_to_copy: Dict[int, List[int]],
+        num_lookahead_slots: int,
+    ) -> List[SamplerOutput]:
+        output = await make_async(self.driver_worker.execute_model)(
+            seq_group_metadata_list=seq_group_metadata_list, )
+        return output
+
+    async def check_health_async(self) -> None:
         # NeuronExecutor will always be healthy as long as
         # it's running.
         return
