@@ -79,7 +79,7 @@ def get_tokenizer(
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 # Ignore weights - we only need the tokenizer.
-                ignore_file_pattern=["*.pt", "*.safetensors", "*.bin"])
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
             tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":
