@@ -17,55 +17,16 @@ steps:
           limit: 5
   - wait
 
-  - label: "AMD Default Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 1"
-
-  - label: "AMD Core Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 5"
-
-  - label: "AMD Distributed Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 7"
-
-  - label: "AMD Engine Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 8"
-
-  - label: "AMD Examples Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 10"
-
-  - label: "AMD Models Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 12"
-
-  - label: "AMD Prefix Caching Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 14"
-
-  - label: "AMD Logits Processor Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 16"
-
-  - label: "AMD Worker Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 17"
-
-  - label: "AMD Speculative Decoding Test"
-    agents:
-      queue: amd
-    command: "bash .buildkite/run-amd-test.sh ${BUILDKITE_COMMIT} 18"
+  - group: "AMD Tests"
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares && "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "{{ step.command or (step.commands | join(' && ')) }}"
+    {% endfor %}
+    {% endfor %}
 
   - label: "Neuron Test"
     agents:
