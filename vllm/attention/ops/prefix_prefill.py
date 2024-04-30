@@ -437,7 +437,8 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_bl,
         num_queries_per_kv: int,
         BLOCK_M: tl.constexpr,
-        BLOCK_DMODEL: tl.constexpr,
+        BLOCK_DMODEL: tl.constexpr,  # head size
+        BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
     ):
         # attn_bias[]
@@ -458,21 +459,34 @@ if triton.__version__ >= "2.1.0":
 
         # initialize offsets
         offs_n = tl.arange(0, BLOCK_N)
-        offs_d = tl.arange(0, BLOCK_DMODEL)
+        # offs_d = tl.arange(0, BLOCK_DMODEL)
+        # NOTE:
+        offs_d = tl.arange(0, BLOCK_DMODEL_PADDED)
         offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
         off_q = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
             cur_head * stride_qh + offs_d[None, :] * stride_qd)
-
+        
+        # NOTE:
+        dim_mask = tl.where(
+            tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(tl.int1)
+        
         q = tl.load(
             Q + off_q,
-            mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len,
+            mask=dim_mask[None, :] &
+            (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
             other=0.0)
+        
+        # q = tl.load(
+        #     Q + off_q,
+        #     mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len,
+        #     other=0.0)
 
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
         l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+        # acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+        acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)
 
         alibi_slope = tl.load(Alibi_slopes + cur_head)
         alibi_start_q = tl.arange(
@@ -531,8 +545,12 @@ if triton.__version__ >= "2.1.0":
             # acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
+            # v = tl.load(V_cache + off_v,
+            #             mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
+            #             other=0.0)
             v = tl.load(V_cache + off_v,
-                        mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
+                        mask=dim_mask[None, :] &
+                        ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)
 
             p = p.to(v.dtype)
@@ -600,10 +618,15 @@ if triton.__version__ >= "2.1.0":
             # acc_scale = l_i / l_i_new * alpha
             acc = acc * acc_scale[:, None]
             # update acc
+            # v = tl.load(v_ptrs +
+            #             (cur_batch_in_all_start_index + start_n) * stride_vbs,
+            #             mask=(start_n + offs_n[:, None]) <
+            #             cur_batch_seq_len - cur_batch_ctx_len,
+            #             other=0.0)
             v = tl.load(v_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                        mask=(start_n + offs_n[:, None]) <
-                        cur_batch_seq_len - cur_batch_ctx_len,
+                        mask=dim_mask[None, :] & ((start_n + offs_n[:, None]) <
+                        cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
 
             p = p.to(v.dtype)
@@ -619,9 +642,13 @@ if triton.__version__ >= "2.1.0":
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs +
             cur_head * stride_oh + offs_d[None, :] * stride_od)
         out_ptrs = Out + off_o
+        # tl.store(out_ptrs,
+        #          acc,
+        #          mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len)
         tl.store(out_ptrs,
                  acc,
-                 mask=offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len)
+                 mask=dim_mask[None, :] & (offs_m[:, None] < 
+                 cur_batch_seq_len - cur_batch_ctx_len))
         return
 
     @torch.inference_mode()
