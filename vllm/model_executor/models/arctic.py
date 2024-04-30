@@ -119,6 +119,7 @@ class ArcticMoE(nn.Module):
                     torch.Size((self.num_experts,
                                 2 * self.intermediate_size,
                                 self.hidden_size)),
+                    params_dtype=params_dtype,
                     quant_config=linear_method.quant_config,
                 )
                 torch.cuda.empty_cache()
@@ -126,6 +127,7 @@ class ArcticMoE(nn.Module):
                     torch.Size((self.num_experts,
                                 self.hidden_size,
                                 self.intermediate_size)),
+                    params_dtype=params_dtype,
                     quant_config=linear_method.quant_config,
                 )
                 torch.cuda.empty_cache()
@@ -153,22 +155,7 @@ class ArcticMoE(nn.Module):
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
         if self.is_quant:
-            # Create it on CPU and later quantize it to GPU.
-            if not hasattr(self, "ws_cpu"):
-                self.ws_cpu = torch.empty(
-                    self.ws.orig_shape,
-                    dtype=self.params_dtype,
-                    device="cpu",
-                )
-                self.w2s_cpu = torch.empty(
-                    self.w2s.orig_shape,
-                    dtype=self.params_dtype,
-                    device="cpu",
-                )
-            if weight_name.endswith("w2.weight"):
-                param_data = self.w2s_cpu
-            else:
-                param_data = self.ws_cpu
+            param_data = param.ds_dequantize()
         else:
             param_data = param.data
         shard_size = self.intermediate_size
@@ -180,6 +167,8 @@ class ArcticMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        if self.is_quant:
+            param.ds_quantize_(param_data)
 
     def local_moe_fused(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -542,7 +531,3 @@ class ArcticForCausalLM(nn.Module):
                                                     default_weight_loader)
                             weight_loader(param, loaded_weight)
 
-        for name, module in self.named_modules():
-            if isinstance(module, ArcticMoE) and module.is_quant:
-                module.ws.ds_quantize_(module.ws_cpu.cuda())
-                module.w2s.ds_quantize_(module.w2s_cpu.cuda())

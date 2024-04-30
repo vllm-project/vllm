@@ -95,6 +95,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
         weight = DeepSpeedFPParameter(
             torch.Size((output_size_per_partition,
                         input_size_per_partition)),
+            params_dtype=params_dtype,
             quant_config=self.quant_config,
         )
         set_weight_attrs(weight, {
@@ -108,7 +109,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
             # and then loads the quantized parameter.
             if weight_loader is not None:
                 orig_param_data = param.data
-                param.data = torch.empty(weight.orig_shape, dtype=params_dtype)
+                param.data = param.ds_dequantize()
                 weight_loader(param, loaded_weight, *args, **kwargs)
                 param.data, loaded_weight = orig_param_data, param.data
             param.ds_quantize_(loaded_weight.cuda())
@@ -132,7 +133,8 @@ class DeepSpeedFPParameter(nn.Parameter):
     GPUs, and can be dequantized on-the-fly when needed by the model.
     """
 
-    def __new__(cls, orig_shape: torch.Size, quant_config: DeepSpeedFPConfig):
+    def __new__(cls, orig_shape: torch.Size, params_dtype: torch.dtype,
+                quant_config: DeepSpeedFPConfig):
         from deepspeed.ops.fp_quantizer import FP_Quantize
         data = torch.empty((
             orig_shape.numel() // quant_config.group_size,
@@ -142,6 +144,8 @@ class DeepSpeedFPParameter(nn.Parameter):
         self.orig_shape = orig_shape
         self.quant_config = quant_config
         self.fp_quantizer = FP_Quantize(group_size=quant_config.group_size)
+        self.fp_quantizer.orig_shape = orig_shape
+        self.fp_quantizer.orig_dtype = params_dtype
         return self
 
     def ds_quantize_(self, tensor: torch.Tensor):
