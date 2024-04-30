@@ -1,4 +1,3 @@
-import contextlib
 from collections import namedtuple
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -15,19 +14,9 @@ from .parallel_state import (get_tensor_model_parallel_group,
 _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 
 
-@contextlib.contextmanager
-def with_pynccl_for_all_reduce():
-    """use pynccl instead of torch.distributed for all reduce"""
-    from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
-    tp_size = get_tensor_model_parallel_world_size()
-    if tp_size == 1 or _TP_NCCL_COMMUNICATOR is not None:
-        yield
-    else:
-        global _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
-        yield
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
+def change_model_parallel_pynccl_allreduce(enable: bool = True) -> None:
+    global _ENABLE_PYNCCL_FOR_ALL_REDUCE
+    _ENABLE_PYNCCL_FOR_ALL_REDUCE = enable
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

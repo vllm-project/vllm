@@ -9,7 +9,9 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict, destroy_model_parallel,
+from vllm.distributed import (broadcast_tensor_dict,
+                              change_model_parallel_pynccl_allreduce,
+                              destroy_model_parallel,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               warmpup_model_parallel)
@@ -112,6 +114,8 @@ class Worker(WorkerBase):
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+        change_model_parallel_pynccl_allreduce(
+            enable=not self.model_config.enforce_eager)
 
     def cleanup_device(self) -> None:
         if self.device_config.device.type == "cuda":
