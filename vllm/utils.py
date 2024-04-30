@@ -10,7 +10,7 @@ from collections import OrderedDict, defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, Awaitable, Callable, Generic, Hashable, List,
-                    Optional, Tuple, TypeVar, Union)
+                    Optional, Tuple, TypeVar, Union, Dict)
 
 import psutil
 import torch
@@ -452,8 +452,8 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: dict[Any, list[Any]],
-                dict2: dict[Any, list[Any]]) -> dict[Any, list[Any]]:
+def merge_dicts(dict1: Dict[Any, List[Any]],
+                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
     
     When a key conflicts, the values in dict1 is prioritized.
