@@ -240,10 +240,8 @@ class Fp8LinearMethod(LinearMethodBase):
             out_dtype=x.dtype,
             scale_a=x_scale,
             scale_b=layer.weight_scale,
+            bias=bias,
         )
-
-        if bias is not None:
-            output.add_(bias)
 
         return output
 
