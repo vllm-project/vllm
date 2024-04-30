@@ -12,6 +12,7 @@ openai
 uvicorn[standard]
 pydantic >= 2.0  # Required for OpenAI server.
 prometheus_client >= 0.18.0
+prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken == 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer == 0.9.8
 outlines == 0.0.34 # Requires torch >= 2.1.0
