@@ -204,6 +204,12 @@ class ModelRunner:
                         "but the KV cache data type is not FP8. "
                         "KV cache scaling factors will not be used.")
 
+    def save_model(self, path: str) -> None:
+        from safetensors.torch import save_model
+        from vllm.distributed import get_tensor_model_parallel_rank
+        rank = get_tensor_model_parallel_rank()
+        save_model(self.model, f"{path}/model.{rank}.safetensors")
+
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 

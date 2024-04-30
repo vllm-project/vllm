@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.deepspeedfp import (
-    DeepSpeedFPLinearMethod, DeepSpeedFPQuantizedParameter)
+    DeepSpeedFPLinearMethod, DeepSpeedFPParameter)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -114,25 +114,23 @@ class ArcticMoE(nn.Module):
                                          bias=False,
                                          params_dtype=self.params_dtype,
                                          linear_method=linear_method)
-
-            # Create it on CPU and later quantize it to GPU.
             if self.is_quant:
-                self.ws = DeepSpeedFPQuantizedParameter(
-                    torch.empty(self.num_experts,
+                self.ws = DeepSpeedFPParameter(
+                    torch.Size((self.num_experts,
                                 2 * self.intermediate_size,
-                                self.hidden_size,
-                                dtype=self.params_dtype).cpu(),
-                    requires_grad=False,
-                    quantization=linear_method.quant_config,
+                                self.hidden_size)),
+                    params_dtype=params_dtype,
+                    quant_config=linear_method.quant_config,
                 )
-                self.w2s = DeepSpeedFPQuantizedParameter(
-                    torch.empty(self.num_experts,
+                torch.cuda.empty_cache()
+                self.w2s = DeepSpeedFPParameter(
+                    torch.Size((self.num_experts,
                                 self.hidden_size,
-                                self.intermediate_size,
-                                dtype=self.params_dtype).cpu(),
-                    requires_grad=False,
-                    quantization=linear_method.quant_config,
+                                self.intermediate_size)),
+                    params_dtype=params_dtype,
+                    quant_config=linear_method.quant_config,
                 )
+                torch.cuda.empty_cache()
             else:
                 self.ws = nn.Parameter(
                     torch.empty(self.num_experts,
@@ -156,7 +154,10 @@ class ArcticMoE(nn.Module):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param.data
+        if self.is_quant:
+            param_data = param.ds_dequantize()
+        else:
+            param_data = param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
@@ -166,6 +167,8 @@ class ArcticMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        if self.is_quant:
+            param.ds_quantize_(param_data)
 
     def local_moe_fused(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -181,9 +184,9 @@ class ArcticMoE(nn.Module):
         if self.is_quant:
             if 2 * num_tokens <= self.num_experts:
                 # If much fewer tokens than experts, use selective dequantize.
-                ws_dequantized = self.ws.selective_dequantized(
+                ws_dequantized = self.ws.ds_selective_dequantize(
                     topk_ids.flatten())
-                w2s_dequantized = self.w2s.selective_dequantized(
+                w2s_dequantized = self.w2s.ds_selective_dequantize(
                     topk_ids.flatten())
                 # We gathered the experts to the tokens so update the mapping.
                 topk_ids = torch.arange(
@@ -192,8 +195,8 @@ class ArcticMoE(nn.Module):
                     device=topk_ids.device,
                 ).reshape(topk_ids.shape)
             else:
-                ws_dequantized = self.ws.dequantized()
-                w2s_dequantized = self.w2s.dequantized()
+                ws_dequantized = self.ws.ds_dequantize()
+                w2s_dequantized = self.w2s.ds_dequantize()
 
         final_hidden_states = fused_experts(
             hidden_states,
@@ -451,35 +454,30 @@ class ArcticForCausalLM(nn.Module):
         expert_params_mapping = []
         num_layers = self.config.num_hidden_layers
 
-        for i in range(num_layers):
-            for weight_name in ["w1", "w3"]:
-                mapping = (f"layers.{i}.residual_mlp.w13.weight",
-                           f"layers.{i}.residual_mlp.{weight_name}.weight",
-                           0 if weight_name == "w1" else 1)
-                mlp_params_mapping.append(mapping)
-            if i % 2 == 0:
+        for layer in range(num_layers):
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w1.weight", 0))
+            mlp_params_mapping.append((
+                f"layers.{layer}.residual_mlp.w13.weight",
+                f"layers.{layer}.residual_mlp.w3.weight", 1))
+            if layer % 2 == 0:
                 # MLP layers
-                for weight_name in ["w1", "w3"]:
-                    mapping = (
-                        f"layers.{i}.block_sparse_moe.mlp.w13.weight",
-                        f"layers.{i}.block_sparse_moe.mlp.{weight_name}.weight",
-                        0 if weight_name == "w1" else 1)
-                    mlp_params_mapping.append(mapping)
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w1.weight", 0))
+                mlp_params_mapping.append((
+                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                    f"layers.{layer}.block_sparse_moe.mlp.w3.weight", 1))
             else:
                 # MoE layers
                 for expert_id in range(self.config.num_local_experts):
-                    for weight_name in ["w1", "w2", "w3"]:
-                        if weight_name in ["w1", "w3"]:
-                            mapping = (
-                                "ws",
-                                f"experts.{expert_id}.{weight_name}.weight",
-                                expert_id)
-                        else:
-                            mapping = (
-                                "w2s",
-                                f"experts.{expert_id}.{weight_name}.weight",
-                                expert_id)
-                        expert_params_mapping.append(mapping)
+                    expert_params_mapping.append((
+                        "ws", f"experts.{expert_id}.w1.weight", expert_id))
+                    expert_params_mapping.append((
+                        "w2s", f"experts.{expert_id}.w2.weight", expert_id))
+                    expert_params_mapping.append((
+                        "ws", f"experts.{expert_id}.w3.weight", expert_id))
 
         params_dict = dict(self.named_parameters())
 
@@ -533,12 +531,3 @@ class ArcticForCausalLM(nn.Module):
                                                     default_weight_loader)
                             weight_loader(param, loaded_weight)
 
-        # For Arctic, we run a post quantization on 16 bits weights.
-        # Iterate in order of largest to smallest params to reduce
-        # pytorch fragmentation issues.
-        for name, param in sorted(self.named_parameters(),
-                                  key=lambda v: -v[1].numel()):
-            if hasattr(param, "is_arctic") and param.is_arctic:
-                # do quantization after loading and moe to GPU
-                assert param.device.type != "cuda"
-                param.data = param.cuda()
