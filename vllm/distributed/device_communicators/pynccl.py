@@ -280,9 +280,6 @@ class NCCLCommunicator:
                              ctypes.c_void_p(stream.cuda_stream)))
 
     def __del__(self):
-        # `dist` module might have been already destroyed
-        if hasattr(dist, 'destroy_process_group'):
-            dist.destroy_process_group()
         # function might have been already destroyed
         if _c_ncclCommDestroy is not None:
             _c_ncclCommDestroy(self.comm)
