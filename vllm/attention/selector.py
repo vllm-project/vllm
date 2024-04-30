@@ -19,7 +19,7 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
-    FLASHINER = enum.auto()
+    FLASHINFER = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -44,7 +44,7 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
-    elif backend == _Backend.FLASHINER:
+    elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
@@ -75,17 +75,6 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         logger.info("Cannot use FlashAttention-2 backend for dtype other than "
                     "torch.float16 or torch.bfloat16.")
         return _Backend.XFORMERS
-
-    try:
-        # Still use flash attention for the prefill stage.
-        import flash_attn  # noqa: F401
-        import flashinfer  # noqa: F401
-        return _Backend.FLASHINER
-    except ImportError:
-        logger.info(
-            "Cannot use Flashinfer backend because the flashinfer package "
-            "is not found. Please install both flashinfer and flash attention "
-            "for better performance.")
 
     try:
         import flash_attn  # noqa: F401
