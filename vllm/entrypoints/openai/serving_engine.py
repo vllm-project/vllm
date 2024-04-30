@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import shutil
-
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -51,7 +50,6 @@ class OpenAIServing:
         self.max_model_len = 0
         # Lazy initialized
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-        self.tokenizer_jsons = None
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -102,7 +100,7 @@ class OpenAIServing:
             shutil.rmtree(TOKENIZER_EPHIMERAL_PATH)
         except OSError as e:
             raise RuntimeError(
-                f"Error removing '{TOKENIZER_EPHIMERAL_PATH.name}' directory: {e}"
+                f"Error removing '{TOKENIZER_EPHIMERAL_PATH.name}' dir: {e}"
             ) from e
 
         return tokenizer_jsons

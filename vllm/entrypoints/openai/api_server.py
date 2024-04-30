@@ -72,7 +72,7 @@ async def health() -> Response:
     return Response(status_code=200)
 
 
-@app.get("/get_tokenizer")
+@app.get("/v1/get_tokenizer")
 async def get_tokenizer():
     return JSONResponse(content=openai_serving_chat.tokenizer_jsons)
 
