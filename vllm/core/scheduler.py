@@ -1,6 +1,4 @@
 import enum
-import os
-import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -16,13 +14,6 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
 from vllm.utils import merge_dicts
 
 logger = init_logger(__name__)
-
-# Test-only. If configured, decode is preempted with
-# ARTIFICIAL_PREEMPTION_PROB% probability.
-ENABLE_ARTIFICIAL_PREEMPT = bool(
-    os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
-ARTIFICIAL_PREEMPTION_PROB = 0.5
-ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 
 class PreemptionMode(enum.Enum):
@@ -295,12 +286,8 @@ class Scheduler:
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
 
-        # The following field is test-only. It is used to inject artificial
-        # preemption.
-        self.enable_artificial_preemption = ENABLE_ARTIFICIAL_PREEMPT
-        self.artificial_preempt_cnt = (ARTIFICIAL_PREEMPTION_MAX_CNT
-                                       if self.enable_artificial_preemption
-                                       else 0)
+        # Test-only
+        self.total_preempted = 0
 
     @property
     def lora_enabled(self) -> bool:
@@ -407,6 +394,9 @@ class Scheduler:
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
+            # If chunked prefill is preempted, it is possible chunked prefill
+            # comes before decoding. In that case, it is possible there's no
+            # budget for decoding which returns num_running_tokens == 0.
             if num_running_tokens == 0:
                 break
 
@@ -878,13 +868,6 @@ class Scheduler:
         """Determine whether or not we have enough space in the KV cache to
         continue generation of the sequence group.
         """
-        # It is True only for testing case to trigger artificial preemption.
-        if (self.enable_artificial_preemption
-                and random.uniform(0, 1) < ARTIFICIAL_PREEMPTION_PROB
-                and self.artificial_preempt_cnt > 0):
-            self.artificial_preempt_cnt -= 1
-            return False
-
         # Appending slots only occurs in decoding.
         is_prefill = False
 
@@ -1026,6 +1009,7 @@ class Scheduler:
         blocks_to_swap_out: Dict[int, int],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
+        self.total_preempted += 1
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences
