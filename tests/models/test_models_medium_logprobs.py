@@ -10,7 +10,6 @@ import pytest
 
 from tests.models.utils import check_logprobs_close
 
-
 MAX_MODEL_LEN = 1024
 
 MODELS = [
@@ -47,6 +46,7 @@ MODELS = [
     "xverse/XVERSE-7B",
 ]
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -65,8 +65,8 @@ def test_models(
                          dtype=dtype,
                          max_model_len=MAX_MODEL_LEN,
                          tensor_parallel_size=1)
-    hf_outputs = hf_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
+    hf_outputs = hf_model.generate_greedy_logprobs(example_prompts, max_tokens,
+                                                   num_logprobs)
     del hf_model
 
     # Run vLLM.
@@ -74,9 +74,10 @@ def test_models(
                              dtype=dtype,
                              max_model_len=MAX_MODEL_LEN,
                              tensor_parallel_size=1)
-    vllm_outputs = vllm_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
-    del gptq_model
+    vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
+                                                       max_tokens,
+                                                       num_logprobs)
+    del vllm_model
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
