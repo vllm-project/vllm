@@ -8,16 +8,39 @@ Run `pytest tests/models/test_models.py`.
 import pytest
 
 MODELS = [
-    "facebook/opt-125m",
+    # baichuan
+    "bigscience/bloom-560m",
+    # chatglm
+    # command-r
+    # dbrx
+    # decilm
+    "deepseek-ai/deepseek-coder-1.3b-instruct",
+    # falcon
+    "google/gemma-1.1-2b-it",
     "gpt2",
     "bigcode/tiny_starcoder_py",
+    # gpt-j
     "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",  # Testing alibi slopes.
+    # internlm2
+    # jais
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    # llava
+    "openbmb/MiniCPM-2B-128k",
+    # mixtral
+    # mixtral-quant
+    # mpt
+    "allenai/OLMo-1B",
+    "facebook/opt-125m",
+    # orion
     "microsoft/phi-2",
-    "stabilityai/stablelm-3b-4e1t",
-    # "allenai/OLMo-1B",  # Broken
+    "Qwen/Qwen-1_8B",
+    "Qwen/Qwen1.5-1.8B",
+    # qwen2 moe
+    "stabilityai/stablelm-2-1_6b-chat",
     "bigcode/starcoder2-3b",
+    # xverse
 ]
+
 
 
 @pytest.mark.parametrize("model", MODELS)
