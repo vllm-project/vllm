@@ -139,7 +139,7 @@ class WorkerMonitor(threading.Thread):
         self.result_handler.close()
 
 
-class ProcessWorkerWrapper():
+class ProcessWorkerWrapper:
     """Local process wrapper for vllm.worker.Worker,
     for handling single-node multi-GPU tensor parallel."""
 
@@ -150,6 +150,7 @@ class ProcessWorkerWrapper():
         self.tasks = result_handler.tasks
         self.process: BaseProcess = mp.Process(  # type: ignore[attr-defined]
             target=_run_worker_process,
+            name="VllmWorkerProcess",
             kwargs=dict(
                 worker_factory=worker_factory,
                 task_queue=self._task_queue,
