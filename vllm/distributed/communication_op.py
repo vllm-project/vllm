@@ -18,19 +18,16 @@ _ENABLE_PYNCCL_FOR_ALL_REDUCE = False
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
     """use pynccl instead of torch.distributed for all reduce"""
+    from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
     tp_size = get_tensor_model_parallel_world_size()
-    if tp_size == 1:
-        # No-op.
-        # NOTE(woosuk): We don't initialize pynccl when tp_size is 1.
+    if tp_size == 1 or _TP_NCCL_COMMUNICATOR is not None:
         yield
     else:
-        from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
         global _ENABLE_PYNCCL_FOR_ALL_REDUCE
         old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
 
         stream = torch.cuda.current_stream()
-        assert _TP_NCCL_COMMUNICATOR is not None
         with _TP_NCCL_COMMUNICATOR.switch_stream(stream):
             yield
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
@@ -59,10 +56,9 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
         return out
     # `_TP_NCCL_COMMUNICATOR` knows the group it is working on.
     from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
-    if _TP_NCCL_COMMUNICATOR is not None:
-        out = _TP_NCCL_COMMUNICATOR.all_reduce(input_)
-    if out is not None:
-        return out
+    if _TP_NCCL_COMMUNICATOR is not None and _ENABLE_PYNCCL_FOR_ALL_REDUCE:
+        _TP_NCCL_COMMUNICATOR.all_reduce(input_)
+        return input_
     torch.distributed.all_reduce(input_,
                                  group=get_tensor_model_parallel_group())
     return input_
