@@ -10,9 +10,10 @@ from vllm import LLM, EngineArgs
 Example usage
 
 python save_state_dict.py \
-    --model /path/to/model \
+    --model /path/to/load \
     --quantization deepspeedfp \
-    --tensor-parallel-size 8
+    --tensor-parallel-size 8 \
+    --output /path/to/save
 """
 
 parser = argparse.ArgumentParser()
