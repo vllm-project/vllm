@@ -5,6 +5,9 @@ import pytest
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
+from vllm.attention import Attention, AttentionMetadata
+
+from vllm.attention.backends.xformers import XFormersBackend
 
 from vllm._C import ops, cache_ops
 from vllm.utils import get_max_shared_memory_bytes
@@ -36,6 +39,7 @@ HEAD_SIZES = [64, 80, 96, 112, 128, 256
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
+BACKEND_NAMES = ["xformers"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -156,35 +160,83 @@ def sim_prompt_run(query, key, value):
 def make_golden_prompt_run(prompt_len):
     pass
 
+def build_attention_metadata():
+    pass
+
+def make_backend(backend_name: str):
+    if backend_name == "xformers":
+        return XFormersBackend()
+    assert False, f"Unrecognized backend_name {backend_name} for unit test"
+
+def make_metadata(attn_backend):
+    attn_backend.make_metadata(
+                is_prompt=True,
+                prompt_lens=prompt_lens,
+                prompt_lens_tensor=prompt_lens_tensor,
+                max_subquery_len=max_subquery_len,
+                max_context_len=None,
+                max_prompt_len=max_prompt_len,
+                subquery_start_loc=subquery_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=False,
+            )
+
+def make_attention(num_heads: int, head_size: int):
+    # Attention operator instance
+    scale = float(1.0 / (head_size**0.5))
+    return Attention(num_heads,
+                     head_size,
+                     scale=scale,)
+
 # @pytest.mark.parametrize("version", ["v1", "v2"])
 # @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
-# @pytest.mark.parametrize("num_heads", NUM_HEADS)
-# @pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 # @pytest.mark.parametrize("use_alibi", USE_ALIBI)
 # @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 # @pytest.mark.parametrize("dtype", DTYPES)
 # @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 # @pytest.mark.parametrize("seed", SEEDS)
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_encoder_self_attention(
-    kv_cache_factory,
-    version: str,
-    num_seqs: int,
-    num_heads: Tuple[int, int],
-    head_size: int,
-    use_alibi: bool,
-    block_size: int,
-    dtype: torch.dtype,
-    kv_cache_dtype: str,
-    seed: int,
-    device: str,) -> None:
+def test_prefill_stage_encoder_self_attention(num_heads: int, head_size: int, backend_name: str) -> None:
+    # Attention operator instance
+    attn = make_attention(num_heads, head_size)
+    attn_backend = make_backend(backend_name)
 
-    scale = float(1.0 / (head_size**0.5))
-    alibi_slopes = None
-    if use_alibi:
-        alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
+    assert(True)
 
-    attn=Attention(num_heads,head_size,scale,num_heads,)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+def test_prefill_stage_decoder_self_attention(num_heads: int, head_size: int) -> None:
+    # Attention operator instance
+    attn = make_attention(num_heads, head_size)
+
+    assert(True)
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+def test_decode_stage_decoder_self_attention(num_heads: int, head_size: int) -> None:
+    # Attention operator instance
+    attn = make_attention(num_heads, head_size)
+
+    assert(True)
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+def test_prefill_stage_cross_attention(num_heads: int, head_size: int) -> None:
+    # Attention operator instance
+    attn = make_attention(num_heads, head_size)
+
+    assert(True)
+
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+def test_decode_stage_cross_attention(num_heads: int, head_size: int) -> None:
+    # Attention operator instance
+    attn = make_attention(num_heads, head_size)
 
     assert(True)
 
