@@ -26,10 +26,7 @@ def with_pynccl_for_all_reduce():
         global _ENABLE_PYNCCL_FOR_ALL_REDUCE
         old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
-
-        stream = torch.cuda.current_stream()
-        with _TP_NCCL_COMMUNICATOR.switch_stream(stream):
-            yield
+        yield
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 
 
