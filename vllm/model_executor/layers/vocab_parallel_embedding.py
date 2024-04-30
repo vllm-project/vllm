@@ -104,6 +104,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                       loaded_weight: torch.Tensor,
                       loaded_shard_id: Optional[int] = None):
         if self.linear_method.QUANTIZED:
+            # loader code adapted from MergedColumnParallelLinear
             param_data = param.data
             output_dim = getattr(param, "output_dim", None)
             is_metadata = getattr(param, "is_metadata", False)
@@ -170,7 +171,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                 ignore_warning = getattr(param, "ignore_warning", False)
                 if not ignore_warning:
                     print("Loading a weight without `output_dim` attribute in "
-                          "MergedColumnParallelLinear, assume the weight is "
+                          "VocabParallelEmbedding, assume the weight is "
                           "the same for all partitions.")
             assert param_data.shape == loaded_weight.shape
             param_data.copy_(loaded_weight)
