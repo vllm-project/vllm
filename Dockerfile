@@ -1,6 +1,10 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
+# Please update any changes made here to
+# docs/source/dev/dockerfile/dockerfile.rst and
+# docs/source/assets/dev/dockerfile-stages-dependency.png
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
