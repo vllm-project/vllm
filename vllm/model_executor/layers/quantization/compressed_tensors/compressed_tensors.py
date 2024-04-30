@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 
@@ -35,6 +35,12 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_name(self) -> str:
         return "compressed_tensors"
+    
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["CompressedTensorsLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return CompressedTensorsLinearMethod(self)
+        return None
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
