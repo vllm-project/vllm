@@ -311,8 +311,17 @@ class XFormersImpl(AttentionImpl):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.prompt_lens)
+                if attn_metadata.is_cross_attn:
+                    # Non-causal cross-attention
+                    # Each block is a rectangle of size
+                    # (decoder prompt len) x (encoder prompt len)
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.prompt_lens)
+                else:
+                    # Causal self-attention
+                    # Each block is a square
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.prompt_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
