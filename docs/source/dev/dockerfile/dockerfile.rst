@@ -1,7 +1,17 @@
 Dockerfile
 ====================
 
--  Visualization of the multi-stage Dockerfile
+-  A visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:
+
+   - All build stages
+   - The default build target (highlighted in grey)
+   - External images (with dashed borders)
+   
+   The edges of the build graph represent:
+   
+   - FROM ... dependencies (with a solid line and a full arrow head)
+   - COPY --from=... dependencies (with a dashed line and an empty arrow head)
+   - RUN --mount=(.*)from=... dependencies (with a dotted line and an empty diamond arrow head)
 
    .. figure:: ../../assets/dev/dockerfile-stages-dependency.png
       :alt: query
@@ -10,11 +20,11 @@ Dockerfile
 
    Made using: https://github.com/patrickhoefler/dockerfilegraph
 
-   Commands to regenerate it:
+   Commands to regenerate it (make sure to run it from the `root` directory where the dockerfile is present):
 
    .. code:: bash
 
-      dockerfilegraph -o png --legend --dpi 200 --max-label-length 50
+      dockerfilegraph -o png --legend --dpi 200 --max-label-length 50 --filename Dockerfile
 
    or in case you want to run it directly with the docker image:
    
@@ -29,6 +39,9 @@ Dockerfile
          --output png \
          --dpi 200 \
          --max-label-length 50 \
+         --filename Dockerfile \
          --legend
+
+   (To run it for a different file, you can pass in a different argument to the flag `--filename`.)
 
    
