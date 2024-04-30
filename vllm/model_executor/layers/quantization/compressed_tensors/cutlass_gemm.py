@@ -3,27 +3,31 @@ from cutlass import Tensor as FakeTensor
 import cutlass.epilogue
 
 import torch
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Union, Any
 
 from vllm.logger import init_logger
 
 logger = init_logger("cutlass_gemm")
 
+# type alias
+TF = Union[torch.Tensor, float]
+
 def setup_dequant_epilogue(plan : cutlass.op.Gemm,
-                           dq: torch.Tensor,
-                           static_scales: Optional[torch.Tensor],
-                           activation_scales: Optional[torch.Tensor]) \
-                              -> Tuple[cutlass.op.Gemm, Dict]:
+                           dq : torch.Tensor,
+                           static_scales: Optional[TF],
+                           activation_scales: Optional[TF]) \
+                              -> Tuple[cutlass.op.Gemm, Optional[Dict]]:
 
     if all([static_scales is None, activation_scales is None]):
         return plan, None
     assert static_scales is not None
 
-    def epilog_with_scales_and_act_scales(accum, scales, act_scales):
+    def epilog_with_scales_and_act_scales(accum: torch.Tensor, scales: TF,
+                                          act_scales: TF) -> torch.Tensor:
         D = accum * scales * act_scales
         return D
 
-    def epilog_with_scales(accum, scales):
+    def epilog_with_scales(accum: torch.Tensor, scales: TF) -> torch.Tensor:
         D = accum * scales
         return D
 
@@ -38,7 +42,7 @@ def setup_dequant_epilogue(plan : cutlass.op.Gemm,
         'D':
         dq,
     }
-    epilog_fn = epilog_with_scales
+    epilog_fn: Any = epilog_with_scales
 
     if activation_scales is not None:
         epilog_tensors['act_scales'] = activation_scales
