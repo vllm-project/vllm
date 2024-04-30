@@ -11,7 +11,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               change_model_parallel_pynccl_allreduce,
-                              destroy_model_parallel,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               warmpup_model_parallel)
