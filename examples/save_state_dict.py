@@ -35,7 +35,7 @@ def main(args):
     model_executor._run_workers("save_model", path=args.output)
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
-        if not any(file.endswidth(ext) for ext in (".bin", ".pt", ".safetensors")):
+        if not any(file.endswith(ext) for ext in (".bin", ".pt", ".safetensors")):
             shutil.copy(f"{model_path}/{file}", args.output)
 
 if __name__ == "__main__":
