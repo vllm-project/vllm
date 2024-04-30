@@ -98,6 +98,17 @@ class NCCLCommunicator:
                    tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
                    stream=None):
+        """
+        Perform all reduce on the input tensor.
+        Args:
+            tensor: the input tensor.
+            op: the reduce operation. Default is ReduceOp.SUM.
+            stream: the stream to perform the operation. Default is None.
+        Returns:
+            The input tensor after all reduce. If the communicator is not
+            enabled or the input tensor is not on the same device as the
+            communicator, return None.
+        """
         # nccl communicator created on a specific device
         # will only work on tensors on the same device
         # otherwise it will cause "illegal memory access"

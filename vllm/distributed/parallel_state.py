@@ -3,7 +3,6 @@
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/parallel_state.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
-import contextlib
 import os
 from typing import Optional
 
@@ -315,35 +314,3 @@ def destroy_model_parallel():
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
-
-
-# Whether to use pynccl for nccl all reduce.
-# We use pynccl for all reduce when using CUDA graph, because torch.distributed
-# is not well supported by CUDA graph.
-_ENABLE_PYNCCL_FOR_ALL_REDUCE = False
-
-
-@contextlib.contextmanager
-def with_pynccl_for_all_reduce():
-    """use pynccl instead of torch.distributed for all reduce"""
-    tp_size = get_tensor_model_parallel_world_size()
-    if tp_size == 1:
-        # No-op.
-        # NOTE(woosuk): We don't initialize pynccl when tp_size is 1.
-        yield
-    else:
-        global _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
-
-        stream = torch.cuda.current_stream()
-        assert _TP_NCCL_COMMUNICATOR is not None
-        with _TP_NCCL_COMMUNICATOR.switch_stream(stream):
-            yield
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
-
-
-def is_pynccl_enabled_for_all_reduce():
-    """check if pynccl is enabled for all reduce"""
-    global _ENABLE_PYNCCL_FOR_ALL_REDUCE
-    return _ENABLE_PYNCCL_FOR_ALL_REDUCE

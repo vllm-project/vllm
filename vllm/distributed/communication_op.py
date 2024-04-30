@@ -1,3 +1,4 @@
+import contextlib
 from collections import namedtuple
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -6,8 +7,33 @@ from torch.distributed import ProcessGroup
 
 from .parallel_state import (get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
-                             get_tensor_model_parallel_world_size,
-                             is_pynccl_enabled_for_all_reduce)
+                             get_tensor_model_parallel_world_size)
+
+# Whether to use pynccl for nccl all reduce.
+# We use pynccl for all reduce when using CUDA graph, because torch.distributed
+# is not well supported by CUDA graph.
+_ENABLE_PYNCCL_FOR_ALL_REDUCE = False
+
+
+@contextlib.contextmanager
+def with_pynccl_for_all_reduce():
+    """use pynccl instead of torch.distributed for all reduce"""
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size == 1:
+        # No-op.
+        # NOTE(woosuk): We don't initialize pynccl when tp_size is 1.
+        yield
+    else:
+        from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
+        global _ENABLE_PYNCCL_FOR_ALL_REDUCE
+        old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
+        _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
+
+        stream = torch.cuda.current_stream()
+        assert _TP_NCCL_COMMUNICATOR is not None
+        with _TP_NCCL_COMMUNICATOR.switch_stream(stream):
+            yield
+        _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
@@ -31,14 +57,14 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     out = custom_all_reduce(input_)
     if out is not None:
         return out
-    if is_pynccl_enabled_for_all_reduce():
-        # `_TP_NCCL_COMMUNICATOR` knows the group it is working on.
-        from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
-        assert _TP_NCCL_COMMUNICATOR is not None
-        _TP_NCCL_COMMUNICATOR.all_reduce(input_)
-    else:
-        torch.distributed.all_reduce(input_,
-                                     group=get_tensor_model_parallel_group())
+    # `_TP_NCCL_COMMUNICATOR` knows the group it is working on.
+    from vllm.distributed.parallel_state import _TP_NCCL_COMMUNICATOR
+    if _TP_NCCL_COMMUNICATOR is not None:
+        out = _TP_NCCL_COMMUNICATOR.all_reduce(input_)
+    if out is not None:
+        return out
+    torch.distributed.all_reduce(input_,
+                                 group=get_tensor_model_parallel_group())
     return input_
 
 
