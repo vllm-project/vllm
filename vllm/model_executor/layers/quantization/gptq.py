@@ -70,12 +70,20 @@ class GPTQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, lm_head_quantized)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["GPTQLinearMethod"]:
-        if isinstance(layer, LinearBase):
-            return GPTQLinearMethod(self)
-
+            self,
+            layer: torch.nn.Module,
+            is_lm_head: bool = False) -> Optional["GPTQLinearMethod"]:
         # lm_head can be optionally quantized
-        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+        if is_lm_head and self.lm_head_quantized:
+            # quantized lm_head is only supported for ParallelLMHead
+            if not isinstance(layer, ParallelLMHead):
+                raise ValueError(
+                    "Quantized lm_head is enabled but lm_head layer is not a"
+                    f"ParallelLMHead. Actual type: {type(self).__name__}.")
+            else:
+                return GPTQLinearMethod(self)
+
+        if isinstance(layer, LinearBase):
             return GPTQLinearMethod(self)
 
         return None
@@ -85,7 +93,6 @@ class GPTQConfig(QuantizationConfig):
 
 
 class ExllamaState(Enum):
-
     UNUSED = enum.auto()
     UNINITIALIZED = enum.auto()
     READY = enum.auto()

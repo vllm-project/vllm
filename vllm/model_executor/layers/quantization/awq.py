@@ -63,7 +63,9 @@ class AWQConfig(QuantizationConfig):
         return cls(weight_bits, group_size, zero_point)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["AWQLinearMethod"]:
+            self,
+            layer: torch.nn.Module,
+            is_lm_head: bool = False) -> Optional["AWQLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AWQLinearMethod(self)
         return None

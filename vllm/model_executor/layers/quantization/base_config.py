@@ -87,11 +87,14 @@ class QuantizationConfig(ABC):
 
     @abstractmethod
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional[QuantizableMethodBase]:
+            self,
+            layer: torch.nn.Module,
+            is_lm_head: bool = False) -> Optional[QuantizableMethodBase]:
         """Get the quantize method to use for the quantized layer.
         
         Args:
             layer: The layer for the quant method.
+            is_lm_head: Is layer lm_head
         Returns:
             The quantize method. None if the given layer doesn't support quant
             method.

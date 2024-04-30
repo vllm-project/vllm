@@ -208,7 +208,9 @@ class AQLMConfig(QuantizationConfig):
                    out_group_size)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["AQLMLinearMethod"]:
+            self,
+            layer: torch.nn.Module,
+            is_lm_head: bool = False) -> Optional["AQLMLinearMethod"]:
         if isinstance(layer, LinearBase):
             return AQLMLinearMethod(self)
         return None
