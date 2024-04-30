@@ -1,75 +1,59 @@
-"""Tests whether gptq models with quantized lm_head can be loaded.
+"""Tests whether gptq models with non-quantized lm_head can be loaded.
 
-Run `pytest tests/quantization/test_quant_lm_head_true.py --forked`.
+Run `pytest tests/quantization/test_quant_lm_head.py --forked`.
 """
-from typing import Optional
-
 import pytest
-import torch
 
-from vllm import CompletionOutput, SamplingParams
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+SAMPLE_PROMPT = "A story about life in 1978:\n"
 
-# Model Id // Expected output
-MODELS_QUANT_TYPE = [
-    ("LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse",
-     'VLLM is a very popular and successful program'),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
-     "\nIn the year 2020, a group of scientists"),
-    ("LnL-AI/opt-125M-autoround-lm_head-true-symTrue",
-     "\nThe story of the vLLM:"),
-    ("LnL-AI/opt-125M-autoround-lm_head-false-symTrue",
-     "\nThe story of the VLLM is a story of the VLLM,"),
+
+# model, boolean if lm head is quantized
+MODELS_LM_HEAD_QUANT = [
+    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", False),
+    ("LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-"
+        "lm_head-symFalse", True),
+    ("LnL-AI/opt-125M-autoround-lm_head-false-symTrue", False),
+    ("LnL-AI/opt-125M-autoround-lm_head-true-symTrue", True),
 ]
 
-MAX_TOKENS = 20
+# model, expected output
+EXPECTED_OUTPUTS = {
+    "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit": "\nIn 1978, I",
+    "LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-"
+        "lm_head-symFalse": '"I was a 16-year',
+    "LnL-AI/opt-125M-autoround-lm_head-false-symTrue": "\nA story about",
+    "LnL-AI/opt-125M-autoround-lm_head-true-symTrue": "\nThe story of",
+}
 
 
-@pytest.mark.parametrize("model_quant_type", MODELS_QUANT_TYPE)
-def test_lm_head(
-        vllm_runner,
-        model_quant_type: str,
-) -> None:
-    model, expected_output = model_quant_type
-    vllm_model = vllm_runner(model,
-                             dtype=torch.float16,
-                             enforce_eager=True,
-                             enable_prefix_caching=True,
-                             gpu_memory_utilization=0.5,
-                             max_model_len=2048,
-                             seed=898,
-                             tensor_parallel_size=1)
-    llm_engine = vllm_model.model.llm_engine
+@pytest.mark.parametrize("model_lm_head_quant", MODELS_LM_HEAD_QUANT)
+def test_lm_head_false(
+    vllm_runner,
+    model_lm_head_quant: str,
+):
+    model, lm_head_quant = model_lm_head_quant
+    vllm_model = vllm_runner(model, enforce_eager=True)
+    quantization_config = (
+        vllm_model.model.llm_engine.model_config.hf_config.quantization_config
+    )
 
-    quantization_config = llm_engine.model_config.hf_config.quantization_config
-    quant_lm_head = False
-    if quantization_config.get("lm_head"):
-        quant_lm_head = True
-
-    lm_head_layer = (vllm_model.model.llm_engine.model_executor.driver_worker.
-                     model_runner.model.lm_head)
-
-    if quant_lm_head and "opt" not in model:
-        assert isinstance(lm_head_layer.linear_method, GPTQLinearMethod)
+    if not lm_head_quant:
+        assert not quantization_config.get("lm_head"), (
+            f"{model} does not have a quantized lm_head, but found "
+            "one in the quantization config."
+        )
     else:
-        assert isinstance(lm_head_layer.linear_method, UnquantizedLinearMethod)
+        assert (quantization_config.get("lm_head") is not None and
+                quantization_config.get("lm_head")), (
+            "f{model} has a quantized lm_head, but did not find "
+            "one in the quantization config."
+        )
 
-    llm_engine.add_request(
-        "id", "A story about vLLM:\n",
-        SamplingParams(
-            temperature=0.0,
-            max_tokens=MAX_TOKENS,
-        ), None)
+    output_str = vllm_model.generate_greedy([SAMPLE_PROMPT], 20)[0][1]
+    output_generation_str = output_str[len(SAMPLE_PROMPT):]
+    expected_output_str = EXPECTED_OUTPUTS[model]
 
-    output: Optional[CompletionOutput] = None
-    output_text = ""
-    while llm_engine.has_unfinished_requests():
-        (request_output,) = llm_engine.step()
-        (output,) = request_output.outputs
-
-        # Ensure we don't backtrack
-        assert output.text.startswith(output_text)
-        output_text = output.text
-    assert output is not None
-    assert output_text.startswith(expected_output)
+    assert output_generation_str.startswith(expected_output_str), (
+        f"{model} generation of {output_generation_str} does not "
+        "match the expected string prefix {expected_output_str}"
+    )
