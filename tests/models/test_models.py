@@ -16,7 +16,7 @@ MODELS = [
     # decilm
     "deepseek-ai/deepseek-coder-1.3b-instruct",
     # falcon
-    "google/gemma-1.1-2b-it",
+    # "google/gemma-1.1-2b-it", # < broken
     "gpt2",
     "bigcode/tiny_starcoder_py",
     # gpt-j

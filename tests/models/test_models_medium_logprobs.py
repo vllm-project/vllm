@@ -65,7 +65,6 @@ def test_models(
                          dtype=dtype,
                          max_model_len=MAX_MODEL_LEN,
                          tensor_parallel_size=1)
-
     hf_outputs = hf_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
     del hf_model
