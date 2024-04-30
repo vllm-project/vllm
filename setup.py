@@ -422,7 +422,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0a1"],
+        "tensorizer": ["tensorizer==2.9.0"],
         # UPSTREAM SYNC: required for sparsity
         "sparse": _sparsity_deps,
         "sparsity": _sparsity_deps,
