@@ -60,12 +60,21 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
     max_prompt_len: Optional[int] = None
+    block_tables: Optional[torch.Tensor] = None
 
     # Metadata for the decode stage
     # Workspace buffer required by the kernel, the buffer should not
     # be allocated/deacollated by the FalshInfermetadata
     workspace_buffer: Optional[torch.Tensor] = None
-    #  The indptr of the paged kv cache, shape: [batch_size + 1]
+    # An example for paged_kv_indices, paged_kv_indptr:
+    # request 1, page indices [0, 5, 8]
+    # request 2, page indices [1, 6, 7]
+    # request 3, page indices [3, 4]
+    # paged_kv_indices is a concatenation of page indices of all requests:
+    # [0, 5, 8, 1, 6, 7, 3, 4]
+    # paged_kv_indptr is used to index into paged_kv_indices:
+    # [0, 3, 6, 8]
+    # The indptr of the paged kv cache, shape: [batch_size + 1]
     paged_kv_indptr: Optional[torch.Tensor] = None
     # The page indices of the paged kv cache
     paged_kv_indices: Optional[torch.Tensor] = None
@@ -84,6 +93,12 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     data_type: torch.dtype = None
 
     def __post_init__(self):
+        # Refer to
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
+        if self.head_dim is not None and self.head_dim not in [64, 128, 256]:
+            raise ValueError("Only [64, 128, 256] are supported for head_dim,",
+                             f"received {self.head_dim}.")
+
         if not self.is_prompt:
             self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
                 self.workspace_buffer, "NHD")
@@ -141,10 +156,10 @@ class FlashInferImpl(AttentionImpl):
 
         if attn_metadata.num_prefill_tokens > 0:
             assert attn_metadata.num_decode_tokens == 0, (
-                "chunked prefill is not supported with flash infer yet")
+                "Chunked prefill is not supported with flashinfer yet.")
         if attn_metadata.num_decode_tokens > 0:
             assert attn_metadata.num_prefill_tokens == 0, (
-                "chunked prefill is not supported with flash infer yet")
+                "Chunked prefill is not supported with flashinfer yet.")
 
         if kv_cache is not None:
             # Use the same reshape and cache kernel as flash attention.
@@ -157,20 +172,25 @@ class FlashInferImpl(AttentionImpl):
                 attn_metadata.kv_cache_dtype,
             )
 
-        if prefill_metadata := attn_metadata.prefill_metadata:
-            output = flash_attn_varlen_func(
-                q=query,
-                k=key,
-                v=value,
-                cu_seqlens_q=prefill_metadata.seq_start_loc,
-                cu_seqlens_k=prefill_metadata.seq_start_loc,
-                max_seqlen_q=prefill_metadata.max_prompt_len,
-                max_seqlen_k=prefill_metadata.max_prompt_len,
-                softmax_scale=self.scale,
-                causal=True,
-                window_size=self.sliding_window,
-                alibi_slopes=self.alibi_slopes,
-            )
+        if prefill_meta := attn_metadata.prefill_metadata:
+            assert prefill_meta.block_tables is not None
+            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+                output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=prefill_meta.seq_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_prompt_len,
+                    max_seqlen_k=prefill_meta.max_prompt_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                )
+            else:
+                raise NotImplementedError(
+                    "Prefix caching is not supported with flashinfer yet.")
         else:
             assert attn_metadata.decode_metadata is not None
             assert attn_metadata.decode_metadata.decode_wrapper is not None

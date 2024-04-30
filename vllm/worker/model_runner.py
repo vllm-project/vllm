@@ -403,7 +403,8 @@ class ModelRunner:
                 is_prompt=True,
                 use_cuda_graph=False,
                 seq_start_loc=seq_start_loc,
-                max_prompt_len=max_prompt_len)
+                max_prompt_len=max_prompt_len,
+                block_tables=block_tables)
         else:
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=True,
@@ -455,10 +456,11 @@ class ModelRunner:
         # [0, 5, 8, 1, 6, 7, 3, 4]
         # paged_kv_indptr is used to index into paged_kv_indices:
         # [0, 3, 6, 8]
-        # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_indices: List[int] = []
-        # 0 is always in paged_kv_indptr because the
+        # 0 at the beginning of paged_kv_indptr indicates the start of the
+        # first request’s page indices in the paged_kv_indices list.
         paged_kv_indptr: List[int] = [0]
+        # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
