@@ -6,14 +6,14 @@ import uuid
 from functools import partial
 from typing import Type
 
-import torch
 import torch.nn as nn
 from tensorizer import (DecryptionParams, EncryptionParams, TensorDeserializer,
                         TensorSerializer, stream_io)
 from tensorizer.utils import convert_bytes, get_mem_usage, no_init_or_tensor
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.distributed import initialize_model_parallel
+from vllm.distributed import (init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
@@ -226,7 +226,7 @@ model_name = model_ref.split("/")[1]
 os.environ["MASTER_ADDR"] = "127.0.0.1"
 os.environ["MASTER_PORT"] = "8080"
 
-torch.distributed.init_process_group(world_size=1, rank=0)
+init_distributed_environment(world_size=1, rank=0, local_rank=0)
 initialize_model_parallel()
 
 keyfile = args.keyfile if args.keyfile else None
