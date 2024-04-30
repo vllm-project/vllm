@@ -65,15 +65,14 @@ def cutlass_gemm_dq(
                f" - o_dq {dq.shape} {dq.dtype} \n")
     logger.debug(log_str)
 
-    plan = cutlass.op.Gemm(
-        element_A=x_q.dtype,
-        element_B=w_q.dtype,
-        element_C=dq.dtype,
-        element_D=dq.dtype,
-        layout_A=cutlass.LayoutType.RowMajor,
-        layout_B=cutlass.LayoutType.ColumnMajor,
-        layout_C=cutlass.LayoutType.RowMajor,
-        element_accumulator=torch.int32)
+    plan = cutlass.op.Gemm(element_A=x_q.dtype,
+                           element_B=w_q.dtype,
+                           element_C=dq.dtype,
+                           element_D=dq.dtype,
+                           layout_A=cutlass.LayoutType.RowMajor,
+                           layout_B=cutlass.LayoutType.ColumnMajor,
+                           layout_C=cutlass.LayoutType.RowMajor,
+                           element_accumulator=torch.int32)
 
     plan, visitor_args = setup_dequant_epilogue(plan, dq, static_scales,
                                                 activation_scales)

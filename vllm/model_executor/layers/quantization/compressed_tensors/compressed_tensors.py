@@ -35,18 +35,19 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_name(self) -> str:
         return "compressed_tensors"
-    
+
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["CompressedTensorsLinearMethod"]:
+            self, layer: torch.nn.Module
+    ) -> Optional["CompressedTensorsLinearMethod"]:
         if isinstance(layer, LinearBase):
             return CompressedTensorsLinearMethod(self)
         return None
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
-        layer_quant_details: Dict[str:Any] = dict()
-        ignore = config.get("ignore")
-        fake_quant = config.get("format") == "fakequant"
+        layer_quant_details: Dict[str, Any] = dict()
+        ignore: List[str] = config.get("ignore", None)
+        fake_quant: bool = config.get("format") == "fakequant"
 
         for key, quant_config in config["config_groups"].items():
             targets = quant_config.get("targets")
@@ -66,9 +67,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return ["config.json"]
 
     def _get_schema(self, weight_quant: Dict, input_quant: Dict):
-        # TODO: Will static vs dynamic be defined in the config?
-        # TODO: Expand conditions/break into separate fxs as other
-        # schemes are supported
+        # TODO: Refactor as additional cases are supported
 
         weight_bit = weight_quant.get("num_bits")
         input_bit = input_quant.get("num_bits")
@@ -90,11 +89,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             "Scheme not supported. Only 8-bit static symmtetric "
             "per tensor quantization is currently supported")
 
-    def get_scheme(self, layer: torch.nn.Module,
-                   layer_name: str) -> "CompressedTensorsScheme":
+    def get_scheme(
+            self,
+            layer: torch.nn.Module,
+            layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
 
         if layer_name is None:
-            raise ValueError("layer_name must be provided for CompressedTensorsConfig")
+            raise ValueError(
+                "layer_name must be provided for CompressedTensorsConfig")
 
         if layer_name in self.ignore:
             return CompressedTensorsUnquantized()
@@ -106,8 +108,11 @@ class CompressedTensorsConfig(QuantizationConfig):
             if target.lower() in layer_name_class:
                 layer_type_name = target
                 break
+        if layer_type_name is None:
+            raise ValueError(f"Could not matching target for layer {layer}")
 
-        layer_quant_details = self.layer_quant_details.get(layer_type_name)
+        layer_quant_details: Dict[str, Any] = self.layer_quant_details.get(
+            layer_type_name, None)
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer_name}.")
@@ -123,10 +128,13 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
 
-    def create_weights(self, layer: torch.nn.Module,
+    def create_weights(self,
+                       layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
+                       output_partition_sizes: List[int],
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
                        layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         """
@@ -146,11 +154,11 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             weight_loader=weight_loader)
 
         layer.scheme = scheme
-        
+
     def apply(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None):
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None):
         """
         Use the output of create_weights and the CompressedTensorsScheme associated with 
         the layer to apply the forward pass with the layer input.

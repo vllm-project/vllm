@@ -96,8 +96,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         # Register parameter with the layer; register weight loader with each parameter
         set_weight_attrs(weight, {"weight_loader": weight_loader})
-        set_weight_attrs(weight,
-                         {"logical_widths": output_partition_sizes})
+        set_weight_attrs(weight, {"logical_widths": output_partition_sizes})
 
         layer.register_parameter("input_scale", input_scale)
         set_weight_attrs(input_scale, {"weight_loader": weight_loader})

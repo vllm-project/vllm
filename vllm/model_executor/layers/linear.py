@@ -30,13 +30,15 @@ class LinearMethodBase(QuantizeMethodBase):
     """Base class for different (maybe quantized) linear methods."""
 
     @abstractmethod
-    def create_weights(self, layer: torch.nn.Module, 
+    def create_weights(self,
+                       layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
+                       output_partition_sizes: List[int],
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
                        layer_name: Optional[str] = None,
                        **extra_weight_attrs) -> Dict[str, Any]:
-      
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
         
@@ -74,10 +76,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
 
-    def create_weights(self, layer: torch.nn.Module,
+    def create_weights(self,
+                       layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
+                       output_partition_sizes: List[int],
+                       input_size: int,
+                       output_size: int,
+                       params_dtype: torch.dtype,
                        layer_name: Optional[str] = None,
                        **extra_weight_attrs) -> Dict[str, Any]:
         weight = Parameter(torch.empty(sum(output_partition_sizes),
@@ -113,15 +118,13 @@ class LinearBase(torch.nn.Module):
         layer_name: name of the layer in the state dict.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         super().__init__()
 
         # Keep input parameters
@@ -154,24 +157,25 @@ class ReplicatedLinear(LinearBase):
         quant_config: Quantization configure.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, layer_name)
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
-        self.quant_method.create_weights(self, self.input_size,
-                                         [self.output_size], self.input_size,
-                                         self.output_size, self.params_dtype, layer_name=self.layer_name)
+        self.quant_method.create_weights(self,
+                                         self.input_size, [self.output_size],
+                                         self.input_size,
+                                         self.output_size,
+                                         self.params_dtype,
+                                         layer_name=self.layer_name)
 
         if bias:
             self.bias = Parameter(
@@ -211,18 +215,16 @@ class ColumnParallelLinear(LinearBase):
         layer_name: name of the layer in the state dict.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        gather_output: bool = False,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        output_sizes: Optional[List[int]] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 gather_output: bool = False,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 output_sizes: Optional[List[int]] = None,
+                 layer_name: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, layer_name)
 
@@ -310,17 +312,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         quant_config: Quantization configure.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: List[int],
-        bias: bool = True,
-        gather_output: bool = False,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_sizes: List[int],
+                 bias: bool = True,
+                 gather_output: bool = False,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         self.output_sizes = output_sizes
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
@@ -460,18 +460,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         layer_name: name of the layer in the state dict.
     """
 
-    def __init__(
-        self,
-        hidden_size: int,
-        head_size: int,
-        total_num_heads: int,
-        total_num_kv_heads: Optional[int] = None,
-        bias: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 hidden_size: int,
+                 head_size: int,
+                 total_num_heads: int,
+                 total_num_kv_heads: Optional[int] = None,
+                 bias: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -652,18 +650,16 @@ class RowParallelLinear(LinearBase):
         layer_name: name of the layer in the state dict.
     """
 
-    def __init__(
-        self,
-        input_size: int,
-        output_size: int,
-        bias: bool = True,
-        input_is_parallel: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        reduce_results: bool = True,
-        quant_config: Optional[QuantizationConfig] = None,
-        layer_name: Optional[str] = None
-    ):
+    def __init__(self,
+                 input_size: int,
+                 output_size: int,
+                 bias: bool = True,
+                 input_is_parallel: bool = True,
+                 skip_bias_add: bool = False,
+                 params_dtype: Optional[torch.dtype] = None,
+                 reduce_results: bool = True,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 layer_name: Optional[str] = None):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config, layer_name)
 
