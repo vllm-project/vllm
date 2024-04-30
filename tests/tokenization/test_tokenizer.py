@@ -12,7 +12,7 @@ TOKENIZER_NAMES = [
 @pytest.mark.parametrize("tokenizer_name", TOKENIZER_NAMES)
 def test_tokenizer_revision(tokenizer_name: str):
     # Assume that "main" branch always exists
-    tokenizer = get_tokenizer(tokenizer_name, revision="main")
+    tokenizer, _ = get_tokenizer(tokenizer_name, revision="main")
     assert isinstance(tokenizer, PreTrainedTokenizerBase)
 
     # Assume that "never" branch always does not exist

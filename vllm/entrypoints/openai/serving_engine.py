@@ -33,7 +33,8 @@ class LoRAModulePath:
 class OpenAIServing:
 
     def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 shared_tokenizer: Optional[bool] = True):
         self.engine = engine
         self.served_model_names = served_model_names
         if lora_modules is None:
@@ -50,6 +51,7 @@ class OpenAIServing:
         self.max_model_len = 0
         # Lazy initialized
         self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
+        self.shared_tokenizer = shared_tokenizer
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -69,7 +71,7 @@ class OpenAIServing:
         self.max_model_len = engine_model_config.max_model_len
 
         # A separate tokenizer to map token IDs to strings.
-        self.tokenizer = get_tokenizer(
+        self.tokenizer, hf_tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
             tokenizer_revision=engine_model_config.tokenizer_revision,
@@ -77,9 +79,10 @@ class OpenAIServing:
             truncation_side="left")
 
         # tokenizer json required to be informed
-        self.tokenizer_jsons = self._get_tokenizer_jsons()
+        if self.shared_tokenizer:
+            self.tokenizer_jsons = self._get_tokenizer_jsons(hf_tokenizer)
 
-    def _get_tokenizer_jsons(self) -> Dict[str, Dict]:
+    def _get_tokenizer_jsons(self, hf_tokenizer) -> Dict[str, Dict]:
         """Get tokenizer jsons been used"""
         CURRENT_DIR = os.path.dirname(__file__)
         EPHIMERAL_FOLDER_NAME = "tmp_tokenizer"
@@ -87,7 +90,7 @@ class OpenAIServing:
             os.path.join(CURRENT_DIR, EPHIMERAL_FOLDER_NAME))
 
         # save tokenizer files in ephimeral folder
-        self.tokenizer.save_pretrained(TOKENIZER_EPHIMERAL_PATH.absolute())
+        hf_tokenizer.save_pretrained(TOKENIZER_EPHIMERAL_PATH.absolute())
         tmp_list = [i for i in TOKENIZER_EPHIMERAL_PATH.glob("*.json")]
 
         # populate tokenizer json

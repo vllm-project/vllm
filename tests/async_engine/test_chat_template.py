@@ -108,7 +108,7 @@ def test_no_load_chat_template_literallike():
 async def test_get_gen_prompt(model, template, add_generation_prompt,
                               expected_output):
     # Initialize the tokenizer
-    tokenizer = get_tokenizer(tokenizer_name=model)
+    tokenizer, _ = get_tokenizer(tokenizer_name=model)
     mock_serving_chat = MockServingChat(tokenizer)
     OpenAIServingChat._load_chat_template(mock_serving_chat,
                                           chat_template=template)

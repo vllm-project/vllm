@@ -463,7 +463,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    tokenizer, _ = get_tokenizer(tokenizer_name=MODEL_NAME)
 
     # Test exclusive selection
     token_id = 1000
@@ -827,7 +827,7 @@ number: "1" | "2"
 )
 async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
                                        model_name: str):
-    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    tokenizer, _ = get_tokenizer(tokenizer_name=MODEL_NAME)
     # test using text and token IDs
     for prompt in ("Hello, my name is", [0, 0, 0, 0, 0]):
         completion = await client.completions.create(model=model_name,

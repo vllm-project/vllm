@@ -74,7 +74,11 @@ async def health() -> Response:
 
 @app.get("/v1/get_tokenizer")
 async def get_tokenizer():
-    return JSONResponse(content=openai_serving_chat.tokenizer_jsons)
+    if openai_serving_chat.shared_tokenizer:
+        return JSONResponse(content=openai_serving_chat.tokenizer_jsons)
+    else:
+        return JSONResponse(content={"error": "No shared tokenizer"},
+                            status_code=HTTPStatus.BAD_REQUEST)
 
 
 @app.get("/v1/models")
@@ -166,9 +170,10 @@ if __name__ == "__main__":
     openai_serving_chat = OpenAIServingChat(engine, served_model_names,
                                             args.response_role,
                                             args.lora_modules,
+                                            args.shared_tokenizer,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model_names, args.lora_modules)
+        engine, served_model_names, args.lora_modules, args.shared_tokenizer)
 
     app.root_path = args.root_path
     uvicorn.run(app,

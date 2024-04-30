@@ -37,10 +37,12 @@ class OpenAIServingChat(OpenAIServing):
                  served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRAModulePath]] = None,
+                 shared_tokenizer: Optional[bool] = True,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         shared_tokenizer=shared_tokenizer)
         self.response_role = response_role
         self._load_chat_template(chat_template)
 

@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 from typing import Optional, Union
 
 import huggingface_hub
@@ -126,7 +127,8 @@ def get_tokenizer(
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
-    return get_cached_tokenizer(tokenizer)
+    hf_tokenizer = deepcopy(tokenizer)
+    return get_cached_tokenizer(tokenizer), hf_tokenizer
 
 
 def get_lora_tokenizer(lora_request: LoRARequest, *args,

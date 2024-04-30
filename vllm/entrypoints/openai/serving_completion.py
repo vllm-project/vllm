@@ -55,10 +55,12 @@ class OpenAIServingCompletion(OpenAIServing):
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]] = None,
+                 shared_tokenizer: Optional[bool] = True):
         super().__init__(engine=engine,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         shared_tokenizer=shared_tokenizer)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):

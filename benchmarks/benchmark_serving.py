@@ -346,8 +346,8 @@ def main(args: argparse.Namespace):
     else:
         api_url = f"http://{args.host}:{args.port}{args.endpoint}"
 
-    tokenizer = get_tokenizer(tokenizer_id,
-                              trust_remote_code=args.trust_remote_code)
+    tokenizer, _ = get_tokenizer(tokenizer_id,
+                                 trust_remote_code=args.trust_remote_code)
 
     if args.dataset is not None:
         warnings.warn(

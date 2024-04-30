@@ -64,6 +64,10 @@ def make_arg_parser():
                         "list. If not specified, the model name will be the "
                         "same as the `--model` argument.")
     parser.add_argument(
+        "--shared-tokenizer",
+        action='store_true',
+        help="Allow to share the tokenizer with /v1/get_tokenizer api path")
+    parser.add_argument(
         "--lora-modules",
         type=str,
         default=None,
