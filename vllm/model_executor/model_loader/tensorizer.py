@@ -44,7 +44,7 @@ class TensorizerConfig:
                           str, bytes, os.PathLike, int]
     vllm_tensorized: bool
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -104,7 +104,7 @@ class TensorizerArgs:
                           str, bytes, os.PathLike, int]
     vllm_tensorized: bool
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -125,8 +125,9 @@ class TensorizerArgs:
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
       num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is 1. This greatly increases
-          performance.
+          from the source file. Default is `None`, which will dynamically set
+          the number of readers based on the number of available 
+          resources and model size. This greatly increases performance.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
@@ -199,10 +200,12 @@ class TensorizerArgs:
             "use for decryption. Can be a file path or S3 network URI.")
         group.add_argument(
             "--num-readers",
-            default=1,
+            default=None,
             type=int,
             help="Controls how many threads are allowed to read concurrently "
-            "from the source file.")
+            "from the source file. Default is `None`, which will dynamically "
+            "set the number of readers based on the available resources "
+            "and model size. This greatly increases performance.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
@@ -337,7 +340,7 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info("Deserialized %s in %0.2fs, %f/s", total_bytes_str,
+        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
                     end - start, per_second)
         logger.info("Memory usage before: %s", before_mem)
         logger.info("Memory usage after: %s", after_mem)
