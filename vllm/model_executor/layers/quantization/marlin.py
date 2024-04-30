@@ -73,9 +73,7 @@ class MarlinConfig(QuantizationConfig):
         return cls(group_size)
 
     def get_quant_method(
-            self,
-            layer: torch.nn.Module,
-            is_lm_head: bool = False) -> Optional["MarlinLinearMethod"]:
+            self, layer: torch.nn.Module) -> Optional["MarlinLinearMethod"]:
         if isinstance(layer, LinearBase):
             return MarlinLinearMethod(self)
         return None

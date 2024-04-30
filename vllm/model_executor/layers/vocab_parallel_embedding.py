@@ -70,10 +70,7 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         quant_method = None
         if quant_config is not None:
-            quant_method = quant_config.get_quant_method(self,
-                                                         is_lm_head=isinstance(
-                                                             self,
-                                                             ParallelLMHead))
+            quant_method = quant_config.get_quant_method(self)
 
         # lm_head may be quantized
         if quant_method is not None:
