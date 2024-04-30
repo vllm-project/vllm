@@ -231,6 +231,7 @@ class AQLMLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
+                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         del output_size  # Unused.
         del input_size  # Unused.

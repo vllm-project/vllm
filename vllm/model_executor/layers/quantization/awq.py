@@ -86,6 +86,7 @@ class AWQLinearMethod(LinearMethodBase):
                        input_size_per_partition: int,
                        output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
+                       layer_name: Optional[str] = None,
                        **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.group_size != 0:
             raise ValueError(

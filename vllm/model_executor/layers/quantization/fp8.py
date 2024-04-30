@@ -79,6 +79,7 @@ class Fp8LinearMethod(LinearMethodBase):
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
+        layer_name: Optional[str] = None,
         **extra_weight_attrs,
     ):
         output_size_per_partition = sum(output_partition_sizes)
