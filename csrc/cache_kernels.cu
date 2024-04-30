@@ -318,7 +318,7 @@ void reshape_and_cache_flash(
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
-  // FIXME: only suport auto datatype, does not support fp8
+  // FIXME: only support auto datatype, does not support fp8
   if (kv_cache_dtype != "auto") {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
