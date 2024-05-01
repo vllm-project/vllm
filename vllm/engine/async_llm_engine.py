@@ -23,16 +23,25 @@ ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
 def resolve_environ_as_type(name:str, datatype):
-    """Resolve environmental variable by name as given datatype if exists, otherwise return `None`."""
+    """
+    Resolve environmental variable by name as given datatype if exists, 
+    otherwise return `None`.
+    """
     ret = os.environ.get(name, None)
     if ret is not None:
         ret = datatype(ret)
     return ret
 
-ENGINE_MAX_CONCURRENT_REQUESTS = resolve_environ_as_type("VLLM_ENGINE_MAX_CONCURRENT_REQUESTS", int)
+ENGINE_MAX_CONCURRENT_REQUESTS = resolve_environ_as_type(
+  "VLLM_ENGINE_MAX_CONCURRENT_REQUESTS", 
+  int
+)
 """Max concurrent requests to process at anytime, if set."""
 
-ENGINE_MAX_REQUEST_LIFESPAN = resolve_environ_as_type("VLLM_ENGINE_REQUEST_LIFESPAN", int)
+ENGINE_MAX_REQUEST_LIFESPAN = resolve_environ_as_type(
+  "VLLM_ENGINE_REQUEST_LIFESPAN", 
+  int
+)
 """Max lifespan in seconds for any request, if set."""
 
 class AsyncEngineDeadError(RuntimeError):
@@ -160,29 +169,42 @@ class RequestTracker:
         for k,v in self.running_requests.items():
             lifespan = arrival_time - v
             if lifespan > ENGINE_MAX_REQUEST_LIFESPAN:
-                print("Aborting request due to lifespan policy:", k)
+                print(
+                  "Aborting request due to lifespan policy:",
+                  k
+                )
                 self.abort_request(k)
 
     def kill_quota_exceeding_requests(self):
         """Kill every request that exceeding max concurrency request limit."""
         running_requests = [(k,v) for k,v in self.running_requests.items()]
-        running_requests.sort(key = lambda it: it[1]) # smallest first, so oldest will be first, and oldest will be killed first
+        running_requests.sort(key = lambda it: it[1])
+        # smallest first, so oldest will be first
+        # and oldest will be killed first
           
         total_running_requests = len(running_requests)
-        out_of_quota_running_requests = total_running_requests-ENGINE_MAX_CONCURRENT_REQUESTS
+        out_of_quota_running_requests = (
+          total_running_requests - ENGINE_MAX_CONCURRENT_REQUESTS
+        )
         if out_of_quota_running_requests > 0:
             for i in range(out_of_quota_running_requests):
                 k, _ = running_requests[i]
-                print("Aborting request due to max concurrency policy:", k)
+                print(
+                  "Aborting request due to max concurrency policy:",
+                  k
+                )
                 self.abort_request(k)
   
     def perform_retention(self, request_id:str, arrival_time:Optional[float]):
         """
-        Remove running requests based on retention policies specified by the following environment variables:
+        Remove running requests based on retention policies 
+        specified by the following environment variables:
         
-        - ENGINE_MAX_CONCURRENT_REQUESTS: Max concurrent requests to process at anytime, if set.
+        - ENGINE_MAX_CONCURRENT_REQUESTS:
+        Max concurrent requests to process at anytime, if set.
 
-        - ENGINE_MAX_REQUEST_LIFESPAN: Max lifespan in seconds for any request, if set.
+        - ENGINE_MAX_REQUEST_LIFESPAN:
+        Max lifespan in seconds for any request, if set.
         """
         if arrival_time is None:
             arrival_time = time.time()
@@ -203,7 +225,10 @@ class RequestTracker:
             raise KeyError(f"Request {request_id} already exists.")
 
         # do retention here
-        self.perform_retention(request_id, engine_add_request_kwargs.get("arrival_time", None))
+        self.perform_retention(
+          request_id, 
+          engine_add_request_kwargs.get("arrival_time", None)
+        )
 
         stream = AsyncStream(request_id)
         self._new_requests.put_nowait((stream, {
