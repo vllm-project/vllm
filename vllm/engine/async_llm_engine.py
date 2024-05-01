@@ -7,10 +7,10 @@ from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
 
 from transformers import PreTrainedTokenizer
 
-from vllm.config import ModelConfig
+from vllm.config import DecodingConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.engine.ray_utils import initialize_ray_cluster, ray
+from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -117,7 +117,7 @@ class RequestTracker:
         self._request_streams[request_id].put(request_output)
         if request_output.finished:
             if verbose:
-                logger.info(f"Finished request {request_id}.")
+                logger.info("Finished request %s.", request_id)
             self.abort_request(request_id)
 
     def process_exception(self,
@@ -128,7 +128,7 @@ class RequestTracker:
         """Propagate an exception from the engine."""
         self._request_streams[request_id].put(exception)
         if verbose:
-            logger.info(f"Finished request {request_id}.")
+            logger.info("Finished request %s.", request_id)
         self.abort_request(request_id)
 
     def add_request(self, request_id: str,
@@ -151,7 +151,7 @@ class RequestTracker:
     def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
-            logger.info(f"Aborted request {request_id}.")
+            logger.info("Aborted request %s.", request_id)
 
         self._finished_requests.put_nowait(request_id)
 
@@ -219,7 +219,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups)
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
         if self.log_stats:
@@ -521,11 +521,11 @@ class AsyncLLMEngine:
                 if shortened_token_ids is not None:
                     shortened_token_ids = shortened_token_ids[:self.
                                                               max_log_len]
-            logger.info(f"Received request {request_id}: "
-                        f"prompt: {shortened_prompt!r}, "
-                        f"sampling_params: {sampling_params}, "
-                        f"prompt_token_ids: {shortened_token_ids}, "
-                        f"lora_request: {lora_request}.")
+            logger.info(
+                "Received request %s: prompt: %r, "
+                "sampling_params: %s, prompt_token_ids: %s, "
+                "lora_request: %s.", request_id, shortened_prompt,
+                sampling_params, shortened_token_ids, lora_request)
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -697,6 +697,14 @@ class AsyncLLMEngine:
         else:
             return self.engine.get_model_config()
 
+    async def get_decoding_config(self) -> DecodingConfig:
+        """Get the decoding configuration of the vLLM engine."""
+        if self.engine_use_ray:
+            return await self.engine.get_decoding_config.remote(  # type: ignore
+            )
+        else:
+            return self.engine.get_decoding_config()
+
     async def do_log_stats(self) -> None:
         if self.engine_use_ray:
             await self.engine.do_log_stats.remote()  # type: ignore
@@ -717,4 +725,4 @@ class AsyncLLMEngine:
                 raise RuntimeError("Engine is dead.") from e
         else:
             await self.engine.check_health_async()
-        logger.debug(f"Health check took {time.perf_counter()-t}s")
+        logger.debug("Health check took %fs", time.perf_counter() - t)

@@ -1,6 +1,6 @@
 import os
 from contextlib import contextmanager
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -18,7 +18,7 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-_CA_HANDLE = None
+_CA_HANDLE: Optional["CustomAllreduce"] = None
 _IS_CAPTURING = False
 _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
@@ -37,7 +37,7 @@ def init_custom_ar() -> None:
         return
 
     if world_size not in _SUPPORTED_WORLD_SIZES:
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled due to an unsupported world size: "
             "%d. Supported world sizes: %s. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.", world_size,
@@ -47,11 +47,11 @@ def init_custom_ar() -> None:
     # note: num dev can be larger than world_size if we're only using
     # first few GPUs
     if num_dev < world_size:
-        logger.warn(
+        logger.warning(
             "Cannot test GPU P2P because not all GPUs are visible to the "
             "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
             " is set.")
-        return False
+        return
     # test nvlink first, this will filter out most of the cases
     # where custom allreduce is not supported
     if "CUDA_VISIBLE_DEVICES" in os.environ:
@@ -62,7 +62,7 @@ def init_custom_ar() -> None:
     # this checks hardware and driver support for NVLink
     full_nvlink = _is_full_nvlink(device_ids)
     if world_size > 2 and not full_nvlink:
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled because it's not supported on more"
             " than two PCIe-only GPUs. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
@@ -71,7 +71,7 @@ def init_custom_ar() -> None:
     # this is expensive to compute at the first time
     # then we cache the result
     if not _can_p2p(rank, world_size):
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled because your platform lacks GPU P2P"
             " capability or P2P test failed. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
@@ -117,7 +117,7 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
     ca_handle = get_handle()
     # when custom allreduce is disabled, this will be None
     if ca_handle is None:
-        return
+        return None
     if is_capturing():
         if torch.cuda.is_current_stream_capturing():
             if ca_handle.should_custom_ar(input):
@@ -134,6 +134,8 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
         # gains of using custom kernels
         if ca_handle.should_custom_ar(input):
             return ca_handle.all_reduce_unreg(input)
+
+    return None
 
 
 @contextmanager
@@ -224,14 +226,14 @@ class CustomAllreduce:
         return self._gather_ipc_meta(shard_data)
 
     def _gather_ipc_meta(self, shard_data):
-        all_data = [None] * self.world_size
+        all_data: List[Optional[Any]] = [None] * self.world_size
         dist.all_gather_object(all_data, shard_data)
 
         handles = []
         offsets = []
         for i in range(len(all_data)):
-            handles.append(all_data[i][0])
-            offsets.append(all_data[i][1])
+            handles.append(all_data[i][0])  # type: ignore
+            offsets.append(all_data[i][1])  # type: ignore
         return handles, offsets
 
     def register_buffer(self, inp: torch.Tensor):

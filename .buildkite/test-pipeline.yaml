@@ -96,6 +96,9 @@ steps:
 - label: Metrics Test
   command: pytest -v -s metrics
 
+- label: Quantization Test
+  command: pytest -v -s quantization
+
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
   commands:

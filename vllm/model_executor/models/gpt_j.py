@@ -26,10 +26,11 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -44,7 +45,7 @@ class GPTJAttention(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
@@ -56,13 +57,13 @@ class GPTJAttention(nn.Module):
             self.head_size,
             self.total_num_heads,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.out_proj = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -105,21 +106,20 @@ class GPTJMLP(nn.Module):
         self,
         intermediate_size: int,
         config: GPTJConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.n_embd
         self.fc_in = ColumnParallelLinear(
             hidden_size,
             intermediate_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.fc_out = RowParallelLinear(
             intermediate_size,
             hidden_size,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.activation_function, quant_config,
                               intermediate_size)
 
@@ -135,14 +135,14 @@ class GPTJBlock(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         inner_dim = (4 * config.n_embd
                      if config.n_inner is None else config.n_inner)
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
-        self.attn = GPTJAttention(config, linear_method)
-        self.mlp = GPTJMLP(inner_dim, config, linear_method)
+        self.attn = GPTJAttention(config, quant_config)
+        self.mlp = GPTJMLP(inner_dim, config, quant_config)
 
     def forward(
         self,
@@ -169,7 +169,7 @@ class GPTJModel(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -179,7 +179,7 @@ class GPTJModel(nn.Module):
             self.embed_dim,
         )
         self.h = nn.ModuleList(
-            [GPTJBlock(config, linear_method) for _ in range(config.n_layer)])
+            [GPTJBlock(config, quant_config) for _ in range(config.n_layer)])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -207,13 +207,13 @@ class GPTJForCausalLM(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
+        self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(config, linear_method)
+        self.transformer = GPTJModel(config, quant_config)
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.n_embd,
