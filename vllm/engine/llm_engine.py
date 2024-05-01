@@ -1800,6 +1800,7 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
+        num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
@@ -1915,7 +1916,8 @@ class LLMEngine:
             num_generation_tokens_iter = (
                 actual_num_batched_tokens - num_prompt_tokens_iter +
                 num_generation_tokens_from_prefill_groups)
-
+            num_tokens_iter = (num_generation_tokens_iter +
+                               num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
         if model_output and (model_output[0].spec_decode_worker_metrics
@@ -1941,6 +1943,7 @@ class LLMEngine:
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
             num_generation_tokens_iter=num_generation_tokens_iter,
+            num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
