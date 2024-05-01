@@ -13,7 +13,6 @@ from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
 from vllm.logger import init_logger
-from vllm.utils import enable_trace_function_call_for_thread
 
 logger = init_logger(__name__)
 
@@ -25,9 +24,11 @@ _TERMINATE = "TERMINATE"  # sentinel
 CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
+JOIN_TIMEOUT_S = 1
+
 # Use dedicated multiprocess context for workers.
 # Both spawn and fork work
-mp_method = os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+mp_method = os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 mp = multiprocessing.get_context(mp_method)
 
 
@@ -114,7 +115,7 @@ class WorkerMonitor(threading.Thread):
             for worker in self.workers:
                 process = worker.process
                 if process.sentinel in dead_sentinels:
-                    process.join(1)
+                    process.join(JOIN_TIMEOUT_S)
                 if process.exitcode is not None and process.exitcode != 0:
                     logger.error("Worker %s pid %s died, exit code: %s",
                                  process.name, process.pid, process.exitcode)
@@ -126,7 +127,7 @@ class WorkerMonitor(threading.Thread):
             self.result_handler.close()
 
         for worker in self.workers:
-            worker.process.join(2)
+            worker.process.join(JOIN_TIMEOUT_S)
 
     def close(self):
         if self._close:
@@ -205,9 +206,7 @@ def _run_worker_process(
     _add_prefix(sys.stdout, process_name, pid)
     _add_prefix(sys.stderr, process_name, pid)
 
-    # Set up function call tracing if enabled via env var
-    enable_trace_function_call_for_thread()
-
+    # Initialize worker
     worker = worker_factory()
     del worker_factory
 
