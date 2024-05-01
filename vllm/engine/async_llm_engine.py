@@ -169,7 +169,7 @@ class RequestTracker:
         running_requests.sort(key = lambda it: it[1]) # smallest first, so oldest will be first, and oldest will be killed first
           
         total_running_requests = len(running_requests)
-        out_of_quota_running_requests = total_running_requests-VLLM_ENGINE_MAX_CONCURRENT_REQUESTS
+        out_of_quota_running_requests = total_running_requests-ENGINE_MAX_CONCURRENT_REQUESTS
         if out_of_quota_running_requests > 0:
             for i in range(out_of_quota_running_requests):
                 k, _ = running_requests[i]
