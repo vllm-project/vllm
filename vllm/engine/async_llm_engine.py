@@ -22,7 +22,8 @@ logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
-def resolve_environ_as_type(name:str, datatype):
+
+def resolve_environ_as_type(name: str, datatype):
     """
     Resolve environmental variable by name as given datatype if exists, 
     otherwise return `None`.
@@ -32,17 +33,15 @@ def resolve_environ_as_type(name:str, datatype):
         ret = datatype(ret)
     return ret
 
+
 ENGINE_MAX_CONCURRENT_REQUESTS = resolve_environ_as_type(
-  "VLLM_ENGINE_MAX_CONCURRENT_REQUESTS", 
-  int
-)
+    "VLLM_ENGINE_MAX_CONCURRENT_REQUESTS", int)
 """Max concurrent requests to process at anytime, if set."""
 
 ENGINE_MAX_REQUEST_LIFESPAN = resolve_environ_as_type(
-  "VLLM_ENGINE_REQUEST_LIFESPAN", 
-  int
-)
+    "VLLM_ENGINE_REQUEST_LIFESPAN", int)
 """Max lifespan in seconds for any request, if set."""
+
 
 class AsyncEngineDeadError(RuntimeError):
     pass
@@ -164,38 +163,32 @@ class RequestTracker:
             del self._running_requests[request_id]
         return self._running_requests
 
-    def kill_outdated_requests(self,arrival_time:float):
+    def kill_outdated_requests(self, arrival_time: float):
         """Kill every outdated running request."""
-        for k,v in self.running_requests.items():
+        for k, v in self.running_requests.items():
             lifespan = arrival_time - v
             if lifespan > ENGINE_MAX_REQUEST_LIFESPAN:
-                print(
-                  "Aborting request due to lifespan policy:",
-                  k
-                )
+                print("Aborting request due to lifespan policy:", k)
                 self.abort_request(k)
 
     def kill_quota_exceeding_requests(self):
         """Kill every request that exceeding max concurrency request limit."""
-        running_requests = [(k,v) for k,v in self.running_requests.items()]
-        running_requests.sort(key = lambda it: it[1])
+        running_requests = [(k, v) for k, v in self.running_requests.items()]
+        running_requests.sort(key=lambda it: it[1])
         # smallest first, so oldest will be first
         # and oldest will be killed first
-          
+
         total_running_requests = len(running_requests)
-        out_of_quota_running_requests = (
-          total_running_requests - ENGINE_MAX_CONCURRENT_REQUESTS
-        )
+        out_of_quota_running_requests = (total_running_requests -
+                                         ENGINE_MAX_CONCURRENT_REQUESTS)
         if out_of_quota_running_requests > 0:
             for i in range(out_of_quota_running_requests):
                 k, _ = running_requests[i]
-                print(
-                  "Aborting request due to max concurrency policy:",
-                  k
-                )
+                print("Aborting request due to max concurrency policy:", k)
                 self.abort_request(k)
-  
-    def perform_retention(self, request_id:str, arrival_time:Optional[float]):
+
+    def perform_retention(self, request_id: str,
+                          arrival_time: Optional[float]):
         """
         Remove running requests based on retention policies 
         specified by the following environment variables:
@@ -226,9 +219,7 @@ class RequestTracker:
 
         # do retention here
         self.perform_retention(
-          request_id, 
-          engine_add_request_kwargs.get("arrival_time", None)
-        )
+            request_id, engine_add_request_kwargs.get("arrival_time", None))
 
         stream = AsyncStream(request_id)
         self._new_requests.put_nowait((stream, {
@@ -243,9 +234,9 @@ class RequestTracker:
     def check_if_request_has_finished(self, request_id: str) -> bool:
         """Check if a request has already finished."""
         ret = request_id not in self._request_streams or self._request_streams[
-                request_id].finished
+            request_id].finished
         return ret
-    
+
     def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
