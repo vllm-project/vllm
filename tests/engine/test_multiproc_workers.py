@@ -108,7 +108,7 @@ def test_local_workers_clean_shutdown() -> None:
     # Clean shutdown
     worker_monitor.close()
 
-    worker_monitor.join(2)
+    worker_monitor.join(5)
 
     # Ensure everything is stopped
     assert not worker_monitor.is_alive()

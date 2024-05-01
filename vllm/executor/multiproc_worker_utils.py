@@ -24,7 +24,7 @@ _TERMINATE = "TERMINATE"  # sentinel
 CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
-JOIN_TIMEOUT_S = 1
+JOIN_TIMEOUT_S = 2
 
 # Use dedicated multiprocess context for workers.
 # Both spawn and fork work
