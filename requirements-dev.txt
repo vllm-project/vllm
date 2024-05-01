@@ -20,7 +20,10 @@ pytest-asyncio
 pytest-rerunfailures
 pytest-shard
 httpx
-einops # required for MPT
+einops # required for MPT testing
+bitsandbytes # required for baichuan testing
+transformers_stream_generator # required for qwen1 testing
+sentencepiece # required for sentencepiece testing
 requests
 ray
 peft
