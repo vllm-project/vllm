@@ -356,6 +356,10 @@ class PrefixCachingBlock(Block):
         prefix_caching_allocator: BlockAllocator,
         block_id: Optional[int] = None,
     ):
+        assert isinstance(prefix_caching_allocator,
+                          PrefixCachingBlockAllocator), (
+                              "Currently this class is only tested with "
+                              "PrefixCachingBlockAllocator.")
         assert_prefix_caching_block_or_none(prev_block)
 
         self._prev_block = prev_block
@@ -437,12 +441,12 @@ class PrefixCachingBlock(Block):
         if not self.is_full:
             return None
 
-        if self._prev_block is not None:
-            prev_block_hash = self._prev_block.content_hash
-        else:
-            prev_block_hash = None
+        is_first_block = self._prev_block is None
+        prev_block_hash = (
+            None if is_first_block else
+            self._prev_block.content_hash  # type: ignore
+        )
 
-        is_first_block = prev_block_hash is None
         # Previous block exists but does not yet have a hash.
         # Return no hash in this case.
         if prev_block_hash is None and not is_first_block:

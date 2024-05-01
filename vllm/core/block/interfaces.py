@@ -58,10 +58,13 @@ class Block(ABC):
     @property
     @abstractmethod
     def content_hash(self) -> Optional[int]:
-        """If the block doesn't support content hash, it should raise an
-            exception.
+        """Return the content-based hash of the current block, or None if it is
+        not yet defined or not supported.
+
+        For the content-based hash to be defined, the current block must be
+        full.
         """
-        pass
+        return None
 
 
 class BlockAllocator(ABC):

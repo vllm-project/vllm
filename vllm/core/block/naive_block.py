@@ -288,4 +288,4 @@ class NaiveBlock(Block):
 
     @property
     def content_hash(self) -> Optional[int]:
-        raise NotImplementedError
+        return None

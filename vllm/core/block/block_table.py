@@ -106,7 +106,7 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be appended.
         """
         assert self._is_allocated
-        assert self._blocks is not None
+        assert len(self._blocks) > 0
 
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)
@@ -143,6 +143,7 @@ class BlockTable:
         blocks_to_allocate = cdiv(slots_to_allocate, self._block_size)
 
         for _ in range(blocks_to_allocate):
+            assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable(prev_block=self._blocks[-1],
                                                  device=device))
@@ -161,6 +162,7 @@ class BlockTable:
                 the current instance.
         """
         assert self._is_allocated
+        assert len(self._blocks) > 0
         forked_blocks = self._allocator.fork(self._blocks[-1])
         return BlockTable(
             block_size=self._block_size,
