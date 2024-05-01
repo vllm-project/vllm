@@ -6,7 +6,7 @@ import numpy
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
