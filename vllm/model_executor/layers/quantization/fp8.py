@@ -9,7 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.model_loader.weight_utils import all_close_1d
 from vllm.model_executor.utils import set_weight_attrs
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -245,6 +244,11 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         return output
+
+
+def all_close_1d(x: torch.Tensor) -> bool:
+    assert len(x.shape) == 1
+    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
 
 
 def per_tensor_quantize(tensor: torch.Tensor,
