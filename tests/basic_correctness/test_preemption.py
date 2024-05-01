@@ -1,12 +1,23 @@
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
+VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 has to be set before running this test.
+
+Run `VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1
 pytest tests/basic_correctness/test_preemption.py`.
 """
 import pytest
 
+from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
+                                 ENABLE_ARTIFICIAL_PREEMPT)
+
 MODELS = [
     "facebook/opt-125m",
 ]
+
+assert ENABLE_ARTIFICIAL_PREEMPT is True, (
+    "Use an env var VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1. "
+    "`VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest "
+    "tests/basic_correctness/test_preemption.py`")
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -40,11 +51,10 @@ def test_chunked_prefill_recompute(
         max_num_batched_tokens=max_num_batched_tokens,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_seqs=max_num_seqs,
-        num_gpu_blocks_override=2 + 256 // 8,
-        max_model_len=(2 + 256 // 8) * 8,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    assert vllm_model.model.llm_engine.scheduler.total_preempted > 0
+    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+            ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -76,11 +86,10 @@ def test_preemption(
     vllm_model = vllm_runner(
         model,
         dtype=dtype,
-        num_gpu_blocks_override=2 + 256 // 8,
-        max_model_len=(2 + 256 // 8) * 8,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    assert vllm_model.model.llm_engine.scheduler.total_preempted > 0
+    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+            ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -112,16 +121,11 @@ def test_swap(
                                                max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        swap_space=10,
-        num_gpu_blocks_override=2 + 256 // 8,
-        max_model_len=(2 + 256 // 8) * 8,
-    )
+    vllm_model = vllm_runner(model, dtype=dtype, swap_space=10)
     vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
-    assert vllm_model.model.llm_engine.scheduler.total_preempted > 0
+    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+            ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
 
     for i in range(len(example_prompts)):
