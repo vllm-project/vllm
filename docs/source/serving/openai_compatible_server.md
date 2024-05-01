@@ -4,7 +4,7 @@ vLLM provides an HTTP server that implements OpenAI's [Completions](https://plat
 
 You can start the server using Python, or using [Docker](deploying_with_docker.rst):
 ```bash
-python -m vllm.entrypoints.openai.api_server --model mistralai/Mistral-7B-Instruct-v0.2 --dtype auto --api-key token-abc123
+python -m vllm.entrypoints.openai.api_server --model NousResearch/Meta-Llama-3-8B-Instruct --dtype auto --api-key token-abc123
 ```
 
 To call the server, you can use the official OpenAI Python client library, or any other HTTP client.
@@ -16,7 +16,7 @@ client = OpenAI(
 )
 
 completion = client.chat.completions.create(
-  model="mistralai/Mistral-7B-Instruct-v0.2",
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
   messages=[
     {"role": "user", "content": "Hello!"}
   ]
@@ -37,7 +37,7 @@ Or directly merge them into the JSON payload if you are using HTTP call directly
 
 ```python
 completion = client.chat.completions.create(
-  model="mistralai/Mistral-7B-Instruct-v0.2",
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
   messages=[
     {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
   ],
@@ -87,7 +87,7 @@ In order for the language model to support chat protocol, vLLM requires the mode
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
 specifies how are roles, messages, and other chat-specific tokens are encoded in the input.
 
-An example chat template for `mistralai/Mistral-7B-Instruct-v0.2` can be found [here](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.2#instruction-format)
+An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
 
 Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those model,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
