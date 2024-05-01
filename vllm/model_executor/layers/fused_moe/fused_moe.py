@@ -208,8 +208,8 @@ def moe_align_block_size(
                              dtype=torch.int32,
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
-    num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((num_m_blocks, ),
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty((max_num_m_blocks, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
