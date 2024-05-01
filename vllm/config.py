@@ -189,6 +189,7 @@ class ModelConfig:
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
             if (self.quantization not in ["marlin", "gptq_marlin"]):
+                logger_data = {"quantization": self.quantization}
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
