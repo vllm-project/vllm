@@ -128,6 +128,8 @@ class SchedulerOutputs:
     ignored_seq_groups: List[SequenceGroup]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
+    # The number of requests in the running queue
+    running_queue_size: int
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -797,6 +799,7 @@ class Scheduler:
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            running_queue_size=len(self.running),
         )
 
     def _schedule_chunked_prefill(self):
@@ -883,6 +886,7 @@ class Scheduler:
                                        swapped_in.blocks_to_copy),
             ignored_seq_groups=prefills.ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
+            running_queue_size=len(self.running),
         )
 
     def _schedule(self) -> SchedulerOutputs:
