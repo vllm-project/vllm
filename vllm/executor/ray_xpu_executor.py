@@ -8,7 +8,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
 from vllm.engine.ray_utils import RayWorkerWrapper, ray
-from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
+from vllm.executor.distributed_gpu_executor import (
+    DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -29,7 +30,7 @@ logger = init_logger(__name__)
 USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
 
 
-class RayXPUExecutor(ExecutorBase):
+class RayXPUExecutor(DistributedGPUExecutor):
 
     def __init__(
         self,
@@ -389,7 +390,11 @@ class RayXPUExecutor(ExecutorBase):
                                f"Dead Workers: {dead_actors}. ")
 
 
-class RayXPUExecutorAsync(RayXPUExecutor, ExecutorAsyncBase):
+class RayXPUExecutorAsync(RayXPUExecutor, DistributedGPUExecutorAsync):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.driver_executor = make_async(self.driver_worker.execute_method)
 
     async def _run_workers_async(
         self,
@@ -417,27 +422,3 @@ class RayXPUExecutorAsync(RayXPUExecutor, ExecutorAsyncBase):
 
         all_outputs = await asyncio.gather(*coros)
         return all_outputs
-
-    async def execute_model_async(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
-        all_outputs = await self._run_workers_async(
-            "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            })
-
-        # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output
-
-    async def check_health_async(self) -> None:
-        """Raises an error if engine is unhealthy."""
-        self._check_if_any_actor_is_dead()

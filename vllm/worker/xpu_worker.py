@@ -11,7 +11,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized)
+                              ensure_model_parallel_initialized,
+                              init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -190,10 +191,11 @@ class XPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
-        blocks_to_swap_in: Optional[Dict[int, int]] = None,
-        blocks_to_swap_out: Optional[Dict[int, int]] = None,
-        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        blocks_to_swap_in: Optional[Dict[int, int]],
+        blocks_to_swap_out: Optional[Dict[int, int]],
+        blocks_to_copy: Optional[Dict[int, List[int]]],
+        num_lookahead_slots: int = 0,
     ) -> List[SamplerOutput]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
@@ -266,13 +268,12 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
                                                 "sockets")
             os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
-            torch.distributed.init_process_group(
-                backend="ccl",
+            init_distributed_environment(
                 world_size=parallel_config.world_size,
                 rank=rank,
-                init_method=distributed_init_method,
-            )
-
+                distributed_init_method=distributed_init_method,
+                local_rank=self.local_rank,
+                backend="ccl")
         # A small all_reduce for warmup.
         torch.distributed.all_reduce(torch.zeros(1).xpu())
 
