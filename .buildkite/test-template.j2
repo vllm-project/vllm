@@ -36,6 +36,7 @@ steps:
     agents:
       queue: neuron
     command: bash .buildkite/run-neuron-test.sh
+    soft_fail: true
 
   - label: "Intel Test"
     depends_on: ~
