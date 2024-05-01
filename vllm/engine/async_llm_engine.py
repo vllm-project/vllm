@@ -31,8 +31,8 @@ def resolve_environ_as_type(name: str, datatype: Type[T]) -> Optional[T]:
     """
     ret = os.environ.get(name, None)
     if ret is not None:
-        ret = datatype(ret)
-    return ret
+        ret = datatype(ret) # type: ignore
+    return ret # type: ignore
 
 
 ENGINE_MAX_CONCURRENT_REQUESTS = resolve_environ_as_type(
