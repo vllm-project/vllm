@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
-                    Optional, Set, Tuple, Type, Union)
+                    Optional, Set, Tuple, Type, Union, TypeVar)
 
 from transformers import PreTrainedTokenizer
 
@@ -18,12 +18,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
 
+T = TypeVar("T")
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
 
-def resolve_environ_as_type(name: str, datatype):
+def resolve_environ_as_type(name: str, datatype: Type[T]) -> Optional[T]:
     """
     Resolve environmental variable by name as given datatype if exists, 
     otherwise return `None`.
