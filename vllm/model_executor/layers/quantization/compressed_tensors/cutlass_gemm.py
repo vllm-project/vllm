@@ -1,7 +1,6 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 import cutlass
-import cutlass.epilogue
 import torch
 from cutlass import Tensor as FakeTensor
 

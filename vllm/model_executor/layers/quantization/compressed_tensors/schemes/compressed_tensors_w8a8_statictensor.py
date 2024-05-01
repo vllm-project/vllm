@@ -4,8 +4,6 @@ import torch
 from torch.nn import Parameter
 
 from vllm._C import ops
-from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
-    cutlass_gemm_dq)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
@@ -115,6 +113,12 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
+
+        # Lazy import so we don't fail on cutlass imports on non-CUDA
+        # machines.
+        from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
+            cutlass_gemm_dq)
+
         weight = layer.weight
         weight_scale = layer.weight_scale
         act_scale = layer.input_scale
