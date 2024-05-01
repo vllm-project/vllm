@@ -14,9 +14,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
+
 
 # begin-metrics-definitions
 class Metrics:
@@ -32,8 +32,7 @@ class Metrics:
             "vllm:num_requests_waiting",
             "Number of requests waiting to be processed.")
         self.gauge_scheduler_swapped = Gauge(
-            "vllm:num_requests_swapped",
-            "Number of requests swapped to CPU.")
+            "vllm:num_requests_swapped", "Number of requests swapped to CPU.")
         #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = Gauge(
             "vllm:gpu_cache_usage_perc",
@@ -44,8 +43,7 @@ class Metrics:
 
         # Iteration stats
         self.counter_prompt_tokens = Counter(
-            "vllm:prompt_tokens_total",
-            "Number of prefill tokens processed.")
+            "vllm:prompt_tokens_total", "Number of prefill tokens processed.")
         self.counter_generation_tokens = Counter(
             "vllm:generation_tokens_total",
             "Number of generation tokens processed.")
@@ -102,7 +100,8 @@ class Metrics:
         # Deprecated in favor of vllm:generation_tokens_total
         self.gauge_avg_generation_throughput = Gauge(
             "vllm:avg_generation_throughput_toks_per_s",
-            "Average generation throughput in tokens/s.",)
+            "Average generation throughput in tokens/s.",
+        )
 
 
 # end-metrics-definitions
@@ -259,7 +258,7 @@ class StatLogger:
         # grafana/prometheus side. See
         # https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
         self._log_gauge(self.metrics.gauge_avg_prompt_throughput,
-                        prompt_throughput)            
+                        prompt_throughput)
         self._log_gauge(self.metrics.gauge_avg_generation_throughput,
                         generation_throughput)
 

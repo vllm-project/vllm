@@ -5,10 +5,10 @@ import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
-from aioprometheus import MetricsMiddleware
-from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
