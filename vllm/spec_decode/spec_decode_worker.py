@@ -404,18 +404,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 logprobs = {
                     t: Logprob(
                         logprob=logprobs[r],
-                        rank=(r + 1),
-                        decoded_token="TODO",)
+                        rank=(r + 1),)
                     for r, t in enumerate(logprob_indices[:num_logprob])
                 }
 
                 # TODO get rank for sampled token.
-                #if token_id not in topk_indices:
-                #    logprobs[token_id] = Logprob(
-                #        logprob=logprobs[r],
-                #        rank=(r + 1),
-                #        decoded_token="TODO",
-                #    )
+                if token_id not in topk_indices:
+                    logprobs[token_id] = Logprob(
+                        logprob=0.1,
+                        rank=10,
+                    )
 
                 step_output_token_ids.append(
                     SequenceGroupOutput(
