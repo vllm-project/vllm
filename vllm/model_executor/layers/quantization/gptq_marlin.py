@@ -17,23 +17,19 @@ GPTQ_MARLIN_MIN_THREAD_N = 64
 GPTQ_MARLIN_MIN_THREAD_K = 128
 GPTQ_MARLIN_MAX_PARALLEL = 16
 
-GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4]
+GPTQ_MARLIN_SUPPORTED_NUM_BITS = [4, 8]
 GPTQ_MARLIN_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
 GPTQ_MARLIN_SUPPORTED_SYM = [True]
 
 
 # Precompute permutations for Marlin weight and scale shuffling
 #
-# Marlin works on [16,64] tiles. The goal of the permutations
-# is to reorder the weight data so that it is compatible
-# with the tensor-core format that is described here:
+# Marlin works on [16,64] tiles. The goal of the permutations is
+# to reorder the weight data so that it is compatible with the tensor-core
+# format that is described here:
 # https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#matrix-fragments-for-mma-m16n8k16-with-floating-point-type # noqa: E501
-#
-# As a result of this reordering, the vector loads inside the
-# kernel will get the data as it is needed for tensor-core
-# (without the need to use ldmatrix instructions)
-def _get_perms():
-    perm = []
+def _get_perms(num_bits):
+    perm_list = []
     for i in range(32):
         perm1 = []
         col = i // 4
@@ -46,11 +42,18 @@ def _get_perms():
             ]:
                 perm1.append(16 * row + col + 8 * block)
         for j in range(4):
-            perm.extend([p + 256 * j for p in perm1])
+            perm_list.extend([p + 256 * j for p in perm1])
 
-    perm = numpy.array(perm)
-    interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
-    perm = perm.reshape((-1, 8))[:, interleave].ravel()  # type: ignore
+    perm = numpy.array(perm_list)
+
+    if num_bits == 4:
+        interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
+    elif num_bits == 8:
+        interleave = numpy.array([0, 2, 1, 3])
+    else:
+        raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
+
+    perm = perm.reshape((-1, len(interleave)))[:, interleave].ravel()
     perm = torch.from_numpy(perm)
     scale_perm = []
     for i in range(8):
@@ -62,7 +65,14 @@ def _get_perms():
     return perm, scale_perm, scale_perm_single
 
 
-_perm, _scale_perm, _scale_perm_single = _get_perms()
+_perm = {}
+_scale_perm = {}
+_scale_perm_single = {}
+for num_bits in [4, 8]:
+    perm, scale_perm, scale_perm_single = _get_perms(num_bits)
+    _perm[num_bits] = perm
+    _scale_perm[num_bits] = scale_perm
+    _scale_perm_single[num_bits] = scale_perm_single
 
 
 def get_pack_factor(num_bits):
@@ -71,11 +81,15 @@ def get_pack_factor(num_bits):
     return 32 // num_bits
 
 
-def marlin_permute_scales(s, size_k, size_n, group_size):
+def marlin_permute_scales(s, size_k, size_n, group_size, num_bits):
     if group_size < size_k and group_size != -1:
-        s = s.reshape((-1, len(_scale_perm)))[:, _scale_perm]
+        s = s.reshape((-1, len(_scale_perm[num_bits])))[:,
+                                                        _scale_perm[num_bits]]
     else:
-        s = s.reshape((-1, len(_scale_perm_single)))[:, _scale_perm_single]
+        s = s.reshape(
+            (-1,
+             len(_scale_perm_single[num_bits])))[:,
+                                                 _scale_perm_single[num_bits]]
     s = s.reshape((-1, size_n)).contiguous()
 
     return s
@@ -419,6 +433,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
                 layer.g_idx_sort_indices,
                 part_size_k,
                 part_size_n,
+                self.quant_config.weight_bits,
             )
             replace_tensor("qweight", marlin_qweight)
 
@@ -428,15 +443,17 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
             if self.quant_config.desc_act:
                 scales_size_k = full_size_k
 
-            marlin_scales = marlin_permute_scales(layer.scales, scales_size_k,
-                                                  scales_size_n,
-                                                  self.quant_config.group_size)
+            marlin_scales = marlin_permute_scales(
+                layer.scales, scales_size_k, scales_size_n,
+                self.quant_config.group_size, self.quant_config.weight_bits)
             replace_tensor("scales", marlin_scales)
 
         output = ops.gptq_marlin_gemm(reshaped_x, layer.qweight, layer.scales,
                                       layer.g_idx, layer.g_idx_sort_indices,
-                                      layer.workspace, size_m, part_size_n,
-                                      part_size_k, layer.is_k_full)
+                                      layer.workspace,
+                                      self.quant_config.weight_bits, size_m,
+                                      part_size_n, part_size_k,
+                                      layer.is_k_full)
 
         if bias is not None:
             output.add_(bias)  # In-place add

@@ -273,7 +273,9 @@ class HfRunner:
         return all_logprobs
 
     def __del__(self):
-        del self.model
+        if self.model is not None:
+            del self.model
+            self.model = None
         cleanup()
 
 
