@@ -187,10 +187,6 @@ class MixtralMoE(nn.Module):
         if "act_scale" in weight_name or "weight_scale" in weight_name:
             param_data[expert_id] = loaded_weight
 
-    def _all_close_1d(self, x: torch.Tensor) -> bool:
-        assert len(x.shape) == 1
-        return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
-
     def process_weights_after_loading(self):
         # Fp8 is the only case where we need to process after loading.
         if not self.use_fp8:
