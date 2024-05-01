@@ -351,3 +351,9 @@ class OPTForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+        # memory optimization: if lm_head quantization is not enabled lm_head
+        # is same as embed_tokens. keep only one copy
+        if (self.quant_config is None
+                or not self.quant_config.lm_head_quantized):
+            self.lm_head = self.model.decoder.embed_tokens

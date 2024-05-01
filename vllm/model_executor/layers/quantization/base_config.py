@@ -35,6 +35,9 @@ class QuantizableMethodBase(ABC):
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
 
+    # if lm_head is quantized
+    lm_head_quantized: bool = False
+
     @abstractmethod
     def get_name(self) -> str:
         """Name of the quantization method."""
