@@ -485,6 +485,9 @@ class PrefixCachingBlock(Block):
 
         _block = self
         self._cached_num_tokens_total = 0
+
+        # TODO: current implement here take O(N^2), we expect future
+        # we have O(1) here
         while _block is not None:
             self._cached_num_tokens_total += len(_block.token_ids)
             _block = _block.prev_block
