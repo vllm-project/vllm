@@ -200,6 +200,10 @@ _c_ncclAllReduce.argtypes = [
     ncclDataType_t, ctypes.c_void_p, ctypes.c_void_p
 ]
 
+# be cautious! this is a collective call, it will block until all
+# processes in the communicator have called this function.
+# because Python object destruction can happen in random order,
+# it is better not to call it at all.
 # equivalent to c declaration:
 # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
 _c_ncclCommDestroy = nccl.ncclCommDestroy
@@ -278,11 +282,3 @@ class NCCLCommunicator:
                              ncclDataTypeEnum.from_torch(tensor.dtype),
                              ncclRedOpTypeEnum.from_torch(op), self.comm,
                              ctypes.c_void_p(stream.cuda_stream)))
-
-    def __del__(self):
-        # `dist` module might have been already destroyed
-        if hasattr(dist, 'destroy_process_group'):
-            dist.destroy_process_group()
-        # function might have been already destroyed
-        if _c_ncclCommDestroy is not None:
-            _c_ncclCommDestroy(self.comm)
