@@ -80,7 +80,7 @@ def multiple_tp_worker_fn():
         assert result == 2
 
 
-@pytest.mark.skipif(torch.cuda.device_count() != 4,
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 2 GPUs to run the test.")
 def test_pynccl_multiple_tp():
     distributed_run(worker_fn, 4)
