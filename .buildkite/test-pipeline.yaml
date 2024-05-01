@@ -94,7 +94,7 @@ steps:
   command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
 
 - label: Metrics Test
-  command: pytest -v -s metrics
+  command: pytest -v -s metrics --forked
 
 - label: Quantization Test
   command: pytest -v -s quantization

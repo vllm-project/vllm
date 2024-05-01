@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
-from typing import Dict, List, Optional, Protocol, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 from aioprometheus import Counter, Gauge, Histogram
@@ -18,13 +18,11 @@ logger = init_logger(__name__)
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
 
-
 # begin-metrics-definitions
 class Metrics:
     labelname_finish_reason = "finished_reason"
 
     def __init__(self, max_model_len: int):
-
         # System stats
         #   Scheduler State
         self.gauge_scheduler_running = Gauge(
