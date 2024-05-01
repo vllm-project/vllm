@@ -1878,13 +1878,10 @@ class LLMEngine:
                         seq_group.metrics.first_scheduled_time -
                         seq_group.metrics.arrival_time)
                     time_prefill_requests.append(
-                        seq_group.metrics.first_token_time - 
-                        seq_group.metrics.first_scheduled_time
-                    )
+                        seq_group.metrics.first_token_time -
+                        seq_group.metrics.first_scheduled_time)
                     time_decode_requests.append(
-                        now - 
-                        seq_group.metrics.first_token_time
-                    )
+                        now - seq_group.metrics.first_token_time)
                     time_inference_requests.append(
                         now - seq_group.metrics.first_scheduled_time)
                     # Metadata
@@ -1961,7 +1958,8 @@ class LLMEngine:
             num_generation_tokens_requests=num_generation_tokens_requests,
             best_of_requests=best_of_requests,
             n_requests=n_requests,
-            max_num_generation_tokens_requests=max_num_generation_tokens_requests,
+            max_num_generation_tokens_requests=
+            max_num_generation_tokens_requests,
             finished_reason_requests=finished_reason_requests,
         )
 
