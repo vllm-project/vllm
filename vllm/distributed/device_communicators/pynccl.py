@@ -235,7 +235,8 @@ class NCCLCommunicator:
         else:
             self.unique_id = NcclUniqueId()
         tensor = torch.ByteTensor(list(self.unique_id.internal))
-        dist.broadcast(tensor, src=0, group=group)
+        ranks = dist.get_process_group_ranks(group)
+        dist.broadcast(tensor, src=ranks[0], group=group)
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
