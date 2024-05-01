@@ -43,6 +43,12 @@ ENGINE_MAX_REQUEST_LIFESPAN = resolve_environ_as_type(
     "VLLM_ENGINE_REQUEST_LIFESPAN", int)
 """Max lifespan in seconds for any request, if set."""
 
+ENGINE_HAS_RETENTION_POLICY = any([
+    it is not None
+    for it in [ENGINE_MAX_CONCURRENT_REQUESTS, ENGINE_MAX_REQUEST_LIFESPAN]
+])
+"""Having at least one retention policy configured."""
+
 
 class AsyncEngineDeadError(RuntimeError):
     pass
@@ -217,7 +223,7 @@ class RequestTracker:
             self.kill_quota_exceeding_requests()
         finally:
             # finally, add yourself into the retention dict.
-            self._running_requests[request_id] = arrival_time
+            self.running_requests[request_id] = arrival_time
 
     def add_request(self, request_id: str,
                     **engine_add_request_kwargs) -> AsyncStream:
@@ -227,8 +233,10 @@ class RequestTracker:
             raise KeyError(f"Request {request_id} already exists.")
 
         # do retention here
-        self.perform_retention(
-            request_id, engine_add_request_kwargs.get("arrival_time", None))
+        if ENGINE_HAS_RETENTION_POLICY:
+            self.perform_retention(
+                request_id,
+                engine_add_request_kwargs.get("arrival_time", None))
 
         stream = AsyncStream(request_id)
         self._new_requests.put_nowait((stream, {
