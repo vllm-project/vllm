@@ -23,6 +23,7 @@ ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
 def resolve_environ_as_type(name:str, datatype):
+    """Resolve environmental variable by name as given datatype if exists, otherwise return `None`."""
     ret = os.environ.get(name, None)
     if ret is not None:
         ret = datatype(ret)
@@ -98,6 +99,7 @@ class RequestTracker:
         self._new_requests: asyncio.Queue[Tuple[AsyncStream,
                                                 dict]] = asyncio.Queue()
         self.new_requests_event = asyncio.Event()
+        self._running_requests: Dict[str, float] = {}
 
     def __contains__(self, item):
         return item in self._request_streams
@@ -142,12 +144,66 @@ class RequestTracker:
             logger.info("Finished request %s.", request_id)
         self.abort_request(request_id)
 
+    @property
+    def running_requests(self) -> Dict[str, float]:
+        """Get running requests"""
+        dead_request_ids = []
+        for request_id in self._running_requests.keys():
+            if self.check_if_request_has_finished(request_id):
+                dead_request_ids.append(request_id)
+        for request_id in dead_request_ids:
+            del self._running_requests[request_id]
+        return self._running_requests
+
+    def kill_outdated_requests(self,arrival_time:float):
+        """Kill every outdated running request."""
+        for k,v in self.running_requests.items():
+            lifespan = arrival_time - v
+            if lifespan > ENGINE_MAX_REQUEST_LIFESPAN:
+                print("Aborting request due to lifespan policy:", k)
+                self.abort_request(k)
+
+    def kill_quota_exceeding_requests(self):
+        """Kill every request that exceeding max concurrency request limit."""
+        running_requests = [(k,v) for k,v in self.running_requests.items()]
+        running_requests.sort(key = lambda it: it[1]) # smallest first, so oldest will be first, and oldest will be killed first
+          
+        total_running_requests = len(running_requests)
+        out_of_quota_running_requests = total_running_requests-VLLM_ENGINE_MAX_CONCURRENT_REQUESTS
+        if out_of_quota_running_requests > 0:
+            for i in range(out_of_quota_running_requests):
+                k, _ = running_requests[i]
+                print("Aborting request due to max concurrency policy:", k)
+                self.abort_request(k)
+  
+    def perform_retention(self, request_id:str, arrival_time:Optional[float]):
+        """
+        Remove running requests based on retention policies specified by the following environment variables:
+        
+        - ENGINE_MAX_CONCURRENT_REQUESTS: Max concurrent requests to process at anytime, if set.
+
+        - ENGINE_MAX_REQUEST_LIFESPAN: Max lifespan in seconds for any request, if set.
+        """
+        if arrival_time is None:
+            arrival_time = time.time()
+        try:
+            # first, kill every one outdated.
+            self.kill_outdated_requests(arrival_time)
+            # secondly, kill every quota-exceeded requests.
+            self.kill_quota_exceeding_requests()
+        finally:
+            # finally, add yourself into the retention dict.
+            self._running_requests[request_id] = arrival_time
+
     def add_request(self, request_id: str,
                     **engine_add_request_kwargs) -> AsyncStream:
         """Add a request to be sent to the engine on the next background
         loop iteration."""
         if request_id in self._request_streams:
             raise KeyError(f"Request {request_id} already exists.")
+
+        # do retention here
+        self.perform_retention(request_id, engine_add_request_kwargs.get("arrival_time", None))
 
         stream = AsyncStream(request_id)
         self._new_requests.put_nowait((stream, {
@@ -159,6 +215,12 @@ class RequestTracker:
 
         return stream
 
+    def check_if_request_has_finished(self, request_id: str) -> bool:
+        """Check if a request has already finished."""
+        ret = request_id not in self._request_streams or self._request_streams[
+                request_id].finished
+        return ret
+    
     def abort_request(self, request_id: str, *, verbose: bool = False) -> None:
         """Abort a request during next background loop iteration."""
         if verbose:
@@ -166,8 +228,7 @@ class RequestTracker:
 
         self._finished_requests.put_nowait(request_id)
 
-        if request_id not in self._request_streams or self._request_streams[
-                request_id].finished:
+        if self.check_if_request_has_finished(request_id):
             # The request has already finished or been aborted.
             return
 
