@@ -21,7 +21,7 @@ prompts = [
 
 @pytest.fixture(scope="session")
 def llm():
-    return LLM(model=MODEL_NAME, max_model_len=15000)
+    return LLM(model=MODEL_NAME, max_model_len=128)
 
 
 @pytest.mark.skip_global_cleanup
