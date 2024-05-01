@@ -21,12 +21,13 @@ class SequenceGroupToSample:
     sampling_params: SamplingParams
     # seq_id -> sequence data.
     seq_data: Dict[int, SequenceData]
-    # The length of the prompt of the sequence group. None if it is in a decode
+    # The length of the sequence of the sequence group. None if it is in a decode
     # stage.
-    prompt_len: Optional[int]
+    seqlen: Optional[int]
     # The length of the query tokens to compute in the current step. None if it
-    # is in a decode stage. The length of subquery_len <= prompt_len.
-    subquery_len: Optional[int]
+    # is in a decode stage. The length of query_len <= seqlen if chunked prefill
+    # is enabled.
+    query_len: Optional[int]
     # A random number generator for sampling.
     generator: Optional[torch.Generator]
     # True if the sequence group is in prefill stage. False if it is in a
@@ -46,8 +47,8 @@ class SequenceGroupToSample:
         if len(self.prompt_logprob_indices) > 0:
             assert self.sampling_params.prompt_logprobs is not None
         if self.is_prompt:
-            assert self.prompt_len is not None
-            assert self.subquery_len is not None
+            assert self.seqlen is not None
+            assert self.query_len is not None
 
 
 class SamplingMetadata:
@@ -94,8 +95,8 @@ class SamplingMetadata:
     @staticmethod
     def prepare(
         seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
+        seq_lens: List[int],
+        query_lens: Optional[List[int]],
         device: str,
         pin_memory: bool,
     ) -> "SamplingMetadata":
@@ -104,8 +105,8 @@ class SamplingMetadata:
             selected_token_indices,
             categorized_sample_indices,
             num_prompts,
-        ) = _prepare_seq_groups(seq_group_metadata_list, prompt_lens,
-                                subquery_lens, device)
+        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens,
+                                query_lens, device)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,
@@ -137,8 +138,8 @@ class SamplingMetadata:
 
 def _prepare_seq_groups(
     seq_group_metadata_list: List[SequenceGroupMetadata],
-    prompt_lens: List[int],
-    subquery_lens: Optional[List[int]],
+    seq_lens: List[int],
+    query_lens: Optional[List[int]],
     device: str,
 ) -> Tuple[List[SequenceGroupToSample], List[int], Dict[
         SamplingType, List[Tuple[int, int]]], int]:
@@ -146,9 +147,9 @@ def _prepare_seq_groups(
 
     Args:
         seq_group_metadata_list: A list of sequence group to batch.
-        prompt_lens: A list of prompt lens per sequence group.
+        seq_lens: A list of sequence lens per sequence group.
             Index of prompt len should match with seq_group_metadata_list.
-        subquery_lens: A list of query lengths. Prompt lens include the length
+        query_lens: A list of query lengths. Prompt lens include the length
             of entire prompt tokens, and it could be shorter.
         device: A device to use for random number generator,
             `SequenceGroupToSample.generator`.
@@ -189,8 +190,8 @@ def _prepare_seq_groups(
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
-        prompt_len: Optional[int] = None
-        subquery_len: Optional[int] = None
+        seqlen: Optional[int] = None
+        query_len: Optional[int] = None
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
         do_sample = seq_group_metadata.do_sample
@@ -203,12 +204,12 @@ def _prepare_seq_groups(
             num_prompts += 1
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
-            assert subquery_lens is not None and prompt_lens is not None
-            subquery_len, prompt_len = subquery_lens[i], prompt_lens[i]
+            assert query_lens is not None and seq_lens is not None
+            query_len, seqlen = query_lens[i], seq_lens[i]
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
-            prompt_logprob_len = (subquery_len - num_prefill_sample
-                                  if do_sample else subquery_len)
+            prompt_logprob_len = (query_len - num_prefill_sample
+                                  if do_sample else query_len)
             sample_len = num_prefill_sample if do_sample else 0
         else:
             # Decode
@@ -267,8 +268,8 @@ def _prepare_seq_groups(
                 seq_ids=seq_ids,
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
-                prompt_len=prompt_len,
-                subquery_len=subquery_len,
+                seqlen=seqlen,
+                query_len=query_len,
                 generator=generator,
                 is_prompt=is_prompt,
                 prompt_logprob_indices=list(prompt_logprob_indices),
@@ -367,8 +368,8 @@ class SamplingTensors:
                     and sampling_params.prompt_logprobs is not None):
                 # For tokens in the prompt that we only need to get
                 # their logprobs
-                subquery_len = seq_group.subquery_len
-                assert subquery_len is not None
+                query_len = seq_group.query_len
+                assert query_len is not None
                 prefill_len = len(seq_group.prompt_logprob_indices)
                 temperatures += [temperature] * prefill_len
                 top_ps += [top_p] * prefill_len
@@ -397,8 +398,8 @@ class SamplingTensors:
 
             if is_prompt:
                 prompt_best_of.append(sampling_params.best_of)
-                subquery_len = seq_group.subquery_len
-                assert subquery_len is not None
+                query_len = seq_group.query_len
+                assert query_len is not None
 
             for seq_id in seq_ids:
                 seq_data = seq_group.seq_data[seq_id]

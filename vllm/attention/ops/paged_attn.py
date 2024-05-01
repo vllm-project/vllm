@@ -13,12 +13,11 @@ _PARTITION_SIZE = 512
 @dataclass
 class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
-    # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. WARNING: When it is a prefill request, it doesn't include new
-    # tokens. When it is for decoding, it includes a new token.
-    context_lens: Optional[torch.Tensor]
-    # Maximum context length in the batch.
-    max_context_len: Optional[int]
+    # (batch_size,). The length of sequences (entire tokens seen so far) per
+    # sequence.
+    seqlens: Optional[torch.Tensor]
+    # Maximum sequence length in the batch.
+    max_seqlen: Optional[int]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -85,7 +84,7 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
+        seqlens: torch.Tensor,
         max_context_len: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
@@ -118,7 +117,7 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                context_lens,
+                seqlens,
                 block_size,
                 max_context_len,
                 alibi_slopes,
@@ -150,7 +149,7 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                context_lens,
+                seqlens,
                 block_size,
                 max_context_len,
                 alibi_slopes,
@@ -168,9 +167,9 @@ class PagedAttention:
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         subquery_start_loc: torch.Tensor,
-        prompt_lens_tensor: torch.Tensor,
+        seq_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
-        max_subquery_len: int,
+        max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
     ) -> torch.Tensor:
         output = torch.empty_like(query)
@@ -184,9 +183,9 @@ class PagedAttention:
             block_tables,
             # subquery_start_loc is (batch_size + 1,)
             subquery_start_loc[:-1],
-            prompt_lens_tensor,
+            seq_lens_tensor,
             context_lens,
-            max_subquery_len,
+            max_query_len,
             alibi_slopes,
         )
         return output

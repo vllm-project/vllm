@@ -45,6 +45,7 @@ class EngineArgs:
     quantization: Optional[str] = None
     enforce_eager: bool = False
     max_context_len_to_capture: int = 8192
+    max_seqlen_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
@@ -319,6 +320,12 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_context_len_to_capture,
                             help='Maximum context length covered by CUDA '
+                            'graphs. When a sequence has context length (DEPRECATED)'
+                            'larger than this, we fall back to eager mode.')
+        parser.add_argument('--max-seqlen-to-capture',
+                            type=int,
+                            default=EngineArgs.max_seqlen_to_capture,
+                            help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
@@ -475,7 +482,7 @@ class EngineArgs:
             self.trust_remote_code, self.dtype, self.seed, self.revision,
             self.code_revision, self.tokenizer_revision, self.max_model_len,
             self.quantization, self.quantization_param_path,
-            self.enforce_eager, self.max_context_len_to_capture,
+            self.enforce_eager, self.max_context_len_to_capture, self.max_seqlen_to_capture,
             self.max_logprobs, self.skip_tokenizer_init)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,

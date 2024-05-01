@@ -65,26 +65,26 @@ class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
-    prompt_lens_tensor: Optional[torch.Tensor]
+    seq_lens: Optional[List[int]]
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
+    # NOTE(sang): Definition of context_len, query_len, and seqlen.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
     # |-------------------- seqlen ----------------------|
-    #                                   |- subquery_len -|
+    #                                   |-- query_len ---|
 
     # WARNING(sang): context_len has different definition depending on if it is
     # prefill vs decoding. When it is prefill, it doesn't include new tokens.
     # When it is for decoding, it includes a new token.
 
-    # Maximum subquery length in the batch.
-    max_subquery_len: Optional[int]
-    # Maximum prompt length in the batch.
-    max_prompt_len: Optional[int]
+    # Maximum query length in the batch.
+    max_query_len: Optional[int]
+    # Maximum sequence length in the batch.
+    max_seqlen: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -248,7 +248,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            assert prefill_meta.prompt_lens is not None
+            assert prefill_meta.seq_lens is not None
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # triton attention
                 # When block_tables are not filled, it means q and k are the
@@ -261,8 +261,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         None,
                         prefill_meta.seq_start_loc,
                         prefill_meta.seq_start_loc,
-                        prefill_meta.max_prompt_len,
-                        prefill_meta.max_prompt_len,
+                        prefill_meta.max_seqlen,
+                        prefill_meta.max_seqlen,
                         True,
                         self.scale,
                     )
@@ -275,7 +275,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         query,
                         key,
                         value,
-                        prefill_meta.prompt_lens,
+                        prefill_meta.seq_lens,
                         self.scale,
                     )
                 else:
@@ -285,8 +285,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         v=value,
                         cu_seqlens_q=prefill_meta.seq_start_loc,
                         cu_seqlens_k=prefill_meta.seq_start_loc,
-                        max_seqlen_q=prefill_meta.max_prompt_len,
-                        max_seqlen_k=prefill_meta.max_prompt_len,
+                        max_seqlen_q=prefill_meta.max_seqlen,
+                        max_seqlen_k=prefill_meta.max_seqlen,
                         softmax_scale=self.scale,
                         causal=True,
                     )
@@ -304,9 +304,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.prompt_lens_tensor,
+                    prefill_meta.seq_lens_tensor,
                     prefill_meta.context_lens,
-                    prefill_meta.max_subquery_len,
+                    prefill_meta.max_query_len,
                     self.alibi_slopes,
                 )
 
@@ -317,8 +317,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.context_lens,
-                decode_meta.max_context_len,
+                decode_meta.seqlens,
+                decode_meta.max_seqlen,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -334,13 +334,13 @@ def _naive_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    prompt_lens: List[int],
+    seq_lens: List[int],
     scale: float,
 ) -> torch.Tensor:
     output = torch.empty_like(query)
     start = 0
-    for _, prompt_len in enumerate(prompt_lens):
-        end = start + prompt_len
+    for _, seqlen in enumerate(seq_lens):
+        end = start + seqlen
         out = _naive_masked_attention(
             query[start:end],
             key[start:end],
@@ -349,7 +349,7 @@ def _naive_attention(
         )
         # TODO(woosuk): Unnecessary copy. Optimize.
         output[start:end].copy_(out)
-        start += prompt_len
+        start += seqlen
 
     return output
 
