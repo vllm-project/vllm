@@ -73,7 +73,6 @@ class GPUExecutor(ExecutorBase):
         """
         assert self.speculative_config is not None
 
-        from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
 
         target_worker = self._create_worker()
@@ -86,10 +85,11 @@ class GPUExecutor(ExecutorBase):
             # TODO allow draft-model specific load config.
             #load_config=self.load_config,
         )
-        draft_worker = MultiStepWorker(**draft_worker_kwargs)
 
-        spec_decode_worker = SpecDecodeWorker.from_workers(
-            proposer_worker=draft_worker, scorer_worker=target_worker)
+        spec_decode_worker = SpecDecodeWorker.create_worker(
+            scorer_worker=target_worker,
+            draft_worker_kwargs=draft_worker_kwargs,
+        )
 
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")

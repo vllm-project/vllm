@@ -333,13 +333,13 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sampler_output.sampled_token_probs = spec_probs
         sampler_output.sampled_token_ids = spec_sampled_tokens
         target_token_ids, target_probs = sampler_output_to_torch(
-            [sampler_output])
+            [sampler_output], True)
 
         # Convert non-speculative output tokens to tensors.
         sampler_output.sampled_token_probs = non_spec_probs
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
         non_spec_target_token_ids, non_spec_target_probs = (
-            sampler_output_to_torch([sampler_output]))
+            sampler_output_to_torch([sampler_output], True))
 
         return (target_token_ids, target_probs, non_spec_target_token_ids,
                 non_spec_target_probs)
