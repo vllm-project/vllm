@@ -139,7 +139,7 @@ class MixtralMoE(nn.Module):
             # If loading fp8 checkpoint, pass the weight loaders.
             # If loading an fp16 checkpoint, do not (we will quantize in
             #   process_weights_after_loading()
-            if quant_config.is_serialized:
+            if quant_config.is_checkpoint_fp8_serialized:
                 set_weight_attrs(self.ws_scale, {
                     "weight_loader": self.weight_loader,
                 })
@@ -149,7 +149,7 @@ class MixtralMoE(nn.Module):
 
             # ACT_SCALE (for fp8)
             if quant_config.activation_scheme == "static":
-                if not quant_config.is_serialized:
+                if not quant_config.is_checkpoint_fp8_serialized:
                     raise ValueError(
                         "Found static activation scheme for checkpoint that "
                         "was not serialized fp8.")
@@ -197,7 +197,7 @@ class MixtralMoE(nn.Module):
             return
 
         # If checkpoint is fp16, quantize here.
-        if not self.quant_config.is_serialized:
+        if not self.quant_config.is_checkpoint_fp8_serialized:
             ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
             w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
             for expert in range(self.num_total_experts):
