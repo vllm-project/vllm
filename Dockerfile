@@ -94,6 +94,8 @@ WORKDIR /usr/src/flash-attention-v2
 RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
     --no-build-isolation --no-deps --no-cache-dir
 
+# Flashinfer backend
+RUN pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.2/
 #################### FLASH_ATTENTION Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
