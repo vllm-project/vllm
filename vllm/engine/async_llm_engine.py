@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
-                    Optional, Set, Tuple, Type, Union, TypeVar)
+                    Optional, Set, Tuple, Type, TypeVar, Union)
 
 from transformers import PreTrainedTokenizer
 
