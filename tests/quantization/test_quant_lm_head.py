@@ -52,7 +52,8 @@ def test_lm_head(
     quantization_config = llm_engine.model_config.hf_config if hasattr(
         llm_engine.model_config.hf_config, "quantization_config") else None
     if quantization_config is not None:
-        quantization_config = llm_engine.model_config.hf_config.quantization_config
+        quantization_config = (
+            llm_engine.model_config.hf_config.quantization_config)
 
         if quantization_config.get("lm_head"):
             lm_head_quantized = True
