@@ -60,9 +60,7 @@ def test_models(
 ) -> None:
     # Skip if explicitly skipped.
     if model in SKIPPED_MODEL_REASON:
-        pytest.skip(
-            reason=SKIPPED_MODEL_REASON[model]
-        )
+        pytest.skip(reason=SKIPPED_MODEL_REASON[model])
 
     # To pass the small model tests, we need full precision.
     assert dtype == "float"

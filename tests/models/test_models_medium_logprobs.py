@@ -10,7 +10,6 @@ import pytest
 
 from tests.models.utils import check_logprobs_close
 
-
 SKIPPED_MODEL_REASON = {
     "THUDM/chatglm3-6b": "Hf side test broken",
     "allenai/OLMo-1B": "Hf side requirement conflict (req torch 2.2)",
@@ -23,7 +22,7 @@ MODELS = [
     "baichuan-inc/Baichuan2-7B-Chat",
     "bigscience/bloom-560m",
     "THUDM/chatglm3-6b",
-    # command-r             -> not tested 
+    # command-r             -> not tested
     # dbrx                  -> not tested
     "Deci/DeciLM-7B-instruct",
     "deepseek-ai/deepseek-coder-1.3b-instruct",
@@ -52,6 +51,7 @@ MODELS = [
     "xverse/XVERSE-7B",
 ]
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -67,23 +67,21 @@ def test_models(
 ) -> None:
     # Skip if explicitly skipped.
     if model in SKIPPED_MODEL_REASON:
-        pytest.skip(
-            reason=SKIPPED_MODEL_REASON[model]
-        )
+        pytest.skip(reason=SKIPPED_MODEL_REASON[model])
     # Run HF.
-    hf_model = hf_runner(model_name=model, 
-                         dtype=dtype)
+    hf_model = hf_runner(model_name=model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy_logprobs_limit(
         example_prompts, max_tokens, num_logprobs)
     del hf_model
 
     # Run vLLM.
-    vllm_model = vllm_runner(model_name=model, 
+    vllm_model = vllm_runner(model_name=model,
                              enforce_eager=True,
-                             dtype=dtype, 
+                             dtype=dtype,
                              max_model_len=MAX_MODEL_LEN)
-    vllm_outputs = vllm_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
+    vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
+                                                       max_tokens,
+                                                       num_logprobs)
     del vllm_model
 
     check_logprobs_close(

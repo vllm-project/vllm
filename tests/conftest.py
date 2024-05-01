@@ -262,7 +262,7 @@ class HfRunner:
                     last_hidden_states,
                     self.model.get_output_embeddings().weight.t(),
                 )
-                if getattr("bais", self.model.get_output_embeddings(), 
+                if getattr("bias", self.model.get_output_embeddings(),
                            None) is not None:
                     logits += self.model.get_output_embeddings(
                     ).bias.unsqueeze(0)
@@ -301,7 +301,7 @@ class HfRunner:
                     last_hidden_states,
                     self.model.get_output_embeddings().weight.t(),
                 )
-                if getattr(self.model.get_output_embeddings(), "bais",
+                if getattr(self.model.get_output_embeddings(), "bias",
                            None) is not None:
                     logits += self.model.get_output_embeddings(
                     ).bias.unsqueeze(0)
@@ -334,7 +334,6 @@ class HfRunner:
         outputs = zip(all_output_ids, all_output_strs, all_logprobs)
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
-
 
     def __del__(self):
         del self.model
