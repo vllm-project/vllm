@@ -220,7 +220,6 @@ class LLMEngine:
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
                 labels=dict(model_name=model_config.model),
                 max_model_len=self.model_config.max_model_len)
-            self.stat_logger.info("cache_config", self.cache_config)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.

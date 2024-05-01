@@ -86,7 +86,7 @@ autodoc_mock_imports = [
     "torch",
     "transformers",
     "psutil",
-    "prometheus_client",
+    "aioprometheus",
     "sentencepiece",
     "vllm.cuda_utils",
     "vllm._C",

@@ -30,9 +30,8 @@ def test_metric_counter_prompt_tokens(
 
     _ = vllm_model.generate_greedy(example_prompts, max_tokens)
     stat_logger = vllm_model.model.llm_engine.stat_logger
-    metric_count = stat_logger.metrics.counter_prompt_tokens.labels(
-        **stat_logger.labels)._value.get()
-
+    metric_count = stat_logger.metrics.counter_prompt_tokens.get_value(
+        stat_logger.labels)
     assert vllm_prompt_token_count == metric_count, (
         f"prompt token count: {vllm_prompt_token_count!r}\n"
         f"metric: {metric_count!r}")
@@ -55,8 +54,8 @@ def test_metric_counter_generation_tokens(
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     tokenizer = vllm_model.model.get_tokenizer()
     stat_logger = vllm_model.model.llm_engine.stat_logger
-    metric_count = stat_logger.metrics.counter_generation_tokens.labels(
-        **stat_logger.labels)._value.get()
+    metric_count = stat_logger.metrics.counter_generation_tokens.get_value(
+        stat_logger.labels)
     vllm_generation_count = 0
     for i in range(len(example_prompts)):
         vllm_output_ids, vllm_output_str = vllm_outputs[i]

@@ -5,8 +5,7 @@ from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Protocol, Union
 
 import numpy as np
-from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
-                               disable_created_metrics)
+from aioprometheus import Counter, Gauge, Histogram
 
 from vllm.logger import init_logger
 
@@ -15,7 +14,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-disable_created_metrics()
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the metrics definitions.
@@ -25,62 +23,44 @@ disable_created_metrics()
 class Metrics:
     labelname_finish_reason = "finished_reason"
 
-    def __init__(self, labelnames: List[str], max_model_len: int):
-        # Unregister any existing vLLM collectors
-        for collector in list(REGISTRY._collector_to_names):
-            if hasattr(collector, "_name") and "vllm" in collector._name:
-                REGISTRY.unregister(collector)
-
-        # Config Information
-        self.info_cache_config = Info(
-            name='vllm:cache_config',
-            documentation='information of cache_config')
+    def __init__(self, max_model_len: int):
 
         # System stats
         #   Scheduler State
         self.gauge_scheduler_running = Gauge(
-            name="vllm:num_requests_running",
-            documentation="Number of requests currently running on GPU.",
-            labelnames=labelnames)
+            "vllm:num_requests_running",
+            "Number of requests currently running on GPU.")
         self.gauge_scheduler_waiting = Gauge(
-            name="vllm:num_requests_waiting",
-            documentation="Number of requests waiting to be processed.",
-            labelnames=labelnames)
+            "vllm:num_requests_waiting",
+            "Number of requests waiting to be processed.")
         self.gauge_scheduler_swapped = Gauge(
-            name="vllm:num_requests_swapped",
-            documentation="Number of requests swapped to CPU.",
-            labelnames=labelnames)
+            "vllm:num_requests_swapped",
+            "Number of requests swapped to CPU.")
         #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = Gauge(
-            name="vllm:gpu_cache_usage_perc",
-            documentation="GPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames)
+            "vllm:gpu_cache_usage_perc",
+            "GPU KV-cache usage. 1 means 100 percent usage.")
         self.gauge_cpu_cache_usage = Gauge(
-            name="vllm:cpu_cache_usage_perc",
-            documentation="CPU KV-cache usage. 1 means 100 percent usage.",
-            labelnames=labelnames)
+            "vllm:cpu_cache_usage_perc",
+            "CPU KV-cache usage. 1 means 100 percent usage.")
 
         # Iteration stats
         self.counter_prompt_tokens = Counter(
-            name="vllm:prompt_tokens_total",
-            documentation="Number of prefill tokens processed.",
-            labelnames=labelnames)
+            "vllm:prompt_tokens_total",
+            "Number of prefill tokens processed.")
         self.counter_generation_tokens = Counter(
-            name="vllm:generation_tokens_total",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames)
+            "vllm:generation_tokens_total",
+            "Number of generation tokens processed.")
         self.histogram_time_to_first_token = Histogram(
-            name="vllm:time_to_first_token_seconds",
-            documentation="Histogram of time to first token in seconds.",
-            labelnames=labelnames,
+            "vllm:time_to_first_token_seconds",
+            "Histogram of time to first token in seconds.",
             buckets=[
                 0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5,
                 0.75, 1.0, 2.5, 5.0, 7.5, 10.0
             ])
         self.histogram_time_per_output_token = Histogram(
-            name="vllm:time_per_output_token_seconds",
-            documentation="Histogram of time per output token in seconds.",
-            labelnames=labelnames,
+            "vllm:time_per_output_token_seconds",
+            "Histogram of time per output token in seconds.",
             buckets=[
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5
@@ -89,52 +69,42 @@ class Metrics:
         # Request stats
         #   Latency
         self.histogram_e2e_time_request = Histogram(
-            name="vllm:e2e_request_latency_seconds",
-            documentation="Histogram of end to end request latency in seconds.",
-            labelnames=labelnames,
+            "vllm:e2e_request_latency_seconds",
+            "Histogram of end to end request latency in seconds.",
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
         #   Metadata
         self.histogram_num_prompt_tokens_request = Histogram(
-            name="vllm:request_prompt_tokens",
-            documentation="Number of prefill tokens processed.",
-            labelnames=labelnames,
+            "vllm:request_prompt_tokens",
+            "Number of prefill tokens processed.",
             buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_num_generation_tokens_request = Histogram(
-            name="vllm:request_generation_tokens",
-            documentation="Number of generation tokens processed.",
-            labelnames=labelnames,
+            "vllm:request_generation_tokens",
+            "Number of generation tokens processed.",
             buckets=build_1_2_5_buckets(max_model_len),
         )
         self.histogram_best_of_request = Histogram(
-            name="vllm:request_params_best_of",
-            documentation="Histogram of the best_of request parameter.",
-            labelnames=labelnames,
+            "vllm:request_params_best_of",
+            "Histogram of the best_of request parameter.",
             buckets=[1, 2, 5, 10, 20],
         )
         self.histogram_n_request = Histogram(
-            name="vllm:request_params_n",
-            documentation="Histogram of the n request parameter.",
-            labelnames=labelnames,
+            "vllm:request_params_n",
+            "Histogram of the n request parameter.",
             buckets=[1, 2, 5, 10, 20],
         )
         self.counter_request_success = Counter(
-            name="vllm:request_success",
-            documentation="Count of successfully processed requests.",
-            labelnames=labelnames + [Metrics.labelname_finish_reason])
+            "vllm:request_success_total",
+            "Count of successfully processed requests.")
 
         # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = Gauge(
-            name="vllm:avg_prompt_throughput_toks_per_s",
-            documentation="Average prefill throughput in tokens/s.",
-            labelnames=labelnames,
-        )
+            "vllm:avg_prompt_throughput_toks_per_s",
+            "Average prefill throughput in tokens/s.")
         # Deprecated in favor of vllm:generation_tokens_total
         self.gauge_avg_generation_throughput = Gauge(
-            name="vllm:avg_generation_throughput_toks_per_s",
-            documentation="Average generation throughput in tokens/s.",
-            labelnames=labelnames,
-        )
+            "vllm:avg_generation_throughput_toks_per_s",
+            "Average generation throughput in tokens/s.",)
 
 
 # end-metrics-definitions
@@ -195,12 +165,6 @@ class Stats:
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
 
-class SupportsMetricsInfo(Protocol):
-
-    def metrics_info(self) -> Dict[str, str]:
-        ...
-
-
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
@@ -216,12 +180,7 @@ class StatLogger:
 
         # Prometheus metrics
         self.labels = labels
-        self.metrics = Metrics(labelnames=list(labels.keys()),
-                               max_model_len=max_model_len)
-
-    def info(self, type: str, obj: SupportsMetricsInfo) -> None:
-        if type == "cache_config":
-            self.metrics.info_cache_config.info(obj.metrics_info())
+        self.metrics = Metrics(max_model_len=max_model_len)
 
     def _get_throughput(self, tracked_stats: List[int], now: float) -> float:
         return float(np.sum(tracked_stats) / (now - self.last_local_log))
@@ -274,23 +233,23 @@ class StatLogger:
 
     def _log_gauge(self, gauge: Gauge, data: Union[int, float]) -> None:
         # Convenience function for logging to gauge.
-        gauge.labels(**self.labels).set(data)
+        gauge.set(self.labels, data)
 
     def _log_counter(self, counter: Counter, data: Union[int, float]) -> None:
         # Convenience function for logging to counter.
-        counter.labels(**self.labels).inc(data)
+        counter.add(self.labels, data)
 
     def _log_counter_labels(self, counter: Counter, data: CollectionsCounter,
                             label_key: str) -> None:
         # Convenience function for collection counter of labels.
         for label, count in data.items():
-            counter.labels(**{**self.labels, label_key: label}).inc(count)
+            counter.add({**self.labels, label_key: label}, count)
 
     def _log_histogram(self, histogram: Histogram,
                        data: Union[List[int], List[float]]) -> None:
         # Convenience function for logging list to histogram.
         for datum in data:
-            histogram.labels(**self.labels).observe(datum)
+            histogram.observe(self.labels, datum)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
@@ -301,10 +260,10 @@ class StatLogger:
         # Which log raw data and calculate summaries using rate() on the
         # grafana/prometheus side. See
         # https://github.com/vllm-project/vllm/pull/2316#discussion_r1464204666
-        self.metrics.gauge_avg_prompt_throughput.labels(
-            **self.labels).set(prompt_throughput)
-        self.metrics.gauge_avg_generation_throughput.labels(
-            **self.labels).set(generation_throughput)
+        self._log_gauge(self.metrics.gauge_avg_prompt_throughput,
+                        prompt_throughput)            
+        self._log_gauge(self.metrics.gauge_avg_generation_throughput,
+                        generation_throughput)
 
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.

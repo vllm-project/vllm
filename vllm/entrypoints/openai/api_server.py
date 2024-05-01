@@ -5,13 +5,14 @@ import os
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
+from aioprometheus import MetricsMiddleware
+from aioprometheus.asgi.starlette import metrics
 import fastapi
 import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -54,9 +55,8 @@ def parse_args():
     return parser.parse_args()
 
 
-# Add prometheus asgi middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
+app.add_middleware(MetricsMiddleware)  # Trace HTTP server metrics
+app.add_route("/metrics", metrics)  # Exposes HTTP metrics
 
 
 @app.exception_handler(RequestValidationError)
