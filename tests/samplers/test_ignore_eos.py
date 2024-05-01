@@ -2,10 +2,9 @@
 
 Run `pytest tests/samplers/test_ignore_eos.py`.
 """
-import gc
 
 import pytest
-import torch
+
 from vllm import SamplingParams
 
 MODELS = ["facebook/opt-125m"]
@@ -25,7 +24,8 @@ def test_beam_search_single_input(
 
     vllm_model = vllm_runner(model, dtype=dtype)
     sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=True)
-    ignore_eos_output = vllm_model.model.generate(example_prompts, sampling_params=sampling_params)
+    ignore_eos_output = vllm_model.model.generate(
+        example_prompts, sampling_params=sampling_params)
     print(len(ignore_eos_output[0].outputs[0].token_ids))
     assert max_tokens - len(ignore_eos_output[0].outputs[0].token_ids) < 10
     assert max_tokens - len(ignore_eos_output[0].outputs[0].token_ids) >= 0
