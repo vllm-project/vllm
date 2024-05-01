@@ -157,7 +157,7 @@ class RequestTracker:
     def running_requests(self) -> Dict[str, float]:
         """Get running requests"""
         dead_request_ids = []
-        for request_id in self._running_requests.keys():
+        for request_id in self._running_requests:
             if self.check_if_request_has_finished(request_id):
                 dead_request_ids.append(request_id)
         for request_id in dead_request_ids:
