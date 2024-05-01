@@ -46,7 +46,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    all_close_1d, default_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
@@ -78,6 +79,8 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.quant_config = quant_config
+
         # FIXME(pcmoritz): Make this more general to support different
         # quantization schemes
         self.use_fp8 = isinstance(quant_config, Fp8Config)
@@ -86,24 +89,28 @@ class MixtralMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
                                      params_dtype=self.params_dtype,
                                      quant_config=None)
 
+        if self.use_fp8:
+            params_dtype = torch.float8_e4m3fn
+
         self.ws = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
                         device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=params_dtype))
 
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
@@ -112,33 +119,57 @@ class MixtralMoE(nn.Module):
             "weight_loader": self.weight_loader,
         })
 
-        # Scaling factors for FP8 weights
-        self.ws_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
-        self.w2s_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
+        # Used for fp8.
+        self.ws_scale = None
+        self.w2s_scale = None
+        self.as_scale = None
+        self.a2s_scale = None
 
-        # Scaling factors for FP8 activations
-        need_act_scales = (self.use_fp8
-                           and quant_config.activation_scheme == "static")
-        self.as_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if need_act_scales else None
-        self.a2s_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if need_act_scales else None
+        if self.use_fp8:
+            # WEIGHT_SCALE (for fp8)
+            self.ws_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                    device="cuda",
+                                                    dtype=torch.float32),
+                                         requires_grad=False)
+            self.w2s_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                     device="cuda",
+                                                     dtype=torch.float32),
+                                          requires_grad=False)
 
-        if need_act_scales:
-            set_weight_attrs(self.as_scale, {
-                "weight_loader": self.weight_loader,
-            })
-            set_weight_attrs(self.a2s_scale, {
-                "weight_loader": self.weight_loader,
-            })
+            # If loading fp8 checkpoint, pass the weight loaders.
+            # If loading an fp16 checkpoint, do not (we will quantize in
+            #   process_weights_after_loading()
+            if quant_config.is_checkpoint_fp8_serialized:
+                set_weight_attrs(self.ws_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+                set_weight_attrs(self.w2s_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+
+            # ACT_SCALE (for fp8)
+            if quant_config.activation_scheme == "static":
+                if not quant_config.is_checkpoint_fp8_serialized:
+                    raise ValueError(
+                        "Found static activation scheme for checkpoint that "
+                        "was not serialized fp8.")
+                self.as_scale = nn.Parameter(
+                    torch.zeros(self.num_total_experts,
+                                device="cuda",
+                                dtype=torch.float32),
+                    requires_grad=False)
+                self.a2s_scale = nn.Parameter(
+                    torch.zeros(self.num_total_experts,
+                                device="cuda",
+                                dtype=torch.float32),
+                    requires_grad=False)
+
+                set_weight_attrs(self.as_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+                set_weight_attrs(self.a2s_scale, {
+                    "weight_loader": self.weight_loader,
+                })
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
@@ -153,11 +184,20 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if "act_scale" in weight_name:
-            param_data[:] = param_data[:].max(loaded_weight)
+        if "act_scale" in weight_name or "weight_scale" in weight_name:
+            param_data[expert_id] = loaded_weight
+
+    def _all_close_1d(self, x: torch.Tensor) -> bool:
+        assert len(x.shape) == 1
+        return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
 
     def process_weights_after_loading(self):
-        if self.use_fp8:
+        # Fp8 is the only case where we need to process after loading.
+        if not self.use_fp8:
+            return
+
+        # If checkpoint is fp16, quantize here.
+        if not self.quant_config.is_checkpoint_fp8_serialized:
             ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
             w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
             for expert in range(self.num_total_experts):
@@ -167,6 +207,26 @@ class MixtralMoE(nn.Module):
                     expert] = ops.scaled_fp8_quant(self.w2s.data[expert, :, :])
             self.ws = nn.Parameter(ws, requires_grad=False)
             self.w2s = nn.Parameter(w2s, requires_grad=False)
+
+        # If checkpoint is fp8 + static, cleanup act_scales.
+        #   Since state_dict has an act_scale per expert but our kernels
+        #   are passed one act_scale shared across all experts.
+        elif self.quant_config.activation_scheme == "static":
+            if self.as_scale is None or self.a2s_scale is None:
+                raise ValueError(
+                    "QuantConfig has static quantization, but found "
+                    "activation scales are None.")
+
+            if (not all_close_1d(self.as_scale)
+                    or not all_close_1d(self.a2s_scale)):
+                print_warning_once(
+                    "Found act_scales that are not equal for fp8 MoE layer. "
+                    "Using the maximum across experts for each layer. ")
+
+            self.as_scale = nn.Parameter(self.as_scale.max(),
+                                         requires_grad=False)
+            self.a2s_scale = nn.Parameter(self.a2s_scale.max(),
+                                          requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -225,13 +285,6 @@ class MixtralAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
-
-        if isinstance(quant_config, Fp8Config):
-            print_warning_once(
-                "For Mixtral FP8 quantization, we currently do not quantize "
-                "the attention layers until their FP8 performance is improved."
-            )
-            quant_config = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -465,6 +518,13 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the activation scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("ws_scale" if weight_name in ["w1", "w3"] else "w2s_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id)
             ("ws" if weight_name in ["w1", "w3"] else "w2s",
