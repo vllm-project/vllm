@@ -193,10 +193,10 @@ class RequestTracker:
         Remove running requests based on retention policies 
         specified by the following environment variables:
         
-        - ENGINE_MAX_CONCURRENT_REQUESTS:
+        - VLLM_ENGINE_MAX_CONCURRENT_REQUESTS:
         Max concurrent requests to process at anytime, if set.
 
-        - ENGINE_MAX_REQUEST_LIFESPAN:
+        - VLLM_ENGINE_MAX_REQUEST_LIFESPAN:
         Max lifespan in seconds for any request, if set.
         """
         if arrival_time is None:
