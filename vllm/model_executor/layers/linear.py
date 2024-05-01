@@ -379,7 +379,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 "We do not currently support loaded_shard_id == None and "
                 "shard_splitter != None for a parameter. Please open an issue."
             )
-            
+
         # Special case for Fp8 scales.
         fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
                                            None)
