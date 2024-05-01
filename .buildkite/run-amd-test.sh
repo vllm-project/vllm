@@ -40,5 +40,5 @@ docker run \
         -e HF_TOKEN \
         --name ${container_name} \
         ${container_name} \
-        /bin/bash -c "$1"
+        /bin/bash -c $(echo $1 | sed "s/^'//" | sed "s/'$//")
 
