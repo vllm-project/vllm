@@ -116,24 +116,19 @@ class ParallelVocabEmbedding(torch.nn.Module):
                     return
                 current_shard_offset = 0
                 shard_offsets = []
-                print(f"output_sizes: {self.output_sizes}")
 
                 for i, output_size in enumerate(self.output_sizes):
                     shard_offsets.append(
                         (i, current_shard_offset, output_size))
                     current_shard_offset += output_size
-                print(f"shared offsets: {shard_offsets}")
+
                 packed_dim = getattr(param, "packed_dim", None)
                 for shard_id, shard_offset, shard_size in shard_offsets:
                     # If quantized, we need to adjust the offset and size to
                     # account for the packing.
-                    print(f"shared size pre: {shard_size}")
-                    print(f"shared offset pre: {shard_offset}")
                     if packed_dim == output_dim:
                         shard_size = shard_size // param.pack_factor
-                        print(f"shared size post: {shard_size}")
                         shard_offset = shard_offset // param.pack_factor
-                        print(f"shared offset post: {shard_offset}")
 
                         # If marlin, we need to adjust the offset and size to
                         # account for the tiling.
@@ -159,13 +154,10 @@ class ParallelVocabEmbedding(torch.nn.Module):
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
                 packed_dim = getattr(param, "packed_dim", None)
-                print(f"shared size pre: {shard_size}")
-                print(f"shared offset pre: {shard_offset}")
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
-                    print(f"shared size post: {shard_size}")
-                    print(f"shared offset post: {shard_offset}")
 
                     # If marlin, we need to adjust the offset and size to
                     # account for the tiling.
