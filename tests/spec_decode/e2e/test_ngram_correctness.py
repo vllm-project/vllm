@@ -62,7 +62,7 @@ from .conftest import run_greedy_equality_correctness_test
 def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
                                       test_llm_generator, batch_size: int,
                                       output_len: int):
-    """Verify greedy equality on a tiny model with differnt batch size."""
+    """Verify greedy equality on a tiny model with different batch size."""
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
