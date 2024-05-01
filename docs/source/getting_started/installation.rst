@@ -53,6 +53,7 @@ You can also build and install vLLM from source:
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
+    $ # export VLLM_INSTALL_PUNICA_KERNELS=1 # optionally build for multi-LoRA capability
     $ pip install -e .  # This may take 5-10 minutes.
 
 .. tip::
