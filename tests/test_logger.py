@@ -207,12 +207,8 @@ def test_custom_logging_config_causes_an_error_if_configure_logging_is_off():
         # Remember! The root logger is assumed to have been configured as
         # though VLLM_CONFIGURE_LOGGING=1 and VLLM_LOGGING_CONFIG_PATH=None.
         root_logger = logging.getLogger("vllm")
-        other_logger_name = f"vllm.test_logger.{unique_name()}"
+        other_logger_name = f"vllm.test_logger.{uuid4()}"
         other_logger = init_logger(other_logger_name)
         assert other_logger.handlers != root_logger.handlers
         assert other_logger.level != root_logger.level
         assert other_logger.propagate
-
-
-def unique_name() -> str:
-    return str(uuid4())
