@@ -597,16 +597,18 @@ class LLMEngine:
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output=output))
+        self.do_log_stats(scheduler_outputs, output)
 
         return request_outputs
 
-    def do_log_stats(self) -> None:
+    def do_log_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
+            self.stat_logger.log(
+                self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
