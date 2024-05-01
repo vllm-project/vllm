@@ -66,9 +66,9 @@ class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,
     is_prompt: bool
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]]
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor]
+    seqlens: Optional[List[int]]
+    # seqlens stored as a tensor.
+    seqlens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, query_len, and seqlen.
     # |---------- N-1 iteration --------|
@@ -248,7 +248,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            assert prefill_meta.seq_lens is not None
+            assert prefill_meta.seqlens is not None
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
                 # triton attention
                 # When block_tables are not filled, it means q and k are the
@@ -275,7 +275,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         query,
                         key,
                         value,
-                        prefill_meta.seq_lens,
+                        prefill_meta.seqlens,
                         self.scale,
                     )
                 else:
@@ -304,7 +304,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.seq_lens_tensor,
+                    prefill_meta.seqlens_tensor,
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
@@ -334,12 +334,12 @@ def _naive_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    seq_lens: List[int],
+    seqlens: List[int],
     scale: float,
 ) -> torch.Tensor:
     output = torch.empty_like(query)
     start = 0
-    for _, seqlen in enumerate(seq_lens):
+    for _, seqlen in enumerate(seqlens):
         end = start + seqlen
         out = _naive_masked_attention(
             query[start:end],

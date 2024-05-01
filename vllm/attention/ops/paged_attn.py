@@ -167,7 +167,7 @@ class PagedAttention:
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         subquery_start_loc: torch.Tensor,
-        seq_lens_tensor: torch.Tensor,
+        seqlens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
@@ -183,7 +183,7 @@ class PagedAttention:
             block_tables,
             # subquery_start_loc is (batch_size + 1,)
             subquery_start_loc[:-1],
-            seq_lens_tensor,
+            seqlens_tensor,
             context_lens,
             max_query_len,
             alibi_slopes,
