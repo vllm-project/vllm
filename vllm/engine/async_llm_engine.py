@@ -47,7 +47,7 @@ ENGINE_HAS_RETENTION_POLICY = any([
     it is not None
     for it in [ENGINE_MAX_CONCURRENT_REQUESTS, ENGINE_MAX_REQUEST_LIFESPAN]
 ])
-"""Having at least one retention policy configured."""
+"""Flag of having at least one retention policy configured."""
 
 
 class AsyncEngineDeadError(RuntimeError):
