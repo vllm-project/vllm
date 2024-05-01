@@ -190,7 +190,7 @@ __device__ inline void scale4(FragB &frag_b, FragS &frag_s_1, FragS &frag_s_2,
   frag_b[1] = __hmul2(frag_b[1], s_val_3_4);
 }
 
-// Given 2 floats multiply by 2 scales (halfs)
+// Given 2 floats multiply by 2 scales (halves)
 __device__ inline void scale_float(float *c, FragS &s) {
   __half *s_ptr = reinterpret_cast<__half *>(&s);
   c[0] = __fmul_rn(c[0], __half2float(s_ptr[0]));
@@ -540,7 +540,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
   }
 
   // Since B-accesses have non-constant stride they have to be computed at
-  // runtime; we break dependicies between subsequent accesses with a tile by
+  // runtime; we break dependencies between subsequent accesses with a tile by
   // maintining multiple pointers (we have enough registers), a tiny
   // optimization.
   const int4 *B_ptr[b_sh_wr_iters];
@@ -939,7 +939,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partioning
+  // finally have to globally reduce over the results. As the striped partitioning
   // minimizes the number of such reductions and our outputs are usually rather
   // small, we perform this reduction serially in L2 cache.
   auto global_reduce = [&](bool first = false, bool last = false) {
@@ -1144,7 +1144,7 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
-    // the loop seemed to noticeably worse performance after compliation.
+    // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
