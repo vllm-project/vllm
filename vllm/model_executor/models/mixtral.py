@@ -112,12 +112,10 @@ class MixtralMoE(nn.Module):
 
         # Scaling factors for FP8 weights
         self.ws_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, dtype=torch.float32),
+            torch.ones(self.num_total_experts, dtype=torch.float32),
             requires_grad=False) if self.use_fp8 else None
         self.w2s_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, dtype=torch.float32),
+            torch.ones(self.num_total_experts, dtype=torch.float32),
             requires_grad=False) if self.use_fp8 else None
 
         # Scaling factors for FP8 activations
