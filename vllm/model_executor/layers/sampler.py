@@ -13,6 +13,9 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceGroupOutput, SequenceOutput)
 
+# (num_token_ids, num_parent_ids) per sequence group.
+SampleResultType = List[Tuple[List[int], List[int]]]
+
 
 class Sampler(nn.Module):
     """Samples the next tokens from the model's outputs.
@@ -155,7 +158,7 @@ def _apply_min_tokens_penalty(
         have not been generated yet
     """
     # list of indices in logits that will be set to -inf
-    logits_to_penalize = []
+    logits_to_penalize: List[Tuple[int, int]] = []
     logits_applied = 0
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
@@ -169,19 +172,17 @@ def _apply_min_tokens_penalty(
 
         start_idx = sample_indices[0]
         min_tokens = sampling_params.min_tokens
-        if min_tokens > 0:
+        token_ids_to_penalize = sampling_params.all_stop_token_ids
+        if min_tokens > 0 and token_ids_to_penalize:
             seqs_to_penalize = []
-            for i, seq_id in enumerate(seq_ids):
+            for j, seq_id in enumerate(seq_ids):
                 seq_data = seq_group.seq_data[seq_id]
                 if len(seq_data.output_token_ids) < min_tokens:
-                    seqs_to_penalize.append(i)
+                    seqs_to_penalize.append(j)
 
             if seqs_to_penalize:
                 # convert to the index into logits
-                seqs_to_penalize = [start_idx + i for i in seqs_to_penalize]
-                # use set() to remove any duplicates
-                token_ids_to_penalize = set(sampling_params.stop_token_ids +
-                                            [sampling_params.eos_token_id])
+                seqs_to_penalize = [start_idx + j for j in seqs_to_penalize]
                 # itertools.product pairs each seq index with every token id
                 logits_to_penalize.extend(
                     itertools.product(seqs_to_penalize, token_ids_to_penalize))
@@ -271,7 +272,7 @@ def _apply_min_p(
 def _greedy_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     samples: torch.Tensor,
-) -> List[Tuple[List[int], List[int]]]:
+) -> SampleResultType:
     """Run greedy sampling on a given samples.
 
     Args:
@@ -286,7 +287,7 @@ def _greedy_sample(
     """
     samples = samples.tolist()
     sample_idx = 0
-    results = []
+    results: SampleResultType = []
     for seq_group in selected_seq_groups:
         if not seq_group.do_sample:
             results.append(([], []))
@@ -306,7 +307,7 @@ def _greedy_sample(
 def _random_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     random_samples: torch.Tensor,
-) -> List[Tuple[List[int], List[int]]]:
+) -> SampleResultType:
     """Run random sampling on a given samples.
 
     Args:
@@ -322,7 +323,7 @@ def _random_sample(
     # Find the maximum best_of value of the prompt phase requests.
     random_samples = random_samples.cpu()
     sample_idx = 0
-    results = []
+    results: SampleResultType = []
     for seq_group in selected_seq_groups:
         if not seq_group.do_sample:
             results.append(([], []))
@@ -350,7 +351,7 @@ def _random_sample(
 def _beam_search_sample(
     selected_seq_groups: List[SequenceGroupToSample],
     logprobs: torch.Tensor,
-) -> List[Tuple[List[int], List[int]]]:
+) -> SampleResultType:
     """Run beam sampling on a given samples.
 
     Args:
@@ -372,7 +373,7 @@ def _beam_search_sample(
     # NOTE: Beam search is not vectorized, so its speed can be slower than
     # other sampling methods.
     sample_idx = 0
-    results = []
+    results: SampleResultType = []
     for seq_group in selected_seq_groups:
         if not seq_group.do_sample:
             results.append(([], []))
@@ -393,16 +394,16 @@ def _beam_search_sample(
             next_token_ids = next_token_ids.tolist()
         else:
             # Generation phase.
-            cumulative_logprobs = [
+            cumulative_logprobs: List[int] = [
                 seq_group.seq_data[seq_id].cumulative_logprob
                 for seq_id in seq_ids
             ]
-            cumulative_logprobs = torch.tensor(
+            cumulative_logprobs_tensor = torch.tensor(
                 cumulative_logprobs,
                 dtype=torch.float,
                 device=seq_group_logprobs.device)
             seq_group_logprobs = (seq_group_logprobs +
-                                  cumulative_logprobs.unsqueeze(dim=1))
+                                  cumulative_logprobs_tensor.unsqueeze(dim=1))
             _, topk_ids = torch.topk(seq_group_logprobs.flatten(),
                                      2 * beam_width)
             topk_ids = topk_ids.tolist()
@@ -454,8 +455,10 @@ def _sample_with_torch(
     sampling_metadata: SamplingMetadata,
     include_gpu_probs_tensor: bool,
     modify_greedy_probs: bool,
-) -> Tuple[List[Tuple[List[int], List[int]]], Optional[torch.Tensor]]:
-    categorized_seq_group_ids = {t: [] for t in SamplingType}
+) -> Tuple[SampleResultType, Optional[torch.Tensor]]:
+    categorized_seq_group_ids: Dict[SamplingType,
+                                    List[int]] = {t: []
+                                                  for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
@@ -557,8 +560,10 @@ def _sample_with_triton_kernel(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     sampling_tensors: SamplingTensors,
-) -> List[Tuple[List[int], List[int]]]:
-    categorized_seq_group_ids = {t: [] for t in SamplingType}
+) -> SampleResultType:
+    categorized_seq_group_ids: Dict[SamplingType,
+                                    List[int]] = {t: []
+                                                  for t in SamplingType}
     categorized_sample_indices = sampling_metadata.categorized_sample_indices
     for i, seq_group in enumerate(sampling_metadata.seq_groups):
         sampling_params = seq_group.sampling_params
@@ -634,7 +639,7 @@ def _sample(
     probs: torch.Tensor, logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata, sampling_tensors: SamplingTensors,
     include_gpu_probs_tensor: bool, modify_greedy_probs: bool
-) -> Tuple[List[Tuple[List[int], List[int]]], Optional[torch.Tensor]]:
+) -> Tuple[SampleResultType, Optional[torch.Tensor]]:
     """
     Args:
         probs: (num_query_tokens_in_batch, num_vocab)
@@ -645,7 +650,7 @@ def _sample(
     Returns:
         (next_token_ids, parent_seq_ids) for each seq group in a batch.
             If sampling is skipped, it returns ([], [])
-        sampled_token_ids_tensor: A tensor of sampled token ids.    
+        sampled_token_ids_tensor: A tensor of sampled token ids.
     """
     return _sample_with_torch(
         probs,
@@ -682,7 +687,7 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
 def _get_logprobs(
     logprobs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
-    sample_results: List[Tuple[List[int], List[int]]],
+    sample_results: SampleResultType,
 ) -> Tuple[List[Optional[PromptLogprobs]], List[SampleLogprobs]]:
     """Return sample lobprobs and prompt logprobs.
 
@@ -753,8 +758,8 @@ def _get_logprobs(
         assert len(next_token_ids) == len(query_indices)
 
     if len(query_indices) == 0:
-        empty_sampled_logprob = []
-        empty_prompt_logprob = None
+        empty_sampled_logprob: SampleLogprobs = []
+        empty_prompt_logprob: Optional[PromptLogprobs] = None
         return [empty_prompt_logprob], [empty_sampled_logprob]
 
     query_indices_gpu = torch.tensor(query_indices, device=logprobs.device)
@@ -967,7 +972,7 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
 
 
 def _build_sampler_output(
-    sample_results: List[Tuple[List[int], List[int]]],
+    sample_results: SampleResultType,
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
@@ -1011,7 +1016,7 @@ def _build_sampler_output(
     )
 
 
-def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[str]:
+def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     """Get a list of next prompt tokens to compute logprob from a
         given sequence group.
 

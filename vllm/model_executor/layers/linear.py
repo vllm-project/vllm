@@ -128,7 +128,8 @@ class LinearBase(torch.nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
         if quant_config is None:
-            self.quant_method = UnquantizedLinearMethod()
+            self.quant_method: Optional[
+                QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self)
 
@@ -160,6 +161,8 @@ class ReplicatedLinear(LinearBase):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
+        # All the linear layer supports quant method.
+        assert self.quant_method is not None
         self.quant_method.create_weights(self, self.input_size,
                                          [self.output_size], self.input_size,
                                          self.output_size, self.params_dtype)
@@ -173,6 +176,7 @@ class ReplicatedLinear(LinearBase):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
         output = self.quant_method.apply(self, x, bias)
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -221,6 +225,8 @@ class ColumnParallelLinear(LinearBase):
         self.output_size_per_partition = divide(output_size, tp_size)
         if output_sizes is None:
             output_sizes = [output_size]
+        # All the linear layer supports quant method.
+        assert self.quant_method is not None
         self.quant_method.create_weights(self,
                                          self.input_size,
                                          [x // tp_size for x in output_sizes],
@@ -241,7 +247,8 @@ class ColumnParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # Special case for Fp8 scales.
-        shard_indexer = getattr(param, "shard_indexer", None)
+        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
+                                           None)
 
         tp_rank = get_tensor_model_parallel_rank()
         output_dim = getattr(param, "output_dim", None)
@@ -252,10 +259,10 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         # Special case for Fp8 scales.
-        elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(param_data,
-                                                      loaded_weight,
-                                                      shard_id=0)
+        elif fp8_scales_shard_indexer is not None:
+            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
+                                                                 loaded_weight,
+                                                                 shard_id=0)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -264,6 +271,7 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
+        assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
@@ -322,7 +330,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
         # Special case for Fp8 scales.
-        shard_indexer = getattr(param, "shard_indexer", None)
+        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
+                                           None)
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.
@@ -380,11 +389,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
-        # Special case sharding for Fp8 scales.
-        elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(param_data,
-                                                      loaded_weight,
-                                                      loaded_shard_id)
+        # Special case for Fp8 scales.
+        elif fp8_scales_shard_indexer is not None:
+            param_data, loaded_weight = fp8_scales_shard_indexer(
+                param_data, loaded_weight, loaded_shard_id)
 
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
@@ -469,7 +477,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         # Special case for AQLM codebooks.
         is_metadata = getattr(param, "is_metadata", False)
         # Special case for Fp8 scales.
-        shard_indexer = getattr(param, "shard_indexer", None)
+        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
+                                           None)
 
         if loaded_shard_id is None:
             # Loaded weight is already packed.
@@ -544,12 +553,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size,
                                            shard_size)
-        # Special case for for Fp8 scales.
-        elif shard_indexer is not None:
-
-            param_data, loaded_weight = shard_indexer(param_data,
-                                                      loaded_weight,
-                                                      loaded_shard_id)
+        # Special case for Fp8 scales.
+        elif fp8_scales_shard_indexer is not None:
+            param_data, loaded_weight = fp8_scales_shard_indexer(
+                param_data, loaded_weight, loaded_shard_id)
         else:
             ignore_warning = getattr(param, "ignore_warning", False)
             if not ignore_warning:
@@ -607,6 +614,8 @@ class RowParallelLinear(LinearBase):
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
+        # All the linear layer supports quant method.
+        assert self.quant_method is not None
         self.quant_method.create_weights(self,
                                          self.input_size_per_partition,
                                          [self.output_size],
@@ -631,7 +640,8 @@ class RowParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # Special case for Fp8 scales.
-        shard_indexer = getattr(param, "shard_indexer", None)
+        fp8_scales_shard_indexer = getattr(param, "fp8_scales_shard_indexer",
+                                           None)
 
         tp_rank = get_tensor_model_parallel_rank()
         input_dim = getattr(param, "input_dim", None)
@@ -642,10 +652,10 @@ class RowParallelLinear(LinearBase):
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
         # Special case for Fp8 scales.
-        elif shard_indexer is not None:
-            param_data, loaded_weight = shard_indexer(param_data,
-                                                      loaded_weight,
-                                                      shard_id=0)
+        elif fp8_scales_shard_indexer is not None:
+            param_data, loaded_weight = fp8_scales_shard_indexer(param_data,
+                                                                 loaded_weight,
+                                                                 shard_id=0)
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
@@ -661,6 +671,7 @@ class RowParallelLinear(LinearBase):
             input_parallel = splitted_input[tp_rank].contiguous()
 
         # Matrix multiply.
+        assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_parallel)
         if self.reduce_results and self.tp_size > 1:
             output_ = tensor_model_parallel_all_reduce(output_parallel)

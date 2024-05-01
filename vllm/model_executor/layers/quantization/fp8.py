@@ -21,14 +21,16 @@ class Fp8Config(QuantizationConfig):
 
     def __init__(
         self,
-        is_serialized: bool = False,
+        is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
     ) -> None:
-        self.is_serialized = is_serialized
-        if is_serialized:
+        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
+        if is_checkpoint_fp8_serialized:
             logger.warning("Detected fp8 checkpoint. Please note that the "
                            "format is experimental and subject to change.")
-        assert activation_scheme in ACTIVATION_SCHEMES
+        if activation_scheme not in ACTIVATION_SCHEMES:
+            raise ValueError(
+                f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
 
     @classmethod
@@ -41,10 +43,7 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # TODO: PyTorch 2.3.0+ is required to run FP8 on
-        # SM 89 (e.g. Ada) GPUs. Specifically, this PR has to
-        # be included: https://github.com/pytorch/pytorch/pull/118881
-        return 90
+        return 89
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -53,12 +52,13 @@ class Fp8Config(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_serialized = ("fp8" in quant_method)
+        is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        return cls(is_serialized=is_serialized,
+        return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme)
 
-    def get_quant_method(self, layer: torch.nn.Module) -> "Fp8LinearMethod":
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["Fp8LinearMethod"]:
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
         return None
@@ -88,6 +88,24 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
 
+    def _create_scale_param(
+        self,
+        scale_name: str,
+        layer: torch.nn.Module,
+        output_partition_sizes: List[int],
+        **extra_weight_attrs,
+    ) -> None:
+        scale = Parameter(torch.empty(len(output_partition_sizes),
+                                      dtype=torch.float32),
+                          requires_grad=False)
+        layer.register_parameter(scale_name, scale)
+        set_weight_attrs(
+            scale, {
+                **extra_weight_attrs,
+                "fp8_scales_shard_indexer":
+                self.scales_shard_indexer,
+            })
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -106,7 +124,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # WEIGHT
         weight_dtype = (torch.float8_e4m3fn
-                        if self.quant_config.is_serialized else params_dtype)
+                        if self.quant_config.is_checkpoint_fp8_serialized else
+                        params_dtype)
         weight = Parameter(torch.empty(output_size_per_partition,
                                        input_size_per_partition,
                                        dtype=weight_dtype),
@@ -120,30 +139,21 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # If checkpoint is serialized fp8, load them.
         # Otherwise, wait until process_weights_after_loading.
-        if self.quant_config.is_serialized:
+        if self.quant_config.is_checkpoint_fp8_serialized:
             # WEIGHT SCALE
-            weight_scale = Parameter(torch.empty(len(output_partition_sizes),
-                                                 dtype=torch.float32),
-                                     requires_grad=False)
-            layer.register_parameter("weight_scale", weight_scale)
-            set_weight_attrs(weight_scale, {
-                **extra_weight_attrs,
-                "shard_indexer":
-                self.scales_shard_indexer,
-            })
+            self._create_scale_param(
+                scale_name="weight_scale",
+                layer=layer,
+                output_partition_sizes=output_partition_sizes,
+                **extra_weight_attrs)
 
             # ACTIVATION SCALE
             if self.quant_config.activation_scheme == "static":
-                act_scale = Parameter(torch.empty(len(output_partition_sizes),
-                                                  dtype=torch.float32),
-                                      requires_grad=False)
-                layer.register_parameter("act_scale", act_scale)
-                set_weight_attrs(
-                    act_scale, {
-                        **extra_weight_attrs,
-                        "shard_indexer":
-                        self.scales_shard_indexer,
-                    })
+                self._create_scale_param(
+                    scale_name="act_scale",
+                    layer=layer,
+                    output_partition_sizes=output_partition_sizes,
+                    **extra_weight_attrs)
 
     def scales_shard_indexer(
             self, param: torch.Tensor, loaded_weight: torch.Tensor,
@@ -166,8 +176,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 or not layer.process_after_load):
             return
 
-        # If checkpoint is fp1616 (not serialized fp8), quantize the weights.
-        if not self.quant_config.is_serialized:
+        # If checkpoint is fp/bf16 (not serialized fp8), quantize the weights.
+        if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight,
                                                          scale=None)
             layer.weight = Parameter(qweight.t(), requires_grad=False)
@@ -176,21 +186,27 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.act_scale = None
             return
 
-        # TODO: cutlass kernels will remove the need for much of this logic.
-        # If the checkpoint is serialized fp8, we already loaded quantized,
-        # so, just cleanup the Parameters for easier use in apply().
+        # If checkpoint is fp8, requantize the separately quantized logical
+        # weights into a single fp8 weight with a single weight scale.
         else:
+            # WEIGHT_SCALE / WEIGHT
+            #   Loop over logical weights, requantizing with single scale.
+            max_w_scale = layer.weight_scale.max()
+            start = 0
+            for idx, logical_width in enumerate(layer.logical_widths):
+                end = start + logical_width
+                weight_dq = per_tensor_dequantize(layer.weight[start:end, :],
+                                                  layer.weight_scale[idx])
+
+                layer.weight[start:end, :] = per_tensor_quantize(
+                    weight_dq, layer.weight_scale.max())
+                start = end
+            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+
             # WEIGHT
             #   Transpose weight for passing to torch._scaled_mm
             weight = layer.weight
             layer.weight = Parameter(weight.t(), requires_grad=False)
-
-            # WEIGHT_SCALE
-            #   If we only have one logical shard, avoid the loop in apply().
-            if len(layer.logical_widths) == 1:
-                layer.weight_scale = Parameter(layer.weight_scale.max(),
-                                               requires_grad=False)
-                layer.logical_widths = None
 
             # ACT_SCALE
             #   Dynamic: set to None (required input to ops.scaled_fp8_quant).
@@ -217,44 +233,33 @@ class Fp8LinearMethod(LinearMethodBase):
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
         qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
 
-        # Case 1: we have one single scale for N logical weights.
-        if layer.logical_widths is None:
-            output, _ = torch._scaled_mm(
-                qinput,
-                layer.weight,
-                out_dtype=x.dtype,
-                scale_a=x_scale,
-                scale_b=layer.weight_scale,
-            )
-
-        # TODO: replace naive loop with cutlass gemm_dq w/ epilogue fusion.
-        # Case 2: We have N weight_scales for N logical weights.
-        else:
-            output = torch.empty(x.shape[0],
-                                 layer.weight.shape[1],
-                                 dtype=x.dtype,
-                                 device="cuda")
-            start = 0
-            # Loop over the N logical shards.
-            for logical_width, w_scale in zip(layer.logical_widths,
-                                              layer.weight_scale):
-                end = start + logical_width
-                out, _ = torch._scaled_mm(
-                    qinput,
-                    layer.weight[:, start:end],
-                    out_dtype=x.dtype,
-                    scale_a=x_scale,
-                    scale_b=w_scale,
-                )
-                output[:, start:end] = out
-                start = end
-
-        if bias is not None:
-            output.add_(bias)
+        # Fused GEMM_DQ
+        output, _ = torch._scaled_mm(
+            qinput,
+            layer.weight,
+            out_dtype=x.dtype,
+            scale_a=x_scale,
+            scale_b=layer.weight_scale,
+            bias=bias,
+        )
 
         return output
 
 
-def all_close_1d(x: torch.Tensor):
+def all_close_1d(x: torch.Tensor) -> bool:
     assert len(x.shape) == 1
     return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
+
+
+def per_tensor_quantize(tensor: torch.Tensor,
+                        inv_scale: float) -> torch.Tensor:
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    qweight = (tensor / inv_scale).clamp(min=finfo.min, max=finfo.max)
+    return qweight.to(torch.float8_e4m3fn)
+
+
+def per_tensor_dequantize(tensor: torch.Tensor,
+                          inv_scale: float) -> torch.Tensor:
+    fake_qweight = tensor.to(torch.float16)
+    dq_weight = fake_qweight * inv_scale
+    return dq_weight
