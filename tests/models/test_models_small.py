@@ -10,7 +10,8 @@ import pytest
 SKIPPED_MODEL_REASON = {
     "allenai/OLMo-1B": "Hf side requirements",
     "google/gemma-1.1-2b-it": "No bitwise correctness for fp32",
-    "Qwen/Qwen-1_8B": "No bitwise correctness for fp32"
+    "openbmb/MiniCPM-2B-128k": "No bitwise correctness for fp32",
+    "Qwen/Qwen-1_8B": "No bitwise correctness for fp32",
 }
 
 MODELS = [
