@@ -228,6 +228,7 @@ class NCCLCommunicator:
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "NCCLCommunicator should be attached to a non-NCCL group.")
         self.group = group
+        # note: this rank is the rank in the group
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
         if self.rank == 0:
