@@ -1,5 +1,4 @@
 """Token blocks."""
-from __future__ import annotations
 
 from itertools import takewhile
 from os.path import commonprefix
