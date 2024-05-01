@@ -167,7 +167,8 @@ class RequestTracker:
         """Kill every outdated running request.
         Configurable via: `VLLM_ENGINE_MAX_REQUEST_LIFESPAN`
         """
-        if ENGINE_MAX_REQUEST_LIFESPAN is None: return
+        if ENGINE_MAX_REQUEST_LIFESPAN is None:
+            return
         for k, v in self.running_requests.items():
             lifespan = arrival_time - v
             if lifespan > ENGINE_MAX_REQUEST_LIFESPAN:
@@ -178,7 +179,8 @@ class RequestTracker:
         """Kill every request that exceeding max concurrency request limit.
         Configurable via `VLLM_ENGINE_MAX_CONCURRENT_REQUESTS`
         """
-        if ENGINE_MAX_CONCURRENT_REQUESTS is None: return
+        if ENGINE_MAX_CONCURRENT_REQUESTS is None:
+            return
         running_requests = [(k, v) for k, v in self.running_requests.items()]
         running_requests.sort(key=lambda it: it[1])
         # smallest first, so oldest will be first
