@@ -58,7 +58,7 @@ def parse_args():
 
 # Add prometheus asgi middleware to route /metrics requests
 route = Mount("/metrics", make_asgi_app())
-# Avoid 307 Redirect
+# Workaround for 307 Redirect for /metrics
 route.path_regex = re.compile('^/metrics(?P<path>.*)$')
 app.routes.append(route)
 
