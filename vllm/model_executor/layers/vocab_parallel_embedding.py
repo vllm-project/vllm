@@ -105,6 +105,14 @@ class VocabParallelEmbedding(torch.nn.Module):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
+    def extra_repr(self) -> str:
+        s = f"num_embeddings={self.num_embeddings_per_partition}"
+        s += f", embedding_dim={self.embedding_dim}"
+        s += f", org_vocab_size={self.org_vocab_size}"
+        s += f', num_embeddings_padded={self.num_embeddings_padded}'
+        s += f', tp_size={self.tp_size}'
+        return s
+
 
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.

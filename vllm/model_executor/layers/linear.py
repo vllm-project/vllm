@@ -181,6 +181,12 @@ class ReplicatedLinear(LinearBase):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        return s
+
 
 class ColumnParallelLinear(LinearBase):
     """Linear layer with column parallelism.
@@ -280,6 +286,14 @@ class ColumnParallelLinear(LinearBase):
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"in_features={self.input_size}"
+        s += f", output_features={self.output_size_per_partition}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={get_tensor_model_parallel_world_size()}"
+        s += f", gather_output={self.gather_output}"
+        return s
 
 
 class MergedColumnParallelLinear(ColumnParallelLinear):
@@ -685,3 +699,11 @@ class RowParallelLinear(LinearBase):
             output = output_
             output_bias = self.bias
         return output, output_bias
+
+    def extra_repr(self) -> str:
+        s = f"input_features={self.input_size_per_partition}"
+        s += f", output_features={self.output_size}"
+        s += f", bias={self.bias is not None}"
+        s += f", tp_size={self.tp_size}"
+        s += f", reduce_results={self.reduce_results}"
+        return s

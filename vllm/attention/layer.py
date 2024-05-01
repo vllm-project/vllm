@@ -47,3 +47,10 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         return self.impl.forward(query, key, value, kv_cache, attn_metadata,
                                  kv_scale)
+
+    def extra_repr(self) -> str:
+        s = f"head_size={self.impl.head_size}"  # type: ignore
+        s += f", num_heads={self.impl.num_heads}"  # type: ignore
+        s += f", num_kv_heads={self.impl.num_kv_heads}"  # type: ignore
+        s += f", scale={self.impl.scale}"  # type: ignore
+        return s

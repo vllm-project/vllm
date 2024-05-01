@@ -49,3 +49,18 @@ def test_models(
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_model_print(
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
+    vllm_model = vllm_runner(model, dtype=dtype)
+    # This test is for verifying whether the model's extra_repr
+    # can be printed correctly.
+    print(vllm_model.model.llm_engine.model_executor.driver_worker.
+          model_runner.model)
+    del vllm_model
