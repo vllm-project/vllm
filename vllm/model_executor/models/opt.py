@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelVocabEmbedding, ParallelLMHead)
+    ParallelLMHead, ParallelVocabEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
