@@ -9,6 +9,7 @@ from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.utils import cdiv
 
 PrefixHash = int
 BlockId = int
@@ -254,7 +255,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self._hashless_allocator.all_block_ids
 
     def is_block_cached(self, block: "PrefixCachingBlock") -> bool:
-        if block.content_hash not in self._cached_blocks:
+        if block.content_hash in self._cached_blocks:
             return True
         return False
 
@@ -359,7 +360,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 if block.num_empty_slots >= num_lookahead_slots:
                     num_touched_blocks += 1
                 else:
-                    num_touched_blocks += 2
+                    num_touched_blocks += cdiv(
+                        num_lookahead_slots - block.num_empty_slots,
+                        self._block_size)
             else:
                 if not self.is_block_cached(block):
                     num_touched_blocks += 1

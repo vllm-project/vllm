@@ -106,7 +106,7 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
 @pytest.mark.parametrize("block_size", [8])
 @pytest.mark.parametrize("num_cpu_blocks", [4])
 @pytest.mark.parametrize("num_gpu_blocks", [4])
-@pytest.mark.parametrize("num_lookahead_slots", [0, 2])
+@pytest.mark.parametrize("num_lookahead_slots", [0, 2, 10])
 @pytest.mark.parametrize("enable_caching", [False])
 def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
               enable_caching):

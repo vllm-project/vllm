@@ -3,6 +3,7 @@ from typing import Dict, Iterable, List, Optional, Set
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator
+from vllm.utils import cdiv
 
 BlockId = int
 Refcount = int
@@ -229,7 +230,9 @@ class NaiveBlockAllocator(BlockAllocator):
                 if block.num_empty_slots >= num_lookahead_slots:
                     new_block_count += 1
                 else:
-                    new_block_count += 2
+                    new_block_count += cdiv(
+                        num_lookahead_slots - block.num_empty_slots,
+                        self._block_size)
             else:
                 old_block_set.add(block.block_id)
         num_touched_blocks = new_block_count + len(old_block_set)
