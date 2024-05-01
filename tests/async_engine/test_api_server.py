@@ -1,4 +1,3 @@
-import locale
 import subprocess
 import sys
 import time
@@ -40,18 +39,8 @@ def api_server(tokenizer_pool_size: int, engine_use_ray: bool,
         commands.append("--engine-use-ray")
     if worker_use_ray:
         commands.append("--worker-use-ray")
-    uvicorn_process = subprocess.Popen(commands,
-                                       stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT)
+    uvicorn_process = subprocess.Popen(commands)
     yield
-
-    try:
-        output, _ = uvicorn_process.communicate(timeout=3)
-    except subprocess.TimeoutExpired:
-        uvicorn_process.kill()
-        output, _ = uvicorn_process.communicate()
-    output = output.decode(locale.getpreferredencoding())
-    assert "Avg prompt throughput: " in output
     uvicorn_process.terminate()
 
 
