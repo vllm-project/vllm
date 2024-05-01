@@ -116,25 +116,36 @@ class ParallelVocabEmbedding(torch.nn.Module):
                     return
                 current_shard_offset = 0
                 shard_offsets = []
+                print(f"output_sizes: {self.output_sizes}")
+
                 for i, output_size in enumerate(self.output_sizes):
                     shard_offsets.append(
                         (i, current_shard_offset, output_size))
                     current_shard_offset += output_size
+                print(f"shared offsets: {shard_offsets}")
                 packed_dim = getattr(param, "packed_dim", None)
                 for shard_id, shard_offset, shard_size in shard_offsets:
                     # If quantized, we need to adjust the offset and size to
                     # account for the packing.
+                    print(f"shared size pre: {shard_size}")
+                    print(f"shared offset pre: {shard_offset}")
                     if packed_dim == output_dim:
                         shard_size = shard_size // param.pack_factor
+                        print(f"shared size post: {shard_size}")
                         shard_offset = shard_offset // param.pack_factor
+                        print(f"shared offset post: {shard_offset}")
 
                         # If marlin, we need to adjust the offset and size to
                         # account for the tiling.
                         shard_size, shard_offset = adjust_marlin_shard(
                             param, shard_size, shard_offset)
 
+                    max_shard_size = loaded_weight.size(output_dim)
+                    # shard size should not be larger than full weight size
+                    safe_shard_size = min(max_shard_size, shard_size)
+
                     loaded_weight_shard = loaded_weight.narrow(
-                        output_dim, shard_offset, shard_size)
+                        output_dim, shard_offset, safe_shard_size)
                     self.weight_loader(param, loaded_weight_shard, shard_id)
                 return
 
@@ -148,20 +159,31 @@ class ParallelVocabEmbedding(torch.nn.Module):
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
                 packed_dim = getattr(param, "packed_dim", None)
+                print(f"shared size pre: {shard_size}")
+                print(f"shared offset pre: {shard_offset}")
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.pack_factor
                     shard_offset = shard_offset // param.pack_factor
+                    print(f"shared size post: {shard_size}")
+                    print(f"shared offset post: {shard_offset}")
 
                     # If marlin, we need to adjust the offset and size to
                     # account for the tiling.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
-                param_data = param_data.narrow(output_dim, shard_offset,
-                                               shard_size)
                 start_idx = tp_rank * shard_size
+
+                max_shard_size = loaded_weight.size(output_dim)
+                # shard size should not be larger than full weight size
+                safe_shard_size = min(max_shard_size, shard_size)
+
+                param_data = param_data.narrow(output_dim, shard_offset,
+                                               safe_shard_size)
+
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
-                                                     shard_size)
+                                                     safe_shard_size)
+
             elif is_metadata:
                 # metadata indicates fixed size concatenated along dim 0
                 shard_size = loaded_weight.shape[0]
@@ -194,7 +216,7 @@ class ParallelVocabEmbedding(torch.nn.Module):
             masked_input = input_
 
         # Get the embeddings.
-        # TODO: linear_method base class does not have embedding api
+        #TODO: linear_method base class does not have embedding api
         assert not self.linear_method.QUANTIZED
         output_parallel = F.embedding(masked_input, self.weight)
 

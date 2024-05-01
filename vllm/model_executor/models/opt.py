@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelVocabEmbedding)
+    ParallelVocabEmbedding, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, skip_gptq_extra_param)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -290,14 +290,9 @@ class OPTForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.model = OPTModel(config, quant_config)
 
-        # TODO de-duplicate lm_head and embed_tokens if they are the same
-        #  in terms of weights shape and value
-        self.lm_head = ParallelVocabEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config)
-
-        self.model.decoder.embed_tokens = self.lm_head
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

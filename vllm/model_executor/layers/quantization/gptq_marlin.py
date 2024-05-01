@@ -165,6 +165,11 @@ class GPTQMarlinConfig(QuantizationConfig):
         group_size = quant_config.get("group_size", None)
         sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
+        lm_head_quantized = quant_config.get("lm_head", False)
+
+        # TODO FIX ME: marlin is not compatible with quantized lm_head.
+        if lm_head_quantized:
+            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None

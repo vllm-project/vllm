@@ -14,13 +14,17 @@ from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 # Model Id // Expected output
 MODELS_QUANT_TYPE = [
     ("LnL-AI/TinyLlama-1.1B-intermediate-step-1341k-3T-autoround-lm_head-symFalse",
-     'VLLM is a very popular and successful program'),
+     "On the surface of Mars, we found",
+     " a lot of water, but we didn't find any life."),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
-     "\nIn the year 2020, a group of scientists"),
+     "On the surface of Mars, we found",
+     " a rocky terrain that is similar to the Martian surface."),
     ("LnL-AI/opt-125M-autoround-lm_head-true-symTrue",
-     "\nThe story of the vLLM:"),
+     "On the surface of Mars, we found",
+     " a lot of evidence for the existence of life on Earth."),
     ("LnL-AI/opt-125M-autoround-lm_head-false-symTrue",
-     "\nThe story of the VLLM is a story of the VLLM,"),
+     "On the surface of Mars, we found",
+     " a lot of evidence of life. But the evidence is not conclusive."),
 ]
 
 MAX_TOKENS = 20
@@ -28,10 +32,10 @@ MAX_TOKENS = 20
 
 @pytest.mark.parametrize("model_quant_type", MODELS_QUANT_TYPE)
 def test_lm_head(
-        vllm_runner,
-        model_quant_type: str,
+    vllm_runner,
+    model_quant_type: str,
 ) -> None:
-    model, expected_output = model_quant_type
+    model, prompt, expected_output = model_quant_type
     vllm_model = vllm_runner(model,
                              dtype=torch.float16,
                              enforce_eager=True,
@@ -50,14 +54,13 @@ def test_lm_head(
     lm_head_layer = (vllm_model.model.llm_engine.model_executor.driver_worker.
                      model_runner.model.lm_head)
 
-    if quant_lm_head and "opt" not in model:
+    if quant_lm_head:
         assert isinstance(lm_head_layer.linear_method, GPTQLinearMethod)
     else:
         assert isinstance(lm_head_layer.linear_method, UnquantizedLinearMethod)
 
     llm_engine.add_request(
-        "id", "A story about vLLM:\n",
-        SamplingParams(
+        "id", prompt, SamplingParams(
             temperature=0.0,
             max_tokens=MAX_TOKENS,
         ), None)
@@ -65,11 +68,13 @@ def test_lm_head(
     output: Optional[CompletionOutput] = None
     output_text = ""
     while llm_engine.has_unfinished_requests():
-        (request_output,) = llm_engine.step()
-        (output,) = request_output.outputs
+        (request_output, ) = llm_engine.step()
+        (output, ) = request_output.outputs
 
         # Ensure we don't backtrack
         assert output.text.startswith(output_text)
         output_text = output.text
+
+    print(f"output: {output_text}")
     assert output is not None
     assert output_text.startswith(expected_output)
