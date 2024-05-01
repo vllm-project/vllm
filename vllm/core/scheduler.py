@@ -331,12 +331,14 @@ class Scheduler:
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
-                    self._preempt(victim_seq_group, blocks_to_swap_out)
+                    self._preempt(victim_seq_group, blocks_to_swap_out,
+                                  self.scheduler_config.preemption_mode)
                     preempted.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    self._preempt(seq_group, blocks_to_swap_out)
+                    self._preempt(seq_group, blocks_to_swap_out,
+                                  self.scheduler_config.preemption_mode)
                     preempted.append(seq_group)
                     break
             else:
@@ -538,7 +540,7 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
-        preemption_mode: Optional[PreemptionMode] = None,
+        preemption_mode: Optional[str] = None,
     ) -> None:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
@@ -556,6 +558,10 @@ class Scheduler:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
+        elif preemption_mode == "swap":
+            preemption_mode = PreemptionMode.SWAP
+        else:
+            preemption_mode = PreemptionMode.RECOMPUTE
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:

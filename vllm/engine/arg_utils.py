@@ -63,6 +63,7 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
+    preemption_mode: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -417,6 +418,7 @@ class EngineArgs:
             num_lookahead_slots=self.num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            preemption_mode=self.preemption_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

@@ -542,18 +542,19 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        preemption_mode: Whether to perform preemption by swapping or 
+            recomputation (default)
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: Optional[int],
-        max_num_seqs: int,
-        max_model_len: int,
-        use_v2_block_manager: bool = False,
-        num_lookahead_slots: int = 0,
-        delay_factor: float = 0.0,
-        enable_chunked_prefill: bool = False,
-    ) -> None:
+    def __init__(self,
+                 max_num_batched_tokens: Optional[int],
+                 max_num_seqs: int,
+                 max_model_len: int,
+                 use_v2_block_manager: bool = False,
+                 num_lookahead_slots: int = 0,
+                 delay_factor: float = 0.0,
+                 enable_chunked_prefill: bool = False,
+                 preemption_mode: Optional[str] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
@@ -566,6 +567,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.preemption_mode = preemption_mode
 
         self._verify_args()
 
