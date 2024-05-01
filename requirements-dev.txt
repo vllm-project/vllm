@@ -14,7 +14,7 @@ types-setuptools
 
 # testing
 pytest
-tensorizer==2.9.0a0
+tensorizer==2.9.0
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
