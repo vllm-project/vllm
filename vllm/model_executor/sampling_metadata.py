@@ -16,15 +16,23 @@ _SEED_0_REPLACEMENT = 3403598558
 
 @dataclass
 class SequenceGroupToSample:
+    # |---------- N-1 iteration --------|
+    # |---------------- N iteration ---------------------|
+    # |- tokenA -|......................|-- newTokens ---|
+    # |---------- context_len ----------|
+    # |-------------------- seqlen ----------------------|
+    #                                   |-- query_len ---|
+
     # Sequence ids for the sequence group in a previous step.
     seq_ids: List[int]
     sampling_params: SamplingParams
     # seq_id -> sequence data.
     seq_data: Dict[int, SequenceData]
-    # The length of the sequence of the sequence group. None if it is in a decode
+    # The length of the sequence (all tokens seen in the past + new token to
+    # compute attention) of the sequence group. None if it is in a decode
     # stage.
     seqlen: Optional[int]
-    # The length of the query tokens to compute in the current step. None if it
+    # The length of new query tokens to compute in the current step. None if it
     # is in a decode stage. The length of query_len <= seqlen if chunked prefill
     # is enabled.
     query_len: Optional[int]
@@ -105,8 +113,8 @@ class SamplingMetadata:
             selected_token_indices,
             categorized_sample_indices,
             num_prompts,
-        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens,
-                                query_lens, device)
+        ) = _prepare_seq_groups(seq_group_metadata_list, seq_lens, query_lens,
+                                device)
         selected_token_indices = async_tensor_h2d(selected_token_indices,
                                                   dtype=torch.long,
                                                   target_device=device,

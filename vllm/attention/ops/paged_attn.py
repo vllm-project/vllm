@@ -85,7 +85,7 @@ class PagedAttention:
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         seqlens: torch.Tensor,
-        max_context_len: int,
+        max_seqlen: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
@@ -96,7 +96,7 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
+        max_num_partitions = ((max_seqlen + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
@@ -105,7 +105,7 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = (max_context_len <= 8192
+        use_v1 = (max_seqlen <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
         if use_v1:
             # Run PagedAttention V1.
@@ -119,7 +119,7 @@ class PagedAttention:
                 block_tables,
                 seqlens,
                 block_size,
-                max_context_len,
+                max_seqlen,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
@@ -151,7 +151,7 @@ class PagedAttention:
                 block_tables,
                 seqlens,
                 block_size,
-                max_context_len,
+                max_seqlen,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,

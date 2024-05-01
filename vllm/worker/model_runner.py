@@ -42,7 +42,7 @@ class PreparePromptMetadata(NamedTuple):
     input_tokens: List[int]
     input_positions: List[int]
     attn_metadata: Optional[AttentionMetadataPerStage]
-    seq_lens: List[int]
+    seqlens: List[int]
     query_lens: List[int]
     lora_index_mapping: List[int]
     lora_prompt_mapping: List[int]
@@ -56,7 +56,7 @@ class PreparePromptMetadata(NamedTuple):
             input_tokens=[],
             input_positions=[],
             attn_metadata=None,
-            seq_lens=[],
+            seqlens=[],
             query_lens=[],
             lora_index_mapping=[],
             lora_prompt_mapping=[],
@@ -134,9 +134,8 @@ class ModelRunner:
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
 
-        self.max_seqlen_to_capture = (
-            self.model_config.max_seqlen_to_capture
-            if self.model_config is not None else 0)
+        self.max_seqlen_to_capture = (self.model_config.max_seqlen_to_capture
+                                      if self.model_config is not None else 0)
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
@@ -231,7 +230,7 @@ class ModelRunner:
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
 
-        seq_lens: List[int] = []
+        seqlens: List[int] = []
         context_lens: List[int] = []
         query_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
@@ -240,13 +239,11 @@ class ModelRunner:
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
 
-        is_prompt = False
         for seq_group_metadata in seq_group_metadata_list:
-            # assert seq_group_metadata.is_prompt
+            assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
-            # assert len(seq_ids) == 1
+            assert len(seq_ids) == 1
             seq_id = seq_ids[0]
-            is_prompt = seq_group_metadata.is_prompt
 
             computed_block_nums = seq_group_metadata.computed_block_nums
             if (self.scheduler_config is not None
@@ -259,21 +256,19 @@ class ModelRunner:
 
             token_chunk_size = seq_group_metadata.token_chunk_size
             seq_data = seq_group_metadata.seq_data[seq_id]
-            computed_len = seq_data.get_num_computed_tokens()
+            context_len = seq_data.get_num_computed_tokens()
             # We should use get_len here because in case of preemption
             # it contains output tokens.
-            prefill_end = min(seq_data.get_len(),
-                              computed_len + token_chunk_size)
-            prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
-            seqlen = prefill_end
-            seq_lens.append(seqlen)
+            seqlen = min(seq_data.get_len(), context_len + token_chunk_size)
+            prompt_tokens = seq_data.get_token_ids()[context_len:seqlen]
+            seqlens.append(seqlen)
 
             # NOTE: This only works for oooooooxxx style attention.
             if computed_block_nums is not None and len(
                     computed_block_nums) > 0 and self.sliding_window is None:
                 # Prefix is not supported with sliding_window
-                computed_len = len(computed_block_nums) * self.block_size
-                prompt_tokens = prompt_tokens[computed_len:]
+                context_len = len(computed_block_nums) * self.block_size
+                prompt_tokens = prompt_tokens[context_len:]
                 prefix_block_tables.append(computed_block_nums)
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
@@ -287,25 +282,25 @@ class ModelRunner:
                 prefix_block_tables.append([])
                 # Right now, prefill start is always 0. However, this
                 # assumption can be changed once chunked prefill is introduced.
-                assert computed_len == 0
+                assert context_len == 0
 
             # actual prompt lens
-            context_lens.append(computed_len)
-            query_lens.append(seqlen - computed_len)
+            context_lens.append(context_len)
+            query_lens.append(seqlen - context_len)
 
             input_tokens.extend(prompt_tokens)
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(list(range(computed_len, prefill_end)))
+            input_positions.extend(list(range(context_len, seqlen)))
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
                 lora_requests.add(seq_group_metadata.lora_request)
 
-            lora_index_mapping += [lora_id] * (seqlen - computed_len)
+            lora_index_mapping += [lora_id] * (seqlen - context_len)
             lora_prompt_mapping.extend(
                 [lora_id] *
-                (seqlen - computed_len
+                (seqlen - context_len
                  if seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.multi_modal_data:
@@ -327,12 +322,12 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert computed_len == 0, (
+                assert context_len == 0, (
                     "Prefix caching is currently not supported with "
                     "sliding window attention")
                 start_idx = max(0, seqlen - self.sliding_window)
 
-            for i in range(computed_len, prefill_end):
+            for i in range(context_len, seqlen):
                 if i < start_idx:
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
@@ -343,7 +338,7 @@ class ModelRunner:
                 slot_mapping.append(slot)
 
         max_query_len = max(query_lens)
-        max_seqlen = max(seq_lens)
+        max_seqlen = max(seqlens)
         assert max_query_len > 0
 
         context_lens_tensor = torch.tensor(context_lens,
@@ -372,16 +367,16 @@ class ModelRunner:
         # Query length can be shorter than key (i.e., prompt) when prefill
         # is chunked or prefix cached.
         query_lens_tensor = torch.tensor(query_lens,
-                                            dtype=torch.long,
-                                            device=self.device)
+                                         dtype=torch.long,
+                                         device=self.device)
         subquery_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                          dtype=torch.int32,
                                          device=self.device)
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                          dtype=torch.int,
-                                          device=self.device)
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
+        seqlens_tensor = torch.tensor(seqlens,
+                                      dtype=torch.int,
+                                      device=self.device)
+        seq_start_loc = torch.zeros(seqlens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
 
@@ -390,21 +385,20 @@ class ModelRunner:
                      dtype=subquery_start_loc.dtype,
                      out=subquery_start_loc[1:])
 
-        torch.cumsum(seq_lens_tensor,
+        torch.cumsum(seqlens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
         attn_metadata = self.attn_backend.make_metadata(
-            is_prompt=is_prompt,
-            seq_lens=seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
+            is_prompt=True,
+            seqlens=seqlens,
+            seqlens_tensor=seqlens_tensor,
             max_query_len=max_query_len,
-            max_context_len=max(context_lens),
             max_seqlen=max_seqlen,
             subquery_start_loc=subquery_start_loc,
             seq_start_loc=seq_start_loc,
-            context_lens=context_lens_tensor,
+            context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
         )
@@ -413,7 +407,7 @@ class ModelRunner:
             input_tokens=input_tokens,
             input_positions=input_positions,
             attn_metadata=attn_metadata,
-            seq_lens=seq_lens,
+            seqlens=seqlens,
             query_lens=query_lens,
             lora_index_mapping=lora_index_mapping,
             lora_prompt_mapping=lora_prompt_mapping,
@@ -480,10 +474,9 @@ class ModelRunner:
         # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_seqlen = max(seqlens)
-        use_captured_graph = (
-            not self.model_config.enforce_eager
-            and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
-            and max_seqlen <= self.max_seqlen_to_capture)
+        use_captured_graph = (not self.model_config.enforce_eager
+                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                              and max_seqlen <= self.max_seqlen_to_capture)
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
             assert graph_batch_size >= batch_size
@@ -497,8 +490,8 @@ class ModelRunner:
             batch_size = graph_batch_size
 
         seqlens_tensor = torch.tensor(seqlens,
-                                           dtype=torch.int,
-                                           device=self.device)
+                                      dtype=torch.int,
+                                      device=self.device)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -527,14 +520,13 @@ class ModelRunner:
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
-            seq_lens=None,
-            seq_lens_tensor=seqlens_tensor,
+            seqlens=None,
+            seqlens_tensor=seqlens_tensor,
             max_query_len=None,
-            max_context_len=None,
             max_seqlen=max_seqlen,
             subquery_start_loc=None,
             seq_start_loc=None,
-            context_lens=None,
+            context_lens_tensor=None,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
@@ -567,7 +559,7 @@ class ModelRunner:
                 input_tokens,
                 input_positions,
                 prefill_attn_metadata,
-                seq_lens,
+                seqlens,
                 query_lens,
                 lora_index_mapping,
                 lora_prompt_mapping,
@@ -585,13 +577,13 @@ class ModelRunner:
                 decode_slot_mapping,
             ) = self._prepare_decode(decode_reqs)
             sampling_metadata = SamplingMetadata.prepare(
-                seq_group_metadata_list, seq_lens, query_lens,
-                self.device, self.pin_memory)
+                seq_group_metadata_list, seqlens, query_lens, self.device,
+                self.pin_memory)
 
             if not self.scheduler_config.chunked_prefill_enabled:
                 assert (len(prefill_reqs) and len(decode_reqs)) == 0
 
-            num_prefills = len(seq_lens)
+            num_prefills = len(seqlens)
             num_prefill_tokens = len(input_tokens)
             num_decode_tokens = len(decode_input_tokens)
 
@@ -803,10 +795,10 @@ class ModelRunner:
                 int(max_num_batched_tokens /
                     self.vision_language_config.image_feature_size))
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            seqlen = (max_num_batched_tokens // max_num_seqs +
+                      (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data, fake_multi_modal_input = _prepare_fake_inputs(
-                seq_len, self.vision_language_config)
+                seqlen, self.vision_language_config)
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
@@ -910,14 +902,13 @@ class ModelRunner:
                 # Create dummy attn_metadata.
                 decode_metadata = self.attn_backend.make_metadata(
                     is_prompt=False,
-                    seq_lens=None,
-                    seq_lens_tensor=seqlens[:batch_size],
+                    seqlens=None,
+                    seqlens_tensor=seqlens[:batch_size],
                     max_query_len=None,
-                    max_context_len=None,
                     max_seqlen=self.max_seqlen_to_capture,
                     subquery_start_loc=None,
                     seq_start_loc=None,
-                    context_lens=None,
+                    context_lens_tensor=None,
                     block_tables=block_tables[:batch_size],
                     use_cuda_graph=True,
                 )
@@ -1027,7 +1018,7 @@ class CUDAGraphRunner:
             "positions": positions,
             "kv_caches": kv_caches,
             "slot_mapping": attn_metadata.slot_mapping,
-            "context_lens": attn_metadata.decode_metadata.context_lens,
+            "seqlens_tensor": attn_metadata.decode_metadata.seqlens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
@@ -1049,8 +1040,8 @@ class CUDAGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.input_buffers["context_lens"].copy_(
-            attn_metadata.decode_metadata.context_lens, non_blocking=True)
+        self.input_buffers["seqlens_tensor"].copy_(
+            attn_metadata.decode_metadata.seqlens_tensor, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         # Run the graph.
@@ -1089,18 +1080,18 @@ def _get_graph_batch_size(batch_size: int) -> int:
 
 
 def _prepare_fake_inputs(
-        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
+        seqlen: int, vision_language_config: Optional[VisionLanguageConfig]):
     """Prepare fake inputs for profile run."""
     if vision_language_config:
         prompt_tokens = [
             vision_language_config.image_token_id
         ] * vision_language_config.image_feature_size + [0] * (
-            seq_len - vision_language_config.image_feature_size)
+            seqlen - vision_language_config.image_feature_size)
         fake_image_input = MultiModalData(
             type=MultiModalData.Type.IMAGE,
             data=torch.zeros(vision_language_config.image_input_shape,
                              dtype=torch.float16))
     else:
-        prompt_tokens = [0] * seq_len
+        prompt_tokens = [0] * seqlen
         fake_image_input = None
     return SequenceData(prompt_tokens), fake_image_input

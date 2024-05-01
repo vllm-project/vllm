@@ -52,7 +52,7 @@ class NeuronModelRunner:
         input_positions: List[List[int]] = []
         input_block_ids: List[int] = []
 
-        seq_lens: List[int] = []
+        seqlens: List[int] = []
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -62,7 +62,7 @@ class NeuronModelRunner:
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
             seqlen = len(prompt_tokens)
-            seq_lens.append(seqlen)
+            seqlens.append(seqlen)
 
             input_tokens.append(prompt_tokens)
             input_positions.append(list(range(seqlen)))
@@ -72,7 +72,7 @@ class NeuronModelRunner:
             assert len(block_table) == 1
             input_block_ids.append(block_table[0])
 
-        max_seqlen = max(seq_lens)
+        max_seqlen = max(seqlens)
         assert max_seqlen > 0
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_seqlen,
@@ -88,7 +88,7 @@ class NeuronModelRunner:
                                        dtype=torch.long,
                                        device=self.device)
 
-        return input_tokens, input_positions, input_block_ids, seq_lens
+        return input_tokens, input_positions, input_block_ids, seqlens
 
     def _prepare_decode(
         self,
@@ -110,10 +110,10 @@ class NeuronModelRunner:
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append([generation_token])
 
-                seq_len = seq_data.get_len()
-                position = seq_len - 1
+                seqlen = seq_data.get_len()
+                position = seqlen - 1
                 input_positions.append([position])
-                context_lens.append(seq_len)
+                context_lens.append(seqlen)
 
                 assert seq_group_metadata.block_tables is not None
                 block_table = seq_group_metadata.block_tables[seq_id]
@@ -149,18 +149,18 @@ class NeuronModelRunner:
         # Prepare input tensors.
         if is_prompt:
             (input_tokens, input_positions, input_block_ids,
-             seq_lens) = self._prepare_prompt(seq_group_metadata_list)
+             seqlens) = self._prepare_prompt(seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
              input_block_ids) = self._prepare_decode(seq_group_metadata_list)
-            seq_lens = []
+            seqlens = []
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
-            seq_lens,
+            seqlens,
             # query_lens is not needed if chunked prefill is not
             # supported. Since neuron worker doesn't support chunked prefill
-            # just use seq_lens instead.
-            seq_lens,
+            # just use seqlens instead.
+            seqlens,
             self.device,
             self.pin_memory)
 

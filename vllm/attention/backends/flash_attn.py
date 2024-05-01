@@ -66,10 +66,11 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    seq_lens: Optional[List[int]]
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor]
+    # (batch_size,). The sequence length per sequence. Sequence length means
+    # the computed tokens + new tokens None if it is a decoding.
+    seqlens: Optional[List[int]]
+    # seqlens stored as a tensor.
+    seqlens_tensor: Optional[torch.Tensor]
 
     # NOTE(sang): Definition of context_len, query_len, and seqlen.
     # |---------- N-1 iteration --------|
@@ -78,10 +79,6 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # |---------- context_len ----------|
     # |-------------------- seqlen ----------------------|
     #                                   |-- query_len ---|
-
-    # WARNING(sang): context_len has different definition depending on if it is
-    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
-    # When it is for decoding, it includes a new token.
 
     # Maximum query length in the batch.
     max_query_len: Optional[int]
@@ -95,6 +92,9 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,) A tensor of context lengths (tokens that are computed
+    # so far).
+    context_lens_tensor: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -245,8 +245,8 @@ class FlashAttentionImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens,
+                    prefill_meta.seqlens_tensor,
+                    prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                 )
@@ -257,7 +257,7 @@ class FlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seqlens,
+                decode_meta.seqlens_tensor,
                 decode_meta.max_seqlen,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,

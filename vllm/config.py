@@ -68,7 +68,7 @@ class ModelConfig:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED).
+            to eager mode (DEPRECATED. Use max_seqlen_to_capture instead).
         max_seqlen_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode
@@ -108,7 +108,11 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
-        self.max_seqlen_to_capture = max_seqlen_to_capture or max_context_len_to_capture
+        if self.max_context_len_to_capture is not None:
+            logger.warning("`max_context_len_to_capture` is deprecated. "
+                           "Use `max_seqlen_to_capture` instead.")
+        self.max_seqlen_to_capture = (max_seqlen_to_capture
+                                      or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
 
@@ -203,7 +207,7 @@ class ModelConfig:
         if self.max_seqlen_to_capture is None:
             self.max_seqlen_to_capture = self.max_model_len
         self.max_seqlen_to_capture = min(self.max_seqlen_to_capture,
-                                              self.max_model_len)
+                                         self.max_model_len)
 
     def verify_with_parallel_config(
         self,
@@ -759,8 +763,7 @@ class SpeculativeConfig:
             max_model_len=None,
             quantization=draft_quantization,
             enforce_eager=target_model_config.enforce_eager,
-            max_seqlen_to_capture=target_model_config.
-            max_seqlen_to_capture,
+            max_seqlen_to_capture=target_model_config.max_seqlen_to_capture,
             max_logprobs=target_model_config.max_logprobs,
         )
 

@@ -53,20 +53,6 @@ class XFormersBackend(AttentionBackend):
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
-class AttentionMetadataBuilder:
-    def add_sequence_group(self, seq_group):
-        pass
-
-    def build(self) -> AttentionMetadata:
-        pass
-
-def prepare_input(seq_group_list):
-    builder = AttentionMetadataBuilder()
-    for seq_group in seq_group_list:
-        # update positions, input_tokens, etc.
-        builder.add_seq_group(seq_group)
-    attn_metadata = builder.build()
-
 
 @dataclass
 class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
@@ -80,31 +66,18 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    seq_lens: Optional[List[int]]
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor]
+    # (batch_size,). The sequence length per sequence. Sequence length means
+    # the computed tokens + new tokens None if it is a decoding.
+    seqlens: Optional[List[int]]
+    # seqlens stored as a tensor.
+    seqlens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, query_len, and seqlen.
-    # Before
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len/computed_len ----------|     -> context len for prefill, computed len for prefix caching
-    # |------------ prompt_len/context_len --------------| -> context len for decode, prompt len for prefill
-    #                                   |- subquery_len -|
-
-    # After
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
     # |-------------------- seqlen ----------------------|
     #                                   |-- query_len ---|
-
-    # WARNING(sang): context_len has different definition depending on if it is
-    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
-    # When it is for decoding, it includes a new token.
 
     # Maximum query length in the batch.
     max_query_len: Optional[int]
@@ -120,6 +93,9 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,) A tensor of context lengths (tokens that are computed
+    # so far).
+    context_lens_tensor: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -265,8 +241,8 @@ class XFormersImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.seq_lens_tensor,
-                    prefill_meta.context_lens,
+                    prefill_meta.seqlens_tensor,
+                    prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                 )
@@ -279,7 +255,7 @@ class XFormersImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seqlens,
+                decode_meta.seqlens_tensor,
                 decode_meta.max_seqlen,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
@@ -311,7 +287,7 @@ class XFormersImpl(AttentionImpl):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
-        assert attn_metadata.seq_lens is not None
+        assert attn_metadata.seqlens is not None
         original_query = query
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].
@@ -332,7 +308,7 @@ class XFormersImpl(AttentionImpl):
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.seq_lens)
+                    attn_metadata.seqlens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
@@ -340,7 +316,7 @@ class XFormersImpl(AttentionImpl):
             else:
                 attn_metadata.attn_bias = _make_alibi_bias(
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
-                    attn_metadata.seq_lens)
+                    attn_metadata.seqlens)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -365,7 +341,7 @@ class XFormersImpl(AttentionImpl):
         # one. This is inefficient, especially when we have many short prompts.
         output = torch.empty_like(original_query)
         start = 0
-        for i, seqlen in enumerate(attn_metadata.seq_lens):
+        for i, seqlen in enumerate(attn_metadata.seqlens):
             end = start + seqlen
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
@@ -384,10 +360,10 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    seq_lens: List[int],
+    seqlens: List[int],
 ) -> LowerTriangularMaskWithTensorBias:
     attn_biases = []
-    for seqlen in seq_lens:
+    for seqlen in seqlens:
         bias = torch.arange(seqlen, dtype=dtype)
         # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(seqlen, 1)`

@@ -47,9 +47,8 @@ def test_prepare_prompt(batch_size):
         expected_selected_token_indices.append(selected_token_start_idx +
                                                seqlen - 1)
         selected_token_start_idx += seqlen
-    (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _,
-     _, _,
-     slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
+    (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _, _,
+     _, slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
 
@@ -241,9 +240,8 @@ def test_empty_seq_group():
     assert attn_metadata is None
     assert len(slot_mapping) == 0
 
-    (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _,
-     _, _,
-     slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
+    (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _, _,
+     _, slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
     assert len(input_tokens) == 0
     assert len(input_positions) == 0
     assert attn_metadata is None

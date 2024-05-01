@@ -80,7 +80,7 @@ class CPUModelRunner:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        seq_lens: List[int] = []
+        seqlens: List[int] = []
         multi_modal_input_list: List[torch.Tensor] = []
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -94,7 +94,7 @@ class CPUModelRunner:
             computed_len = seq_data.get_num_computed_tokens()
             seqlen = len(prompt_tokens)
 
-            seq_lens.append(seqlen)  # Prompt token num
+            seqlens.append(seqlen)  # Prompt token num
             input_tokens.extend(prompt_tokens)  # Token ids
 
             # Token position ids
@@ -151,8 +151,8 @@ class CPUModelRunner:
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
-            seq_lens=seq_lens,
-            num_prefills=len(seq_lens),
+            seqlens=seqlens,
+            num_prefills=len(seqlens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
             prefill_metadata=None,
@@ -163,7 +163,7 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
         )
-        return (input_tokens, input_positions, attn_metadata, seq_lens,
+        return (input_tokens, input_positions, attn_metadata, seqlens,
                 multi_modal_input)
 
     def _prepare_decode(
@@ -188,12 +188,12 @@ class CPUModelRunner:
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
 
-                seq_len = seq_data.get_len()
-                position = seq_len - 1
+                seqlen = seq_data.get_len()
+                position = seqlen - 1
                 input_positions.append(position)
 
-                context_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
+                context_len = seqlen if self.sliding_window is None else min(
+                    seqlen, self.sliding_window)
                 context_lens.append(context_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
@@ -236,7 +236,7 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            seq_lens=None,
+            seqlens=None,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             max_context_len=max_context_len,
@@ -265,20 +265,20 @@ class CPUModelRunner:
             is_prompt = seq_group_metadata_list[0].is_prompt
             # Prepare input tensors.
             if is_prompt:
-                (input_tokens, input_positions, attn_metadata, seq_lens,
+                (input_tokens, input_positions, attn_metadata, seqlens,
                  multi_modal_input
                  ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
-                seq_lens = []
+                seqlens = []
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
-                seq_lens,
+                seqlens,
                 # query_lens is not needed if chunked prefill is not
                 # supported. Since CPU worker doesn't support chunked prefill
-                # just use seq_lens instead.
-                seq_lens,
+                # just use seqlens instead.
+                seqlens,
                 self.device,
                 pin_memory=False)
             # Broadcast the metadata.
@@ -300,7 +300,7 @@ class CPUModelRunner:
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 seq_data=None,
-                seq_lens=None,
+                seqlens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
                 generators=None,
