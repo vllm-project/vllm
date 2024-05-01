@@ -22,6 +22,17 @@ logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = int(
     os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
 
+def resolve_environ_as_type(name:str, datatype):
+    ret = os.environ.get(name, None)
+    if ret is not None:
+        ret = datatype(ret)
+    return ret
+
+ENGINE_MAX_CONCURRENT_REQUESTS = resolve_environ_as_type("VLLM_ENGINE_MAX_CONCURRENT_REQUESTS", int)
+"""Max concurrent requests to process at anytime, if set."""
+
+ENGINE_MAX_REQUEST_LIFESPAN = resolve_environ_as_type("VLLM_ENGINE_REQUEST_LIFESPAN", int)
+"""Max lifespan in seconds for any request, if set."""
 
 class AsyncEngineDeadError(RuntimeError):
     pass
