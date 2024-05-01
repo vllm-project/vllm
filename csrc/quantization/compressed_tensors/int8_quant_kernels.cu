@@ -9,7 +9,7 @@ static inline __device__ int8_t float_to_int8_rn(float x)
 #ifdef USE_ROCM
     float dst;
     // Round to nearest even
-    asm volatile("v_rndne_f32 %0, %1;\n" : "=r"(dst) : "v"(x));
+    asm volatile("v_rndne_f32 %0, %1;" : "=v"(dst) : "v"(x));
     // Saturate
     dst = dst < -128.0f ? -128.0f : dst;
     dst = dst > 127.0f ? 127.0f : dst;
