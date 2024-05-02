@@ -18,8 +18,8 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
     return old;
 }
 
-constexpr c10::Float8_e4m3fn FP8_E4M3_MIN = std::numeric_limits<c10::Float8_e4m3fn>::min();
-constexpr c10::Float8_e4m3fn FP8_E4M3_MAX = std::numeric_limits<c10::Float8_e4m3fn>::max();
+#define FP8_E4M3_MIN std::numeric_limits<c10::Float8_e4m3fn>::min();
+#define FP8_E4M3_MAX std::numeric_limits<c10::Float8_e4m3fn>::max();
 
 template<typename scalar_t>
 __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(const scalar_t val, const float scale) {
