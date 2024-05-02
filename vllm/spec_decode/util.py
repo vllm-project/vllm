@@ -1,10 +1,10 @@
 from contextlib import contextmanager
 from itertools import chain
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata, SequenceGroupOutput, Logprob, SequenceOutput
 
 SeqId = int
 
@@ -19,6 +19,73 @@ def get_all_seq_ids(
             seq_group_metadata.seq_data.keys()
             for seq_group_metadata in seq_group_metadata_list
         ]))
+
+
+def get_all_num_logprobs(
+        seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
+    """Given a list of SequenceGroupMetadata, create a list of all num_logprobs.
+
+    If the sampling params do not call for any logprobs, return 0 for that
+    sequence.
+    """
+
+    all_num_logprobs = []
+    for seq_group_metadata in seq_group_metadata_list:
+        num_logprobs = seq_group_metadata.sampling_params.logprobs
+        if seq_group_metadata.sampling_params.logprobs is None:
+            num_logprobs = 0
+        all_num_logprobs.append(num_logprobs)
+
+    return all_num_logprobs
+
+
+def get_sampled_token_logprobs(
+        logprob_tensor: torch.
+    Tensor,  # shape [num_steps, batch_size, vocab_size]
+        sampled_token_ids: torch.Tensor,  # shape [num_steps, batch_size]
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    num_steps, batch_size, vocab_size = logprob_tensor.shape
+
+    selected_logprobs = logprob_tensor[torch.arange(num_steps).unsqueeze(1),
+                                       torch.arange(batch_size),
+                                       sampled_token_ids, ]
+    expanded_selected_logprobs = selected_logprobs.unsqueeze(-1).expand(
+        -1, -1, vocab_size)
+    sampled_token_ids_ranks = (logprob_tensor >=
+                               expanded_selected_logprobs).sum(-1)
+
+    return sampled_token_ids_ranks, selected_logprobs
+
+
+def create_sequence_group_output(
+    token_id: int,
+    token_id_logprob_rank: int,
+    token_id_logprob: float,
+    seq_id: int,
+    topk_token_ids: List[int],
+    topk_logprobs: List[float],
+) -> SequenceGroupOutput:
+    logprobs: Dict[int, Logprob] = {
+        token_id: Logprob(
+            logprob=token_id_logprob,
+            rank=token_id_logprob_rank,
+        ),
+    } | {
+        topk_token_ids[topk_logprob_index]: Logprob(
+            logprob=topk_logprobs[topk_logprob_index],
+            rank=topk_logprob_index + 1,
+        )
+        for topk_logprob_index, _ in enumerate(topk_token_ids)
+    }
+
+    return SequenceGroupOutput(
+        samples=[
+            SequenceOutput(parent_seq_id=seq_id,
+                           output_token=token_id,
+                           logprobs=logprobs)
+        ],
+        prompt_logprobs=None,
+    )
 
 
 def split_batch_by_proposal_len(
