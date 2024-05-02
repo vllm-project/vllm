@@ -1,4 +1,6 @@
 import enum
+import os
+import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -14,6 +16,13 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
 from vllm.utils import merge_dicts
 
 logger = init_logger(__name__)
+
+# Test-only. If configured, decode is preempted with
+# ARTIFICIAL_PREEMPTION_PROB% probability.
+ENABLE_ARTIFICIAL_PREEMPT = bool(
+    os.getenv("VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT", False))  # noqa
+ARTIFICIAL_PREEMPTION_PROB = 0.5
+ARTIFICIAL_PREEMPTION_MAX_CNT = 500
 
 
 class PreemptionMode(enum.Enum):
@@ -286,6 +295,13 @@ class Scheduler:
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
 
+        # The following field is test-only. It is used to inject artificial
+        # preemption.
+        self.enable_artificial_preemption = ENABLE_ARTIFICIAL_PREEMPT
+        self.artificial_preempt_cnt = (ARTIFICIAL_PREEMPTION_MAX_CNT
+                                       if self.enable_artificial_preemption
+                                       else 0)
+
     @property
     def lora_enabled(self) -> bool:
         return bool(self.lora_config)
@@ -386,15 +402,13 @@ class Scheduler:
         # groups to preempt.
         now = time.time()
         running_queue = policy.sort_by_priority(now, running_queue)
-
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
-            # We can have up to 1 running prefill at any given time in running
-            # queue, which means we can guarantee chunk size is at least 1.
-            assert num_running_tokens != 0
+            if num_running_tokens == 0:
+                break
 
             running_queue.popleft()
             while not self._can_append_slots(seq_group):
@@ -448,9 +462,6 @@ class Scheduler:
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
-
-        # Make sure all queues are updated.
-        assert len(running_queue) == 0
 
         return running_queue, SchedulerRunningOutputs(
             decode_seq_groups=decode_seq_groups,
@@ -545,7 +556,6 @@ class Scheduler:
                     ScheduledSequenceGroup(seq_group,
                                            token_chunk_size=num_new_tokens))
             else:
-                assert num_new_tokens == 1
                 decode_seq_groups.append(
                     ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
@@ -868,6 +878,13 @@ class Scheduler:
         """Determine whether or not we have enough space in the KV cache to
         continue generation of the sequence group.
         """
+        # It is True only for testing case to trigger artificial preemption.
+        if (self.enable_artificial_preemption
+                and random.uniform(0, 1) < ARTIFICIAL_PREEMPTION_PROB
+                and self.artificial_preempt_cnt > 0):
+            self.artificial_preempt_cnt -= 1
+            return False
+
         # Appending slots only occurs in decoding.
         is_prefill = False
 
@@ -1116,11 +1133,14 @@ class Scheduler:
         if `enable_chunking` is True. If a sequence group has multiple
         sequences (e.g., running beam search), it means it is in decoding
         phase, so chunking doesn't happen.
+
+        Returns 0 if the new token cannot be computed due to token budget.
         """
         num_new_tokens = 0
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
+        assert num_new_tokens > 0
         # Chunk if a running request cannot fit in.
         # If number of seq > 1, it means it is doing beam search in a
         # decode phase. Do not chunk in that case.
