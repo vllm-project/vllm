@@ -142,12 +142,9 @@ def fused_moe_kernel(
         # K dimension.
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K) - pid_z * BLOCK_SIZE_K
         a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] &
-                    (offs_k[None, :] < k_remaining),
+                    mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
                     other=0.0)
-        b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < k_remaining,
-                    other=0.0)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -262,7 +259,8 @@ def invoke_fused_moe_kernel(
         A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
 
-    num_m_blocks = triton.cdiv(sorted_token_ids.shape[0], config['BLOCK_SIZE_M'])
+    num_m_blocks = triton.cdiv(sorted_token_ids.shape[0],
+                               config['BLOCK_SIZE_M'])
     num_n_blocks = triton.cdiv(B.shape[1], config['BLOCK_SIZE_N'])
     config['SPLIT_K'] = 2
     split_k = config['SPLIT_K']
@@ -271,10 +269,13 @@ def invoke_fused_moe_kernel(
     if split_k == 1:
         D = C.unsqueeze(dim=2)
     else:
-        D = torch.empty(C.shape[0], C.shape[1], split_k, C.shape[2],
+        D = torch.empty(C.shape[0],
+                        C.shape[1],
+                        split_k,
+                        C.shape[2],
                         device=C.device,
                         dtype=C.dtype)
-    
+
     fused_moe_kernel[grid](
         A,
         B,
