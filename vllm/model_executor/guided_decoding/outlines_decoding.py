@@ -74,7 +74,8 @@ async def get_outlines_guided_decoding_logits_processor(
 
     result = await loop.run_in_executor(global_thread_pool,
                                         _get_cached_logits_processor, guide,
-                                        tokenizer, mode)
+                                        tokenizer, mode,
+                                        request.guided_whitespace_pattern)
 
     logits_processor = copy(result)
     # reset logits processor's internal state
@@ -117,9 +118,10 @@ def _get_guide_and_mode(
 @lru_cache(maxsize=32)
 def _get_cached_logits_processor(guide: str,
                                  tokenizer: PreTrainedTokenizerBase,
-                                 mode: GuidedDecodingMode):
+                                 mode: GuidedDecodingMode,
+                                 whitespace_pattern: Union[str, None]):
     if mode == GuidedDecodingMode.JSON:
-        return JSONLogitsProcessor(guide, tokenizer)
+        return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.GRAMMAR:
