@@ -45,12 +45,14 @@ def fused_moe_kernel(
     stride_bk,
     stride_bn,
     stride_cm,
+    stride_c_split_k,
     stride_cn,
     # Meta-parameters
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    SPLIT_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -117,6 +119,13 @@ def fused_moe_kernel(
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
 
+    # ----------------------------------------------------------
+    # Split-K
+    pid_z = tl.program_id(axis=1)
+    # Move the starting pointers to the correct position.
+    a_ptrs = a_ptrs + pid_z * BLOCK_SIZE_K * stride_ak
+    b_ptrs = b_ptrs + pid_z * BLOCK_SIZE_K * stride_bk
+
     if use_fp8:
         a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
@@ -128,15 +137,16 @@ def fused_moe_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
+        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K) - pid_z * BLOCK_SIZE_K
         a = tl.load(a_ptrs,
                     mask=token_mask[:, None] &
-                    (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    (offs_k[None, :] < k_remaining),
                     other=0.0)
         b = tl.load(b_ptrs,
-                    mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
+                    mask=offs_k[:, None] < k_remaining,
                     other=0.0)
         # We accumulate along the K dimension.
         if use_fp8:
@@ -144,8 +154,8 @@ def fused_moe_kernel(
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
+        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -162,6 +172,7 @@ def fused_moe_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[
         None, :]
+    c_ptrs = c_ptrs + pid_z * stride_c_split_k
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
@@ -251,13 +262,23 @@ def invoke_fused_moe_kernel(
         A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
 
-    grid = lambda META: (triton.cdiv(sorted_token_ids.shape[0], META[
-        'BLOCK_SIZE_M']) * triton.cdiv(B.shape[1], META['BLOCK_SIZE_N']), )
+    num_m_blocks = triton.cdiv(sorted_token_ids.shape[0], config['BLOCK_SIZE_M'])
+    num_n_blocks = triton.cdiv(B.shape[1], config['BLOCK_SIZE_N'])
+    config['SPLIT_K'] = 2
+    split_k = config['SPLIT_K']
+    grid = lambda META: (num_m_blocks * num_n_blocks, split_k)
 
+    if split_k == 1:
+        D = C.unsqueeze(dim=2)
+    else:
+        D = torch.empty(C.shape[0], C.shape[1], split_k, C.shape[2],
+                        device=C.device,
+                        dtype=C.dtype)
+    
     fused_moe_kernel[grid](
         A,
         B,
-        C,
+        D,
         A_scale,
         B_scale,
         topk_weights,
@@ -273,14 +294,17 @@ def invoke_fused_moe_kernel(
         B.stride(0),
         B.stride(2),
         B.stride(1),
-        C.stride(1),
-        C.stride(2),
+        D.stride(1),
+        D.stride(2),
+        D.stride(3),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
         use_fp8=use_fp8,
         **config,
     )
+    if split_k > 1:
+        torch.sum(D, dim=2, out=C)
 
 
 def get_default_config(
@@ -300,6 +324,7 @@ def get_default_config(
             'BLOCK_SIZE_N': 32,
             'BLOCK_SIZE_K': 64,
             'GROUP_SIZE_M': 1,
+            'SPLIT_K': 4,
         }
     else:
         default_config = {
@@ -307,6 +332,7 @@ def get_default_config(
             'BLOCK_SIZE_N': 64,
             'BLOCK_SIZE_K': 32,
             'GROUP_SIZE_M': 8,
+            'SPLIT_K': 1,
         }
     return default_config
 
@@ -525,7 +551,7 @@ def fused_moe(
     )
 
     return torch.sum(
-        intermediate_cache3.view(*intermediate_cache3.shape),
+        intermediate_cache3,
         dim=1,
         out=hidden_states if inplace else None,
     )
