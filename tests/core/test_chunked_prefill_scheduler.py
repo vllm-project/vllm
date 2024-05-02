@@ -4,9 +4,9 @@ from unittest.mock import MagicMock
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
+from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
-from vllm.vllm.core.interfaces import AllocStatus
 
 from .utils import create_dummy_prompt
 
