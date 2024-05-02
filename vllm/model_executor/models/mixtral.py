@@ -102,13 +102,11 @@ class MixtralMoE(nn.Module):
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
-                        device="cuda",
                         dtype=params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device="cuda",
                         dtype=params_dtype))
 
         set_weight_attrs(self.ws, {
@@ -127,11 +125,9 @@ class MixtralMoE(nn.Module):
         if self.use_fp8:
             # WEIGHT_SCALE (for fp8)
             self.ws_scale = nn.Parameter(torch.ones(self.num_total_experts,
-                                                    device="cuda",
                                                     dtype=torch.float32),
                                          requires_grad=False)
             self.w2s_scale = nn.Parameter(torch.ones(self.num_total_experts,
-                                                     device="cuda",
                                                      dtype=torch.float32),
                                           requires_grad=False)
 
@@ -154,12 +150,10 @@ class MixtralMoE(nn.Module):
                         "was not serialized fp8.")
                 self.as_scale = nn.Parameter(
                     torch.zeros(self.num_total_experts,
-                                device="cuda",
                                 dtype=torch.float32),
                     requires_grad=False)
                 self.a2s_scale = nn.Parameter(
                     torch.zeros(self.num_total_experts,
-                                device="cuda",
                                 dtype=torch.float32),
                     requires_grad=False)
 
