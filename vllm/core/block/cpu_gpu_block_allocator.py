@@ -105,7 +105,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
-        self._null_block = None
+        self._null_block: Optional[Block] = None
 
         self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
         for _, allocator in self._allocators.items():
@@ -120,7 +120,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             def fail(token_ids: List[int]):
                 raise ValueError("null_block should not be modified")
 
-            self._null_block.append_token_ids = fail
+            self._null_block.append_token_ids = fail  # type: ignore
         return self._null_block
 
     def allocate_mutable(self,
