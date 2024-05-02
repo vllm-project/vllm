@@ -199,10 +199,10 @@ class FlashAttentionImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        assert attn_metadata.kv_cache_dtype != "fp8", ("fp8 is not supported.")
 
         if kv_cache is not None:
-            key_cache = kv_cache[0]
-            value_cache = kv_cache[1]
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
 
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
@@ -260,10 +260,10 @@ class FlashAttentionImpl(AttentionImpl):
                     q=query,
                     k=key_cache,
                     v=value_cache,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.context_lens,  # FIXME
-                    max_seqlen_q=prefill_meta.max_prompt_len,
-                    max_seqlen_k=prefill_meta.max_context_len,
+                    cu_seqlens_q=prefill_meta.subquery_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_subquery_len,
+                    max_seqlen_k=prefill_meta.max_prompt_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -273,7 +273,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            # TODO(skrider): tune num_splits heuristic
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
