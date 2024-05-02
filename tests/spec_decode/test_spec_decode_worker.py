@@ -1,4 +1,5 @@
 import random
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -6,6 +7,7 @@ import torch
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
+from vllm.sequence import SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
@@ -31,13 +33,14 @@ def test_correctly_calls_draft_model(k: int, batch_size: int):
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    exception_secret = 'artifical stop'
+    exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
 
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     call_args_list = draft_worker.get_spec_proposals.call_args_list
     assert len(call_args_list) == 1
@@ -60,8 +63,8 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     """Verify SpecDecodeWorker calls the target model with correct
     inputs. Everything else is mocked out.
     """
-    draft_worker = mock_worker(cls=MultiStepWorker)
-    target_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker, use_spec=False)
+    target_worker = mock_worker(use_spec=False)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -98,11 +101,12 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
         proposal_probs=proposal_probs,
         proposal_lens=proposal_lens)
 
-    exception_secret = 'artifical stop'
+    exception_secret = 'artificial stop'
     target_worker.execute_model.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     seen_contexts = []
 
@@ -141,8 +145,10 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
-    target_worker = mock_worker(vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,
+                               vocab_size=vocab_size,
+                               use_spec=False)
+    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -189,26 +195,26 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
-    exception_secret = 'artifical stop'
+    exception_secret = 'artificial stop'
     rejection_sampler.side_effect = ValueError(exception_secret)
 
     with pytest.raises(ValueError, match=exception_secret):
-        worker.execute_model(**execute_model_data.to_dict(), num_spec_tokens=k)
+        worker.execute_model(**execute_model_data.to_dict(),
+                             num_lookahead_slots=k)
 
     assert len(rejection_sampler.call_args_list) == 1
-    args, _ = rejection_sampler.call_args_list[0]
-    (actual_proposal_scores, actual_bonus_token_ids, actual_proposal_probs,
-     actual_proposal_token_ids) = args
+    _, kwargs = rejection_sampler.call_args_list[0]
+    actual = SimpleNamespace(**kwargs)
 
-    assert torch.equal(actual_bonus_token_ids,
+    assert torch.equal(actual.bonus_token_ids,
                        target_token_ids.reshape(batch_size, k + 1)[:, -1:])
     assert torch.equal(
-        actual_proposal_scores,
+        actual.target_probs,
         target_token_probs.reshape(batch_size, k + 1, -1)[:, :-1])
-    assert torch.equal(actual_proposal_token_ids, proposal_token_ids)
-    assert torch.equal(actual_proposal_probs, proposal_probs)
+    assert torch.equal(actual.draft_token_ids, proposal_token_ids)
+    assert torch.equal(actual.draft_probs, proposal_probs)
 
 
 @pytest.mark.parametrize('k', [1, 2, 6])
@@ -220,8 +226,10 @@ def test_correctly_formats_output(k: int, batch_size: int):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
-    target_worker = mock_worker(vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,
+                               vocab_size=vocab_size,
+                               use_spec=False)
+    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -268,7 +276,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
     rejection_sampler_output = torch.randint(low=0,
                                              high=vocab_size,
@@ -283,7 +291,7 @@ def test_correctly_formats_output(k: int, batch_size: int):
     rejection_sampler.return_value = rejection_sampler_output
 
     output = worker.execute_model(**execute_model_data.to_dict(),
-                                  num_spec_tokens=k)
+                                  num_lookahead_slots=k)
 
     expected_output = create_sampler_output_list(
         rejection_sampler_output.transpose(0, 1), [None for _ in range(k + 1)])
@@ -332,8 +340,10 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     """
     vocab_size = 32_000
 
-    draft_worker = mock_worker(cls=MultiStepWorker, vocab_size=vocab_size)
-    target_worker = mock_worker(vocab_size=vocab_size)
+    draft_worker = mock_worker(cls=MultiStepWorker,
+                               vocab_size=vocab_size,
+                               use_spec=False)
+    target_worker = mock_worker(vocab_size=vocab_size, use_spec=False)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -380,7 +390,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs)
 
-    target_worker.execute_model.return_value = target_output[0]
+    target_worker.execute_model.return_value = [target_output[0]]
 
     rejection_sampler_output = torch.randint(low=0,
                                              high=vocab_size,
@@ -400,7 +410,7 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
         mock_rejsample_metrics)
 
     output = worker.execute_model(**execute_model_data.to_dict(),
-                                  num_spec_tokens=k)
+                                  num_lookahead_slots=k)
     assert output[0].spec_decode_worker_metrics == mock_rejsample_metrics
 
     call_args_list = (
@@ -423,6 +433,8 @@ def test_k_equals_zero(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -435,7 +447,7 @@ def test_k_equals_zero(k: int, batch_size: int):
         batch_size, k, prev_output_token_len=0)
 
     out = worker.execute_model(**execute_model_data.to_dict(),
-                               num_spec_tokens=k)
+                               num_lookahead_slots=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
     assert out[0].probs is None, "expect gpu tensor references to be None"
@@ -443,7 +455,7 @@ def test_k_equals_zero(k: int, batch_size: int):
         0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
-        **execute_model_data.to_dict(), return_python_output=False)
+        **execute_model_data.to_dict())
     target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
@@ -462,6 +474,8 @@ def test_empty_input_batch(k: int, batch_size: int):
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
+    target_worker.execute_model.return_value = [MagicMock(spec=SamplerOutput)]
+
     draft_worker.device = 'cuda'
     target_worker.device = 'cuda'
 
@@ -474,7 +488,7 @@ def test_empty_input_batch(k: int, batch_size: int):
         batch_size, k, prev_output_token_len=0)
 
     out = worker.execute_model(**execute_model_data.to_dict(),
-                               num_spec_tokens=k)
+                               num_lookahead_slots=k)
 
     assert len(out) == 1, f"expected only one token output when {k=}"
     assert out[0].probs is None, "expect gpu tensor references to be None"
@@ -482,18 +496,18 @@ def test_empty_input_batch(k: int, batch_size: int):
         0].sampled_tokens is None, "expect gpu tensor references to be None"
 
     draft_worker.execute_model.assert_called_once_with(
-        **execute_model_data.to_dict(), return_python_output=False)
+        **execute_model_data.to_dict())
     target_worker.execute_model.assert_called_once_with(
         **execute_model_data.to_dict())
 
 
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_init_device():
     """Verify SpecDecodeWorker invokes proposer/scorer worker init_device, as
     well as other GPU initialization.
     """
-    draft_worker = mock_worker(cls=MultiStepWorker)
-    target_worker = mock_worker()
+    draft_worker = mock_worker(cls=MultiStepWorker, use_spec=False)
+    target_worker = mock_worker(use_spec=False)
     rejection_sampler = MagicMock(spec=RejectionSampler)
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
@@ -512,8 +526,8 @@ def test_init_device():
 
 
 @torch.inference_mode()
-def test_init_cache_engine():
-    """Verify SpecDecodeWorker invokes init_cache_engine on proposer/scorer
+def test_initialize_cache():
+    """Verify SpecDecodeWorker invokes initialize_cache on proposer/scorer
     workers.
     """
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -525,23 +539,22 @@ def test_init_cache_engine():
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    cache_config = MagicMock()
+    kwargs = {"num_gpu_blocks": 1024, "num_cpu_blocks": 1023}
+    worker.initialize_cache(**kwargs)
 
-    worker.init_cache_engine(cache_config)
-
-    draft_worker.init_cache_engine.assert_called_once_with(cache_config)
-    target_worker.init_cache_engine.assert_called_once_with(cache_config)
+    draft_worker.initialize_cache.assert_called_once_with(**kwargs)
+    target_worker.initialize_cache.assert_called_once_with(**kwargs)
 
 
 @pytest.mark.parametrize('available_gpu_blocks', [1, 1024])
 @pytest.mark.parametrize('available_cpu_blocks', [500])
 @pytest.mark.parametrize('target_cache_block_size_bytes', [2 * 2 * 4096])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
-def test_profile_num_available_blocks(available_gpu_blocks: int,
-                                      available_cpu_blocks: int,
-                                      target_cache_block_size_bytes: int,
-                                      draft_kv_size_bytes: int):
+@pytest.mark.skip_global_cleanup
+def test_determine_num_available_blocks(available_gpu_blocks: int,
+                                        available_cpu_blocks: int,
+                                        target_cache_block_size_bytes: int,
+                                        draft_kv_size_bytes: int):
     """Verify SpecDecodeWorker correctly profiles num available GPU blocks.
     Specifically, it should run profiling in the scorer worker, and then evenly
     split the blocks between proposer and scorer worker.
@@ -552,7 +565,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     rejection_sampler.token_id_dtype = torch.int64
     metrics_collector = MagicMock(spec=AsyncMetricsCollector)
 
-    target_worker.profile_num_available_blocks.return_value = (
+    target_worker.determine_num_available_blocks.return_value = (
         available_gpu_blocks, available_cpu_blocks)
     target_worker.get_cache_block_size_bytes.return_value = (
         target_cache_block_size_bytes)
@@ -561,17 +574,9 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
     worker = SpecDecodeWorker(draft_worker, target_worker, rejection_sampler,
                               metrics_collector)
 
-    # These values do not directly impact the adjusted block size calculation,
-    # so they can be fixed.
-    gpu_memory_utilization = 0.9
-    cpu_swap_space = 100
-    block_size = 16
+    num_gpu_blocks, num_cpu_blocks = worker.determine_num_available_blocks()
 
-    num_gpu_blocks, num_cpu_blocks = worker.profile_num_available_blocks(
-        block_size, gpu_memory_utilization, cpu_swap_space, cache_dtype="auto")
-
-    target_worker.profile_num_available_blocks.assert_called_once_with(
-        block_size, gpu_memory_utilization, cpu_swap_space, "auto")
+    target_worker.determine_num_available_blocks.assert_called_once()
     assert num_cpu_blocks == available_cpu_blocks
 
     assert num_gpu_blocks == split_num_cache_blocks_evenly(
@@ -584,7 +589,7 @@ def test_profile_num_available_blocks(available_gpu_blocks: int,
 @pytest.mark.parametrize('target_cache_block_size_bytes',
                          [2 * 2 * 4096, 2 * 2 * 8192])
 @pytest.mark.parametrize('draft_kv_size_bytes', [0, 2 * 2 * 768, 2 * 2 * 4096])
-@torch.inference_mode()
+@pytest.mark.skip_global_cleanup
 def test_split_num_cache_blocks_evenly(available_gpu_blocks: int,
                                        target_cache_block_size_bytes: int,
                                        draft_kv_size_bytes: int):

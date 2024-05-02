@@ -1,3 +1,4 @@
+import itertools
 import random
 from typing import List, Optional, Tuple
 from unittest.mock import patch
@@ -7,6 +8,7 @@ import torch
 from transformers import GenerationConfig, GenerationMixin
 
 from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import Counter
@@ -31,7 +33,12 @@ def _prepare_test(
                              1e-2,
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -48,6 +55,7 @@ def _do_sample(
     sampler: MockLogitsSampler,
     model_runner: ModelRunner,
     sampling_params: SamplingParams,
+    device: str,
 ):
     seq_group_metadata_list = []
     prompt_lens = []
@@ -62,9 +70,12 @@ def _do_sample(
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=device,
+        pin_memory=model_runner.pin_memory)
     return sampler(logits=input_tensor, sampling_metadata=sampling_metadata)
 
 
@@ -79,7 +90,7 @@ def test_sampler_all_greedy(seed: int, device: str):
 
     sampling_params = SamplingParams(temperature=0)
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
     expected = torch.argmax(fake_logits, dim=-1)
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -105,7 +116,7 @@ def test_sampler_all_random(seed: int, device: str):
         n=random.randint(1, 10),
     )
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -131,7 +142,7 @@ def test_sampler_all_random_seed(seed: int, device: str):
         seed=random.randint(0, 10000),
     )
     sampler_output = _do_sample(batch_size, fake_logits, sampler, model_runner,
-                                sampling_params)
+                                sampling_params, device)
 
     for i, sequence_output in enumerate(sampler_output):
         for nth_output in sequence_output.samples:
@@ -154,10 +165,10 @@ def test_sampler_all_random_seed_deterministic(seed: int, device: str):
         seed=random.randint(0, 10000),
     )
     first_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                      model_runner, sampling_params)
+                                      model_runner, sampling_params, device)
 
     second_sampler_output = _do_sample(batch_size, fake_logits, sampler,
-                                       model_runner, sampling_params)
+                                       model_runner, sampling_params, device)
 
     assert first_sampler_output == second_sampler_output
 
@@ -177,7 +188,8 @@ def test_sampler_all_beam(seed: int, device: str):
         best_of=2,
         use_beam_search=True,
     )
-    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params)
+    _do_sample(batch_size, fake_logits, sampler, model_runner, sampling_params,
+               device)
     # no assertion here as I am not sure how to determine whether
     # the outputs are expected - in other words, this just tests
     # whether there are no exceptions in the sampler
@@ -194,13 +206,17 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
     def create_sampling_params(min_tokens,
                                eos_token_id=0,
-                               stop_token_ids=None):
+                               *,
+                               stop_token_ids: Optional[List[int]] = None,
+                               prompt_logprobs: Optional[int] = None):
         sampling_params = SamplingParams(
             min_tokens=min_tokens,
             max_tokens=9999,  # keep higher than max of min_tokens
             stop_token_ids=stop_token_ids,
+            # requesting prompt_logprobs changes the structure of `logits`
+            prompt_logprobs=prompt_logprobs,
         )
-        sampling_params.eos_token_id = eos_token_id
+        sampling_params.all_stop_token_ids.add(eos_token_id)
         return sampling_params
 
     def create_sequence_data(num_input=3, num_generated=0):
@@ -217,9 +233,9 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
 
         expected_penalization = []
         sequence_metadata_list = []
+        # 20% chance to generate seq group metadata list with all prompts
+        is_prompt = random.random() < 0.2
         while batch_size > 0:
-            # 20% chance to generate prompt seq group with single sequence
-            is_prompt = random.random() < 0.2
             num_seqs = 1 if is_prompt else random.randint(1, batch_size)
 
             eos_token_id = random.randint(0, VOCAB_SIZE - 1)
@@ -240,7 +256,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             seq_group_penalization = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
-                num_generated = random.randint(1, 100) if not is_prompt else 0
+                num_generated = 0 if is_prompt else random.randint(1, 100)
                 seq_data[next(seq_id_counter)] = create_sequence_data(
                     num_input=num_input, num_generated=num_generated)
                 seq_group_penalization.append(num_generated < min_tokens)
@@ -292,6 +308,21 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         ]
     }
 
+    prompt_with_penalization_and_prompt_logprobs = {
+        "expected_penalization": [False, False, True],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_1",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(num_input=3),
+                },
+                sampling_params=create_sampling_params(1, prompt_logprobs=3),
+                block_tables={},
+            ),
+        ]
+    }
+
     stop_penalizing_after_min_tokens = {
         "expected_penalization": [False],
         "seq_group_metadata_list": [
@@ -309,8 +340,34 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     }
 
     stop_token_ids = [42, 99, 42, 0]  # intentional duplication
-    simple_combination = {
-        "expected_penalization": [True, False, False],
+    prompt_combination = {
+        "expected_penalization": [False, True, False],
+        "seq_group_metadata_list": [
+            SequenceGroupMetadata(
+                request_id="test_2",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(num_input=2),
+                },
+                sampling_params=create_sampling_params(1, prompt_logprobs=3),
+                block_tables={},
+            ),
+            SequenceGroupMetadata(
+                request_id="test_3",
+                is_prompt=True,
+                seq_data={
+                    next(seq_id_counter): create_sequence_data(),
+                },
+                sampling_params=create_sampling_params(
+                    0, stop_token_ids=stop_token_ids),
+                block_tables={},
+            )
+        ]
+    }
+
+    stop_token_ids = [1, 999, 37, 37]  # intentional duplication
+    decode_combination = {
+        "expected_penalization": [True, False, False, True, False],
         "seq_group_metadata_list": [
             SequenceGroupMetadata(
                 request_id="test_1",
@@ -327,14 +384,19 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
             ),
             SequenceGroupMetadata(
                 request_id="test_2",
-                is_prompt=True,
+                is_prompt=False,
                 seq_data={
-                    next(seq_id_counter): create_sequence_data(),
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=20),
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=1),
+                    next(seq_id_counter):
+                    create_sequence_data(num_generated=10),
                 },
                 sampling_params=create_sampling_params(
-                    0, stop_token_ids=stop_token_ids),
+                    10, prompt_logprobs=5, stop_token_ids=stop_token_ids),
                 block_tables={},
-            )
+            ),
         ]
     }
 
@@ -342,8 +404,10 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         test_cases = [
             prompt_without_penalization,
             prompt_with_penalization,
+            prompt_with_penalization_and_prompt_logprobs,
             stop_penalizing_after_min_tokens,
-            simple_combination,
+            prompt_combination,
+            decode_combination,
         ]
     else:
         test_cases = [generate_test_case()]
@@ -351,35 +415,53 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     def run_test_case(*,
                       expected_penalization=None,
                       seq_group_metadata_list=None):
-        assert expected_penalization, "Invalid test case"
-        assert seq_group_metadata_list, "Invalid test case"
+        assert expected_penalization, \
+            "Invalid test case, need expected_penalization"
+        assert seq_group_metadata_list, \
+            "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
         prompt_lens = []
-        sampling_params_per_seq = []
+        sampling_params_per_row = []
         for sgm in seq_group_metadata_list:
-            num_seqs = len(sgm.seq_data)
-            batch_size += num_seqs
             sampling_params = sgm.sampling_params
-            for seq_id in sgm.seq_data:
-                prompt_lens.append(sgm.seq_data[seq_id].get_prompt_len())
-                sampling_params_per_seq.append(sampling_params)
+
+            num_rows = len(sgm.seq_data)
+            if sgm.is_prompt:
+                # a prompt seq_group has only one sequence
+                seq_data = next(iter(sgm.seq_data.values()))
+                prompt_len = seq_data.get_prompt_len()
+                prompt_lens.append(prompt_len)
+
+                if sgm.sampling_params.prompt_logprobs:
+                    # with prompt_logprobs each token in the prompt has a row in
+                    # logits
+                    num_rows = prompt_len
+
+            batch_size += num_rows
+            sampling_params_per_row.extend(
+                itertools.repeat(sampling_params, num_rows))
+
+        assert len(
+            expected_penalization
+        ) == batch_size, \
+            ("Invalid test case, expected_penalization does not match computed"
+             "batch size")
 
         _, fake_logits, sampler, model_runner = _prepare_test(batch_size)
-        sampling_metadata = model_runner._prepare_sample(
+        sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list,
-            prompt_lens=prompt_lens,
-            subquery_lens=prompt_lens)
+            prompt_lens=prompt_lens if prompt_lens else None,
+            subquery_lens=prompt_lens if prompt_lens else None,
+            device=device,
+            pin_memory=model_runner.pin_memory)
         # the logits tensor is modified in-place by the sampler
         _ = sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
 
         for logits_idx, (should_penalize, sampling_params) in enumerate(
-                zip(expected_penalization, sampling_params_per_seq)):
+                zip(expected_penalization, sampling_params_per_row)):
 
-            tokens_to_check = [sampling_params.eos_token_id]
-            if sampling_params.stop_token_ids:
-                tokens_to_check.extend(sampling_params.stop_token_ids)
-            tokens_to_check = set(tokens_to_check)
+            tokens_to_check = sampling_params.all_stop_token_ids
 
             if should_penalize:
                 for token_id in tokens_to_check:
@@ -453,8 +535,12 @@ def test_sampler_mixed(seed: int, device: str):
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
     def test_sampling(model_runner: ModelRunner):
-        sampling_metadata = model_runner._prepare_sample(
-            seq_group_metadata_list, prompt_lens, subquery_lens=prompt_lens)
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list,
+            prompt_lens,
+            subquery_lens=prompt_lens,
+            device=device,
+            pin_memory=model_runner.pin_memory)
         sampler_output = sampler(logits=fake_logits,
                                  sampling_metadata=sampling_metadata)
 
@@ -519,7 +605,12 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,
@@ -545,16 +636,20 @@ def test_sampler_top_k_top_p(seed: int, device: str):
             ))
         prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=device,
+        pin_memory=model_runner.pin_memory)
 
     sample_probs = None
 
     def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
-        return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
+        return ([[prob.topk(1, dim=-1).indices.tolist(), [0]]
+                 for prob in probs], None)
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)

@@ -1,6 +1,7 @@
 import enum
 from abc import ABC, abstractmethod
 from typing import Dict, List
+from typing import Sequence as GenericSequence
 
 from vllm.sequence import Sequence, SequenceGroup
 
@@ -62,7 +63,7 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def can_swap_in(self, seq_group: SequenceGroup,
-                    num_lookahead_slots: int) -> bool:
+                    num_lookahead_slots: int) -> AllocStatus:
         pass
 
     @abstractmethod
@@ -103,7 +104,8 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def get_common_computed_block_ids(self, seqs: List[Sequence]) -> List[int]:
+    def get_common_computed_block_ids(
+            self, seqs: List[Sequence]) -> GenericSequence[int]:
         pass
 
     @abstractmethod

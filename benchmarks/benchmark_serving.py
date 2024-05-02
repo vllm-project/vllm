@@ -27,7 +27,7 @@ import time
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
-from typing import AsyncGenerator, List, Tuple
+from typing import AsyncGenerator, List, Optional, Tuple
 
 import numpy as np
 from backend_request_func import (ASYNC_REQUEST_FUNCS, RequestFuncInput,
@@ -58,7 +58,11 @@ def sample_sharegpt_requests(
     dataset_path: str,
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
+    fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, int, int]]:
+    if fixed_output_len is not None and fixed_output_len < 4:
+        raise ValueError("output_len too small")
+
     # Load the dataset.
     with open(dataset_path) as f:
         dataset = json.load(f)
@@ -68,38 +72,32 @@ def sample_sharegpt_requests(
     dataset = [(data["conversations"][0]["value"],
                 data["conversations"][1]["value"]) for data in dataset]
 
-    # some of these will be filtered out, so sample more than we need
-    sampled_indices = random.sample(range(len(dataset)),
-                                    int(num_requests * 1.2))
-    dataset = [dataset[i] for i in sampled_indices]
+    # Shuffle the dataset.
+    random.shuffle(dataset)
 
-    # Tokenize the prompts and completions.
-    prompts = [prompt for prompt, _ in dataset]
-    prompt_token_ids = tokenizer(prompts).input_ids
-    completions = [completion for _, completion in dataset]
-    completion_token_ids = tokenizer(completions).input_ids
-    tokenized_dataset = []
-    for i in range(len(dataset)):
-        output_len = len(completion_token_ids[i])
-        tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
-
-    # Filter out too long sequences.
+    # Filter out sequences that are too long or too short
     filtered_dataset: List[Tuple[str, int, int]] = []
-    for prompt, prompt_token_ids, output_len in tokenized_dataset:
+    for i in range(len(dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = dataset[i][0]
+        prompt_token_ids = tokenizer(prompt).input_ids
+        completion = dataset[i][1]
+        completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
-            # This is because TGI causes errors when the input or output length
-            # is too short.
             continue
         if prompt_len > 1024 or prompt_len + output_len > 2048:
             # Prune too long sequences.
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
 
-    # Sample the requests.
-    sampled_requests = random.sample(filtered_dataset, num_requests)
-    return sampled_requests
+    return filtered_dataset
 
 
 def sample_sonnet_requests(
@@ -110,7 +108,9 @@ def sample_sonnet_requests(
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
 ) -> List[Tuple[str, str, int, int]]:
-    assert input_len > prefix_len, "input_len must be greater than prefix_len."
+    assert (
+        input_len > prefix_len
+    ), "'args.sonnet-input-len' must be greater than 'args.prefix-input-len'."
 
     # Load the dataset.
     with open(dataset_path) as f:
@@ -131,8 +131,9 @@ def sample_sonnet_requests(
         base_message, add_generation_prompt=True, tokenize=False)
     base_prompt_offset = len(tokenizer(base_prompt_formatted).input_ids)
 
-    assert (input_len > base_prompt_offset
-            ), f"Please set 'args.input-len' higher than {base_prompt_offset}."
+    assert (
+        input_len > base_prompt_offset
+    ), f"Please set 'args.sonnet-input-len' higher than {base_prompt_offset}."
     num_input_lines = round(
         (input_len - base_prompt_offset) / average_poem_len)
 
@@ -140,7 +141,7 @@ def sample_sonnet_requests(
     # prompt are fixed poem lines.
     assert (
         prefix_len > base_prompt_offset
-    ), f"Please set 'args.prefix-len' higher than {base_prompt_offset}."
+    ), f"Please set 'args.sonnet-prefix-len' higher than {base_prompt_offset}."
 
     num_prefix_lines = round(
         (prefix_len - base_prompt_offset) / average_poem_len)
@@ -358,6 +359,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
 
     elif args.dataset_name == "sharegpt":
@@ -365,6 +367,7 @@ def main(args: argparse.Namespace):
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
+            fixed_output_len=args.sharegpt_output_len,
         )
 
     elif args.dataset_name == "sonnet":
@@ -373,9 +376,9 @@ def main(args: argparse.Namespace):
             input_requests = sample_sonnet_requests(
                 dataset_path=args.dataset_path,
                 num_requests=args.num_prompts,
-                input_len=args.input_len,
-                output_len=args.output_len,
-                prefix_len=args.prefix_len,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
             input_requests = [(prompt, prompt_len, output_len)
@@ -388,9 +391,9 @@ def main(args: argparse.Namespace):
             input_requests = sample_sonnet_requests(
                 dataset_path=args.dataset_path,
                 num_requests=args.num_prompts,
-                input_len=args.input_len,
-                output_len=args.output_len,
-                prefix_len=args.prefix_len,
+                input_len=args.sonnet_input_len,
+                output_len=args.sonnet_output_len,
+                prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
             )
             input_requests = [(prompt_formatted, prompt_len, output_len)
@@ -521,6 +524,12 @@ if __name__ == "__main__":
         default=1000,
         help="Number of prompts to process.",
     )
+    parser.add_argument(
+        "--sharegpt-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the ShareGPT dataset.")
     parser.add_argument(
         "--sonnet-input-len",
         type=int,

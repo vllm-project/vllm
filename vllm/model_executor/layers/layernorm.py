@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 
 
 class RMSNorm(nn.Module):
@@ -64,3 +64,8 @@ class RMSNorm(nn.Module):
             self.variance_epsilon,
         )
         return out
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.weight.data.size(0)}"
+        s += f", eps={self.variance_epsilon}"
+        return s

@@ -1,5 +1,5 @@
 import importlib
-from typing import List, Optional, Type
+from typing import Dict, List, Optional, Type
 
 import torch.nn as nn
 
@@ -41,10 +41,12 @@ _MODELS = {
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
-    "OLMoForCausalLM": ("olmo", "OLMoForCausalLM"),
+    "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
+    "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
+    "Phi3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
@@ -54,6 +56,10 @@ _MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 }
+
+# Architecture -> type.
+# out of tree models
+_OOT_MODELS: Dict[str, Type[nn.Module]] = {}
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS = []
@@ -74,6 +80,8 @@ class ModelRegistry:
 
     @staticmethod
     def load_model_cls(model_arch: str) -> Optional[Type[nn.Module]]:
+        if model_arch in _OOT_MODELS:
+            return _OOT_MODELS[model_arch]
         if model_arch not in _MODELS:
             return None
         if is_hip():
@@ -83,8 +91,8 @@ class ModelRegistry:
                     "ROCm for now.")
             if model_arch in _ROCM_PARTIALLY_SUPPORTED_MODELS:
                 logger.warning(
-                    f"Model architecture {model_arch} is partially supported "
-                    "by ROCm: " + _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
+                    "Model architecture %s is partially supported by ROCm: %s",
+                    model_arch, _ROCM_PARTIALLY_SUPPORTED_MODELS[model_arch])
 
         module_name, model_cls_name = _MODELS[model_arch]
         module = importlib.import_module(
@@ -94,6 +102,16 @@ class ModelRegistry:
     @staticmethod
     def get_supported_archs() -> List[str]:
         return list(_MODELS.keys())
+
+    @staticmethod
+    def register_model(model_arch: str, model_cls: Type[nn.Module]):
+        if model_arch in _MODELS:
+            logger.warning(
+                "Model architecture %s is already registered, and will be "
+                "overwritten by the new model class %s.", model_arch,
+                model_cls.__name__)
+        global _OOT_MODELS
+        _OOT_MODELS[model_arch] = model_cls
 
 
 __all__ = [
