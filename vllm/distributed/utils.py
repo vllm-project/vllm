@@ -9,6 +9,7 @@ from typing import Dict, Optional, Sequence
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .parallel_state import get_cpu_world_group, get_local_rank
@@ -102,11 +103,13 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
     is_distributed = dist.is_initialized()
 
     num_dev = torch.cuda.device_count()
-    cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
     path = os.path.expanduser(
-        f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
+        f"{VLLM_CONFIG_ROOT}/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
+    )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if (not is_distributed or get_local_rank() == 0) \
         and (not os.path.exists(path)):

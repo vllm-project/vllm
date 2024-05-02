@@ -4,11 +4,11 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
-import os
 from typing import Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -80,7 +80,7 @@ def init_distributed_environment(
         # local_rank is not available in torch ProcessGroup,
         # see https://github.com/pytorch/pytorch/issues/122816
         if local_rank == -1 and distributed_init_method == "env://":
-            local_rank = int(os.environ['LOCAL_RANK'])
+            local_rank = envs.LOCAL_RANK
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
 

@@ -9,9 +9,10 @@ import huggingface_hub
 import torch
 from torch import nn
 
-from vllm.config import (VLLM_USE_MODELSCOPE, DeviceConfig, LoadConfig,
-                         LoadFormat, LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
+from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)

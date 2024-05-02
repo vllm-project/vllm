@@ -5,6 +5,7 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
@@ -21,10 +22,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# If the env var is set, it uses the Ray's compiled DAG API
-# which optimizes the control plane overhead.
-# Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
+USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
@@ -145,7 +143,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             "VLLM_INSTANCE_ID":
             VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
-            os.getenv("VLLM_TRACE_FUNCTION", "0"),
+            str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)

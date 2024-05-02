@@ -1,5 +1,4 @@
 import asyncio
-import os
 import time
 from functools import partial
 from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
@@ -7,6 +6,7 @@ from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
 
 from transformers import PreTrainedTokenizer
 
+import vllm.envs as envs
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -20,8 +20,7 @@ from vllm.sequence import MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
-ENGINE_ITERATION_TIMEOUT_S = int(
-    os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60"))
+ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
 
 
 class AsyncEngineDeadError(RuntimeError):

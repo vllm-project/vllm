@@ -1,6 +1,5 @@
 import enum
 import json
-import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
@@ -23,10 +22,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
 
 logger = init_logger(__name__)
-
-# If true, will load models from ModelScope instead of Hugging Face Hub.
-VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
-                                     "False").lower() == "true"
 
 _GB = 1 << 30
 

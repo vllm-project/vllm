@@ -1,10 +1,10 @@
-import os
 from contextlib import contextmanager
 from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 try:
@@ -54,9 +54,9 @@ def init_custom_ar() -> None:
         return
     # test nvlink first, this will filter out most of the cases
     # where custom allreduce is not supported
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = list(
-            map(int, os.environ["CUDA_VISIBLE_DEVICES"].split(",")))
+    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+    if cuda_visible_devices:
+        device_ids = list(map(int, cuda_visible_devices.split(",")))
     else:
         device_ids = list(range(num_dev))
     # this checks hardware and driver support for NVLink
