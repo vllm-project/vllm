@@ -1,5 +1,6 @@
 import argparse
 import time
+from datetime import datetime
 from typing import Dict, List, Tuple
 
 import ray
@@ -99,24 +100,27 @@ def benchmark_config(
 
 def get_configs_compute_bound():
     # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L56
-    return [
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 3},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 3},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_warps": 2, "num_stages": 5},
+    configs = [
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "num_warps": 8, "num_stages": 3},
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "num_warps": 8, "num_stages": 3},
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32,  "num_warps": 2, "num_stages": 5},
     ]
+    for config in configs:
+        config["BLOCK_SIZE_K"] = 32
+        config["GROUP_SIZE_M"] = 8
+        config["SPLIT_K"] = 1
+    return configs
 
 
 def get_configs_io_bound():
     # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L36
-    # NOTE(woosuk): Reduced the search space for faster tuning.
-    # TODO(woosuk): Revert to the original search space and implement a
-    # performance model to prune the search space.
+    # TODO(woosuk): Implement a performance model to prune the search space.
     configs = []
     for num_stages in [2, 3, 4, 5, 6]:
         for block_m in [16, 32]:
@@ -128,10 +132,21 @@ def get_configs_io_bound():
                         "BLOCK_SIZE_N": block_n,
                         "BLOCK_SIZE_K": block_k,
                         "GROUP_SIZE_M": 8,
+                        "SPLIT_K": 1,
                         "num_warps": num_warps,
                         "num_stages": num_stages,
                     })
-                    # TODO(woosuk): Support split-K schedules.
+                    # Split-K
+                    for split_k in [2, 4, 8, 16]:
+                        configs.append({
+                        "BLOCK_SIZE_M": block_m,
+                        "BLOCK_SIZE_N": block_n,
+                        "BLOCK_SIZE_K": block_k,
+                        "GROUP_SIZE_M": 8,
+                        "SPLIT_K": split_k,
+                        "num_warps": num_warps,
+                        "num_stages": num_stages,
+                    })
     return configs
 
 
@@ -184,7 +199,8 @@ class BenchmarkWorker:
             if kernel_time < best_time:
                 best_time = kernel_time
                 best_config = config
-        logger.info(f"Completed tuning for M={M}")
+        now = datetime.now()
+        print(f"{now.ctime()}] Completed tuning for M={M}")
         return best_config
 
 
@@ -263,6 +279,7 @@ def main(args: argparse.Namespace):
 
     w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
+        logger.info(f"Start tuning over {len(search_space)} configurations...")
         # w1
         start = time.time()
         _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
@@ -283,6 +300,9 @@ def main(args: argparse.Namespace):
         # w2
         outputs = _benchmark(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
+            # NOTE(woosuk): Here the batch size is the number of input tokens
+            # to the MoE block. This is not the batch size of the w2 layer.
+            # The actual batch size of the w2 layer is batch_size * topk.
             logger.info(f"W2 batch size: {batch_size}, config: {config}")
             logger.info(f"Kernel time: {kernel_time:.2f} us")
 
