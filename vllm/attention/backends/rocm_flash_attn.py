@@ -50,6 +50,13 @@ class ROCmFlashAttentionBackend(AttentionBackend):
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
+    @staticmethod
+    def zero_block(
+        kv_caches: List[torch.Tensor],
+        block_id: int,
+    ) -> None:
+        PagedAttention.zero_block(kv_caches, block_id)
+
 
 @dataclass
 class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,

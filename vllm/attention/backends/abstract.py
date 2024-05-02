@@ -45,6 +45,14 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    @abstractmethod
+    def zero_block(
+        kv_caches: List[torch.Tensor],
+        block_id: int,
+    ) -> None:
+        raise NotImplementedError
+
 
 @dataclass
 class AttentionMetadataPerStage:
