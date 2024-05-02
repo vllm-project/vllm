@@ -130,7 +130,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         # Weight quantize
         # TODO : try not to remove device-to-host copy.
         # i.e. keep the non-duplicated version of scales in the CPU
-        if self.fake_quant:
+        if self.fake_quant:  # TODO: update
             w_scales = [
                 weight_scale[sum(logical_widths[:i])].item()
                 for i in range(len(logical_widths))
