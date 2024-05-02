@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
     'VLLM_HOST_IP':
-    lambda: os.environ['VLLM_HOST_IP'] or os.environ['HOST_IP'],
+    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
@@ -65,7 +65,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
-    lambda: int(os.environ['LOCAL_RANK']),
+    lambda: int(os.environ.get("LOCAL_RANK", "0")),
 
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES":
