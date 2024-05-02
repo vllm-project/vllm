@@ -92,16 +92,12 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(
-        self,
-        prev_block: Optional[Block]) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(
-        self,
-        prev_block: Optional[Block],
-        token_ids: List[int]) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int]) -> Block:
         pass
 
     @abstractmethod
