@@ -263,11 +263,17 @@ def main(args: argparse.Namespace):
     logger.info(args)
 
     config = AutoConfig.from_pretrained(args.model)
-    E = config.num_local_experts
+    if config.architectures[0] == "DbrxForCausalLM":
+        E = config.ffn_config.moe_num_experts
+        topk = config.ffn_config.moe_top_k
+        intermediate_size = config.ffn_config.ffn_hidden_size
+    else:
+        E = config.num_local_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
+
     hidden_size = config.hidden_size
-    intermediate_size = config.intermediate_size
     shard_intermediate_size = intermediate_size // args.tp_size
-    topk = config.num_experts_per_tok
     dtype = config.torch_dtype
 
     if args.batch_size is None:
