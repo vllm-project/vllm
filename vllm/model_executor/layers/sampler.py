@@ -483,7 +483,13 @@ def _sample_with_torch(
             beam_search_logprobs = logprobs[sample_indices]
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
+    
+    return serialize_sampling_results(
+        /
+    )
 
+def serialize_sampling_results():
+    
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
 
@@ -815,6 +821,14 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     probs[sample_indices, :] = 0
     probs[sample_indices, greedy_samples] = 1.0
 
+"""
+
+sample_results -- what is?
+[(next_token_ids, parent_ids)]
+
+Can pass in seq groups, prompt logprobs=None, sample logprobs (need to construct)
+
+"""
 
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
