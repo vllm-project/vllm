@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
     LOCAL_RANK: int = 0
+    CUDA_VISIBLE_DEVICES: Optional[str] = None
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -38,8 +39,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
+
+    # local rank of the process in the distributed setting, used to determine
+    # the GPU device id
     "LOCAL_RANK":
     lambda: int(os.environ['LOCAL_RANK']),
+
+    # used to control the visible devices in the distributed setting
+    "CUDA_VISIBLE_DEVICES":
+    lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
 }
 
 

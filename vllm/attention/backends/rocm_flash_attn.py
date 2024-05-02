@@ -4,13 +4,13 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
-import vllm.envs as envs
 
 logger = init_logger(__name__)
 
