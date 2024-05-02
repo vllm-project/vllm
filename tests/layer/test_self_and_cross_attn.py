@@ -1,5 +1,6 @@
 import random
 from typing import List, Optional, Tuple
+import itertools
 
 import pytest
 import torch
@@ -17,6 +18,8 @@ from vllm.utils import is_hip
 from allclose_default import get_default_atol, get_default_rtol
 
 from vllm.model_executor.layers.attention.attention import Attention
+
+import random
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -38,7 +41,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
-BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 BACKEND_NAMES = ["xformers"]
@@ -159,11 +162,37 @@ def dummy_embed(input_tokens):
 def sim_prompt_run(query, key, value):
     pass
 
-def make_golden_prompt_run(prompt_len):
-    pass
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size):
+    q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+    kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+    query=torch.rand((batch_size,max_q_prompt_len,head_size))
+    key=torch.rand((batch_size,max_kv_prompt_len,head_size))
+    value=torch.rand((batch_size,max_kv_prompt_len,head_size))
 
-def build_attention_metadata():
-    pass
+    for bdx,(q_prompt_len,kv_prompt_len) in enumerate(zip(q_prompt_lens,kv_prompt_lens)):
+        query[bdx,q_prompt_len:] = 0
+        key[bdx,kv_prompt_len:] = 0
+        value[bdx,kv_prompt_len:] = 0
+
+    return query,key,value,q_prompt_lens,kv_prompt_lens
+
+def pack_qkv(query,key,value,q_prompt_lens,kv_prompt_lens):
+    q_num_tok = sum(q_prompt_lens)
+    kv_num_tok = sum(kv_prompt_lens)
+    batch_size = query.shape[0]
+    head_size = query.shape[-1]
+    q_start_loc_list = list(itertools.accumulate(q_prompt_lens))
+    kv_start_loc_list = list(itertools.accumulate(kv_prompt_lens))
+    packed_query = torch.tensor((q_num_tok,head_size))
+    packed_key = torch.tensor((kv_num_tok,head_size))
+    packed_value = torch.tensor((kv_num_tok,head_size))
+
+    for bdx,(q_prompt_len,q_start_loc,kv_prompt_len,kv_start_loc) in enumerate(zip(q_prompt_lens,q_start_loc_list,kv_prompt_lens,kv_start_loc_list)):
+        packed_query[q_start_loc:(q_start_loc+q_prompt_len)] = query[bdx,:,:]
+        packed_key[kv_start_loc:(kv_start_loc+kv_prompt_len)] = key[bdx,:,:]
+        packed_value[kv_start_loc:(kv_start_loc+kv_prompt_len)] = value[bdx,:,:]
+
+    return packed_query,packed_key,packed_value,q_start_loc_list,kv_start_loc_list
 
 def make_backend(backend_name: str) -> AttentionBackend:
     if backend_name == "xformers":
@@ -208,27 +237,34 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_le
                             use_cuda_graph=False,
                         )
 
-def make_metadata(is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0'):
-        '''
-        Assumptions:
-        * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
-        '''
+def make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0'):
+    key_cache = torch.rand((num_blocks, num_heads, head_size//key_read_width, block_size, key_read_width),device=device)
+    val_cache = torch.rand((num_blocks, num_heads, head_size, block_size),device=device)
+    return key_cache,val_cache
 
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0')
+def make_block_table_slot_mapping(block_size,batch_size,prompt_lens):
 
-        attn_metadata = AttentionMetadata(
-            num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            prefill_metadata=prefill_attn_metadata,
-            decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
 
-def make_attention(num_heads: int, head_size: int):
+def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0'):
+    '''
+    Assumptions:
+    * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
+    '''
+
+    stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, device='cuda:0')
+
+    attn_metadata = AttentionMetadata(
+        num_prefills=num_prefills,
+        slot_mapping=slot_mapping,
+        num_prefill_tokens=num_prefill_tokens,
+        num_decode_tokens=num_decode_tokens,
+        prefill_metadata=prefill_attn_metadata,
+        decode_metadata=decode_attn_metadata,
+        kv_cache_dtype=self.kv_cache_dtype,
+    )
+
+def make_attention(num_heads: int, head_size: int, scale: float):
     # Attention operator instance
-    scale = float(1.0 / (head_size**0.5))
     return Attention(num_heads,
                      head_size,
                      scale=scale,)
@@ -246,8 +282,22 @@ def make_attention(num_heads: int, head_size: int):
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_prefill_stage_encoder_self_attention(num_heads: int, head_size: int, backend_name: str) -> None:
     # Attention operator instance
+    batch_size = 16
+    scale = float(1.0 / (head_size**0.5))
     attn = make_attention(num_heads, head_size)
     attn_backend = make_backend(backend_name)
+    metadata = make_metadata(attn_backend)
+    max_q_prompt_len = 32
+    max_kv_prompt_len = 64
+    query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size)
+    ideal_output = ref_masked_attention(
+        query,
+        key,
+        value,
+        scale=scale
+    )
+    packed_query,packed_key,packed_value,q_start_loc_list,kv_start_loc_list = pack_qkv(query,key,value,q_prompt_lens,kv_prompt_lens)
+
 
     assert(True)
 
