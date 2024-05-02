@@ -65,18 +65,31 @@ def create_sequence_group_output(
     topk_token_ids: List[int],
     topk_logprobs: List[float],
 ) -> SequenceGroupOutput:
+    """Create a SequenceGroupOutput given the sampling results.
+
+    Args:
+        token_id (int): The sampled token for the sequence.
+        token_id_logprob_rank (int): The logprob rank of the sampled token.
+        token_id_logprob (float): The logprob value of the sampled token.
+        seq_id (int): The sequence id.
+        topk_token_ids (List[int]): The list of top-k token ids.
+        topk_logprobs (List[float]): The list of top-k logprobs.
+    """
+    # vLLM logprobs always include the sampled token. In addition, the user may
+    # request topk-logprobs (where top-k varies per user up to max_logprobs).
     logprobs: Dict[int, Logprob] = {
         token_id: Logprob(
             logprob=token_id_logprob,
             rank=token_id_logprob_rank,
         ),
-    } | {
+    }
+    logprobs.update({
         topk_token_ids[topk_logprob_index]: Logprob(
             logprob=topk_logprobs[topk_logprob_index],
             rank=topk_logprob_index + 1,
         )
         for topk_logprob_index, _ in enumerate(topk_token_ids)
-    }
+    })
 
     return SequenceGroupOutput(
         samples=[
@@ -84,6 +97,7 @@ def create_sequence_group_output(
                            output_token=token_id,
                            logprobs=logprobs)
         ],
+        # TODO add prompt logprobs support.
         prompt_logprobs=None,
     )
 
