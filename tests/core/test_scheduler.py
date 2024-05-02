@@ -791,7 +791,7 @@ def test_schedule_swapped_cannot_swap_in():
 
     # The last request should be swapped out.
     scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = False
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
     # Since we cannot swap in, none of the requests are swapped in.
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
