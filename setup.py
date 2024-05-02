@@ -418,7 +418,7 @@ setup(
                    'licenses/LICENSE.punica', 'licenses/LICENSE.squeezellm',
                    'licenses/LICENSE.tensorrtllm', 'licenses/LICENSE.vllm'),
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
-                                    "tests")),
+                                    "tests*")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
