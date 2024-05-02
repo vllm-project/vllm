@@ -15,7 +15,7 @@ DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-SLIDING_WINDOW = [0, 512]
+SLIDING_WINDOW = [0, 16, 64, 128, 256, 512, 2048]
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
