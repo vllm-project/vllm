@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 
 # Tensor model parallel group that the current rank belongs to.
 _TP_DEVICE_GROUP = None
+_TP_CPU_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
@@ -139,8 +140,10 @@ def initialize_model_parallel(
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
         group = torch.distributed.new_group(ranks, backend=backend)
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
         if rank in ranks:
             _TP_DEVICE_GROUP = group
+            _TP_CPU_GROUP = cpu_group
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -200,6 +203,13 @@ def get_tensor_model_parallel_group():
     assert _TP_DEVICE_GROUP is not None, (
         "tensor model parallel group is not initialized")
     return _TP_DEVICE_GROUP
+
+
+def get_tensor_model_parallel_cpu_group():
+    """Get the tensor model parallel cpu group the caller rank belongs to."""
+    assert _TP_CPU_GROUP is not None, (
+        "tensor model parallel cpu group is not initialized")
+    return _TP_CPU_GROUP
 
 
 def get_pipeline_model_parallel_group():
@@ -281,6 +291,10 @@ def destroy_model_parallel():
     if _TP_DEVICE_GROUP:
         torch.distributed.destroy_process_group(_TP_DEVICE_GROUP)
     _TP_DEVICE_GROUP = None
+    global _TP_CPU_GROUP
+    if _TP_CPU_GROUP:
+        torch.distributed.destroy_process_group(_TP_CPU_GROUP)
+    _TP_CPU_GROUP = None
     global _PIPELINE_MODEL_PARALLEL_GROUP
     if _PIPELINE_MODEL_PARALLEL_GROUP:
         torch.distributed.destroy_process_group(_PIPELINE_MODEL_PARALLEL_GROUP)
