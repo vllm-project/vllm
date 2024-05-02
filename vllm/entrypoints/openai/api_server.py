@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 _running_tasks: Set[asyncio.Task[Any]] = set()
 
+
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
 
