@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-USE_RAY_COMPILED_DAG = envs.USE_RAY_COMPILED_DAG
+USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
