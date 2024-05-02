@@ -133,9 +133,11 @@ class NaiveBlockAllocator(BlockAllocator):
 
         return forked_blocks
 
-    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
-        assert device is None
+    def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
+
+    def get_num_total_blocks(self) -> int:
+        return len(self._all_block_indices)
 
     def _allocate_new_block_id(self) -> BlockId:
         if not self._free_block_indices:

@@ -791,12 +791,40 @@ def test_schedule_swapped_cannot_swap_in():
 
     # The last request should be swapped out.
     scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = False
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
     # Since we cannot swap in, none of the requests are swapped in.
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
         swapped, budget, curr_loras, policy)
     assert len(remaining_swapped) == 2
+    assert budget.num_batched_tokens == 0
+    assert budget.num_curr_seqs == 0
+    assert len(output.decode_seq_groups) == 0
+    assert len(output.prefill_seq_groups) == 0
+
+
+def test_infeasible_swap():
+    scheduler = initialize_scheduler()
+    swapped = deque()
+    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    curr_loras = None
+    blocks_to_swap_out = {}
+    for _ in range(2):
+        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+        scheduler._allocate_and_set_running(seq_group)
+        append_new_token_seq_group(60, seq_group, 1)
+        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        swapped.append(seq_group)
+
+    # The last request should be swapped out.
+    scheduler.block_manager.can_swap_in = MagicMock()
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.NEVER
+    # Since we cannot swap in, none of the requests are swapped in.
+    budget = create_token_budget()
+    remaining_swapped, output = scheduler._schedule_swapped(
+        swapped, budget, curr_loras, policy)
+    assert len(remaining_swapped) == 0
+    assert len(output.infeasible_seq_groups) == 2
     assert budget.num_batched_tokens == 0
     assert budget.num_curr_seqs == 0
     assert len(output.decode_seq_groups) == 0

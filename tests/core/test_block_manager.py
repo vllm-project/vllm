@@ -224,7 +224,7 @@ def test_swap():
 
     # Swap seq group from CPU -> GPU.
     cpu_blocks = block_manager.get_block_table(prompt)
-    assert block_manager.can_swap_in(seq_group)
+    assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_in(seq_group)

@@ -285,6 +285,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self._hashless_allocator.get_num_free_blocks(
         ) + self.evictor.num_blocks
 
+    def get_num_total_blocks(self) -> int:
+        return self._hashless_allocator.get_num_total_blocks()
+
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids

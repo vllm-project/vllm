@@ -110,9 +110,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
 
-    def allocate_mutable(self,
-                         prev_block: Optional[Block],
-                         device: Optional[Device] = None) -> Block:
+    def allocate_mutable(self, prev_block: Optional[Block],
+                         device: Device) -> Block:
         """Allocates a new mutable block on the specified device.
 
         Args:
@@ -123,13 +122,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        assert device is not None
         return self._allocators[device].allocate_mutable(prev_block)
 
-    def allocate_immutable(self,
-                           prev_block: Optional[Block],
-                           token_ids: List[int],
-                           device: Optional[Device] = None) -> Block:
+    def allocate_immutable(self, prev_block: Optional[Block],
+                           token_ids: List[int], device: Device) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
 
@@ -144,7 +140,6 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Block: The newly allocated immutable block containing the provided
                 token IDs.
         """
-        assert device is not None
         return self._allocators[device].allocate_immutable(
             prev_block, token_ids)
 
@@ -175,7 +170,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         allocator = self._block_ids_to_allocator[block_id]
         return allocator.fork(last_block)
 
-    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
+    def get_num_free_blocks(self, device: Device) -> int:
         """Returns the number of free blocks available on the specified device.
 
         Args:
@@ -185,8 +180,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             int: The number of free blocks available on the specified device.
         """
-        assert device is not None
         return self._allocators[device].get_num_free_blocks()
+
+    def get_num_total_blocks(self, device: Device) -> int:
+        return self._allocators[device].get_num_total_blocks()
 
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of

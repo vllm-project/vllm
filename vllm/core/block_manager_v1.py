@@ -48,6 +48,10 @@ class BlockAllocatorBase(ABC):
         pass
 
     @abstractmethod
+    def get_num_total_blocks(self) -> int:
+        pass
+
+    @abstractmethod
     def contains_block(self, block_hash: int) -> bool:
         pass
 
@@ -131,6 +135,9 @@ class CachedBlockAllocator(BlockAllocatorBase):
         return (self.num_blocks - self.current_num_blocks +
                 self.evictor.num_blocks)
 
+    def get_num_total_blocks(self) -> int:
+        return self.num_blocks
+
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
@@ -189,6 +196,9 @@ class UncachedBlockAllocator(BlockAllocatorBase):
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
+
+    def get_num_total_blocks(self) -> int:
+        return self.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
         raise NotImplementedError(
@@ -444,7 +454,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def can_swap_in(self,
                     seq_group: SequenceGroup,
-                    num_lookahead_slots: int = 0) -> bool:
+                    num_lookahead_slots: int = 0) -> AllocStatus:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
         blocks = self._get_physical_blocks(seq_group)
@@ -454,7 +464,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().
         num_required_blocks = len(blocks) + num_swapped_seqs
-        return num_free_blocks - num_required_blocks >= self.watermark_blocks
+        if self.gpu_allocator.get_num_total_blocks() < num_required_blocks:
+            return AllocStatus.NEVER
+        elif num_free_blocks - num_required_blocks >= self.watermark_blocks:
+            return AllocStatus.OK
+        else:
+            return AllocStatus.LATER
 
     def swap_in(self,
                 seq_group: SequenceGroup,
