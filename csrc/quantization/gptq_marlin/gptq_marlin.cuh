@@ -19,7 +19,7 @@ static constexpr int default_threads = 256;
 static constexpr int pipe_stages = 4; // 4 pipeline stages fit into shared memory
 
 static constexpr int min_thread_n = 64;
-static constexpr int min_thread_k = 32;
+static constexpr int min_thread_k = 64;
 
 static constexpr int tile_size = 16;
 static constexpr int max_par   = 16;
