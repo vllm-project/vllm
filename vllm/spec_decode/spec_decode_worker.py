@@ -55,13 +55,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_worker_kwargs,
     ) -> "SpecDecodeWorker":
 
-        if "ngram_prompt_lookup_max" in draft_worker_kwargs:
-            ngram_prompt_lookup_max = (
-                draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
-            ngram_prompt_lookup_min = (
-                draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-        else:
-            ngram_prompt_lookup_max = 0
+        ngram_prompt_lookup_max = (
+            draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
+        ngram_prompt_lookup_min = (
+            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
 
         if ngram_prompt_lookup_max > 0:
             proposer_worker = NGramWorker(**draft_worker_kwargs)
