@@ -5,7 +5,7 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Dict, Tuple, Union
+from typing import Dict, Tuple, Union, Optional
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
@@ -54,8 +54,8 @@ global_thread_pool = None  # used for generating logits processor fsm
 
 
 async def get_outlines_guided_decoding_logits_processor(
-        request: Union[CompletionRequest, ChatCompletionRequest],
-        tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor]:
+        request: Union[CompletionRequest, ChatCompletionRequest], tokenizer
+) -> Optional[Union[JSONLogitsProcessor, RegexLogitsProcessor]]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -121,7 +121,8 @@ def convert_guided_choice_format(guided_choice):
 
 
 def _get_guide_and_mode_from_sampling_params(
-        guided_options: Dict[str, str]) -> Tuple[str, GuidedDecodingMode]:
+    guided_options: Dict[str, str]
+) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
     if not guided_options:
         return None, None
 
