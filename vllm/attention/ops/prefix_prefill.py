@@ -126,6 +126,11 @@ if triton.__version__ >= "2.1.0":
                           float("-inf"))
             qk *= sm_scale
             if SLIDING_WINDOW > 0:
+                # (cur_batch_ctx_len + offs_m[:, None]) is the position of Q entry in sequence
+                # (start_n + offs_n[None, :]) is the position of KV entry in sequence
+                # So the condition makes sure an entry in Q only attends to KV entries
+                # not more than SLIDING_WINDOW away.
+                #
                 # We can't use -inf here, because the
                 # sliding window may lead to the entire row being masked.
                 # This then makes m_ij contain -inf, which causes NaNs in
