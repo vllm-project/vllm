@@ -7,9 +7,9 @@ pytest tests/basic_correctness/test_preemption.py`.
 """
 import pytest
 
+from vllm import SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
                                  ENABLE_ARTIFICIAL_PREEMPT)
-from vllm import SamplingParams
 
 MODELS = [
     "facebook/opt-125m",
@@ -151,7 +151,7 @@ def test_swap_infeasible(
     max_tokens: int,
     beam_width: int,
 ) -> None:
-    """Use beam search enables swapping."""
+    """Verify infeasible swap request will be ignored."""
     BLOCK_SIZE = 16
     prefill_blocks = 2
     decode_blocks = max_tokens // BLOCK_SIZE
@@ -193,7 +193,7 @@ def test_preemption_infeasible(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    """Use beam search enables swapping."""
+    """Verify infeasible preemption request will be ignored."""
     BLOCK_SIZE = 16
     prefill_blocks = 2
     decode_blocks = max_tokens // BLOCK_SIZE
@@ -202,8 +202,8 @@ def test_preemption_infeasible(
         dtype=dtype,
         block_size=BLOCK_SIZE,
         # Not enough gpu blocks to complete a single sequence.
-        # preemption should happen, and the sequence should be ignored instead of
-        # hanging forever.
+        # preemption should happen, and the sequence should be
+        # ignored instead of hanging forever.
         num_gpu_blocks_override=prefill_blocks + decode_blocks // 2,
         max_model_len=((prefill_blocks + decode_blocks // 2) * BLOCK_SIZE),
     )
