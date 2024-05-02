@@ -275,6 +275,7 @@ def main(args: argparse.Namespace):
             worker_idx = (worker_idx + 1) % num_gpus
         return ray.get(outputs)
 
+    w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
         search_space = get_configs_compute_bound() + get_configs_io_bound()
 
@@ -294,7 +295,6 @@ def main(args: argparse.Namespace):
         logger.info("W1 tuning took %.2f seconds", end - start)
 
         # w2
-        w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
         start = time.time()
         _tune(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
         end = time.time()
@@ -302,10 +302,8 @@ def main(args: argparse.Namespace):
     else:
 
         def _benchmark(Ms: List[int], N: int, K: int, topk_experts: int):
-            outputs = _distribute("benchmark",
-                                  [(M, E, N, K, topk_experts, dtype)
-                                   for M in Ms])
-            return outputs
+            return _distribute("benchmark",
+                               [(M, E, N, K, topk_experts, dtype) for M in Ms])
 
         # w1
         outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
@@ -315,7 +313,6 @@ def main(args: argparse.Namespace):
             logger.info("Kernel time: %.2f us", kernel_time)
 
         # w2
-        w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
         outputs = _benchmark(w2_batch_sizes, hidden_size,
                              shard_intermediate_size, 1)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
