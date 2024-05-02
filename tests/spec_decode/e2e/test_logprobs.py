@@ -1,12 +1,11 @@
+import math
 from itertools import cycle
 
 import pytest
-import math
-from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
-from .conftest import get_output_from_llm_generator, get_logprobs_from_llm_generator
+from .conftest import get_logprobs_from_llm_generator
 
 
 @pytest.mark.parametrize(
@@ -199,8 +198,8 @@ def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator,
         for logprob_dict in seq_logprobs
     ]
 
-    # Assert one of the returned logprobs has > num_logprobs (indicating the sampled token is not
-    # in top-k).
+    # Assert one of the returned logprobs has > num_logprobs (indicating the
+    # sampled token is not in top-k).
     assert any([
         num_returned > logprob_rank for num_returned in num_returned_logprobs
     ])

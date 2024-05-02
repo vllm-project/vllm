@@ -5,16 +5,15 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
-from vllm.spec_decode.util import (get_all_seq_ids, get_all_num_logprobs,
-                                   get_sampled_token_logprobs,
-                                   create_sequence_group_output, nvtx_range,
+from vllm.spec_decode.util import (create_sequence_group_output,
+                                   get_all_num_logprobs, get_all_seq_ids,
+                                   get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -302,8 +301,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
 
-        Returns a tuple of Tensors, one for the accepted token ids and one for the
-        logprobs according to the scoring model.
+        Returns a tuple of Tensors, one for the accepted token ids and one for
+        the logprobs according to the scoring model.
         """
         proposal_lens_list = proposals.proposal_lens.tolist()
 
@@ -377,17 +376,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
 
         # Get the logprobs/rank of the accepted tokens.
-        accepted_token_id_ranks_by_step, accepted_token_id_logprobs_by_step = get_sampled_token_logprobs(
-            logprob_tensor=target_logprobs_by_step,
-            sampled_token_ids=accepted_token_ids_by_step,
-        )
+        (accepted_token_id_ranks_by_step,
+         accepted_token_id_logprobs_by_step) = get_sampled_token_logprobs(
+             logprob_tensor=target_logprobs_by_step,
+             sampled_token_ids=accepted_token_ids_by_step,
+         )
 
         # Get the top-k logprobs (which may or may not include the logprob of
         # the accepted token).
-        topk_logprobs_by_step, topk_indices_by_step = target_logprobs_by_step.topk(
-            k=self.scorer_worker.model_config.max_logprobs,
-            dim=-1,
-        )
+        (topk_logprobs_by_step,
+         topk_indices_by_step) = target_logprobs_by_step.topk(
+             k=self.scorer_worker.model_config.max_logprobs,
+             dim=-1,
+         )
 
         # Get the sequence ids and num_logprobs (sampling parameter) in the
         # batch.

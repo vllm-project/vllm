@@ -1,10 +1,11 @@
 from contextlib import contextmanager
 from itertools import chain
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata, SequenceGroupOutput, Logprob, SequenceOutput
+from vllm.sequence import (Logprob, SamplerOutput, SequenceGroupMetadata,
+                           SequenceGroupOutput, SequenceOutput)
 
 SeqId = int
 
@@ -133,7 +134,7 @@ def split_batch_by_proposal_len(
 
 def sampler_output_to_torch(
     sampler_output_list: List[SamplerOutput],
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         Returns:

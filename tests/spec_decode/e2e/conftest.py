@@ -1,4 +1,4 @@
-from typing import List, Tuple, Dict
+from typing import Dict, List, Tuple
 
 import pytest
 
@@ -73,8 +73,6 @@ def get_logprobs_from_llm_generator(
     """Returns a dict of (token_id: Logprob) for each generated position, for
     each sequence in the batch.
     """
-    tokens = []
-    token_ids = []
     for llm in llm_generator():
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         logprobs = [output.outputs[0].logprobs[:] for output in outputs]

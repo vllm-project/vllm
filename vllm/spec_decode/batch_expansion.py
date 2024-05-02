@@ -149,12 +149,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return (spec_indices, non_spec_indices, target_seq_group_metadata_list,
                 num_scoring_tokens)
 
-    def _contract_batch(self, contracted_bs: int,
-                        target_sampler_output: List[SamplerOutput],
-                        proposals: SpeculativeProposals,
-                        num_scoring_tokens: int, non_spec_indices: List[int],
-                        spec_indices: List[int],
-                        k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _contract_batch(
+            self, contracted_bs: int,
+            target_sampler_output: List[SamplerOutput],
+            proposals: SpeculativeProposals, num_scoring_tokens: int,
+            non_spec_indices: List[int], spec_indices: List[int],
+            k: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Contract the expanded batch back into its original size.
         This maps the scores of speculative tokens back to their original
         sequences.
@@ -322,7 +322,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
     def _split_scoring_output(
         self, sampler_output: SamplerOutput, num_scoring_tokens: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor, torch.Tensor]:
         """Split the target model output into speculative and non-speculative
         output.
         """
@@ -351,15 +352,16 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sampler_output.sampled_token_probs = spec_probs
         sampler_output.sampled_token_ids = spec_sampled_tokens
         sampler_output.logprobs = spec_logprobs
-        target_token_ids, target_probs, target_logprobs = sampler_output_to_torch(
-            [sampler_output])
+        (target_token_ids, target_probs,
+         target_logprobs) = sampler_output_to_torch([sampler_output])
 
         # Convert non-speculative output tokens to tensors.
         sampler_output.sampled_token_probs = non_spec_probs
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
         sampler_output.logprobs = non_spec_logprobs
-        non_spec_target_token_ids, non_spec_target_probs, non_spec_target_logprobs = (
-            sampler_output_to_torch([sampler_output]))
+        (non_spec_target_token_ids, non_spec_target_probs,
+         non_spec_target_logprobs) = (sampler_output_to_torch([sampler_output
+                                                               ]))
 
         return (target_token_ids, target_probs, target_logprobs,
                 non_spec_target_token_ids, non_spec_target_probs,
