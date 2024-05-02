@@ -44,50 +44,48 @@ DEFAULT_LOGGING_CONFIG = {
 
 
 def _configure_vllm_root_logger() -> None:
+    logging_config: Optional[Dict] = None
+
+    if not VLLM_CONFIGURE_LOGGING and VLLM_LOGGING_CONFIG_PATH:
+        raise RuntimeError(
+            "VLLM_CONFIGURE_LOGGING evaluated to false, but "
+            "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
+            "implies VLLM_CONFIGURE_LOGGING. Please enable "
+            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH.")
+
     if VLLM_CONFIGURE_LOGGING:
-        logging_config: Dict = DEFAULT_LOGGING_CONFIG
+        logging_config = DEFAULT_LOGGING_CONFIG
 
     if VLLM_LOGGING_CONFIG_PATH:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
-                "Could not load logging config. File does not exist:"
-                f" {VLLM_LOGGING_CONFIG_PATH}")
+                "Could not load logging config. File does not exist: %s",
+                VLLM_LOGGING_CONFIG_PATH)
         with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8",
                   mode="r") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected Dict, got"
-                             f" {type(custom_config).__name__}.")
+            raise ValueError("Invalid logging config. Expected Dict, got %s.",
+                             type(custom_config).__name__)
         logging_config = custom_config
 
     if logging_config:
         dictConfig(logging_config)
 
 
-def _configure_vllm_logger(logger: Logger) -> None:
-    # Use the same settings as for root logger
-    _root_logger = logging.getLogger("vllm")
-    default_log_level = os.getenv("LOG_LEVEL", _root_logger.level)
-    logger.setLevel(default_log_level)
-    for handler in _root_logger.handlers:
-        logger.addHandler(handler)
-    logger.propagate = False
-
-
 def init_logger(name: str) -> Logger:
-    logger_is_new = name not in logging.Logger.manager.loggerDict
-    logger = logging.getLogger(name)
-    if VLLM_CONFIGURE_LOGGING and logger_is_new:
-        _configure_vllm_logger(logger)
-    return logger
+    """The main purpose of this function is to ensure that loggers are
+    retrieved in such a way that we can be sure the root vllm logger has
+    already been configured."""
+
+    return logging.getLogger(name)
 
 
-# The logger is initialized when the module is imported.
+# The root logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
-if VLLM_CONFIGURE_LOGGING or VLLM_LOGGING_CONFIG_PATH:
-    _configure_vllm_root_logger()
+_configure_vllm_root_logger()
 
 logger = init_logger(__name__)
 
