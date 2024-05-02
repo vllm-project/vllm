@@ -98,7 +98,7 @@ def benchmark_config(
     return avg
 
 
-def get_configs_compute_bound():
+def get_configs_compute_bound() -> List[Dict[str, int]]:
     # TODO(woosuk): Implement a performance model to prune the search space.
     configs = []
     for num_stages in [3, 4, 5]:
@@ -119,7 +119,7 @@ def get_configs_compute_bound():
     return configs
 
 
-def get_configs_io_bound():
+def get_configs_io_bound() -> List[Dict[str, int]]:
     # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L36
     # TODO(woosuk): Implement a performance model to prune the search space.
     configs = []
