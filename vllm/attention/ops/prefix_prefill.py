@@ -64,7 +64,7 @@ if triton.__version__ >= "2.1.0":
         cur_batch_query_len = cur_batch_seq_len - cur_batch_ctx_len
 
         # start position inside of the query
-        # generally, N goes over ctx_len or seq_len, while M goes over query_len
+        # generally, N goes over kv, while M goes over query_len
         block_start_loc = BLOCK_M * start_m
 
         # initialize offsets
