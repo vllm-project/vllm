@@ -9,10 +9,13 @@ from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     get_quantization_config)
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
                         is_neuron)
+
+GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -138,14 +141,34 @@ class ModelConfig:
             is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
                                 or quant_cfg.get("is_marlin_format", False))
 
-            # Use marlin if the GPTQ model is serialized in marlin format.
-            if quant_method == "gptq" and is_format_marlin:
-                logger.info("The model is serialized in Marlin format. "
-                            "Using Marlin kernel.")
-                quant_method = "marlin"
-                if self.quantization == "gptq":
-                    self.quantization = quant_method
+            # Check which LinearMethod the GPTQ model should use.
+            if quant_method == "gptq":
+                # If serialized in Marlin format, use MarlinLinearMethod.
+                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
+                if is_format_marlin:
+                    logger.info("The model is serialized in Marlin format. "
+                                "Using Marlin kernel.")
+                    quant_method = "marlin"
+                    if self.quantization == "gptq":
+                        self.quantization = quant_method
 
+                # If convertible to Marlin format, use GPTQMarlinLinearMethod
+                # unless the user explicitly specified GPTQLinearMethod.
+                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
+                    if self.quantization == "gptq":
+                        logger.warning(
+                            "The model is convertible to Marlin format, but "
+                            "you specified quantization=gptq. Use "
+                            "quantization=marlin for faster inference.")
+                    else:
+                        logger.info(
+                            "The model is convertible to Marlin format. "
+                            "Using Marlin kernel.")
+                        quant_method = "gptq_marlin"
+                        if self.quantization == "marlin":
+                            self.quantization = quant_method
+
+            # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:
@@ -165,7 +188,7 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if self.quantization != "marlin":
+            if (self.quantization not in ["marlin", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -330,7 +353,8 @@ class CacheConfig:
         elif self.cache_dtype == "fp8":
             if not is_hip():
                 nvcc_cuda_version = get_nvcc_cuda_version()
-                if nvcc_cuda_version < Version("11.8"):
+                if nvcc_cuda_version is not None \
+                        and nvcc_cuda_version < Version("11.8"):
                     raise ValueError(
                         "FP8 is not supported when cuda version is"
                         "lower than 11.8.")
@@ -658,6 +682,8 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -684,6 +710,10 @@ class SpeculativeConfig:
             use_v2_block_manager (bool): Whether vLLM is configured to use the
                 v2 block manager or not. Used for raising an error since the v2
                 block manager is required with spec decode.
+            ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
+                window, if provided.
+            ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
+                window, if provided.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -718,39 +748,57 @@ class SpeculativeConfig:
         draft_code_revision = None
         draft_quantization = None
 
-        draft_model_config = ModelConfig(
-            model=speculative_model,
-            tokenizer=target_model_config.tokenizer,
-            tokenizer_mode=target_model_config.tokenizer_mode,
-            trust_remote_code=target_model_config.trust_remote_code,
-            dtype=target_model_config.dtype,
-            seed=target_model_config.seed,
-            revision=draft_revision,
-            code_revision=draft_code_revision,
-            tokenizer_revision=target_model_config.tokenizer_revision,
-            max_model_len=None,
-            quantization=draft_quantization,
-            enforce_eager=target_model_config.enforce_eager,
-            max_context_len_to_capture=target_model_config.
-            max_context_len_to_capture,
-            max_logprobs=target_model_config.max_logprobs,
-        )
+        if speculative_model == "[ngram]":
+            assert (ngram_prompt_lookup_max is not None
+                    and ngram_prompt_lookup_max > 0)
+            if ngram_prompt_lookup_min is None:
+                ngram_prompt_lookup_min = 0
+            else:
+                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
 
-        draft_model_config.max_model_len = (
-            SpeculativeConfig._maybe_override_draft_max_model_len(
-                speculative_max_model_len,
-                draft_model_config.max_model_len,
-                target_model_config.max_model_len,
-            ))
+            # TODO: current we still need extract vocab_size from target model
+            # config, in future, we may try refactor it out, and set
+            # draft related config as None here.
+            draft_model_config = target_model_config
+            draft_parallel_config = target_parallel_config
+        else:
+            ngram_prompt_lookup_max = 0
+            ngram_prompt_lookup_min = 0
+            draft_model_config = ModelConfig(
+                model=speculative_model,
+                tokenizer=target_model_config.tokenizer,
+                tokenizer_mode=target_model_config.tokenizer_mode,
+                trust_remote_code=target_model_config.trust_remote_code,
+                dtype=target_model_config.dtype,
+                seed=target_model_config.seed,
+                revision=draft_revision,
+                code_revision=draft_code_revision,
+                tokenizer_revision=target_model_config.tokenizer_revision,
+                max_model_len=None,
+                quantization=draft_quantization,
+                enforce_eager=target_model_config.enforce_eager,
+                max_context_len_to_capture=target_model_config.
+                max_context_len_to_capture,
+                max_logprobs=target_model_config.max_logprobs,
+            )
 
-        draft_parallel_config = (
-            SpeculativeConfig.create_draft_parallel_config(
-                target_parallel_config))
+            draft_model_config.max_model_len = (
+                SpeculativeConfig._maybe_override_draft_max_model_len(
+                    speculative_max_model_len,
+                    draft_model_config.max_model_len,
+                    target_model_config.max_model_len,
+                ))
+
+            draft_parallel_config = (
+                SpeculativeConfig.create_draft_parallel_config(
+                    target_parallel_config))
 
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min,
         )
 
     @staticmethod
@@ -818,6 +866,8 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
+        ngram_prompt_lookup_max: int,
+        ngram_prompt_lookup_min: int,
     ):
         """Create a SpeculativeConfig object.
 
@@ -830,6 +880,8 @@ class SpeculativeConfig:
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
+        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max
+        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min
 
         self._verify_args()
 
@@ -853,7 +905,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        draft_model = self.draft_model_config.model
+        if self.ngram_prompt_lookup_max > 0:
+            draft_model = "[ngram]"
+        else:
+            draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 

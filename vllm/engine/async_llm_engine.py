@@ -8,6 +8,7 @@ from typing import (Any, AsyncIterator, Callable, Dict, Iterable, List,
 from transformers import PreTrainedTokenizer
 
 from vllm.config import DecodingConfig, ModelConfig
+from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
@@ -15,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
+from vllm.sequence import MultiModalData, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
 
 logger = init_logger(__name__)
@@ -211,9 +212,11 @@ class _AsyncLLMEngine(LLMEngine):
         if not scheduler_outputs.is_empty():
             # Execute the model.
             output = await self.model_executor.execute_model_async(
-                seq_group_metadata_list, scheduler_outputs.blocks_to_swap_in,
+                seq_group_metadata_list,
+                scheduler_outputs.blocks_to_swap_in,
                 scheduler_outputs.blocks_to_swap_out,
-                scheduler_outputs.blocks_to_copy)
+                scheduler_outputs.blocks_to_copy,
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots)
         else:
             output = []
 
@@ -222,8 +225,7 @@ class _AsyncLLMEngine(LLMEngine):
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
+        self.do_log_stats(scheduler_outputs, output)
 
         return request_outputs
 
@@ -705,9 +707,13 @@ class AsyncLLMEngine:
         else:
             return self.engine.get_decoding_config()
 
-    async def do_log_stats(self) -> None:
+    async def do_log_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[List[SamplerOutput]] = None) -> None:
         if self.engine_use_ray:
-            await self.engine.do_log_stats.remote()  # type: ignore
+            await self.engine.do_log_stats.remote(  # type: ignore
+                scheduler_outputs, model_output)
         else:
             self.engine.do_log_stats()
 

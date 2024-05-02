@@ -20,6 +20,7 @@ class Block(ABC):
     @block_id.setter
     @abstractmethod
     def block_id(self, value: Optional[int]) -> None:
+        """NOTE: Do not use this API outside Block."""
         self._block_id = value
 
     @property
@@ -104,6 +105,10 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
+    def mark_blocks_as_accessed(self) -> None:
+        pass
+
+    @abstractmethod
     def mark_blocks_as_computed(self) -> None:
         pass
 
@@ -114,10 +119,12 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def cow_block_if_not_appendable(self, block: Block) -> Optional["BlockId"]:
+        """NOTE: This should not be used besides Block"""
         pass
 
     @abstractmethod
     def promote_to_immutable_block(self, block: Block) -> BlockId:
+        """NOTE: This should not be used besides Block"""
         pass
 
     class NoFreeBlocksError(ValueError):

@@ -79,7 +79,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
@@ -146,6 +148,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-chat-completion-extra-params
 
@@ -223,7 +230,9 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: Optional[int] = 16
     n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     suffix: Optional[str] = None
@@ -285,6 +294,11 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-completion-extra-params
 
