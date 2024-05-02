@@ -75,6 +75,8 @@ class EngineArgs:
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
+    ngram_prompt_lookup_max: Optional[int] = None
+    ngram_prompt_lookup_min: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -449,6 +451,20 @@ class EngineArgs:
             'draft model. Sequences over this length will skip '
             'speculation.')
 
+        parser.add_argument(
+            '--ngram-prompt-lookup-max',
+            type=int,
+            default=EngineArgs.ngram_prompt_lookup_max,
+            help='Max size of window for ngram prompt lookup in speculative '
+            'decoding.')
+
+        parser.add_argument(
+            '--ngram-prompt-lookup-min',
+            type=int,
+            default=EngineArgs.ngram_prompt_lookup_min,
+            help='Min size of window for ngram prompt lookup in speculative '
+            'decoding.')
+
         parser.add_argument('--model-loader-extra-config',
                             type=str,
                             default=EngineArgs.model_loader_extra_config,
@@ -502,6 +518,8 @@ class EngineArgs:
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
+            ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
         )
 
         scheduler_config = SchedulerConfig(

@@ -200,6 +200,10 @@ _c_ncclAllReduce.argtypes = [
     ncclDataType_t, ctypes.c_void_p, ctypes.c_void_p
 ]
 
+# be cautious! this is a collective call, it will block until all
+# processes in the communicator have called this function.
+# because Python object destruction can happen in random order,
+# it is better not to call it at all.
 # equivalent to c declaration:
 # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
 _c_ncclCommDestroy = nccl.ncclCommDestroy
@@ -228,6 +232,7 @@ class NCCLCommunicator:
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "NCCLCommunicator should be attached to a non-NCCL group.")
         self.group = group
+        # note: this rank is the rank in the group
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
         if self.rank == 0:
@@ -235,7 +240,9 @@ class NCCLCommunicator:
         else:
             self.unique_id = NcclUniqueId()
         tensor = torch.ByteTensor(list(self.unique_id.internal))
-        dist.broadcast(tensor, src=0, group=group)
+        ranks = dist.get_process_group_ranks(group)
+        # arg `src` in `broadcast` is the global rank
+        dist.broadcast(tensor, src=ranks[0], group=group)
         byte_list = tensor.tolist()
         for i, byte in enumerate(byte_list):
             self.unique_id.internal[i] = byte
@@ -278,11 +285,3 @@ class NCCLCommunicator:
                              ncclDataTypeEnum.from_torch(tensor.dtype),
                              ncclRedOpTypeEnum.from_torch(op), self.comm,
                              ctypes.c_void_p(stream.cuda_stream)))
-
-    def __del__(self):
-        # `dist` module might have been already destroyed
-        if hasattr(dist, 'destroy_process_group'):
-            dist.destroy_process_group()
-        # function might have been already destroyed
-        if _c_ncclCommDestroy is not None:
-            _c_ncclCommDestroy(self.comm)

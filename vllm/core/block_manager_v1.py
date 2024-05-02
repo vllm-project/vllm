@@ -8,7 +8,7 @@ from typing import Sequence as GenericSequence
 from typing import Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
-from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
@@ -391,7 +391,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 block_table.append(block_table[len(block_table) %
                                                self.block_sliding_window])
             else:
-                # The sequence has a new logical block.
+                # The sequence hash a new logical block.
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)

@@ -95,7 +95,7 @@ echo 'vLLM yapf: Done'
 # Run mypy
 echo 'vLLM mypy:'
 mypy vllm/attention --config-file pyproject.toml
-mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/core --config-file pyproject.toml
 mypy vllm/distributed --config-file pyproject.toml
 mypy vllm/entrypoints --config-file pyproject.toml
 mypy vllm/executor --config-file pyproject.toml

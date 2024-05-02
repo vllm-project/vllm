@@ -56,6 +56,9 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
+            {% if step.num_gpus %}
+            priorityClassName: gpu-priority-cls-{{ step.num_gpus }}
+            {% endif %}
             volumes:
               - name: dshm
                 emptyDir:
