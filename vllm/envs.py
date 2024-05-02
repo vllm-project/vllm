@@ -14,6 +14,11 @@ if TYPE_CHECKING:
     S3_ACCESS_KEY_ID: Optional[str] = None
     S3_SECRET_ACCESS_KEY: Optional[str] = None
     S3_ENDPOINT_URL: Optional[str] = None
+    VLLM_CONFIG_ROOT: str = ""
+    VLLM_USAGE_STATS_SERVER: str = "https://stats.vllm.ai"
+    VLLM_NO_USAGE_STATS: bool = False
+    VLLM_DO_NOT_TRACK: bool = False
+    VLLM_USAGE_SOURCE: str = ""
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -69,6 +74,25 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
     "S3_ENDPOINT_URL":
     lambda: os.environ.get("S3_ENDPOINT_URL", None),
+
+    # Root directory for VLLM configuration files
+    # Note that this not only affects how vllm finds its configuration files
+    # during runtime, but also affects how vllm installs its configuration
+    # files during **installation**.
+    "VLLM_CONFIG_ROOT":
+    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
+        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
+
+    # Usage stats collection
+    "VLLM_USAGE_STATS_SERVER":
+    lambda: os.environ.get("VLLM_USAGE_STATS_SERVER", "https://stats.vllm.ai"),
+    "VLLM_NO_USAGE_STATS":
+    lambda: os.environ.get("VLLM_NO_USAGE_STATS", "0") == "1",
+    "VLLM_DO_NOT_TRACK":
+    lambda: (os.environ.get("VLLM_DO_NOT_TRACK", None) or os.environ.get(
+        "DO_NOT_TRACK", None) or "0") == "1",
+    "VLLM_USAGE_SOURCE":
+    lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
 }
 
 
