@@ -40,10 +40,12 @@ def get_all_num_logprobs(
 
 
 def get_sampled_token_logprobs(
-        logprob_tensor: torch.
-    Tensor,  # shape [num_steps, batch_size, vocab_size]
+        # shape [num_steps, batch_size, vocab_size]
+        logprob_tensor: torch.Tensor,
         sampled_token_ids: torch.Tensor,  # shape [num_steps, batch_size]
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Get the logprobs for the sampled tokens. Returns the ranks and logprobs.
+    """
     num_steps, batch_size, vocab_size = logprob_tensor.shape
 
     selected_logprobs = logprob_tensor[torch.arange(num_steps).unsqueeze(1),
