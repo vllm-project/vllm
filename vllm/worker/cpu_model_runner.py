@@ -234,11 +234,10 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            seqlens=seqlens,
+            seqlens_tensor=seqlens,
             max_seqlen=max_seqlen,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
-            max_context_len=None,
             num_prefills=0,
             prefill_metadata=None,
             decode_metadata=None,

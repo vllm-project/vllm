@@ -15,7 +15,7 @@ class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    seqlens: Optional[torch.Tensor]
+    seqlens_tensor: Optional[torch.Tensor]
     # Maximum sequence length in the batch.
     max_seqlen: Optional[int]
     # (batch_size, max_blocks_per_seq).

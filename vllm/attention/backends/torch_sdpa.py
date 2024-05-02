@@ -58,7 +58,6 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     slot_mapping: torch.Tensor
-    seq_lens: Optional[List[int]]
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -189,7 +188,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.block_tables,
-                attn_metadata.seq_lens,
+                attn_metadata.seqlens_tensor,
                 attn_metadata.max_seqlen,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
