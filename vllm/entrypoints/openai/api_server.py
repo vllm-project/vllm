@@ -4,6 +4,7 @@ import inspect
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from typing import Any, Set
 
 import fastapi
 import uvicorn
@@ -33,7 +34,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 logger = init_logger(__name__)
 
-_running_tasks = set()
+_running_tasks: Set[asyncio.Task[Any]] = set()
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
