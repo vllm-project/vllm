@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y \
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
-ARG APP_MOUNT=/app
+ARG APP_MOUNT=/vllm-workspace
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
@@ -89,15 +89,16 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     && cd ../..; \
     fi
 
-COPY ./ /app/vllm
+WORKDIR /vllm-workspace
+COPY . .
 
 RUN python3 -m pip install --upgrade pip numba
 
-RUN cd /app \
-    && cd vllm \
-    && pip install -U -r requirements-rocm.txt \
-    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -U -r requirements-rocm.txt \
+    && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
     && cd ..
 
 RUN python3 -m pip install --upgrade pip
