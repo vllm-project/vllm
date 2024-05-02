@@ -4,8 +4,8 @@ from typing import Any, List, Optional
 import torch
 import torch.distributed as dist
 
-from vllm.logger import init_logger
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 try:
     import pynvml
