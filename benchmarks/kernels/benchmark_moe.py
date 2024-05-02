@@ -99,23 +99,25 @@ def benchmark_config(
 
 
 def get_configs_compute_bound() -> List[Dict[str, int]]:
-    # TODO(woosuk): Implement a performance model to prune the search space.
+    # Reduced search space for faster tuning.
+    # TODO(woosuk): Increase the search space and use a performance model to
+    # prune the search space.
     configs = []
-    for num_stages in [3, 4, 5]:
+    for num_stages in [4]:
         for block_m in [64, 128, 256]:
             for block_k in [32, 64]:
                 for block_n in [32, 64, 128, 256]:
-                    for num_warps in [2, 4, 8]:
-                        for group_size in [1, 8, 16, 64]:
-                            configs.append({
-                                "BLOCK_SIZE_M": block_m,
-                                "BLOCK_SIZE_N": block_n,
-                                "BLOCK_SIZE_K": block_k,
-                                "GROUP_SIZE_M": group_size,
-                                "SPLIT_K": 1,
-                                "num_warps": num_warps,
-                                "num_stages": num_stages,
-                            })
+                    for group_size in [1, 8, 64]:
+                        num_warps = 2 if block_n <= 64 else 4
+                        configs.append({
+                            "BLOCK_SIZE_M": block_m,
+                            "BLOCK_SIZE_N": block_n,
+                            "BLOCK_SIZE_K": block_k,
+                            "GROUP_SIZE_M": group_size,
+                            "SPLIT_K": 1,
+                            "num_warps": num_warps,
+                            "num_stages": num_stages,
+                        })
     return configs
 
 
