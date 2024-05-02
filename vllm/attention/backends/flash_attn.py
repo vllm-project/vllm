@@ -249,6 +249,7 @@ class FlashAttentionImpl(AttentionImpl):
                     prefill_meta.context_lens,
                     prefill_meta.max_subquery_len,
                     self.alibi_slopes,
+                    self.sliding_window[0],
                 )
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
