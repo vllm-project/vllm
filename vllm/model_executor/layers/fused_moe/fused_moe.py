@@ -317,15 +317,13 @@ def get_config_file_name(
     K: int,
     topk: int,
     dtype: str,
-    device_name: Optional[str] = None,
 ) -> str:
     # Remove the "torch." prefix.
     assert dtype.startswith("torch.")
     dtype = dtype[len("torch."):]
     if dtype.startswith("float8"):
         dtype = "float8"
-    if device_name is None:
-        device_name = torch.cuda.get_device_name().replace(" ", "_")
+    device_name = torch.cuda.get_device_name().replace(" ", "_")
     return f"e{E}_n{N}_k{K}_top{topk}_{dtype}_{device_name}.json"
 
 
@@ -336,7 +334,7 @@ def get_op_config(
     K: int,
     topk: int,
     dtype: str,
-    device_name: Optional[str] = None,
+    config_file: Optional[str] = None,
 ) -> Optional[_OpConfig]:
     """
     Return optimized configurations for the fused MoE kernel.
@@ -349,10 +347,11 @@ def get_op_config(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    json_file_name = get_config_file_name(E, N, K, topk, dtype, device_name)
-    config_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
-                              "configs")
-    config_file = os.path.join(config_dir, json_file_name)
+    if config_file is None:
+        json_file_name = get_config_file_name(E, N, K, topk, dtype)
+        config_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                  "configs")
+        config_file = os.path.join(config_dir, json_file_name)
 
     if os.path.exists(config_file):
         with open(config_file) as f:
