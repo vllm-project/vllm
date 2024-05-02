@@ -112,15 +112,17 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
 
-        _ = self.null_block # TODO(mmoskal) remove me
+        _ = self.null_block  # TODO(mmoskal) remove me
 
     @property
     def null_block(self) -> Block:
         if self._null_block is None:
             self._null_block = self.allocate_mutable(None, Device.GPU)
-            assert self._null_block.block_id == 0 # TODO(mmoskal) remove me
+            assert self._null_block.block_id == 0  # TODO(mmoskal) remove me
+
             def fail(token_ids: List[int]):
                 raise ValueError("null_block should not be modified")
+
             self._null_block.append_token_ids = fail
         return self._null_block
 
