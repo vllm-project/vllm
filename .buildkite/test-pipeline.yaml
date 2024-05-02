@@ -12,7 +12,11 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
-  command: pytest -v -s basic_correctness
+  commands:
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test
   command: pytest -v -s core
@@ -27,13 +31,14 @@ steps:
   num_gpus: 2 # only support 1 or 2 for now.
   commands:
   - pytest -v -s test_pynccl.py
+  - pytest -v -s test_pynccl_library.py
   - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
 
 - label: Engine Test
-  command: pytest -v -s engine tokenization test_sequence.py test_config.py
+  command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
   commands:
@@ -85,8 +90,14 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
+- label: Tensorizer Test
+  command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
+
 - label: Metrics Test
   command: pytest -v -s metrics
+
+- label: Quantization Test
+  command: pytest -v -s quantization
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"

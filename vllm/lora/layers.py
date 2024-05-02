@@ -32,14 +32,17 @@ if TYPE_CHECKING:
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
     """Returns the device for where to place the LoRA tensors."""
+    # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
-    if hasattr(base_layer, "linear_weights") and isinstance(
-            base_layer.linear_weights, dict):
-        values = list(base_layer.linear_weights.values())
-        if len(values) and isinstance(values[0], torch.Tensor):
-            return values[0].device
-    raise ValueError(f"Unsupported base layer: {base_layer}")
+    # GPTQ/AWQ/SqueezeLLM
+    elif hasattr(base_layer, "qweight"):
+        return base_layer.qweight.device
+    # marlin
+    elif hasattr(base_layer, "B"):
+        return base_layer.B.device
+    else:
+        raise ValueError(f"Unsupported base layer: {base_layer}")
 
 
 def _apply_lora(
@@ -173,6 +176,8 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
+        self.embeddings_slice: Optional[Tuple[int, int]]
+        self.embeddings_weights: Optional[torch.Tensor]
 
     def create_lora_weights(
             self,
@@ -230,9 +235,10 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
             self.lora_a_stacked.shape[2],
         )
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
-        self.embeddings_indices = None
+        # Lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
+        self.embeddings_indices: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -264,6 +270,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                     self.embeddings_tensors.shape[1],
                     self.embeddings_tensors.shape[2]
                 )[self.embeddings_slice[0]:self.embeddings_slice[1]]
+                assert self.embeddings_weights is not None
                 self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
 
     def set_mapping(
@@ -340,10 +347,11 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
         self.output_dim = self.lora_b_stacked.shape[2]
+
+        # lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -472,8 +480,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 device=self.device,
             ) for _ in range(n_slices))
 
-        self.indices: Optional[torch.Tensor] = None
         self.output_dim = self.lora_b_stacked[0].shape[2]
+        # Lazily initialized.
+        self.indices: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
@@ -687,7 +696,8 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
                               self.kv_proj_shard_size)
         self.packed_indices: Optional[torch.Tensor] = None
         self.standard_indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
+        # lazily initialized.
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
@@ -811,8 +821,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        self.indices: Optional[torch.Tensor] = None
-        self.indices_len: Optional[List[int]] = None
+        # Lazily initialized
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -988,9 +999,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
-        self.indices = None
-        self.indices_padded = None
-        self.indices_len = None
+        # Lazily initialized.
+        self.indices: torch.Tensor
+        self.indices_len: List[int]
+        self.indices_padded: torch.Tensor
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0

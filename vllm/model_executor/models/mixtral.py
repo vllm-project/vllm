@@ -21,7 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Mixtral model."""
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -39,15 +39,17 @@ from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.fp8 import (Fp8LinearMethod,
+                                                         per_tensor_quantize)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
+from vllm.utils import print_warning_once
 
 
 class MixtralMoE(nn.Module):
@@ -67,6 +69,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        linear_method: Optional[LinearMethodBase] = None,
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -74,6 +77,9 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        # FIXME(pcmoritz): Make this more general to support different
+        # quantization schemes
+        self.use_fp8 = isinstance(linear_method, Fp8LinearMethod)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -98,6 +104,16 @@ class MixtralMoE(nn.Module):
                         device="cuda",
                         dtype=self.params_dtype))
 
+        # Scaling factors for FP8 weights
+        self.ws_scale = nn.Parameter(
+            torch.ones(
+                self.num_total_experts, device="cuda", dtype=torch.float32),
+            requires_grad=False) if self.use_fp8 else None
+        self.w2s_scale = nn.Parameter(
+            torch.ones(
+                self.num_total_experts, device="cuda", dtype=torch.float32),
+            requires_grad=False) if self.use_fp8 else None
+
         set_weight_attrs(self.ws, {
             "weight_loader": self.weight_loader,
         })
@@ -119,6 +135,18 @@ class MixtralMoE(nn.Module):
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
 
+    def process_weights_after_loading(self):
+        if self.use_fp8:
+            ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
+            w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
+            for expert in range(self.num_total_experts):
+                ws[expert, :, :], self.ws_scale[expert] = per_tensor_quantize(
+                    self.ws.data[expert, :, :])
+                w2s[expert, :, :], self.w2s_scale[
+                    expert] = per_tensor_quantize(self.w2s.data[expert, :, :])
+            self.ws = nn.Parameter(ws, requires_grad=False)
+            self.w2s = nn.Parameter(w2s, requires_grad=False)
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
@@ -130,7 +158,10 @@ class MixtralMoE(nn.Module):
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
-                                        inplace=True)
+                                        inplace=True,
+                                        use_fp8=self.use_fp8,
+                                        w1_scale=self.ws_scale,
+                                        w2_scale=self.w2s_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -171,6 +202,13 @@ class MixtralAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
+
+        if isinstance(linear_method, Fp8LinearMethod):
+            print_warning_once(
+                "For Mixtral FP8 quantization, we currently do not quantize "
+                "the attention layers until their FP8 performance is improved."
+            )
+            linear_method = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -239,7 +277,8 @@ class MixtralDecoderLayer(nn.Module):
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size)
+            intermediate_size=config.intermediate_size,
+            linear_method=linear_method)
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -319,6 +358,8 @@ class MixtralModel(nn.Module):
 
 
 class MixtralForCausalLM(nn.Module):
+    fall_back_to_pt_during_load = False
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -393,11 +434,7 @@ class MixtralForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -414,12 +451,7 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path,
-                cache_dir,
-                load_format,
-                revision,
-                fall_back_to_pt=False):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 

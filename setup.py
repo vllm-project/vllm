@@ -208,7 +208,8 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed
+    return torch_neuronx_installed or os.environ.get("VLLM_BUILD_WITH_NEURON",
+                                                     False)
 
 
 def _is_cpu() -> bool:
@@ -379,14 +380,6 @@ if not _is_neuron():
 # UPSTREAM SYNC: needed for sparsity
 _sparsity_deps = ["nm-magic-wand-nightly"]
 
-
-def get_extra_requirements() -> dict:
-    return {
-        "sparse": _sparsity_deps,
-        "sparsity": _sparsity_deps,
-    }
-
-
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
@@ -426,8 +419,13 @@ setup(
                                     "tests")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
-    extras_require=get_extra_requirements(),
     ext_modules=ext_modules,
+    extras_require={
+        "tensorizer": ["tensorizer==2.9.0a1"],
+        # UPSTREAM SYNC: required for sparsity
+        "sparse": _sparsity_deps,
+        "sparsity": _sparsity_deps,
+    },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
 )

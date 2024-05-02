@@ -22,21 +22,17 @@ MODEL_FORMAT_EXTRABLOCKS = [
 
 @pytest.mark.parametrize("model_format_extrablocks", MODEL_FORMAT_EXTRABLOCKS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [3])
 def test_models(
-    vllm_runner_nm,
-    example_prompts,
+    vllm_runner,
     model_format_extrablocks,
     dtype: str,
-    max_tokens: int,
-    num_logprobs: int,
 ) -> None:
     model_name, sparsity, num_extra_blocks = model_format_extrablocks
-    dense_model = vllm_runner_nm(model_name=model_name,
-                                 sparsity=None,
-                                 dtype=dtype,
-                                 max_model_len=1024)
+    dense_model = vllm_runner(model_name=model_name,
+                              enforce_eager=True,
+                              sparsity=None,
+                              dtype=dtype,
+                              max_model_len=1024)
     dense_gpu_alloc = (
         dense_model.model.llm_engine.scheduler.block_manager.gpu_allocator)
     dense_num_kv_blocks = dense_gpu_alloc.num_blocks
@@ -45,8 +41,9 @@ def test_models(
     torch.cuda.empty_cache()
     gc.collect()
 
-    sparse_model = vllm_runner_nm(
+    sparse_model = vllm_runner(
         model_name=model_name,
+        enforce_eager=True,
         sparsity=sparsity,
         dtype=dtype,
         max_model_len=1024,

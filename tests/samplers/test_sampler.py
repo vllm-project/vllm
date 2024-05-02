@@ -35,8 +35,12 @@ def _prepare_test(
                              dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
     # UPSTREAM SYNC: passing device required for multi-gpu tests
-    model_runner = ModelRunner(None, None, None, DeviceConfig(device=device),
-                               None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=DeviceConfig(device=device),
+                               load_config=None,
+                               lora_config=None)
     return input_tensor, fake_logits, sampler, model_runner
 
 
@@ -603,7 +607,12 @@ def test_sampler_top_k_top_p(seed: int, device: str):
                                device=input_tensor.device,
                                dtype=input_tensor.dtype)
     sampler = MockLogitsSampler(fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
 
     generation_model = GenerationMixin()
     generation_config = GenerationConfig(top_k=top_k,
@@ -638,7 +647,8 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     def mock_sample(probs, *args, **kwargs):
         nonlocal sample_probs
         sample_probs = probs
-        return [[prob.topk(1, dim=-1).indices.tolist(), [0]] for prob in probs]
+        return ([[prob.topk(1, dim=-1).indices.tolist(), [0]]
+                 for prob in probs], None)
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)

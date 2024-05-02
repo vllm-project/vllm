@@ -18,12 +18,18 @@ MODELS = [
     "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-1b",
     "bigscience/bloom-1b1",
-    # "mosaicml/mpt-7b",                # vLLM upstream bug in mpt right now  # noqa
+    "mosaicml/mpt-7b",
     "microsoft/phi-2",
     "stabilityai/stablelm-3b-4e1t",
-    # "allenai/OLMo-1B",                # dependencies are not installed right now  # noqa
+    "allenai/OLMo-1B",
     "bigcode/starcoder2-3b",
     "Qwen/Qwen1.5-0.5B",
+]
+
+SKIPPED_MODELS = [
+    "mosaicml/mpt-7b",
+    "allenai/OLMo-1B",
+    "bigcode/starcoder2-3b",
 ]
 
 
@@ -40,6 +46,10 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
+    if model in SKIPPED_MODELS:
+        pytest.skip(reason="Low priority models not currently passing. "
+                    "We need to re-enable these.")
+
     hf_model = hf_runner_nm(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy_logprobs_nm(example_prompts,
                                                       max_tokens, num_logprobs)

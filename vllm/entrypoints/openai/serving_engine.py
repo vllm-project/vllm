@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple, Union
 
-from pydantic import conint
+from pydantic import Field
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import Annotated
 
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -29,10 +31,10 @@ class OpenAIServing:
 
     def __init__(self,
                  engine: AsyncLLMEngine,
-                 served_model: str,
+                 served_model_names: List[str],
                  lora_modules=Optional[List[LoRA]]):
         self.engine = engine
-        self.served_model = served_model
+        self.served_model_names = served_model_names
         if lora_modules is None:
             self.lora_requests = []
         else:
@@ -45,7 +47,8 @@ class OpenAIServing:
             ]
 
         self.max_model_len = 0
-        self.tokenizer = None
+        # Lazy initialized
+        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
 
         try:
             event_loop = asyncio.get_running_loop()
@@ -68,6 +71,7 @@ class OpenAIServing:
         self.tokenizer = get_tokenizer(
             engine_model_config.tokenizer,
             tokenizer_mode=engine_model_config.tokenizer_mode,
+            tokenizer_revision=engine_model_config.tokenizer_revision,
             trust_remote_code=engine_model_config.trust_remote_code,
             truncation_side="left")
 
@@ -82,13 +86,14 @@ class OpenAIServing:
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
         model_cards = [
-            ModelCard(id=self.served_model,
-                      root=self.served_model,
+            ModelCard(id=served_model_name,
+                      root=self.served_model_names[0],
                       permission=[ModelPermission()])
+            for served_model_name in self.served_model_names
         ]
         lora_cards = [
             ModelCard(id=lora.lora_name,
-                      root=self.served_model,
+                      root=self.served_model_names[0],
                       permission=[ModelPermission()])
             for lora in self.lora_requests
         ]
@@ -98,7 +103,7 @@ class OpenAIServing:
     def _create_logprobs(
         self,
         token_ids: List[int],
-        top_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None,
+        top_logprobs: List[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: Optional[int] = None,
         initial_text_offset: int = 0,
     ) -> LogProbs:
@@ -114,6 +119,7 @@ class OpenAIServing:
                 token = self.tokenizer.decode(token_id)
                 logprobs.tokens.append(token)
                 logprobs.token_logprobs.append(None)
+                assert logprobs.top_logprobs is not None
                 logprobs.top_logprobs.append(None)
             else:
                 token_logprob = step_top_logprobs[token_id].logprob
@@ -122,8 +128,11 @@ class OpenAIServing:
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
+                    assert logprobs.top_logprobs is not None
                     logprobs.top_logprobs.append({
-                        p.decoded_token: p.logprob
+                        # Convert float("-inf") to the
+                        # JSON-serializable float that OpenAI uses
+                        p.decoded_token: max(p.logprob, -9999.0)
                         for i, p in step_top_logprobs.items()
                     } if step_top_logprobs else None)
 
@@ -158,18 +167,18 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(self, request) -> Optional[ErrorResponse]:
-        if request.model == self.served_model:
-            return
+        if request.model in self.served_model_names:
+            return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
-            return
+            return None
         return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
-        if request.model == self.served_model:
-            return
+        if request.model in self.served_model_names:
+            return None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
@@ -181,7 +190,7 @@ class OpenAIServing:
         request: Union[ChatCompletionRequest, CompletionRequest],
         prompt: Optional[str] = None,
         prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[conint(ge=1)] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
@@ -205,6 +214,12 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         if request.max_tokens is None:
+            if token_num >= self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the messages, "
+                    f"Please reduce the length of the messages.", )
             request.max_tokens = self.max_model_len - token_num
 
         if token_num + request.max_tokens > self.max_model_len:

@@ -1,5 +1,6 @@
+import os
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -17,7 +18,7 @@ except ImportError:
 
 logger = init_logger(__name__)
 
-_CA_HANDLE = None
+_CA_HANDLE: Optional["CustomAllreduce"] = None
 _IS_CAPTURING = False
 _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
@@ -42,17 +43,37 @@ def init_custom_ar() -> None:
             " disable_custom_all_reduce=True explicitly.", world_size,
             str(_SUPPORTED_WORLD_SIZES))
         return
-    if not _can_p2p(rank, world_size):
+    num_dev = torch.cuda.device_count()
+    # note: num dev can be larger than world_size if we're only using
+    # first few GPUs
+    if num_dev < world_size:
         logger.warn(
-            "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability or P2P test failed. To silence this warning, specify"
-            " disable_custom_all_reduce=True explicitly.")
+            "Cannot test GPU P2P because not all GPUs are visible to the "
+            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
+            " is set.")
         return
-    full_nvlink = _is_full_nvlink(rank, world_size)
+    # test nvlink first, this will filter out most of the cases
+    # where custom allreduce is not supported
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        device_ids = list(
+            map(int, os.environ["CUDA_VISIBLE_DEVICES"].split(",")))
+    else:
+        device_ids = list(range(num_dev))
+    # this checks hardware and driver support for NVLink
+    full_nvlink = _is_full_nvlink(device_ids)
     if world_size > 2 and not full_nvlink:
         logger.warn(
             "Custom allreduce is disabled because it's not supported on more"
             " than two PCIe-only GPUs. To silence this warning, specify"
+            " disable_custom_all_reduce=True explicitly.")
+        return
+    # test P2P capability, this checks software/cudaruntime support
+    # this is expensive to compute at the first time
+    # then we cache the result
+    if not _can_p2p(rank, world_size):
+        logger.warn(
+            "Custom allreduce is disabled because your platform lacks GPU P2P"
+            " capability or P2P test failed. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
         return
     _CA_HANDLE = CustomAllreduce(rank, world_size, full_nvlink)
@@ -96,7 +117,7 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
     ca_handle = get_handle()
     # when custom allreduce is disabled, this will be None
     if ca_handle is None:
-        return
+        return None
     if is_capturing():
         if torch.cuda.is_current_stream_capturing():
             if ca_handle.should_custom_ar(input):
@@ -114,6 +135,8 @@ def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
         if ca_handle.should_custom_ar(input):
             return ca_handle.all_reduce_unreg(input)
 
+    return None
+
 
 @contextmanager
 def _nvml():
@@ -124,57 +147,39 @@ def _nvml():
         pynvml.nvmlShutdown()
 
 
-# query if the set of gpus are fully connected by nvlink (1 hop)
 @_nvml()
-def _is_full_nvlink(rank, world_size):
-    handle = pynvml.nvmlDeviceGetHandleByIndex(rank)
-    for i in range(world_size):
-        if i != rank:
-            try:
-                link_state = pynvml.nvmlDeviceGetNvLinkState(handle, i)
-                if not link_state:
+def _is_full_nvlink(device_ids: List[int]) -> bool:
+    """
+    query if the set of gpus are fully connected by nvlink (1 hop)
+    Note that `pynvml` is not affected by `CUDA_VISIBLE_DEVICES`,
+    so it works on real physical device ids.
+    """
+    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
+    for i, handle in enumerate(handles):
+        for j, peer_handle in enumerate(handles):
+            if i < j:
+                try:
+                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
+                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
+                        return False
+                except pynvml.NVMLError as error:
+                    logger.error(
+                        "NVLink detection failed. This is normal if your"
+                        " machine has no NVLink equipped.",
+                        exc_info=error)
                     return False
-            except pynvml.NVMLError as error:
-                logger.info(
-                    f"NVLink detection failed with message \"{str(error)}\". "
-                    "This is normal if your machine has no NVLink equipped")
-                return False
     return True
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
-    num_dev = torch.cuda.device_count()
-    # note: num dev can be larger than world_size if we're only using
-    # first few GPUs
-    if num_dev < world_size:
-        logger.warn(
-            "Cannot test GPU P2P because not all GPUs are visible to the "
-            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
-            " is set.")
-        return False
+    from vllm.distributed.utils import gpu_p2p_access_check
     for i in range(world_size):
         if i == rank:
             continue
-        if not torch.cuda.can_device_access_peer(rank, i):
-            return False
-        # on some platforms, P2P support might be buggy and we need
-        # additional checks. See also:
-        # https://github.com/vllm-project/vllm/issues/2728
-        if not _can_actually_p2p(rank, i):
+        if not gpu_p2p_access_check(rank, i):
             return False
     return True
-
-
-# code partly borrowed from
-# https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
-# License: MIT
-def _can_actually_p2p(idx_a, idx_b):
-    dev_i = f"cuda:{idx_a}"
-    dev_j = f"cuda:{idx_b}"
-    a = torch.randn(5, device=dev_i) + 123.0
-    b = a.to(dev_j)
-    c = b.to(dev_i)
-    return torch.all(a == c)
 
 
 class CustomAllreduce:
@@ -221,14 +226,14 @@ class CustomAllreduce:
         return self._gather_ipc_meta(shard_data)
 
     def _gather_ipc_meta(self, shard_data):
-        all_data = [None] * self.world_size
+        all_data: List[Optional[Any]] = [None] * self.world_size
         dist.all_gather_object(all_data, shard_data)
 
         handles = []
         offsets = []
         for i in range(len(all_data)):
-            handles.append(all_data[i][0])
-            offsets.append(all_data[i][1])
+            handles.append(all_data[i][0])  # type: ignore
+            offsets.append(all_data[i][1])  # type: ignore
         return handles, offsets
 
     def register_buffer(self, inp: torch.Tensor):

@@ -1,4 +1,4 @@
-from typing import Optional, Type
+from typing import List, Optional, Type
 
 import torch
 import torch.nn.functional as F
@@ -31,13 +31,14 @@ class SparseW16A16LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
-        output_size_per_partition: int,
+        output_partition_sizes: List[int],
         input_size: int,
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
         del input_size, output_size  # Unused.
+        output_size_per_partition = sum(output_partition_sizes)
 
         supports_linear = (self.storage_format_cls !=
                            SparseBEGemmStorageFormat)

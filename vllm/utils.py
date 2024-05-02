@@ -1,16 +1,18 @@
 import asyncio
 import enum
 import gc
+import glob
 import os
 import socket
 import subprocess
 import uuid
 import warnings
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Optional, Tuple, TypeVar, Union)
+                    Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
+                    Union)
 
 import psutil
 import torch
@@ -51,7 +53,7 @@ class Counter:
 class LRUCache(Generic[T]):
 
     def __init__(self, capacity: int):
-        self.cache = OrderedDict[Hashable, T]()
+        self.cache: OrderedDict[Hashable, T] = OrderedDict()
         self.capacity = capacity
 
     def __contains__(self, key: Hashable) -> bool:
@@ -60,7 +62,7 @@ class LRUCache(Generic[T]):
     def __len__(self) -> int:
         return len(self.cache)
 
-    def __getitem__(self, key: Hashable) -> T:
+    def __getitem__(self, key: Hashable) -> Optional[T]:
         return self.get(key)
 
     def __setitem__(self, key: Hashable, value: T) -> None:
@@ -76,7 +78,7 @@ class LRUCache(Generic[T]):
             key: Hashable,
             default_value: Optional[T] = None) -> Optional[T]:
         if key in self.cache:
-            value = self.cache[key]
+            value: Optional[T] = self.cache[key]
             self.cache.move_to_end(key)
         else:
             value = default_value
@@ -87,7 +89,7 @@ class LRUCache(Generic[T]):
         self.cache.move_to_end(key)
         self._remove_old_if_needed()
 
-    def _on_remove(self, key: Hashable, value: T):
+    def _on_remove(self, key: Hashable, value: Optional[T]):
         pass
 
     def remove_oldest(self):
@@ -100,9 +102,11 @@ class LRUCache(Generic[T]):
         while len(self.cache) > self.capacity:
             self.remove_oldest()
 
-    def pop(self, key: Hashable, default_value: Optional[Any] = None) -> T:
+    def pop(self,
+            key: Hashable,
+            default_value: Optional[T] = None) -> Optional[T]:
         run_on_remove = key in self.cache
-        value = self.cache.pop(key, default_value)
+        value: Optional[T] = self.cache.pop(key, default_value)
         if run_on_remove:
             self._on_remove(key, value)
         return value
@@ -157,6 +161,17 @@ def get_cpu_memory() -> int:
 
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
+
+
+@lru_cache(maxsize=None)
+def get_vllm_instance_id():
+    """
+    If the environment variable VLLM_INSTANCE_ID is set, return it.
+    Otherwise, return a random UUID.
+    Instance id represents an instance of the VLLM. All processes in the same
+    instance should have the same instance id.
+    """
+    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
 
 
 @lru_cache(maxsize=None)
@@ -268,8 +283,12 @@ def get_open_port() -> int:
             return s.getsockname()[1]
 
 
-def set_cuda_visible_devices(device_ids: List[int]) -> None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, device_ids))
+def update_environment_variables(envs: Dict[str, str]):
+    for k, v in envs.items():
+        if k in os.environ and os.environ[k] != v:
+            logger.warning(f"Overwriting environment variable {k} "
+                           f"from '{os.environ[k]}' to '{v}'")
+        os.environ[k] = v
 
 
 def chunk_list(lst, chunk_size):
@@ -502,3 +521,89 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
         merged_dict[key].extend(value)
 
     return dict(merged_dict)
+
+
+def init_cached_hf_modules():
+    """
+    Lazy initialization of the Hugging Face modules.
+    """
+    from transformers.dynamic_module_utils import init_hf_modules
+    init_hf_modules()
+
+
+def nccl_integrity_check(filepath):
+    """
+    when the library is corrupted, we cannot catch
+    the exception in python. it will crash the process.
+    instead, we use the exit code of `ldd` to check
+    if the library is corrupted. if not, we will return
+    the version of the library.
+    """
+    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
+    if exit_code != 0:
+        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
+    import ctypes
+
+    nccl = ctypes.CDLL(filepath)
+    version = ctypes.c_int()
+    nccl.ncclGetVersion.restype = ctypes.c_int
+    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+    result = nccl.ncclGetVersion(ctypes.byref(version))
+    assert result == 0
+    return version.value
+
+
+@lru_cache(maxsize=None)
+def find_library(lib_name: str) -> str:
+    """
+    Find the library file in the system.
+    `lib_name` is full filename, with both prefix and suffix.
+    This function resolves `lib_name` to the full path of the library.
+    """
+    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
+    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
+    # `/sbin/ldconfig` should exist in all Linux systems.
+    # `/sbin/ldconfig` searches the library in the system
+    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+    # each line looks like the following:
+    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
+    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
+    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
+    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    if not locs and env_ld_library_path:
+        locs = [
+            os.path.join(dir, lib_name)
+            for dir in env_ld_library_path.split(":")
+            if os.path.exists(os.path.join(dir, lib_name))
+        ]
+    if not locs:
+        raise ValueError(f"Cannot find {lib_name} in the system.")
+    return locs[0]
+
+
+def find_nccl_library():
+    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+
+    # check if we have vllm-managed nccl
+    vllm_nccl_path = None
+    if torch.version.cuda is not None:
+        cuda_major = torch.version.cuda.split(".")[0]
+        path = os.path.expanduser(
+            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+        files = glob.glob(path)
+        vllm_nccl_path = files[0] if files else None
+
+    # manually load the nccl library
+    if so_file:
+        logger.info(
+            f"Found nccl from environment variable VLLM_NCCL_SO_PATH={so_file}"
+        )
+    else:
+        if torch.version.cuda is not None:
+            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+        elif torch.version.hip is not None:
+            so_file = find_library("librccl.so.1")
+        else:
+            raise ValueError("NCCL only supports CUDA and ROCm backends.")
+        logger.info(f"Found nccl from library {so_file}")
+    return so_file

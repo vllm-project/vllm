@@ -26,7 +26,7 @@ MODEL_FORMAT_PAIRS = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    vllm_runner_nm,
+    vllm_runner,
     example_prompts,
     model_format_pairs,
     dtype: str,
@@ -35,20 +35,20 @@ def test_models(
 ) -> None:
     model_name, sparsity = model_format_pairs
 
-    sparse_model = vllm_runner_nm(model_name=model_name,
-                                  sparsity=sparsity,
-                                  dtype=dtype,
-                                  max_model_len=MAX_MODEL_LEN)
+    sparse_model = vllm_runner(model_name=model_name,
+                               sparsity=sparsity,
+                               dtype=dtype,
+                               max_model_len=MAX_MODEL_LEN)
     sparse_outputs = sparse_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 
     del sparse_model
     gc.collect()
 
-    dense_model = vllm_runner_nm(model_name=model_name,
-                                 sparsity=None,
-                                 dtype=dtype,
-                                 max_model_len=MAX_MODEL_LEN)
+    dense_model = vllm_runner(model_name=model_name,
+                              sparsity=None,
+                              dtype=dtype,
+                              max_model_len=MAX_MODEL_LEN)
     dense_outputs = dense_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
 

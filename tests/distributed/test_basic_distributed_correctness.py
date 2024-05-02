@@ -10,13 +10,15 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
     test_basic_distributed_correctness.py
 ```
 """
-import os
-
+# UPSTREAM SYNC: We can only run one model per invocation of the test.
+#   Otherwise, we have duplicate ray.init() calls which fails.
+#   Rather than ruining .github/scripts/run-tests to pass via env
+#   variables, we just run llama which is sufficient for smoke test.
 import pytest
 import torch
 
 MODELS = [
-    os.environ["TEST_DIST_MODEL"],
+    "meta-llama/Llama-2-7b-hf",
 ]
 
 

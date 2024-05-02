@@ -346,6 +346,10 @@ class HfRunnerNM(HfRunner):
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
+    def __del__(self):
+        del self.model
+        cleanup()
+
 
 @pytest.fixture
 def hf_runner_nm():
@@ -532,6 +536,10 @@ class VllmRunnerNm(VllmRunner):
 
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
+
+    def __del__(self):
+        del self.model
+        cleanup()
 
 
 @pytest.fixture
