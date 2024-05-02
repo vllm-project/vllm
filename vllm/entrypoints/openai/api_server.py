@@ -1,7 +1,6 @@
 import asyncio
 import importlib
 import inspect
-import os
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
@@ -26,6 +25,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+import vllm.envs as envs
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -129,7 +129,7 @@ if __name__ == "__main__":
         allow_headers=args.allowed_headers,
     )
 
-    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+    if token := envs.VLLM_API_KEY or args.api_key:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):

@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
+    VLLM_API_KEY: Optional[str] = None
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -53,6 +54,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
+
+    # API key for VLLM API server
+    "VLLM_API_KEY":
+    lambda: os.environ.get("VLLM_API_KEY", None),
 }
 
 
