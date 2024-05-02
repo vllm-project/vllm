@@ -64,7 +64,7 @@ def create_sequence_group_output(
     token_id: int,
     token_id_logprob_rank: int,
     token_id_logprob: float,
-    seq_id: int,
+    seq_id: SeqId,
     topk_token_ids: List[int],
     topk_logprobs: List[float],
 ) -> SequenceGroupOutput:
