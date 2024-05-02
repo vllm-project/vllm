@@ -33,7 +33,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
 
     def _quantize_single(self, x: torch.Tensor, scale: float):
         x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-        ops.quant_per_tensor(x_q, x, scale)
+        ops.static_scaled_int8_quant(x_q, x, scale)
         return x_q
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
