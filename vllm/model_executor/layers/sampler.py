@@ -305,7 +305,7 @@ def _greedy_sample(
 
 
 def _forced_sample(
-    selected_seq_groups: List[Tuple[List[int], SamplingParams]],
+    selected_seq_groups: List[SequenceGroupToSample],
     samples: torch.Tensor,
 ) -> List[Tuple[List[int], List[int]]]:
     samples = samples.tolist()
@@ -523,7 +523,8 @@ def _sample_with_torch(
             if include_gpu_probs_tensor:
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[
-                    long_sample_indices] = greedy_samples.unsqueeze(-1)
+                  long_sample_indices
+                ] = greedy_samples.unsqueeze(-1)
 
             if modify_greedy_probs:
                 # If required, modify the probabilities such that sampling from
