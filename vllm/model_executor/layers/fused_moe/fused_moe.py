@@ -30,9 +30,6 @@ def fused_moe_kernel(
     sorted_token_ids_ptr,
     expert_ids_ptr,
     num_tokens_post_padded_ptr,
-    # Matrix dimensions
-    N,
-    K,
     EM,
     num_valid_tokens,
     # The stride variables represent how much to increase the ptr by when
@@ -48,11 +45,14 @@ def fused_moe_kernel(
     stride_c_split_k,
     stride_cn,
     # Meta-parameters
+    N: tl.constexpr,
+    K: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     SPLIT_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
@@ -121,10 +121,17 @@ def fused_moe_kernel(
 
     # ----------------------------------------------------------
     # Split-K
-    pid_z = tl.program_id(axis=1)
-    # Move the starting pointers to the correct position.
-    a_ptrs = a_ptrs + pid_z * BLOCK_SIZE_K * stride_ak
-    b_ptrs = b_ptrs + pid_z * BLOCK_SIZE_K * stride_bk
+    if SPLIT_K > 1:
+        pid_z = tl.program_id(axis=1)
+        # Move the starting pointers to the correct position.
+        start_k = pid_z * BLOCK_SIZE_K
+        a_ptrs += start_k * stride_ak
+        b_ptrs += start_k * stride_bk
+        K_STRIDE = BLOCK_SIZE_K * SPLIT_K
+    else:
+        pid_z = 0
+        start_k = 0
+        K_STRIDE = BLOCK_SIZE_K
 
     if use_fp8:
         a_scale = tl.load(a_scale_ptr)
@@ -137,22 +144,26 @@ def fused_moe_kernel(
     # `accumulator` will be converted back to fp16 after the loop.
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
+    for k in range(0, tl.cdiv(K, K_STRIDE)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K) - pid_z * BLOCK_SIZE_K
-        a = tl.load(a_ptrs,
-                    mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
-                    other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        if EVEN_K:
+            a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
+            b = tl.load(b_ptrs)
+        else:
+            k_remaining = K - (start_k + k * K_STRIDE)
+            a = tl.load(a_ptrs,
+                        mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                        other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
         else:
             accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+        a_ptrs += K_STRIDE * stride_ak
+        b_ptrs += K_STRIDE * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -263,6 +274,7 @@ def invoke_fused_moe_kernel(
                                config['BLOCK_SIZE_M'])
     num_n_blocks = triton.cdiv(B.shape[1], config['BLOCK_SIZE_N'])
     split_k = config['SPLIT_K']
+    even_k = (B.shape[2] % (config['BLOCK_SIZE_K'] * split_k)) == 0
     grid = lambda META: (num_m_blocks * num_n_blocks, split_k)
 
     if split_k == 1:
@@ -285,8 +297,6 @@ def invoke_fused_moe_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        B.shape[1],
-        B.shape[2],
         sorted_token_ids.shape[0],
         topk_ids.numel(),
         A.stride(0),
@@ -301,6 +311,9 @@ def invoke_fused_moe_kernel(
         top_k=top_k,
         compute_type=compute_type,
         use_fp8=use_fp8,
+        N=B.shape[1],
+        K=B.shape[2],
+        EVEN_K=even_k,
         **config,
     )
     if split_k > 1:
