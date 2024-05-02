@@ -255,53 +255,37 @@ def main(args: argparse.Namespace):
     topk = config.num_experts_per_tok
     dtype = config.torch_dtype
 
-    ray.init()
-    num_gpus = int(ray.available_resources()["GPU"])
-    workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
-
     if args.batch_size is None:
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
     else:
         batch_sizes = [args.batch_size]
-
     search_space = get_configs_compute_bound() + get_configs_io_bound()
 
-    def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
+    ray.init()
+    num_gpus = int(ray.available_resources()["GPU"])
+    workers = [BenchmarkWorker.remote(args.seed) for _ in range(num_gpus)]
+
+    def _distribute(method: str, inputs: List):
         outputs = []
         worker_idx = 0
-        for M in Ms:
+        for input_args in inputs:
             worker = workers[worker_idx]
-            output = worker.tune.remote(
-                M,
-                E,
-                N,
-                K,
-                topk_experts,
-                dtype,
-                search_space,
-            )
+            worker_method = getattr(worker, method)
+            output = worker_method.remote(*input_args)
             outputs.append(output)
             worker_idx = (worker_idx + 1) % num_gpus
-        configs = ray.get(outputs)
+        return ray.get(outputs)
+
+    def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
+        configs = _distribute(
+            "tune", [(M, E, N, K, topk_experts, dtype, search_space) for M in Ms])
         best_configs = {M: config for M, config in zip(Ms, configs)}
         save_configs(best_configs, E, N, K, topk_experts, str(dtype))
 
     def _benchmark(Ms: List[int], N: int, K: int, topk_experts: int):
-        outputs = []
-        worker_idx = 0
-        for M in Ms:
-            worker = workers[worker_idx]
-            output = worker.benchmark.remote(
-                M,
-                E,
-                N,
-                K,
-                topk_experts,
-                dtype,
-            )
-            outputs.append(output)
-            worker_idx = (worker_idx + 1) % num_gpus
-        return ray.get(outputs)
+        outputs = _distribute(
+            "benchmark", [(M, E, N, K, topk_experts, dtype) for M in Ms])
+        return outputs
 
     w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
