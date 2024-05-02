@@ -19,6 +19,8 @@ if TYPE_CHECKING:
     VLLM_NO_USAGE_STATS: bool = False
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
+    VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -93,6 +95,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         "DO_NOT_TRACK", None) or "0") == "1",
     "VLLM_USAGE_SOURCE":
     lambda: os.environ.get("VLLM_USAGE_SOURCE", "production"),
+
+    # Logging configuration
+    # If set to 0, vllm will not configure logging
+    # If set to 1, vllm will configure logging using the default configuration
+    #    or the configuration file specified by VLLM_LOGGING_CONFIG_PATH
+    "VLLM_CONFIGURE_LOGGING":
+    lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
+    "VLLM_LOGGING_CONFIG_PATH":
+    lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
 }
 
 
