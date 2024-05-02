@@ -597,13 +597,14 @@ def find_library(lib_name: str) -> str:
 
 def find_nccl_library():
     so_file = envs.VLLM_NCCL_SO_PATH
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
     if torch.version.cuda is not None:
         cuda_major = torch.version.cuda.split(".")[0]
         path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
         files = glob.glob(path)
         vllm_nccl_path = files[0] if files else None
 

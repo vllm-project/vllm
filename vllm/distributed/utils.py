@@ -106,8 +106,10 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
     if cuda_visible_devices is None:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
     path = os.path.expanduser(
-        f"~/.config/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
+        f"{VLLM_CONFIG_ROOT}/vllm/gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
+    )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if (not is_distributed or get_local_rank() == 0) \
         and (not os.path.exists(path)):
