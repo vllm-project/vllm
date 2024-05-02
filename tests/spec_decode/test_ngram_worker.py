@@ -43,11 +43,13 @@ def test_ngram_algo_correctness_for_single_no_match():
     ]
 
     proposal_len = 5
-    final_seq_lens = [len(prompt) + proposal_len for prompt in prompts]
+    final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
     ngram_sampler_output_data = create_execute_model_data(
         seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size,
-            final_seq_lens=final_seq_lens))
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens=final_prompt_lens))
 
     proposals = proposer.get_proposals(
         **ngram_sampler_output_data.to_dict(),
@@ -110,11 +112,13 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
     ]
 
     proposal_len = 5
-    final_seq_lens = [len(prompt) + proposal_len for prompt in prompts]
+    final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
     ngram_sampler_output_data = create_execute_model_data(
         seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size,
-            final_seq_lens=final_seq_lens))
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens=final_prompt_lens))
 
     proposals = proposer.get_proposals(
         **ngram_sampler_output_data.to_dict(),
@@ -180,11 +184,13 @@ def test_ngram_algo_correctness_for_batches_match_all():
     ]
 
     proposal_len = 5
-    final_seq_lens = [len(prompt) + proposal_len for prompt in prompts]
+    final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
     ngram_sampler_output_data = create_execute_model_data(
         seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size,
-            final_seq_lens=final_seq_lens))
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens=final_prompt_lens))
 
     proposals = proposer.get_proposals(
         **ngram_sampler_output_data.to_dict(),

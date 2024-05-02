@@ -174,7 +174,7 @@ class CPUModelRunner:
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
-        context_lens: List[int] = []
+        seqlens: List[int] = []
         block_tables: List[List[int]] = []
 
         for seq_group_metadata in seq_group_metadata_list:
@@ -192,9 +192,9 @@ class CPUModelRunner:
                 position = seqlen - 1
                 input_positions.append(position)
 
-                context_len = seqlen if self.sliding_window is None else min(
+                seqlen = seqlen if self.sliding_window is None else min(
                     seqlen, self.sliding_window)
-                context_lens.append(context_len)
+                seqlens.append(seqlen)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
@@ -208,7 +208,7 @@ class CPUModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_context_len = max(context_lens)
+        max_seqlen = max(seqlens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -219,9 +219,7 @@ class CPUModelRunner:
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
-        context_lens = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device=self.device)
+        seqlens = torch.tensor(seqlens, dtype=torch.int, device=self.device)
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
@@ -236,14 +234,15 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            seqlens=None,
+            seqlens=seqlens,
+            max_seqlen=max_seqlen,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
-            max_context_len=max_context_len,
+            max_context_len=None,
             num_prefills=0,
             prefill_metadata=None,
             decode_metadata=None,
-            context_lens=context_lens,
+            context_lens=None,
             block_tables=block_tables,
             kv_cache_dtype=self.kv_cache_dtype,
         )

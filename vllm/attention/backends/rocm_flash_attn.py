@@ -317,7 +317,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seqlens,
+                decode_meta.seqlens_tensor,
                 decode_meta.max_seqlen,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
