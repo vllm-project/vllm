@@ -153,7 +153,8 @@ def fused_moe_kernel(
         else:
             k_remaining = K - (start_k + k * K_STRIDE)
             a = tl.load(a_ptrs,
-                        mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
+                        mask=token_mask[:, None] &
+                        (offs_k[None, :] < k_remaining),
                         other=0.0)
             b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
         # We accumulate along the K dimension.
