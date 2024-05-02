@@ -21,6 +21,7 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
+import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -243,7 +244,7 @@ def merge_async_iterators(
 
 
 def get_ip() -> str:
-    host_ip = os.environ.get("HOST_IP")
+    host_ip = envs.VLLM_HOST_IP
     if host_ip:
         return host_ip
 
@@ -269,7 +270,8 @@ def get_ip() -> str:
 
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable HOST_IP.",
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
 
