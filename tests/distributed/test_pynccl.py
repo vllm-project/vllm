@@ -88,6 +88,7 @@ def multiple_tp_worker_fn():
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp():
     # this tests pynccl for multiple tp groups, in a standalone way
+    # i.e. call `comm.all_reduce` directly
     distributed_run(multiple_tp_worker_fn, 4)
 
 
@@ -116,6 +117,7 @@ def multiple_tp_with_vllm_worker_fn():
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp_with_vllm():
     # this tests pynccl for multiple tp groups, together with vllm
+    # i.e. call `tensor_model_parallel_all_reduce`
     distributed_run(multiple_tp_with_vllm_worker_fn, 4)
 
 
