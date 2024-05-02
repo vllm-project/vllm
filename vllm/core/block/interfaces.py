@@ -108,3 +108,8 @@ class DeviceAwareBlockAllocator(BlockAllocator):
     @abstractmethod
     def get_num_free_blocks(self, device: Device) -> int:
         pass
+
+    @property
+    @abstractmethod
+    def null_block(self) -> Block:
+        pass

@@ -105,10 +105,24 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
+        self._null_block = None
+
         self._block_ids_to_allocator = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
+
+        x = self.null_block # TODO(mmoskal) remove me
+
+    @property
+    def null_block(self) -> Block:
+        if self._null_block is None:
+            self._null_block = self.allocate_mutable(None, Device.GPU)
+            assert self._null_block.block_id == 0 # TODO(mmoskal) remove me
+            def fail(token_ids: List[int]):
+                raise ValueError("null_block should not be modified")
+            self._null_block.append_token_ids = fail
+        return self._null_block
 
     def allocate_mutable(self, prev_block: Optional[Block],
                          device: Device) -> Block:
@@ -149,6 +163,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             block (Block): The block to be freed.
         """
+        if block is self._null_block:
+            return
         allocator = self._block_ids_to_allocator[block.block_id]
         return allocator.free(block)
 
@@ -163,6 +179,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: A new list of blocks that shares the same memory as the
                 original sequence.
         """
+        assert last_block is not self._null_block
         allocator = self._block_ids_to_allocator[last_block.block_id]
         return allocator.fork(last_block)
 

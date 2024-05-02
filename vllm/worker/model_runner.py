@@ -336,6 +336,7 @@ class ModelRunner:
                     continue
 
                 block_number = block_table[i // self.block_size]
+                assert block_number > 0 # TODO(mmoskal) remove
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
@@ -461,6 +462,7 @@ class ModelRunner:
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
+                assert block_number > 0 # TODO(mmoskal) remove
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
