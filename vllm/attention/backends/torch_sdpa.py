@@ -58,6 +58,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     slot_mapping: torch.Tensor
+    seqlens: Optional[List[int]]
 
     def __post_init__(self):
         # Set during the execution of the first attention op.

@@ -152,13 +152,13 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seqlens=seqlens,
+            seqlens_tensor=None,
+            max_seqlen=None,
             num_prefills=len(seqlens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
             prefill_metadata=None,
             decode_metadata=None,
-            max_context_len=None,
-            context_lens=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
@@ -219,7 +219,9 @@ class CPUModelRunner:
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
-        seqlens = torch.tensor(seqlens, dtype=torch.int, device=self.device)
+        seqlens_tensor = torch.tensor(seqlens,
+                                      dtype=torch.int,
+                                      device=self.device)
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
@@ -234,14 +236,14 @@ class CPUModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
-            seqlens_tensor=seqlens,
+            seqlens=seqlens,
+            seqlens_tensor=seqlens_tensor,
             max_seqlen=max_seqlen,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
             prefill_metadata=None,
             decode_metadata=None,
-            context_lens=None,
             block_tables=block_tables,
             kv_cache_dtype=self.kv_cache_dtype,
         )
