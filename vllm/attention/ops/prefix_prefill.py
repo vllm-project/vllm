@@ -124,6 +124,7 @@ if triton.__version__ >= "2.1.0":
             qk += tl.dot(q, k)
             qk = tl.where((start_n + offs_n[None, :]) < cur_batch_ctx_len, qk,
                           float("-inf"))
+            qk *= sm_scale
             if SLIDING_WINDOW > 0:
                 # We can't use -inf here, because the
                 # sliding window may lead to the entire row being masked.
@@ -132,7 +133,6 @@ if triton.__version__ >= "2.1.0":
                 qk = tl.where((cur_batch_ctx_len + offs_m[:, None]) -
                               (start_n + offs_n[None, :]) < SLIDING_WINDOW, qk,
                               -10000)
-            qk *= sm_scale
 
             # -- compute m_ij, p, l_ij
             m_ij = tl.max(qk, 1)  # [M]
