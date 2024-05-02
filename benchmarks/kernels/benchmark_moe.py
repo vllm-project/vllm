@@ -100,21 +100,23 @@ def benchmark_config(
 
 def get_configs_compute_bound():
     # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L56
-    configs = [
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "num_warps": 8, "num_stages": 3},  # noqa: E501
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "num_warps": 8, "num_stages": 3},  # noqa: E501
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},  # noqa: E501
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32,  "num_warps": 2, "num_stages": 5},  # noqa: E501
-    ]  # yapf: disable
-    for config in configs:
-        config["BLOCK_SIZE_K"] = 32
-        config["GROUP_SIZE_M"] = 8
-        config["SPLIT_K"] = 1
+    # TODO(woosuk): Implement a performance model to prune the search space.
+    configs = []
+    for num_stages in [3, 4, 5]:
+        for block_m in [64, 128, 256]:
+            for block_k in [32, 64]:
+                for block_n in [32, 64, 128, 256]:
+                    for num_warps in [2, 4, 8]:
+                        for group_size in [1, 8, 16, 64]:
+                            configs.append({
+                                "BLOCK_SIZE_M": block_m,
+                                "BLOCK_SIZE_N": block_n,
+                                "BLOCK_SIZE_K": block_k,
+                                "GROUP_SIZE_M": group_size,
+                                "SPLIT_K": 1,
+                                "num_warps": num_warps,
+                                "num_stages": num_stages,
+                            })
     return configs
 
 
