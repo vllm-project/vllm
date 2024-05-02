@@ -277,14 +277,15 @@ def main(args: argparse.Namespace):
         return ray.get(outputs)
 
     def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
-        configs = _distribute(
-            "tune", [(M, E, N, K, topk_experts, dtype, search_space) for M in Ms])
+        configs = _distribute("tune",
+                              [(M, E, N, K, topk_experts, dtype, search_space)
+                               for M in Ms])
         best_configs = {M: config for M, config in zip(Ms, configs)}
         save_configs(best_configs, E, N, K, topk_experts, str(dtype))
 
     def _benchmark(Ms: List[int], N: int, K: int, topk_experts: int):
-        outputs = _distribute(
-            "benchmark", [(M, E, N, K, topk_experts, dtype) for M in Ms])
+        outputs = _distribute("benchmark",
+                              [(M, E, N, K, topk_experts, dtype) for M in Ms])
         return outputs
 
     w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
