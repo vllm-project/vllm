@@ -66,6 +66,7 @@ def get_output_from_llm_generator(
 
     return tokens, token_ids
 
+
 def get_logprobs_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> List[List[Dict[int, Logprob]]]:

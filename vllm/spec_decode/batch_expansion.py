@@ -93,7 +93,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         )
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
-        
+
         all_tokens, all_probs, spec_logprobs = self._contract_batch(
             contracted_bs=len(seq_group_metadata_list),
             target_sampler_output=target_sampler_output,
@@ -162,8 +162,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         contracted_bs is the original batch size, and the batch size that the
         target_sampler_output will be contracted to.
         """
-        (target_token_ids, target_probs, target_logprobs, non_spec_target_token_ids,
-         non_spec_target_probs, non_spec_target_logprobs) = self._split_scoring_output(
+        (target_token_ids, target_probs, target_logprobs,
+         non_spec_target_token_ids, non_spec_target_probs,
+         non_spec_target_logprobs) = self._split_scoring_output(
              target_sampler_output, num_scoring_tokens)
 
         # Map distinct sequences used to score each token
@@ -180,8 +181,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
             spec_expanded_bs, k + 1)
         target_probs = target_probs.squeeze().reshape(spec_expanded_bs, k + 1,
                                                       self._vocab_size)
-        target_logprobs = target_logprobs.squeeze().reshape(spec_expanded_bs, k + 1,
-                                                      self._vocab_size)
+        target_logprobs = target_logprobs.squeeze().reshape(
+            spec_expanded_bs, k + 1, self._vocab_size)
 
         all_tokens = torch.full(size=(contracted_bs, k + 1),
                                 fill_value=-1,
@@ -192,10 +193,14 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                                 self._vocab_size,
                                 device=self._device,
                                 dtype=torch.float32)
-        all_logprobs = torch.full(size=(contracted_bs, k + 1, self._vocab_size,),
-                                fill_value=-float("inf"),
-                                device=self._device,
-                                dtype=torch.float32)
+        all_logprobs = torch.full(size=(
+            contracted_bs,
+            k + 1,
+            self._vocab_size,
+        ),
+                                  fill_value=-float("inf"),
+                                  device=self._device,
+                                  dtype=torch.float32)
 
         if non_spec_indices:
             all_tokens[non_spec_indices, :1] = non_spec_target_token_ids
@@ -337,8 +342,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
          ) = sampler_output.sampled_token_probs.split(split_sizes)
         (spec_sampled_tokens, non_spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
-        (spec_logprobs, non_spec_logprobs,
-         ) = sampler_output.logprobs.split(split_sizes)
+        (
+            spec_logprobs,
+            non_spec_logprobs,
+        ) = sampler_output.logprobs.split(split_sizes)
 
         # Convert scores to tensors.
         sampler_output.sampled_token_probs = spec_probs
@@ -354,8 +361,9 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         non_spec_target_token_ids, non_spec_target_probs, non_spec_target_logprobs = (
             sampler_output_to_torch([sampler_output]))
 
-        return (target_token_ids, target_probs, target_logprobs, non_spec_target_token_ids,
-                non_spec_target_probs, non_spec_target_logprobs)
+        return (target_token_ids, target_probs, target_logprobs,
+                non_spec_target_token_ids, non_spec_target_probs,
+                non_spec_target_logprobs)
 
     def _create_target_seq_id_iterator(
             self, seq_ids: List[SeqId]) -> Iterator[TargetSeqId]:

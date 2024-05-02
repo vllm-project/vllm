@@ -808,12 +808,14 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     probs[sample_indices, :] = 0
     probs[sample_indices, greedy_samples] = 1.0
 
+
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
-    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
+                                      torch.Tensor]],
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -844,7 +846,8 @@ def _build_sampler_output(
     if on_device_tensors is not None:
         sampled_token_probs, logprobs_tensor, sampled_token_ids = on_device_tensors
     else:
-        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None, None)
+        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None,
+                                                                   None)
 
     return SamplerOutput(
         outputs=sampler_output,

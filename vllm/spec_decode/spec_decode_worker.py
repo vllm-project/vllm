@@ -279,14 +279,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
 
         logger.info("verify proposals")
-        accepted_token_ids, target_logprobs = self._verify_tokens(seq_group_metadata_list,
-                                                 proposal_scores, proposals, k)
+        accepted_token_ids, target_logprobs = self._verify_tokens(
+            seq_group_metadata_list, proposal_scores, proposals, k)
 
         logger.info("create output list")
-        return self._create_output_sampler_list(seq_group_metadata_list,
-                                                accepted_token_ids, 
-                                                target_logprobs=target_logprobs,
-                                                k=k)
+        return self._create_output_sampler_list(
+            seq_group_metadata_list,
+            accepted_token_ids,
+            target_logprobs=target_logprobs,
+            k=k)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -299,7 +300,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
 
-        Returns TODO
+        Returns a tuple of Tensors, one for the accepted token ids and one for the
+        logprobs according to the scoring model.
         """
         proposal_lens_list = proposals.proposal_lens.tolist()
 
@@ -354,12 +356,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         return accepted_token_ids, logprobs
 
-
     def _create_output_sampler_list(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
-        target_logprobs: torch.Tensor, # shape: [batch_size, k+1, vocab_size]
+        target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
         k: int,
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
@@ -367,9 +368,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
-        
-        def get_all_num_logprobs(seq_group_metadata_list: List[SequenceGroupMetadata]) -> List[int]:
-            
+
+        def get_all_num_logprobs(
+                seq_group_metadata_list: List[SequenceGroupMetadata]
+        ) -> List[int]:
+
             all_num_logprobs = []
             for seq_group_metadata in seq_group_metadata_list:
                 num_logprobs = seq_group_metadata.sampling_params.logprobs
@@ -389,34 +392,42 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         topk_logprobs, topk_indices = target_logprobs.transpose(0, 1).topk(
             k=num_topk,
             dim=-1,
-        ) 
-        vals = target_logprobs[torch.arange(accepted_token_ids.size(0)).unsqueeze(1), torch.arange(accepted_token_ids.size(1)), accepted_token_ids]
+        )
+        vals = target_logprobs[
+            torch.arange(accepted_token_ids.size(0)).unsqueeze(1),
+            torch.arange(accepted_token_ids.size(1)), accepted_token_ids]
         vals_expanded = vals.unsqueeze(-1).expand(-1, -1, self._vocab_size)
 
         ranks = (target_logprobs >= vals_expanded).sum(-1)
-
 
         topk_logprobs_by_step = topk_logprobs.tolist()
         topk_indices_by_step = topk_indices.tolist()
         sampler_output_list = []
 
         for step_index, _ in enumerate(accepted_token_ids_by_step):
-            if all(token_id == -1 for token_id in accepted_token_ids_by_step[step_index]):
+            if all(token_id == -1
+                   for token_id in accepted_token_ids_by_step[step_index]):
                 break
 
             step_output_token_ids = []
 
-            for sequence_index, _ in enumerate(accepted_token_ids_by_step[step_index]):
-                token_id = accepted_token_ids_by_step[step_index][sequence_index]
-                token_id_logprob_rank = ranks[sequence_index][step_index].item() # TODO
+            for sequence_index, _ in enumerate(
+                    accepted_token_ids_by_step[step_index]):
+                token_id = accepted_token_ids_by_step[step_index][
+                    sequence_index]
+                token_id_logprob_rank = ranks[sequence_index][step_index].item(
+                )  # TODO
                 token_id_logprob = vals[sequence_index][step_index].item()
                 seq_id = seq_ids[sequence_index]
                 num_logprobs = num_logprobs_per_seq[sequence_index]
-                topk_token_ids = topk_indices_by_step[step_index][sequence_index][:num_logprobs]
-                topk_logprobs = topk_logprobs_by_step[step_index][sequence_index][:num_logprobs]
+                topk_token_ids = topk_indices_by_step[step_index][
+                    sequence_index][:num_logprobs]
+                topk_logprobs = topk_logprobs_by_step[step_index][
+                    sequence_index][:num_logprobs]
 
                 logprobs = {
-                    token_id: Logprob(
+                    token_id:
+                    Logprob(
                         logprob=token_id_logprob,
                         rank=token_id_logprob_rank,
                     ),
@@ -431,16 +442,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 step_output_token_ids.append(
                     SequenceGroupOutput(
                         samples=[
-                            SequenceOutput(
-                                parent_seq_id=seq_id,
-                                output_token=token_id,
-                                logprobs=logprobs
-                            )
+                            SequenceOutput(parent_seq_id=seq_id,
+                                           output_token=token_id,
+                                           logprobs=logprobs)
                         ],
                         prompt_logprobs=None,
                     ))
 
-            sampler_output_list.append(SamplerOutput(outputs=step_output_token_ids))
+            sampler_output_list.append(
+                SamplerOutput(outputs=step_output_token_ids))
 
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))

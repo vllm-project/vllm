@@ -22,14 +22,10 @@ from .conftest import get_output_from_llm_generator, get_logprobs_from_llm_gener
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-160m",
-            "num_speculative_tokens": 3,
-        }
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
@@ -38,8 +34,8 @@ from .conftest import get_output_from_llm_generator, get_logprobs_from_llm_gener
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_logprobs_equality(baseline_llm_generator, test_llm_generator, batch_size: int,
-                output_len: int):
+def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
+                           batch_size: int, output_len: int):
     """Verify output logprobs are equal with and without speculative decoding.
     """
     run_greedy_logprobs_correctness_test(baseline_llm_generator,
@@ -48,6 +44,7 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator, batch_siz
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -61,18 +58,13 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator, batch_siz
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-160m",
-            "num_speculative_tokens": 3,
-        },
-        {
-            "speculative_model": "JackFram/llama-160m",
-            "num_speculative_tokens": 6,
-        }
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}, {
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 6,
+}])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
@@ -81,8 +73,8 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator, batch_siz
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_logprobs_different_k(baseline_llm_generator, test_llm_generator, batch_size: int,
-                output_len: int):
+def test_logprobs_different_k(baseline_llm_generator, test_llm_generator,
+                              batch_size: int, output_len: int):
     """Veriy logprob greedy equality with different speculation lens.
     """
     run_greedy_logprobs_correctness_test(baseline_llm_generator,
@@ -91,6 +83,7 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator, batch_
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -106,16 +99,14 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator, batch_
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize(
     "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-160m",
-            "num_speculative_tokens": 3,
+    [{
+        "speculative_model": "JackFram/llama-160m",
+        "num_speculative_tokens": 3,
 
-            # Artificially limit the draft model max model len; this forces vLLM
-            # to skip speculation once the sequences grow beyond 32-k tokens.
-            "speculative_max_model_len": 32,
-        }
-    ])
+        # Artificially limit the draft model max model len; this forces vLLM
+        # to skip speculation once the sequences grow beyond 32-k tokens.
+        "speculative_max_model_len": 32,
+    }])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
     "output_len",
@@ -124,8 +115,9 @@ def test_logprobs_different_k(baseline_llm_generator, test_llm_generator, batch_
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_logprobs_when_skip_speculation(baseline_llm_generator, test_llm_generator, batch_size: int,
-                output_len: int):
+def test_logprobs_when_skip_speculation(baseline_llm_generator,
+                                        test_llm_generator, batch_size: int,
+                                        output_len: int):
     """Verify logprobs greedy equality when some sequences skip speculation.
     """
     run_greedy_logprobs_correctness_test(baseline_llm_generator,
@@ -133,6 +125,7 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator, test_llm_generat
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -147,14 +140,10 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator, test_llm_generat
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-160m",
-            "num_speculative_tokens": 3,
-        }
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize(
     "output_len",
@@ -163,8 +152,8 @@ def test_logprobs_when_skip_speculation(baseline_llm_generator, test_llm_generat
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator, batch_size: int,
-                output_len: int):
+def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator,
+                         batch_size: int, output_len: int):
     """Verify at least one logprob result has num_logprobs+1, which tests the
     case where the sampled token is not in top-k logprobs.
 
@@ -201,16 +190,20 @@ def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator, batch_size:
         temperature=temperature,
         logprobs=logprob_rank,
     )
-    
-    spec_batch_logprobs = get_logprobs_from_llm_generator(test_llm_generator, prompts, sampling_params)
+
+    spec_batch_logprobs = get_logprobs_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
 
     num_returned_logprobs = [
-        len(logprob_dict) for seq_logprobs in spec_batch_logprobs for logprob_dict in seq_logprobs
+        len(logprob_dict) for seq_logprobs in spec_batch_logprobs
+        for logprob_dict in seq_logprobs
     ]
 
     # Assert one of the returned logprobs has > num_logprobs (indicating the sampled token is not
     # in top-k).
-    assert any([num_returned > logprob_rank for num_returned in num_returned_logprobs])
+    assert any([
+        num_returned > logprob_rank for num_returned in num_returned_logprobs
+    ])
 
 
 def run_greedy_logprobs_correctness_test(baseline_llm_generator,
@@ -249,41 +242,51 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
         logprobs=logprob_rank,
     )
 
-    spec_batch_logprobs = get_logprobs_from_llm_generator(test_llm_generator, prompts, sampling_params)
-    baseline_batch_logprobs = get_logprobs_from_llm_generator(baseline_llm_generator, prompts, sampling_params)
+    spec_batch_logprobs = get_logprobs_from_llm_generator(
+        test_llm_generator, prompts, sampling_params)
+    baseline_batch_logprobs = get_logprobs_from_llm_generator(
+        baseline_llm_generator, prompts, sampling_params)
 
     assert len(baseline_batch_logprobs) == len(prompts)
     assert len(spec_batch_logprobs) == len(prompts)
 
     # For each sequence in the batch.
     for i, (baseline_logprobs, spec_logprobs) in enumerate(
-                zip(baseline_batch_logprobs, spec_batch_logprobs)):
+            zip(baseline_batch_logprobs, spec_batch_logprobs)):
         assert len(spec_logprobs) == len(baseline_logprobs)
 
         # For each generated position of the sequence.
         for pos, (spec_pos_logprobs, baseline_pos_logprobs) in enumerate(
-            zip(spec_logprobs, baseline_logprobs)):
-            
+                zip(spec_logprobs, baseline_logprobs)):
+
             # Map rank to token/logprob in spec output.
             spec_rank_to_token_id = {
-                value.rank: key for key, value in spec_pos_logprobs.items()}
+                value.rank: key
+                for key, value in spec_pos_logprobs.items()
+            }
             spec_rank_to_logprob = {
                 value.rank: value.logprob
-                for key, value in spec_pos_logprobs.items()}
-        
+                for key, value in spec_pos_logprobs.items()
+            }
+
             # Map rank to token/logprob in baseline output.
             baseline_rank_to_token_id = {
-                value.rank: key for key, value in baseline_pos_logprobs.items()}
+                value.rank: key
+                for key, value in baseline_pos_logprobs.items()
+            }
             baseline_rank_to_logprob = {
                 value.rank: value.logprob
-                for key, value in baseline_pos_logprobs.items()}
-        
+                for key, value in baseline_pos_logprobs.items()
+            }
+
             # Assert set of ranks returned is equal.
-            assert set(spec_rank_to_token_id.keys()) == set(baseline_rank_to_token_id.keys())
+            assert set(spec_rank_to_token_id.keys()) == set(
+                baseline_rank_to_token_id.keys())
 
             # Assert each logprob/token id is correct, keyed by rank.
             for rank in sorted(set(spec_rank_to_token_id.keys())):
-                assert spec_rank_to_token_id[rank] == baseline_rank_to_token_id[rank]
+                assert spec_rank_to_token_id[
+                    rank] == baseline_rank_to_token_id[rank]
                 assert math.isclose(
                     a=spec_rank_to_logprob[rank],
                     b=baseline_rank_to_logprob[rank],
