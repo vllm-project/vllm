@@ -280,11 +280,13 @@ def main(args: argparse.Namespace):
     w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
         logger.info(f"Start tuning over {len(search_space)} configurations...")
+
         # w1
         start = time.time()
         _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
         end = time.time()
         logger.info(f"W1 tuning took {end - start:.2f} seconds")
+
         # w2
         start = time.time()
         _tune(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
