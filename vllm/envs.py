@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
+    LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
+    VLLM_TRACE_FUNCTION: int = 0
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -46,6 +48,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # by PyTorch contains a bug: https://github.com/NVIDIA/nccl/issues/1234
     "VLLM_NCCL_SO_PATH":
     lambda: os.environ.get("VLLM_NCCL_SO_PATH", None),
+
+    # when `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
+    # library file in the locations specified by `LD_LIBRARY_PATH`
+    "LD_LIBRARY_PATH":
+    lambda: os.environ.get("LD_LIBRARY_PATH", None),
 
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN":
@@ -104,6 +111,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
     "VLLM_LOGGING_CONFIG_PATH":
     lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+    "VLLM_TRACE_FUNCTION":
+    lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
 }
 
 

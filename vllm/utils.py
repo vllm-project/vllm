@@ -583,7 +583,7 @@ def find_library(lib_name: str) -> str:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
     # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    env_ld_library_path = envs.LD_LIBRARY_PATH
     if not locs and env_ld_library_path:
         locs = [
             os.path.join(dir, lib_name)
@@ -629,7 +629,7 @@ def enable_trace_function_call_for_thread() -> None:
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
 
-    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+    if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
