@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
+    VLLM_USE_TRITON_FLASH_ATTN: bool = False
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -31,6 +32,9 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # by PyTorch contains a bug: https://github.com/NVIDIA/nccl/issues/1234
     "VLLM_NCCL_SO_PATH":
     lambda: os.environ.get("VLLM_NCCL_SO_PATH", None),
+    "VLLM_USE_TRITON_FLASH_ATTN":
+    lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
+             ("true", "1")),
 }
 
 

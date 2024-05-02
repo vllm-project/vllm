@@ -1,5 +1,4 @@
 """Attention layer ROCm GPUs."""
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
@@ -11,6 +10,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+import vllm.envs as envs
 
 logger = init_logger(__name__)
 
@@ -156,8 +156,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         self.use_naive_attn = False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
-        self.use_triton_flash_attn = (os.environ.get(
-            "VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1"))
+        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                 triton_attention)
