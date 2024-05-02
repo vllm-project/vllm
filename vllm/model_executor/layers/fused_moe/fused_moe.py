@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import triton
@@ -484,14 +484,16 @@ def fused_moe(
     else:
         w1_config = get_op_config(*w1.shape, topk, str(w1.dtype))
         if w1_config is None:
-            config1 = get_default_config(M, *w1.shape, topk, str(w1.dtype))
+            config1 = get_default_config(M, *w1.shape, topk,
+                                         str(w1.dtype))  # type: ignore
         else:
             config1 = w1_config[min(w1_config.keys(),
                                     key=lambda x: abs(x - M))]
 
         w2_config = get_op_config(*w2.shape, 1, str(w2.dtype))
         if w2_config is None:
-            config2 = get_default_config(M * topk, *w2.shape, 1, str(w2.dtype))
+            config2 = get_default_config(M * topk, *w2.shape, 1,
+                                         str(w2.dtype))  # type: ignore
         else:
             config2 = w2_config[min(w2_config.keys(),
                                     key=lambda x: abs(x - M * topk))]
@@ -531,8 +533,8 @@ def fused_moe(
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
     if config2["BLOCK_SIZE_M"] != config1["BLOCK_SIZE_M"]:
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
-            topk_ids, config2["BLOCK_SIZE_M"], E)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = (
+            moe_align_block_size(topk_ids, config2["BLOCK_SIZE_M"], E))
     invoke_fused_moe_kernel(
         intermediate_cache2,
         w2,
