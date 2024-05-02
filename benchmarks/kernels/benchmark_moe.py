@@ -107,14 +107,14 @@ def get_configs_compute_bound() -> List[Dict[str, int]]:
         for block_m in [64, 128, 256]:
             for block_k in [32, 64]:
                 for block_n in [32, 64, 128, 256]:
+                    num_warps = 2 if block_n <= 64 else 4
                     for group_size in [1, 8, 64]:
-                        num_warps = 2 if block_n <= 64 else 4
                         configs.append({
                             "BLOCK_SIZE_M": block_m,
                             "BLOCK_SIZE_N": block_n,
                             "BLOCK_SIZE_K": block_k,
-                            "GROUP_SIZE_M": group_size,
                             "SPLIT_K": 1,
+                            "GROUP_SIZE_M": group_size,
                             "num_warps": num_warps,
                             "num_stages": num_stages,
                         })
@@ -130,26 +130,27 @@ def get_configs_io_bound() -> List[Dict[str, int]]:
             for block_k in [32, 64]:
                 for block_n in [32, 64, 128, 256]:
                     num_warps = 2 if block_n <= 64 else 4
-                    configs.append({
-                        "BLOCK_SIZE_M": block_m,
-                        "BLOCK_SIZE_N": block_n,
-                        "BLOCK_SIZE_K": block_k,
-                        "GROUP_SIZE_M": 8,
-                        "SPLIT_K": 1,
-                        "num_warps": num_warps,
-                        "num_stages": num_stages,
-                    })
-                    # Split-K
-                    for split_k in [2, 4, 8, 16]:
+                    for group_size in [1, 8]:
                         configs.append({
                             "BLOCK_SIZE_M": block_m,
                             "BLOCK_SIZE_N": block_n,
                             "BLOCK_SIZE_K": block_k,
-                            "GROUP_SIZE_M": 8,
-                            "SPLIT_K": split_k,
+                            "SPLIT_K": 1,
+                            "GROUP_SIZE_M": group_size,
                             "num_warps": num_warps,
                             "num_stages": num_stages,
                         })
+                        # Split-K
+                        for split_k in [2, 4, 8, 16]:
+                            configs.append({
+                                "BLOCK_SIZE_M": block_m,
+                                "BLOCK_SIZE_N": block_n,
+                                "BLOCK_SIZE_K": block_k,
+                                "SPLIT_K": split_k,
+                                "GROUP_SIZE_M": group_size,
+                                "num_warps": num_warps,
+                                "num_stages": num_stages,
+                            })
     return configs
 
 
@@ -231,6 +232,18 @@ class BenchmarkWorker:
         return best_config
 
 
+def sort_config(config: Dict[str, int]) -> Dict[str, int]:
+    return {
+        "BLOCK_SIZE_M": config["BLOCK_SIZE_M"],
+        "BLOCK_SIZE_N": config["BLOCK_SIZE_N"],
+        "BLOCK_SIZE_K": config["BLOCK_SIZE_K"],
+        "SPLIT_K": config["SPLIT_K"],
+        "GROUP_SIZE_M": config["GROUP_SIZE_M"],
+        "num_warps": config["num_warps"],
+        "num_stages": config["num_stages"],
+    }
+
+
 def save_configs(
     configs: Dict[int, Dict[str, int]],
     E: int,
@@ -285,7 +298,10 @@ def main(args: argparse.Namespace):
             configs = _distribute(
                 "tune",
                 [(M, E, N, K, topk_experts, dtype, search_space) for M in Ms])
-            best_configs = {M: config for M, config in zip(Ms, configs)}
+            best_configs = {
+                M: sort_config(config)
+                for M, config in zip(Ms, configs)
+            }
             save_configs(best_configs, E, N, K, topk_experts, str(dtype))
 
         logger.info("Start tuning over %d configurations...",
