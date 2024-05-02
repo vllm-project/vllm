@@ -70,11 +70,9 @@ def test_models(
     gptq_marlin_model = vllm_runner(model_name=model_name,
                                     revision=revision,
                                     dtype=dtype,
-                                    quantization="gptq",
+                                    quantization="marlin",
                                     max_model_len=MAX_MODEL_LEN,
-                                    tensor_parallel_size=1,
-                                    disable_custom_all_reduce=True,
-                                    enforce_eager=True)
+                                    tensor_parallel_size=1)
 
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
@@ -86,9 +84,7 @@ def test_models(
                              dtype=dtype,
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
-                             tensor_parallel_size=1,
-                             disable_custom_all_reduce=True,
-                             enforce_eager=True)
+                             tensor_parallel_size=1)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
