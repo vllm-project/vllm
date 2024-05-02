@@ -112,7 +112,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
 
-        x = self.null_block # TODO(mmoskal) remove me
+        _ = self.null_block # TODO(mmoskal) remove me
 
     @property
     def null_block(self) -> Block:

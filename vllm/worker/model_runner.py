@@ -325,7 +325,8 @@ class ModelRunner:
             # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
             start_idx = 0
             if self.sliding_window is not None:
-                assert self.scheduler_config.use_v2_block_manager or computed_len == 0, (
+                assert self.scheduler_config.use_v2_block_manager \
+                    or computed_len == 0, (
                     "Prefix caching is currently not supported with "
                     "sliding window attention in V1 block manager")
                 start_idx = max(0, prompt_len - self.sliding_window)
@@ -336,7 +337,7 @@ class ModelRunner:
                     continue
 
                 block_number = block_table[i // self.block_size]
-                assert block_number > 0 # TODO(mmoskal) remove
+                assert block_number > 0  # TODO(mmoskal) remove
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
@@ -462,7 +463,7 @@ class ModelRunner:
 
                 block_table = seq_group_metadata.block_tables[seq_id]
                 block_number = block_table[position // self.block_size]
-                assert block_number > 0 # TODO(mmoskal) remove
+                assert block_number > 0  # TODO(mmoskal) remove
                 block_offset = position % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)

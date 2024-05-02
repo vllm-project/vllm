@@ -110,15 +110,16 @@ class BlockTable:
 
         if self._block_sliding_window is not None:
             null_block = self._allocator.null_block
-            end_idx = self._num_full_slots // self._block_size - self._block_sliding_window
+            end_idx = (self._num_full_slots //
+                       self._block_size) - self._block_sliding_window
             for idx in range(0, end_idx):
                 b = self._blocks[idx]
                 if b is not null_block:
-                    # print(f"drop block {idx}/{end_idx} = {self._num_full_slots // self._block_size} - {self._block_sliding_window}")
                     self._allocator.free(b)
                     self._blocks[idx] = null_block
 
-        # Ensure there are enough empty slots for the new tokens plus lookahead slots
+        # Ensure there are enough empty slots for the new tokens plus
+        # lookahead slots
         self.ensure_num_empty_slots(num_empty_slots=len(token_ids) +
                                     num_lookahead_slots)
 

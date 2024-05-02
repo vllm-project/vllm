@@ -66,9 +66,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_cpu_blocks = num_cpu_blocks
 
         self.sliding_window = sliding_window
-        # block_sliding_window is the max number of blocks that need to be allocated
+        # block_sliding_window is the max number of blocks that need to be
+        # allocated
         # We generally need up 1 block more due to the way BlockTable works
-        self.block_sliding_window = sliding_window // block_size + 2 if sliding_window is not None else None
+        self.block_sliding_window = None
+        if sliding_window is not None:
+            self.block_sliding_window = sliding_window // block_size + 2
 
         self.watermark = watermark
         assert watermark >= 0.0
