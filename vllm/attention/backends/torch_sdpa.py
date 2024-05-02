@@ -136,7 +136,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                                                 kv_scale)
 
         if attn_metadata.is_prompt:
-            assert attn_metadata.seq_lens is not None
+            assert attn_metadata.seqlens is not None
             if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
                 if self.num_kv_heads != self.num_heads:
                     key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -147,13 +147,13 @@ class TorchSDPABackendImpl(AttentionImpl):
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias(
                             self.alibi_slopes, query.dtype,
-                            attn_metadata.seq_lens)  # type: ignore
+                            attn_metadata.seqlens)  # type: ignore
                     elif self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
-                            attn_metadata.seq_lens, self.sliding_window,
+                            attn_metadata.seqlens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = [None] * len(attn_metadata.seq_lens)
+                        att_masks = [None] * len(attn_metadata.seqlens)
                     attn_metadata.attn_bias = att_masks
 
                 query = query.movedim(0, query.dim() - 2)
@@ -164,7 +164,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 output = torch.empty(
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype)
-                for seqlen, mask in zip(attn_metadata.seq_lens,
+                for seqlen, mask in zip(attn_metadata.seqlens,
                                         attn_metadata.attn_bias):
                     end = start + seqlen
                     sub_out = scaled_dot_product_attention(
@@ -205,10 +205,10 @@ class TorchSDPABackendImpl(AttentionImpl):
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
-    seq_lens: List[int],
+    seqlens: List[int],
 ) -> List[torch.Tensor]:
     attn_biases = []
-    for seqlen in seq_lens:
+    for seqlen in seqlens:
         bias = torch.arange(seqlen, dtype=dtype)
         # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(seqlen, 1)`
@@ -229,12 +229,12 @@ def _make_alibi_bias(
 
 
 def _make_sliding_window_bias(
-    seq_lens: List[int],
+    seqlens: List[int],
     window_size: Optional[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
     attn_biases = []
-    for seqlen in seq_lens:
+    for seqlen in seqlens:
         tensor = torch.full(
             (1, seqlen, seqlen),
             dtype=dtype,
