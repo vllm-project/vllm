@@ -85,8 +85,9 @@ def multiple_tp_worker_fn():
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
-                    reason="Need at least 2 GPUs to run the test.")
+                    reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp():
+    # this tests pynccl for multiple tp groups, in a standalone way
     distributed_run(multiple_tp_worker_fn, 4)
 
 
@@ -112,8 +113,9 @@ def multiple_tp_with_vllm_worker_fn():
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
-                    reason="Need at least 2 GPUs to run the test.")
+                    reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp_with_vllm():
+    # this tests pynccl for multiple tp groups, together with vllm
     distributed_run(multiple_tp_with_vllm_worker_fn, 4)
 
 
