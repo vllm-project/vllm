@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Tensor model parallel group that the current rank belongs to.
-_TP_GROUP = None
+_TP_DEVICE_GROUP = None
 # Pipeline model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 
@@ -132,15 +132,15 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_GROUP
-    assert _TP_GROUP is None, (
+    global _TP_DEVICE_GROUP
+    assert _TP_DEVICE_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
         ranks = range(i * tensor_model_parallel_size,
                       (i + 1) * tensor_model_parallel_size)
         group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
-            _TP_GROUP = group
+            _TP_DEVICE_GROUP = group
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -185,7 +185,7 @@ def ensure_model_parallel_initialized(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP_GROUP is not None
+    return (_TP_DEVICE_GROUP is not None
             and _PIPELINE_MODEL_PARALLEL_GROUP is not None)
 
 
@@ -197,9 +197,9 @@ def get_cpu_world_group():
 
 def get_tensor_model_parallel_group():
     """Get the tensor model parallel group the caller rank belongs to."""
-    assert _TP_GROUP is not None, (
+    assert _TP_DEVICE_GROUP is not None, (
         "tensor model parallel group is not initialized")
-    return _TP_GROUP
+    return _TP_DEVICE_GROUP
 
 
 def get_pipeline_model_parallel_group():
@@ -277,10 +277,10 @@ def get_pipeline_model_parallel_prev_rank():
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP_GROUP
-    if _TP_GROUP:
-        torch.distributed.destroy_process_group(_TP_GROUP)
-    _TP_GROUP = None
+    global _TP_DEVICE_GROUP
+    if _TP_DEVICE_GROUP:
+        torch.distributed.destroy_process_group(_TP_DEVICE_GROUP)
+    _TP_DEVICE_GROUP = None
     global _PIPELINE_MODEL_PARALLEL_GROUP
     if _PIPELINE_MODEL_PARALLEL_GROUP:
         torch.distributed.destroy_process_group(_PIPELINE_MODEL_PARALLEL_GROUP)
