@@ -197,9 +197,9 @@ class BenchmarkWorker:
             if split_k > 1:
                 block_size_m = config["BLOCK_SIZE_M"]
                 block_size_n = config["BLOCK_SIZE_N"]
-                num_m_blocks = tl.cdiv(M * topk + E * block_size_m - 1,
-                                       block_size_m)
-                num_n_blocks = tl.cdiv(N, block_size_n)
+                num_m_blocks = triton.cdiv(M * topk + E * block_size_m - 1,
+                                           block_size_m)
+                num_n_blocks = triton.cdiv(N, block_size_n)
                 num_total_blocks = num_m_blocks * num_n_blocks * split_k
 
                 num_sms = self.device_properties.multi_processor_count
