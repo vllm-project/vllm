@@ -175,7 +175,7 @@ def get_vllm_instance_id():
     Instance id represents an instance of the VLLM. All processes in the same
     instance should have the same instance id.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -316,7 +316,7 @@ def cdiv(a: int, b: int) -> int:
 
 @lru_cache(maxsize=None)
 def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
+    cuda_home = envs.CUDA_HOME
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
@@ -596,7 +596,7 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+    so_file = envs.VLLM_NCCL_SO_PATH
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
