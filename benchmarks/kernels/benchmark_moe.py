@@ -139,14 +139,14 @@ def get_configs_io_bound():
                     # Split-K
                     for split_k in [2, 4, 8, 16]:
                         configs.append({
-                        "BLOCK_SIZE_M": block_m,
-                        "BLOCK_SIZE_N": block_n,
-                        "BLOCK_SIZE_K": block_k,
-                        "GROUP_SIZE_M": 8,
-                        "SPLIT_K": split_k,
-                        "num_warps": num_warps,
-                        "num_stages": num_stages,
-                    })
+                            "BLOCK_SIZE_M": block_m,
+                            "BLOCK_SIZE_N": block_n,
+                            "BLOCK_SIZE_K": block_k,
+                            "GROUP_SIZE_M": 8,
+                            "SPLIT_K": split_k,
+                            "num_warps": num_warps,
+                            "num_stages": num_stages,
+                        })
     return configs
 
 
@@ -191,7 +191,14 @@ class BenchmarkWorker:
         best_time = float("inf")
         for config in search_space:
             try:
-                kernel_time = benchmark_config(config, M, E, N, K, topk, dtype, num_iters=10)
+                kernel_time = benchmark_config(config,
+                                               M,
+                                               E,
+                                               N,
+                                               K,
+                                               topk,
+                                               dtype,
+                                               num_iters=10,)
             except triton.runtime.autotuner.OutOfResources:
                 # Some configurations may be invalid due to resource constraints.
                 continue
@@ -240,6 +247,7 @@ def main(args: argparse.Namespace):
         batch_sizes = [args.batch_size]
 
     search_space = get_configs_compute_bound() + get_configs_io_bound()
+
     def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
         outputs = []
         worker_idx = 0
@@ -294,13 +302,15 @@ def main(args: argparse.Namespace):
         logger.info(f"W2 tuning took {end - start:.2f} seconds")
     else:
         # w1
-        outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
+        outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
+                             hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             logger.info(f"W1 batch size: {batch_size}, config: {config}")
             logger.info(f"Kernel time: {kernel_time:.2f} us")
 
         # w2
-        outputs = _benchmark(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
+        outputs = _benchmark(w2_batch_sizes, hidden_size,
+                             shard_intermediate_size, 1)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             # NOTE(woosuk): Here the batch size is the number of input tokens
             # to the MoE block. This is not the batch size of the w2 layer.
@@ -311,7 +321,9 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="mistralai/Mixtral-8x7B-Instruct-v0.1")
+    parser.add_argument("--model",
+                        type=str,
+                        default="mistralai/Mixtral-8x7B-Instruct-v0.1")
     parser.add_argument("--tp-size", type=int, default=2)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
