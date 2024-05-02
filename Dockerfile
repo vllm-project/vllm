@@ -118,8 +118,6 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
     --mount=type=cache,target=/root/.cache/pip \
     pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 
-# Flashinfer backend
-RUN pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.2/
 #################### vLLM installation IMAGE ####################
 
 
