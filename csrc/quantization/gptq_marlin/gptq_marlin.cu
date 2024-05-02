@@ -115,6 +115,7 @@ template <int lut> __device__ inline int lop3(int a, int b, int c) {
   return res;
 }
 
+// Constructs destination register by taking bytes from 2 sources (based on mask)
 template <int start_byte, int mask>
 __device__ inline uint32_t prmt(uint32_t a) {
   uint32_t res;
@@ -561,13 +562,6 @@ Marlin(const int4 *__restrict__ A, // fp16 input matrix of shape mxk
   FragC frag_c[thread_m_blocks][4][2];
   FragS frag_s[2][4];        // No act-order
   FragS act_frag_s[2][4][4]; // For act-order
-
-  // if (blockIdx.x == 0 && threadIdx.x == 0) {
-  // printf("a_sh_stage = %d b_sh_stage = %d g_idx_stage = %d\n", a_sh_stage,
-  // b_sh_stage,
-  //        g_idx_stage);
-  // return;
-  // }
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1356,10 +1350,6 @@ bool is_valid_cache_size(thread_config_t const &th_config, int max_m_blocks,
 
   TORCH_CHECK(max_shared_mem / 2 > scales_cache_size); // Sanity
 
-  // printf("tb_k = %d, tb_n = %d, pipe_size = %f, scales_cache_size = %d,
-  // max_shared_mem = %d\n",
-  //        tb_k, tb_n, pipe_size, scales_cache_size, max_shared_mem);
-
   return pipe_size < 0.95f * (max_shared_mem - scales_cache_size);
 }
 
@@ -1392,12 +1382,10 @@ bool is_valid_config(thread_config_t const &th_config, int max_m_blocks,
   int scales_cache_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full);
-  // printf("scales_cache_size = %d\n", scales_cache_size);
 
   // Check that pipeline fits into cache
   if (!is_valid_cache_size(th_config, max_m_blocks, prob_m, prob_n, prob_k,
                            num_bits, scales_cache_size, max_shared_mem)) {
-    // printf("cache invalid\n");
     return false;
   }
 
@@ -1491,10 +1479,6 @@ void marlin_mm_f16i4(const void *A, const void *B, void *C, void *s,
         determine_thread_config(prob_m, prob_n, prob_k, num_bits, group_size,
                                 has_act_order, is_k_full, max_shared_mem);
   }
-
-  // printf("exec_config: max_m_blocks = %d, thread_k = %d, thread_n = %d\n",
-  // exec_cfg.max_m_blocks,
-  //        exec_cfg.tb_cfg.thread_k, exec_cfg.tb_cfg.thread_n);
 
   TORCH_CHECK(exec_cfg.max_m_blocks > 0 &&
                   is_valid_config(exec_cfg.tb_cfg, exec_cfg.max_m_blocks,
