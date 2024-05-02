@@ -53,6 +53,11 @@ echo '```' >> benchmark_results.md
 tail -n 20 benchmark_serving.txt >> benchmark_results.md # last 20 lines
 echo '```' >> benchmark_results.md
 
+# if the agent binary is not found, skip uploading the results, exit 0
+if [ ! -f /workspace/buildkite-agent ]; then
+    exit 0
+fi
+
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
 

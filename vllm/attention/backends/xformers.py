@@ -245,6 +245,7 @@ class XFormersImpl(AttentionImpl):
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
+                    self.sliding_window,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
