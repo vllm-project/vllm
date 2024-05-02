@@ -92,16 +92,16 @@ class Block(ABC):
 class BlockAllocator(ABC):
 
     @abstractmethod
-    def allocate_mutable(self,
-                         prev_block: Optional[Block],
-                         device: Optional[Device] = None) -> Block:
+    def allocate_mutable(
+        self,
+        prev_block: Optional[Block]) -> Block:
         pass
 
     @abstractmethod
-    def allocate_immutable(self,
-                           prev_block: Optional[Block],
-                           token_ids: List[int],
-                           device: Optional[Device] = None) -> Block:
+    def allocate_immutable(
+        self,
+        prev_block: Optional[Block],
+        token_ids: List[int]) -> Block:
         pass
 
     @abstractmethod
@@ -113,7 +113,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
+    def get_num_free_blocks(self) -> int:
         pass
 
     @property
@@ -153,7 +153,7 @@ class BlockAllocator(ABC):
         pass
 
 
-class DeviceAwareBlockAllocator(BlockAllocator):
+class DeviceAwareBlockAllocator(ABC):
 
     @abstractmethod
     def allocate_mutable(self,
@@ -170,4 +170,35 @@ class DeviceAwareBlockAllocator(BlockAllocator):
 
     @abstractmethod
     def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
+        pass
+
+    @abstractmethod
+    def free(self, block: Block) -> None:
+        pass
+
+    @abstractmethod
+    def fork(self, last_block: Block) -> List[Block]:
+        pass
+
+    @property
+    @abstractmethod
+    def all_block_ids(self) -> FrozenSet[int]:
+        pass
+
+    @abstractmethod
+    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+        pass
+
+    @abstractmethod
+    def mark_blocks_as_accessed(self, block_ids: List[int],
+                                now: float) -> None:
+        pass
+
+    @abstractmethod
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
+        pass
+
+    @abstractmethod
+    def get_common_computed_block_ids(
+            self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
