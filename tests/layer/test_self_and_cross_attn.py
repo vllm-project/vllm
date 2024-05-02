@@ -41,6 +41,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
+BATCH_SIZES = [16]
 BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
@@ -242,26 +243,61 @@ def make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width,
     val_cache = torch.rand((num_blocks, num_heads, head_size, block_size),device=device)
     return key_cache,val_cache
 
-def make_block_table_slot_mapping(block_size,batch_size,prompt_lens):
+def num_tokens_to_min_blocks(num_tokens,block_size):
+    return (num_tokens+block_size)//block_size
 
-
-def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0'):
+def make_block_tables_slot_mapping(block_size,prompt_lens):
+    '''
+    Naive block table:
+    * For each batch element...
+    * Block table has 
+    '''
+    block_tables = [list(range(num_tokens_to_min_blocks(prompt_len,block_size))) for prompt_len in prompt_lens]
+    slot_mapping = [[block_tables[bdx][idx//block_size] for idx in range(prompt_len)] for bdx,prompt_len in enumerate(prompt_lens)]
+    return block_tables, slot_mapping
+    
+        
+def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, prompt_lens:List[int], context_lens:List[int], block_tables, slot_mapping, device='cuda:0', kv_cache_dtype='auto'):
     '''
     Assumptions:
     * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
     '''
 
-    stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, device='cuda:0')
+    if is_prompt:
 
-    attn_metadata = AttentionMetadata(
-        num_prefills=num_prefills,
-        slot_mapping=slot_mapping,
-        num_prefill_tokens=num_prefill_tokens,
-        num_decode_tokens=num_decode_tokens,
-        prefill_metadata=prefill_attn_metadata,
-        decode_metadata=decode_attn_metadata,
-        kv_cache_dtype=self.kv_cache_dtype,
-    )
+        num_prefills = len(prompt_lens)
+        num_prefill_tokens = sum(prompt_lens)
+        num_decode_tokens = 0
+
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, slot_mapping, device='cuda:0')
+
+        return AttentionMetadata(
+            num_prefills=num_prefills,
+            slot_mapping=slot_mapping,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            prefill_metadata=stage_metadata,
+            decode_metadata=None,
+            kv_cache_dtype=kv_cache_dtype,
+        )
+
+    else: # not is_prompt
+
+        num_prefills = 0
+        num_prefill_tokens = 0
+        num_decode_tokens = sum(prompt_lens)
+
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, slot_mapping, device='cuda:0')
+
+        return AttentionMetadata(
+            num_prefills=num_prefills,
+            slot_mapping=slot_mapping,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            prefill_metadata=None,
+            decode_metadata=stage_metadata,
+            kv_cache_dtype=kv_cache_dtype,
+        )
 
 def make_attention(num_heads: int, head_size: int, scale: float):
     # Attention operator instance
@@ -274,22 +310,28 @@ def make_attention(num_heads: int, head_size: int, scale: float):
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("block_size",BLOCK_SIZES)
 # @pytest.mark.parametrize("use_alibi", USE_ALIBI)
 # @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 # @pytest.mark.parametrize("dtype", DTYPES)
 # @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 # @pytest.mark.parametrize("seed", SEEDS)
 # @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_prefill_stage_encoder_self_attention(num_heads: int, head_size: int, backend_name: str) -> None:
+def test_prefill_stage_encoder_self_attention(num_heads: int, head_size: int, backend_name: str, batch_size: int, block_size: int) -> None:
     # Attention operator instance
-    batch_size = 16
+    device='cuda:0'
+    kv_cache_dtype='auto'
+    is_prompt = True
+    max_q_prompt_len = 32
+    max_kv_prompt_len = max_q_prompt_len
+    context_lens = None
     scale = float(1.0 / (head_size**0.5))
     attn = make_attention(num_heads, head_size)
     attn_backend = make_backend(backend_name)
-    metadata = make_metadata(attn_backend)
-    max_q_prompt_len = 32
-    max_kv_prompt_len = 64
     query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size)
+    block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,q_prompt_lens)
+    metadata = make_metadata(attn_backend, is_prompt, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype)
     ideal_output = ref_masked_attention(
         query,
         key,
@@ -297,6 +339,7 @@ def test_prefill_stage_encoder_self_attention(num_heads: int, head_size: int, ba
         scale=scale
     )
     packed_query,packed_key,packed_value,q_start_loc_list,kv_start_loc_list = pack_qkv(query,key,value,q_prompt_lens,kv_prompt_lens)
+
 
 
     assert(True)
