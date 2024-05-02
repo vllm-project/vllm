@@ -484,12 +484,6 @@ def _sample_with_torch(
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
     
-    return serialize_sampling_results(
-        /
-    )
-
-def serialize_sampling_results():
-    
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
 

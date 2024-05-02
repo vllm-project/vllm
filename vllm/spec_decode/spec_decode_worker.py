@@ -389,31 +389,44 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         topk_logprobs, topk_indices = target_logprobs.transpose(0, 1).topk(
             k=num_topk,
             dim=-1,
-        )
+        ) 
+        vals = target_logprobs[torch.arange(accepted_token_ids.size(0)).unsqueeze(1), torch.arange(accepted_token_ids.size(1)), accepted_token_ids]
+        vals_expanded = vals.unsqueeze(-1).expand(-1, -1, self._vocab_size)
+
+        ranks = (target_logprobs >= vals_expanded).sum(-1)
+
+
         topk_logprobs_by_step = topk_logprobs.tolist()
         topk_indices_by_step = topk_indices.tolist()
-
         sampler_output_list = []
-        for token_ids_by_step, topk_indices, topk_logprobs in zip(accepted_token_ids_by_step, topk_indices_by_step, topk_logprobs_by_step):
-            if all(token_id == -1 for token_id in token_ids_by_step):
+
+        for step_index, _ in enumerate(accepted_token_ids_by_step):
+            if all(token_id == -1 for token_id in accepted_token_ids_by_step[step_index]):
                 break
 
             step_output_token_ids = []
-            for token_id, seq_id, num_logprob, logprobs, logprob_indices in zip(token_ids_by_step, seq_ids, num_logprobs_per_seq, topk_logprobs, topk_indices):
+
+            for sequence_index, _ in enumerate(accepted_token_ids_by_step[step_index]):
+                token_id = accepted_token_ids_by_step[step_index][sequence_index]
+                token_id_logprob_rank = ranks[sequence_index][step_index].item() # TODO
+                token_id_logprob = vals[sequence_index][step_index].item()
+                seq_id = seq_ids[sequence_index]
+                num_logprobs = num_logprobs_per_seq[sequence_index]
+                topk_token_ids = topk_indices_by_step[step_index][sequence_index][:num_logprobs]
+                topk_logprobs = topk_logprobs_by_step[step_index][sequence_index][:num_logprobs]
 
                 logprobs = {
-                    t: Logprob(
-                        logprob=logprobs[r],
-                        rank=(r + 1),)
-                    for r, t in enumerate(logprob_indices[:num_logprob])
-                }
-
-                # TODO get rank for sampled token.
-                if token_id not in topk_indices:
-                    logprobs[token_id] = Logprob(
-                        logprob=0.1,
-                        rank=10,
+                    token_id: Logprob(
+                        logprob=token_id_logprob,
+                        rank=token_id_logprob_rank,
+                    ),
+                } | {
+                    topk_token_ids[topk_logprob_index]: Logprob(
+                        logprob=topk_logprobs[topk_logprob_index],
+                        rank=topk_logprob_index + 1,
                     )
+                    for topk_logprob_index, _ in enumerate(topk_token_ids)
+                }
 
                 step_output_token_ids.append(
                     SequenceGroupOutput(
@@ -426,8 +439,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                         ],
                         prompt_logprobs=None,
                     ))
-            sampler_output_list.append(
-                SamplerOutput(outputs=step_output_token_ids))
+
+            sampler_output_list.append(SamplerOutput(outputs=step_output_token_ids))
 
         maybe_rejsample_metrics = (
             self._metrics.maybe_collect_rejsample_metrics(k))

@@ -244,6 +244,8 @@ def test_logprobs_temp_1(baseline_llm_generator, test_llm_generator, batch_size:
         len(logprob_dict) for seq_logprobs in spec_batch_logprobs for logprob_dict in seq_logprobs
     ]
 
+    # Assert one of the returned logprobs has > num_logprobs (indicating the sampled token is not
+    # in top-k).
     assert any([num_returned > logprob_rank for num_returned in num_returned_logprobs])
 
 
@@ -257,8 +259,7 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
     the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
     the same when temperature is zero.
     """
-    #temperature = 0.0
-    temperature = 1.0
+    temperature = 0.0
 
     prompts = [
         "Hello, my name is",
