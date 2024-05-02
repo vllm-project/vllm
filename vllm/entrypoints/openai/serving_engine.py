@@ -32,7 +32,9 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, served_model_names: List[str],
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 served_model_names: List[str],
                  lora_modules: Optional[List[LoRAModulePath]],
                  shared_tokenizer: Optional[bool] = True):
         self.engine = engine
