@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
+    VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -140,6 +141,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
     "VLLM_USE_RAY_COMPILED_DAG":
     lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
+
+    # Use dedicated multiprocess context for workers.
+    # Both spawn and fork work
+    "VLLM_WORKER_MULTIPROC_METHOD":
+    lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 }
 
 
