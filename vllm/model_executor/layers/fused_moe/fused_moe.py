@@ -262,7 +262,6 @@ def invoke_fused_moe_kernel(
     num_m_blocks = triton.cdiv(sorted_token_ids.shape[0],
                                config['BLOCK_SIZE_M'])
     num_n_blocks = triton.cdiv(B.shape[1], config['BLOCK_SIZE_N'])
-    config['SPLIT_K'] = 2
     split_k = config['SPLIT_K']
     grid = lambda META: (num_m_blocks * num_n_blocks, split_k)
 
