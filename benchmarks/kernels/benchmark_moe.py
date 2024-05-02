@@ -193,10 +193,10 @@ class BenchmarkWorker:
         for config in search_space:
             # A simple heuristic to prune the search space.
             # TODO(woosuk): Remove this once we have a performance model.
+            split_k = config["SPLIT_K"]
             if split_k > 1:
                 block_size_m = config["BLOCK_SIZE_M"]
                 block_size_n = config["BLOCK_SIZE_N"]
-                split_k = config["SPLIT_K"]
                 num_m_blocks = tl.cdiv(M * topk + E * block_size_m - 1,
                                        block_size_m)
                 num_n_blocks = tl.cdiv(N, block_size_n)
