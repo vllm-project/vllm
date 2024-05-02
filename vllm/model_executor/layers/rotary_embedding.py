@@ -156,6 +156,12 @@ class RotaryEmbedding(nn.Module):
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
 
+    def extra_repr(self) -> str:
+        s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
+        s += f", max_position_embeddings={self.max_position_embeddings}"
+        s += f", base={self.base}, is_neox_style={self.is_neox_style}"
+        return s
+
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.
@@ -431,8 +437,8 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
                               torch.full_like(positions, k)).long()
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
-        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(
-            idx.device)
+        self.long_short_cos_sin_cache: torch.Tensor = (
+            self.long_short_cos_sin_cache.to(idx.device))
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 

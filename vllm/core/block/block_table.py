@@ -41,7 +41,9 @@ class BlockTable:
     ):
         self._block_size = block_size
         self._allocator = block_allocator
-        self._blocks: Optional[List[Block]] = _blocks
+        if _blocks is None:
+            _blocks = []
+        self._blocks: List[Block] = _blocks
 
         self._block_sliding_window = block_sliding_window
         # Use helper method instead of directly calculating, as blocks
@@ -106,7 +108,7 @@ class BlockTable:
             token_ids (List[int]): The sequence of token IDs to be appended.
         """
         assert self._is_allocated, "no blocks have been allocated"
-        assert self._blocks is not None
+        assert len(self._blocks) > 0
 
         if self._block_sliding_window is not None:
             null_block = self._allocator.null_block
@@ -156,6 +158,7 @@ class BlockTable:
         blocks_to_allocate = cdiv(slots_to_allocate, self._block_size)
 
         for _ in range(blocks_to_allocate):
+            assert len(self._blocks) > 0
             self._blocks.append(
                 self._allocator.allocate_mutable(prev_block=self._blocks[-1],
                                                  device=device))
@@ -174,6 +177,7 @@ class BlockTable:
                 the current instance.
         """
         assert self._is_allocated
+        assert len(self._blocks) > 0
         forked_blocks = self._allocator.fork(self._blocks[-1])
         return BlockTable(
             block_size=self._block_size,
@@ -193,10 +197,10 @@ class BlockTable:
         assert self._is_allocated
         for block in self._blocks:
             self._allocator.free(block)
-        self._blocks = None
+        self._blocks = []
 
     @property
-    def physical_block_ids(self) -> List[int]:
+    def physical_block_ids(self) -> List[Optional[int]]:
         """Returns a list of physical block indices for the blocks in the
         BlockTable.
 
@@ -251,7 +255,7 @@ class BlockTable:
 
     def _get_all_token_ids(self) -> List[int]:
         # NOTE: This function is O(seq_len); use sparingly.
-        token_ids = []
+        token_ids: List[int] = []
 
         if not self._is_allocated:
             return token_ids
@@ -263,7 +267,7 @@ class BlockTable:
 
     @property
     def _is_allocated(self) -> bool:
-        return self._blocks is not None
+        return len(self._blocks) > 0
 
     @property
     def _num_empty_slots(self) -> int:

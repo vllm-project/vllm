@@ -8,7 +8,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs
+from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
+                                 SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.output_processor.interfaces import (
@@ -22,7 +23,8 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceStage)
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -96,29 +98,38 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> None:
         logger.info(
-            f"Initializing an LLM engine (v{vllm.__version__}) with config: "
-            f"model={model_config.model!r}, "
-            f"speculative_config={speculative_config!r}, "
-            f"tokenizer={model_config.tokenizer!r}, "
-            f"skip_tokenizer_init={model_config.skip_tokenizer_init}, "
-            f"tokenizer_mode={model_config.tokenizer_mode}, "
-            f"revision={model_config.revision}, "
-            f"tokenizer_revision={model_config.tokenizer_revision}, "
-            f"trust_remote_code={model_config.trust_remote_code}, "
-            f"dtype={model_config.dtype}, "
-            f"max_seq_len={model_config.max_model_len}, "
-            f"download_dir={load_config.download_dir!r}, "
-            f"load_format={load_config.load_format}, "
-            f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"disable_custom_all_reduce="
-            f"{parallel_config.disable_custom_all_reduce}, "
-            f"quantization={model_config.quantization}, "
-            f"enforce_eager={model_config.enforce_eager}, "
-            f"kv_cache_dtype={cache_config.cache_dtype}, "
-            f"quantization_param_path={model_config.quantization_param_path}, "
-            f"device_config={device_config.device}, "
-            f"decoding_config={decoding_config!r}, "
-            f"seed={model_config.seed})")
+            "Initializing an LLM engine (v%s) with config: "
+            "model=%r, speculative_config=%r, tokenizer=%r, "
+            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+            "tokenizer_revision=%s, trust_remote_code=%s, dtype=%s, "
+            "max_seq_len=%d, download_dir=%r, load_format=%s, "
+            "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
+            "quantization=%s, enforce_eager=%s, kv_cache_dtype=%s, "
+            "quantization_param_path=%s, device_config=%s, "
+            "decoding_config=%r, seed=%d)",
+            vllm.__version__,
+            model_config.model,
+            speculative_config,
+            model_config.tokenizer,
+            model_config.skip_tokenizer_init,
+            model_config.tokenizer_mode,
+            model_config.revision,
+            model_config.tokenizer_revision,
+            model_config.trust_remote_code,
+            model_config.dtype,
+            model_config.max_model_len,
+            load_config.download_dir,
+            load_config.load_format,
+            parallel_config.tensor_parallel_size,
+            parallel_config.disable_custom_all_reduce,
+            model_config.quantization,
+            model_config.enforce_eager,
+            cache_config.cache_dtype,
+            model_config.quantization_param_path,
+            device_config.device,
+            decoding_config,
+            model_config.seed,
+        )
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -208,7 +219,8 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model))
+                labels=dict(model_name=model_config.model),
+                max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
 
         # Create sequence output processor, e.g. for beam search or
@@ -237,8 +249,10 @@ class LLMEngine:
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
-            logger.info(f"Overriding {num_gpu_blocks=} with "
-                        f"{num_gpu_blocks_override=}")
+            logger.info(
+                "Overriding num_gpu_blocks=%d with "
+                "num_gpu_blocks_override=%d", num_gpu_blocks,
+                num_gpu_blocks_override)
             num_gpu_blocks = num_gpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -286,6 +300,12 @@ class LLMEngine:
         # This is to ensure that the LLMEngine is not referenced in
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
+
+    def __del__(self):
+        # Shutdown model executor when engine is garbage collected
+        # Use getattr since __init__ can fail before the field is set
+        if model_executor := getattr(self, "model_executor", None):
+            model_executor.shutdown()
 
     def get_tokenizer(self) -> "PreTrainedTokenizer":
         return self.tokenizer.get_lora_tokenizer(None)
@@ -414,9 +434,10 @@ class LLMEngine:
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
         sampling_params = sampling_params.clone()
-        # inject the eos token id into the sampling_params to support min_tokens
+        # Add the eos token id into the sampling_params to support min_tokens
         # processing
-        sampling_params.eos_token_id = seq.eos_token_id
+        if seq.eos_token_id is not None:
+            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
         sampling_params.update_from_generation_config(
             self.generation_config_fields)
 
@@ -450,6 +471,10 @@ class LLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
+    def get_decoding_config(self) -> DecodingConfig:
+        """Gets the decoding configuration."""
+        return self.decoding_config
+
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
         return self.scheduler.get_num_unfinished_seq_groups()
@@ -459,9 +484,12 @@ class LLMEngine:
         return self.scheduler.has_unfinished_seqs()
 
     def _process_model_outputs(
-            self, output: List[SamplerOutput],
-            scheduled_seq_groups: List[SequenceGroup],
-            ignored_seq_groups: List[SequenceGroup]) -> List[RequestOutput]:
+        self,
+        output: List[SamplerOutput],
+        scheduled_seq_groups: List[ScheduledSequenceGroup],
+        ignored_seq_groups: List[SequenceGroup],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> List[RequestOutput]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -475,17 +503,15 @@ class LLMEngine:
             sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
-        for scheduled_seq_group, outputs in zip(scheduled_seq_groups,
-                                                output_by_sequence_group):
+        for scheduled_seq_group, outputs, seq_group_meta in zip(
+                scheduled_seq_groups, output_by_sequence_group,
+                seq_group_metadata_list):
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
 
-            # If all sequences in the sequence group are in DECODE, then we can
-            # process the output tokens. Otherwise, they are (chunked) prefill
-            # samples and should not be processed.
-            stages = [seq.data._stage for seq in seq_group.seqs_dict.values()]
-            if all(stage == SequenceStage.DECODE for stage in stages):
+            self.output_processor.process_prompt_logprob(seq_group, outputs)
+            if seq_group_meta.do_sample:
                 self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
@@ -568,19 +594,21 @@ class LLMEngine:
 
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
-            scheduler_outputs.ignored_seq_groups)
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output=output))
+        self.do_log_stats(scheduler_outputs, output)
 
         return request_outputs
 
-    def do_log_stats(self) -> None:
+    def do_log_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
+            self.stat_logger.log(
+                self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
@@ -596,59 +624,109 @@ class LLMEngine:
         """
         now = time.time()
 
-        # KV Cache Usage in %.
+        # System State
+        #   Scheduler State
+        num_running_sys = len(self.scheduler.running)
+        num_swapped_sys = len(self.scheduler.swapped)
+        num_waiting_sys = len(self.scheduler.waiting)
+
+        # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
-        cpu_cache_usage = 0.
+        cpu_cache_usage_sys = 0.
         if num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
-            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
+            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
-        # Scheduler State
-        num_running = len(self.scheduler.running)
-        num_swapped = len(self.scheduler.swapped)
-        num_waiting = len(self.scheduler.waiting)
+        # Iteration stats
+        num_prompt_tokens_iter = 0
+        num_generation_tokens_iter = 0
+        time_to_first_tokens_iter: List[float] = []
+        time_per_output_tokens_iter: List[float] = []
 
-        # Iteration stats if we have scheduler output.
-        num_prompt_tokens = 0
-        num_generation_tokens = 0
-        time_to_first_tokens = []
-        time_per_output_tokens = []
-        time_e2e_requests = []
+        # Request stats
+        #   Latency
+        time_e2e_requests: List[float] = []
+        #   Metadata
+        num_prompt_tokens_requests: List[int] = []
+        num_generation_tokens_requests: List[int] = []
+        best_of_requests: List[int] = []
+        n_requests: List[int] = []
+        finished_reason_requests: List[str] = []
+
+        # NOTE: This loop assumes prefill seq_groups are before
+        # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.num_prefill_groups > 0
+            num_generation_tokens_from_prefill_groups = 0.
+            if scheduler_outputs.num_prefill_groups > 0 and len(
+                    scheduler_outputs.scheduled_seq_groups
+            ) != scheduler_outputs.num_prefill_groups:
+                print("DETECTED CHUNKED")
 
-            # Number of Tokens.
-            if prompt_run:
-                num_prompt_tokens = sum(
-                    len(scheduled_seq_group.seq_group.prompt_token_ids)
-                    for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups)
-                num_generation_tokens = sum(
-                    scheduled_seq_group.seq_group.num_seqs()
-                    for scheduled_seq_group in
-                    scheduler_outputs.scheduled_seq_groups)
-            else:
-                num_generation_tokens = scheduler_outputs.num_batched_tokens
-
-            # Latency Timings.
-            time_last_iters = []
-            for scheduled_seq_group in scheduler_outputs.scheduled_seq_groups:
+            for idx, scheduled_seq_group in enumerate(
+                    scheduler_outputs.scheduled_seq_groups):
+                group_was_prefill = idx < scheduler_outputs.num_prefill_groups
                 seq_group = scheduled_seq_group.seq_group
-                # Time since last token.
-                # (n.b. updates seq_group.metrics.last_token_time)
-                time_last_iters.append(seq_group.get_last_latency(now))
-                # Time since arrival for all finished requests.
+
+                # NOTE: a seq_group that completed all of its prefill tokens
+                # in the last iteration will have seq_group.is_prefill() = False
+                # with group_was_prefill = True
+                if group_was_prefill:
+                    # Number of prompt tokens.
+                    num_prompt_tokens_iter += (
+                        scheduled_seq_group.token_chunk_size)
+
+                    # If the seq_group just finished the prefill state
+                    # get TTFT.
+                    if not seq_group.is_prefill():
+                        latency = seq_group.get_last_latency(now)
+                        time_to_first_tokens_iter.append(latency)
+
+                        # One generation token per finished prefill.
+                        num_generation_tokens_from_prefill_groups += (
+                            seq_group.num_seqs())
+                else:
+                    # TPOTs.
+                    latency = seq_group.get_last_latency(now)
+                    time_per_output_tokens_iter.append(latency)
+
+                # Because of chunked prefill, we can have a single sequence
+                # group that does multiple prompt_runs. To prevent logging
+                # the same metadata more than once per request, we standardize
+                # on logging request level information for finished requests,
+                # which can only happen once.
                 if seq_group.is_finished():
+                    # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
 
-            time_to_first_tokens = time_last_iters if prompt_run else []
-            time_per_output_tokens = [] if prompt_run else time_last_iters
+                    # Metadata
+                    num_prompt_tokens_requests.append(
+                        len(seq_group.prompt_token_ids))
+                    num_generation_tokens_requests.extend([
+                        seq.get_output_len()
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+                    best_of_requests.append(seq_group.sampling_params.best_of)
+                    n_requests.append(seq_group.sampling_params.n)
+                    finished_reason_requests.extend([
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+
+            # Number of generation tokens.
+            #   num_batched_tokens equals the number of prompt_tokens plus the
+            #   number of decode_tokens in a single iteration. So,
+            #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
+            #   + num_generation_tokens_from_prefill_groups (since we generate
+            #   one token on prefills on iters where the prefill finishes).
+            num_generation_tokens_iter = (
+                scheduler_outputs.num_batched_tokens - num_prompt_tokens_iter +
+                num_generation_tokens_from_prefill_groups)
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
@@ -660,17 +738,32 @@ class LLMEngine:
 
         return Stats(
             now=now,
-            num_running=num_running,
-            num_swapped=num_swapped,
-            num_waiting=num_waiting,
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
-            num_prompt_tokens=num_prompt_tokens,
-            num_generation_tokens=num_generation_tokens,
-            time_to_first_tokens=time_to_first_tokens,
-            time_per_output_tokens=time_per_output_tokens,
-            time_e2e_requests=time_e2e_requests,
+
+            # System stats
+            #   Scheduler State
+            num_running_sys=num_running_sys,
+            num_swapped_sys=num_swapped_sys,
+            num_waiting_sys=num_waiting_sys,
+            #   KV Cache Usage in %
+            gpu_cache_usage_sys=gpu_cache_usage_sys,
+            cpu_cache_usage_sys=cpu_cache_usage_sys,
+
+            # Iteration stats
+            num_prompt_tokens_iter=num_prompt_tokens_iter,
+            num_generation_tokens_iter=num_generation_tokens_iter,
+            time_to_first_tokens_iter=time_to_first_tokens_iter,
+            time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
+
+            # Request stats
+            #   Latency
+            time_e2e_requests=time_e2e_requests,
+            #   Metadata
+            num_prompt_tokens_requests=num_prompt_tokens_requests,
+            num_generation_tokens_requests=num_generation_tokens_requests,
+            best_of_requests=best_of_requests,
+            n_requests=n_requests,
+            finished_reason_requests=finished_reason_requests,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

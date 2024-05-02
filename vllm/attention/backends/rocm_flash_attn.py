@@ -1,10 +1,10 @@
 """Attention layer ROCm GPUs."""
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
@@ -163,8 +163,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         self.use_naive_attn = False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
-        self.use_triton_flash_attn = (os.environ.get(
-            "VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1"))
+        self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                 triton_attention)
@@ -260,36 +259,31 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 # triton attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
-                if self.use_triton_flash_attn or self.use_naive_attn:
+                if self.use_triton_flash_attn:
+                    out, _ = self.attn_func(
+                        query,
+                        key,
+                        value,
+                        None,
+                        prefill_meta.seq_start_loc,
+                        prefill_meta.seq_start_loc,
+                        prefill_meta.max_prompt_len,
+                        prefill_meta.max_prompt_len,
+                        True,
+                        self.scale,
+                    )
+                elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
-                    if self.use_naive_attn:
-                        out = self.attn_func(
-                            query,
-                            key,
-                            value,
-                            prefill_meta.prompt_lens,
-                            self.scale,
-                        )
-                        assert output[:num_prefill_tokens].shape == out.shape
-                        output[:num_prefill_tokens] = out
-                    else:
-                        out, _ = self.attn_func(
-                            query,
-                            key,
-                            value,
-                            None,
-                            prefill_meta.seq_start_loc,
-                            prefill_meta.seq_start_loc,
-                            prefill_meta.max_prompt_len,
-                            prefill_meta.max_prompt_len,
-                            True,
-                            self.scale,
-                        )
-                        assert output[:num_prefill_tokens].shape == out.shape
-                        output[:num_prefill_tokens] = out
+                    out = self.attn_func(
+                        query,
+                        key,
+                        value,
+                        prefill_meta.prompt_lens,
+                        self.scale,
+                    )
                 else:
                     out = self.attn_func(
                         q=query,
@@ -302,8 +296,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         softmax_scale=self.scale,
                         causal=True,
                     )
-                    assert output[:num_prefill_tokens].shape == out.shape
-                    output[:num_prefill_tokens] = out
+
+                # common code for prefill
+                assert output[:num_prefill_tokens].shape == out.shape
+                output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
                 output[:num_prefill_tokens] = PagedAttention.forward_prefix(
@@ -318,6 +314,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     prefill_meta.context_lens,
                     prefill_meta.max_subquery_len,
                     self.alibi_slopes,
+                    self.sliding_window[0],
                 )
 
         if decode_meta := attn_metadata.decode_metadata:

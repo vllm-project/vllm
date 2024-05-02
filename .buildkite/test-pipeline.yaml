@@ -17,6 +17,7 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Core Test
   command: pytest -v -s core
@@ -24,18 +25,23 @@ steps:
 - label: Distributed Comm Ops Test
   command: pytest -v -s test_comm_ops.py
   working_dir: "/vllm-workspace/tests/distributed"
-  num_gpus: 2 # only support 1 or 2 for now.
+  num_gpus: 2
 
 - label: Distributed Tests
   working_dir: "/vllm-workspace/tests/distributed"
-  num_gpus: 2 # only support 1 or 2 for now.
+  num_gpus: 2
   commands:
-  - pytest -v -s test_pynccl.py
   - pytest -v -s test_pynccl_library.py
   - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
   - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
   - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
+
+- label: Distributed Tests (Multiple Groups)
+  working_dir: "/vllm-workspace/tests/distributed"
+  num_gpus: 4
+  commands:
+  - pytest -v -s test_pynccl.py
 
 - label: Engine Test
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
