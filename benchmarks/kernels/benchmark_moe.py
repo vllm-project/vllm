@@ -1,4 +1,5 @@
 import argparse
+import time
 from typing import Dict, List, Tuple
 
 import ray
@@ -7,7 +8,10 @@ import torch.nn.functional as F
 import triton.language as tl
 from transformers import AutoConfig
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+
+logger = init_logger(__name__)
 
 
 def benchmark_config(
@@ -93,10 +97,42 @@ def benchmark_config(
     return avg
 
 
-def get_legacy_config_file_name(E: int, N: int, dtype: Optional[str]) -> str:
-    device_name = torch.cuda.get_device_name().replace(" ", "_")
-    dtype_selector = "" if not dtype else f",dtype={dtype}"
-    return f"E={E},N={N},device_name={device_name}{dtype_selector}.json"
+def get_configs_compute_bound():
+    # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L56
+    return [
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8},
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8},
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 5, "num_warps": 2},
+    ]
+
+
+def get_configs_io_bound():
+    # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L36
+    # NOTE(woosuk): Reduced the search space for faster tuning.
+    # TODO(woosuk): Revert to the original search space and implement a
+    # performance model to prune the search space.
+    configs = []
+    for num_stages in [2, 3, 4, 5, 6]:
+        for block_m in [32]:
+            for block_k in [64]:
+                for block_n in [128, 256]:
+                    num_warps = 2 if block_n <= 64 else 4
+                    configs.append({
+                        "BLOCK_SIZE_M": block_m,
+                        "BLOCK_SIZE_N": block_n,
+                        "BLOCK_SIZE_K": block_k,
+                        "GROUP_SIZE_M": 8,
+                        "num_stages": num_stages,
+                        "num_warps": num_warps,
+                    })
+                    # TODO(woosuk): Support split-K schedules.
+    return configs
 
 
 @ray.remote(num_gpus=1)
@@ -148,6 +184,7 @@ class BenchmarkWorker:
             if kernel_time < best_time:
                 best_time = kernel_time
                 best_config = config
+        logger.info(f"Completed tuning for M={M}")
         return best_config
 
 
@@ -160,14 +197,14 @@ def save_configs(
     dtype: str,
 ) -> None:
     filename = get_config_file_name(E, N, K, topk, dtype)
-    print(f"writing config to file {filename}")
+    logger.info(f"writing config to file {filename}")
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
 
 
 def main(args: argparse.Namespace):
-    print(args)
+    logger.info(args)
 
     config = AutoConfig.from_pretrained(args.model)
     E = config.num_local_experts
@@ -186,20 +223,7 @@ def main(args: argparse.Namespace):
     else:
         batch_sizes = [args.batch_size]
 
-    search_space = [
-        # Compute-bound configurations.
-        # Adapted from https://github.com/openai/triton/blob/main/python/triton/ops/matmul.py#L56
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 4, "num_warps": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32, "GROUP_SIZE_M": 8, "num_stages": 5, "num_warps": 2},
-    ]
-
+    search_space = get_configs_compute_bound() + get_configs_io_bound()
     def _tune(Ms: List[int], N: int, K: int, topk_experts: int):
         outputs = []
         worker_idx = 0
@@ -239,15 +263,21 @@ def main(args: argparse.Namespace):
 
     if args.tune:
         # w1
+        start = time.time()
         _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
+        end = time.time()
+        logger.info(f"W1 tuning took {end - start:.2f} seconds")
         # w2
+        start = time.time()
         _tune(batch_sizes, hidden_size, shard_intermediate_size, 1)
+        end = time.time()
+        logger.info(f"W2 tuning took {end - start:.2f} seconds")
     else:
         # w1
         outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            print(f"W1 batch size: {batch_size}, config: {config}")
-            print(f"Kernel time: {kernel_time:.2f} us")
+            logger.info(f"W1 batch size: {batch_size}, config: {config}")
+            logger.info(f"Kernel time: {kernel_time:.2f} us")
 
         # w2
         outputs = _benchmark(
@@ -257,8 +287,8 @@ def main(args: argparse.Namespace):
             1,
         )
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            print(f"W2 batch size: {batch_size}, config: {config}")
-            print(f"Kernel time: {kernel_time:.2f} us")
+            logger.info(f"W2 batch size: {batch_size}, config: {config}")
+            logger.info(f"Kernel time: {kernel_time:.2f} us")
 
 
 if __name__ == "__main__":
