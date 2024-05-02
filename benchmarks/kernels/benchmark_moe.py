@@ -101,16 +101,16 @@ def benchmark_config(
 def get_configs_compute_bound():
     # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L56
     configs = [
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "num_warps": 8, "num_stages": 3},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "num_warps": 8, "num_stages": 3},
-        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},
-        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32,  "num_warps": 2, "num_stages": 5},
-    ]
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "num_warps": 8, "num_stages": 3},  # noqa: E501
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 128, "num_warps": 8, "num_stages": 3},  # noqa: E501
+        {"BLOCK_SIZE_M": 256, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 256, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 64, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "num_warps": 4, "num_stages": 4},  # noqa: E501
+        {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32,  "num_warps": 2, "num_stages": 5},  # noqa: E501
+    ]  # yapf: disable
     for config in configs:
         config["BLOCK_SIZE_K"] = 32
         config["GROUP_SIZE_M"] = 8
@@ -157,6 +157,7 @@ class BenchmarkWorker:
         torch.set_default_device("cuda")
         torch.cuda.manual_seed_all(seed)
         self.seed = seed
+        self.device_properties = torch.cuda.get_device_properties("cuda")
 
     def benchmark(
         self,
@@ -190,6 +191,22 @@ class BenchmarkWorker:
         best_config = None
         best_time = float("inf")
         for config in search_space:
+            # A simple heuristic to prune the search space.
+            # TODO(woosuk): Remove this once we have a performance model.
+            if split_k > 1:
+                block_size_m = config["BLOCK_SIZE_M"]
+                block_size_n = config["BLOCK_SIZE_N"]
+                split_k = config["SPLIT_K"]
+                num_m_blocks = tl.cdiv(M * topk + E * block_size_m - 1,
+                                       block_size_m)
+                num_n_blocks = tl.cdiv(N, block_size_n)
+                num_total_blocks = num_m_blocks * num_n_blocks * split_k
+
+                num_sms = self.device_properties.multi_processor_count
+                if num_total_blocks > 2 * num_sms:
+                    # Sufficient number of blocks. Split-K is not beneficial.
+                    continue
+
             try:
                 kernel_time = benchmark_config(config,
                                                M,
@@ -198,9 +215,9 @@ class BenchmarkWorker:
                                                K,
                                                topk,
                                                dtype,
-                                               num_iters=10,)
+                                               num_iters=10)
             except triton.runtime.autotuner.OutOfResources:
-                # Some configurations may be invalid due to resource constraints.
+                # Some configurations may be invalid and fail to compile.
                 continue
 
             if kernel_time < best_time:
@@ -220,7 +237,7 @@ def save_configs(
     dtype: str,
 ) -> None:
     filename = get_config_file_name(E, N, K, topk, dtype)
-    logger.info(f"writing config to file {filename}")
+    logger.info("writing config to file %s", filename)
     with open(filename, "w") as f:
         json.dump(configs, f, indent=4)
         f.write("\n")
@@ -287,26 +304,27 @@ def main(args: argparse.Namespace):
 
     w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
-        logger.info(f"Start tuning over {len(search_space)} configurations...")
+        logger.info("Start tuning over %d configurations...",
+                    len(search_space))
 
         # w1
         start = time.time()
         _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
         end = time.time()
-        logger.info(f"W1 tuning took {end - start:.2f} seconds")
+        logger.info("W1 tuning took %.2f seconds", end - start)
 
         # w2
         start = time.time()
         _tune(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
         end = time.time()
-        logger.info(f"W2 tuning took {end - start:.2f} seconds")
+        logger.info("W2 tuning took %.2f seconds", end - start)
     else:
         # w1
         outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
                              hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            logger.info(f"W1 batch size: {batch_size}, config: {config}")
-            logger.info(f"Kernel time: {kernel_time:.2f} us")
+            logger.info("W1 batch size: %d, config: %s", batch_size, config)
+            logger.info("Kernel time: %.2f us", kernel_time)
 
         # w2
         outputs = _benchmark(w2_batch_sizes, hidden_size,
@@ -315,8 +333,8 @@ def main(args: argparse.Namespace):
             # NOTE(woosuk): Here the batch size is the number of input tokens
             # to the MoE block. This is not the batch size of the w2 layer.
             # The actual batch size of the w2 layer is batch_size * topk.
-            logger.info(f"W2 batch size: {batch_size}, config: {config}")
-            logger.info(f"Kernel time: {kernel_time:.2f} us")
+            logger.info("W2 batch size: %d, config: %s", batch_size, config)
+            logger.info("Kernel time: %.2f us", kernel_time)
 
 
 if __name__ == "__main__":
