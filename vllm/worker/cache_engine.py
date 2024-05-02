@@ -48,6 +48,9 @@ class CacheEngine:
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
+        # Zero out the first block in the cache, in case it gets used as
+        # 'null_block' in the CpuGpuBlockAllocator
+        self.attn_backend.zero_block(self.gpu_cache, 0)
 
     def _allocate_kv_cache(
         self,
