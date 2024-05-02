@@ -8,7 +8,7 @@ from typing import Sequence as GenericSequence
 from typing import Set
 
 from vllm.block import BlockTable, PhysicalTokenBlock
-from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
+from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
