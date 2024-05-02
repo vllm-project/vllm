@@ -238,7 +238,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
         sampler_output.sampled_tokens = None
-        sampler_output.spec_logprobs = None
+        sampler_output.logprobs = None
         return [sampler_output]
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -346,7 +346,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
-        logprobs = proposal_scores.spec_logprobs
+        logprobs = proposal_scores.logprobs
 
         # Rearrange so that results are in the order of the original seq group
         # metadata.

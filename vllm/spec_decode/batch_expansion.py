@@ -107,7 +107,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         return SpeculativeScores(
             probs=all_probs,
             token_ids=all_tokens,
-            spec_logprobs=spec_logprobs,
+            logprobs=spec_logprobs,
         )
 
     def _expand_batch(
@@ -338,19 +338,19 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         (spec_sampled_tokens, non_spec_sampled_tokens
          ) = sampler_output.sampled_token_ids.flatten().split(split_sizes)
         (spec_logprobs, non_spec_logprobs,
-         ) = sampler_output.spec_logprobs.split(split_sizes)
+         ) = sampler_output.logprobs.split(split_sizes)
 
         # Convert scores to tensors.
         sampler_output.sampled_token_probs = spec_probs
         sampler_output.sampled_token_ids = spec_sampled_tokens
-        sampler_output.spec_logprobs = spec_logprobs
+        sampler_output.logprobs = spec_logprobs
         target_token_ids, target_probs, target_logprobs = sampler_output_to_torch(
             [sampler_output])
 
         # Convert non-speculative output tokens to tensors.
         sampler_output.sampled_token_probs = non_spec_probs
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
-        sampler_output.spec_logprobs = non_spec_logprobs
+        sampler_output.logprobs = non_spec_logprobs
         non_spec_target_token_ids, non_spec_target_probs, non_spec_target_logprobs = (
             sampler_output_to_torch([sampler_output]))
 

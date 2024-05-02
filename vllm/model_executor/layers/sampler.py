@@ -842,13 +842,13 @@ def _build_sampler_output(
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:
-        sampled_token_probs, spec_logprobs, sampled_token_ids = on_device_tensors
+        sampled_token_probs, logprobs_tensor, sampled_token_ids = on_device_tensors
     else:
-        sampled_token_probs, spec_logprobs, sampled_token_ids = (None, None, None)
+        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None, None)
 
     return SamplerOutput(
         outputs=sampler_output,
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
-        spec_logprobs=spec_logprobs,
+        logprobs=logprobs_tensor,
     )

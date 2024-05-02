@@ -73,7 +73,7 @@ def sampler_output_to_torch(
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_logprobs = torch.stack(
         [
-            sampler_output.spec_logprobs
+            sampler_output.logprobs
             for sampler_output in sampler_output_list
         ],
         dim=0,
