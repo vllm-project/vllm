@@ -339,16 +339,16 @@ def get_default_config(
             'BLOCK_SIZE_M': 16,
             'BLOCK_SIZE_N': 32,
             'BLOCK_SIZE_K': 64,
-            'GROUP_SIZE_M': 1,
             'SPLIT_K': 1,
+            'GROUP_SIZE_M': 1,
         }
     else:
         default_config = {
             'BLOCK_SIZE_M': 64,
             'BLOCK_SIZE_N': 64,
             'BLOCK_SIZE_K': 32,
-            'GROUP_SIZE_M': 8,
             'SPLIT_K': 1,
+            'GROUP_SIZE_M': 8,
         }
     return default_config
 
