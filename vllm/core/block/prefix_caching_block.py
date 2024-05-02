@@ -37,7 +37,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         num_blocks: int,
         block_size: int,
         block_ids: Optional[Iterable[int]] = None,
-        eviction_policy: Optional[EvictionPolicy] = EvictionPolicy.LRU,
+        eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
     ):
         # A mapping of prefix hash to block index. All blocks which have a
         # prefix hash will be in this dict, even if they have refcount 0.
@@ -78,7 +78,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         block_size: int,
         allocator: BlockAllocator,
         block_id: Optional[int] = None,
-        computed: Optional[bool] = False,
+        computed: bool = False,
     ) -> Block:
         # Bind block to self.
         allocator = self
@@ -150,6 +150,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 prev_block=prev_block)
 
             assert block.block_id not in self._blocks
+            assert block.block_id is not None
             self._blocks[block.block_id] = block
             return block
         except BlockAllocator.NoFreeBlocksError:
@@ -189,6 +190,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             assert block.content_hash is None
 
             assert block.block_id not in self._blocks
+            assert block.block_id is not None
             self._blocks[block.block_id] = block
             return block
 
@@ -231,6 +233,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # We have fork case where block would get more than one ref,
             # so we cannot free it from tracking if ref cnt large than 1
             if refcount <= 1:
+                assert block.block_id is not None
                 del self._blocks[block.block_id]
             return self._hashless_allocator.free(block)
 
@@ -239,6 +242,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If no longer used, add the block to the evictor.
         if refcount == 0:
             assert block.content_hash in self._cached_blocks
+            assert block.block_id is not None
             del self._blocks[block.block_id]
             self.evictor.add(block.block_id, block.content_hash,
                              block.num_tokens_total, block.last_accessed)
@@ -425,7 +429,7 @@ class PrefixCachingBlock(Block):
         block_size: int,
         prefix_caching_allocator: BlockAllocator,
         block_id: Optional[int] = None,
-        computed: Optional[bool] = False,
+        computed: bool = False,
     ):
         assert isinstance(prefix_caching_allocator,
                           PrefixCachingBlockAllocator), (
@@ -437,8 +441,8 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash: Optional[int] = None
         self._cached_num_tokens_total: Optional[int] = None
         self._prefix_caching_allocator = prefix_caching_allocator
-        self.last_accessed = _DEFAULT_LAST_ACCESSED_TIME
-        self.computed = computed
+        self._last_accessed: float = _DEFAULT_LAST_ACCESSED_TIME
+        self._computed = computed
 
         self._block = NaiveBlock(
             prev_block=prev_block,
@@ -448,6 +452,22 @@ class PrefixCachingBlock(Block):
             allocator=prefix_caching_allocator,
             _cow_target=self,
         )
+
+    @property
+    def computed(self) -> bool:
+        return self._computed
+
+    @computed.setter
+    def computed(self, value) -> None:
+        self._computed = value
+
+    @property
+    def last_accessed(self) -> float:
+        return self._last_accessed
+
+    @last_accessed.setter
+    def last_accessed(self, last_accessed_ts: float):
+        self._last_accessed = last_accessed_ts
 
     def append_token_ids(self, token_ids: List[int]) -> None:
         """Appends the given token IDs to the block and registers the block as
@@ -496,7 +516,7 @@ class PrefixCachingBlock(Block):
         if self._cached_num_tokens_total is not None:
             return self._cached_num_tokens_total
 
-        _block = self
+        _block: Optional[Block] = self
         self._cached_num_tokens_total = 0
 
         # TODO: current implement here take O(N^2), we expect future

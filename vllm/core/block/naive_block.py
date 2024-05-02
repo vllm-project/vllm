@@ -268,6 +268,22 @@ class NaiveBlock(Block):
         self._token_ids.extend(token_ids)
 
     @property
+    def computed(self) -> bool:
+        raise NotImplementedError
+
+    @computed.setter
+    def computed(self, value) -> None:
+        raise NotImplementedError
+
+    @property
+    def last_accessed(self) -> float:
+        raise NotImplementedError
+
+    @last_accessed.setter
+    def last_accessed(self, last_accessed_ts: float):
+        raise NotImplementedError
+
+    @property
     def block_id(self) -> Optional[int]:
         return self._block_id
 

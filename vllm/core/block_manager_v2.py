@@ -204,7 +204,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_ids = []
             for block_id in block_table.physical_block_ids:
                 block_ids.append(block_id)
-            self.block_allocator.mark_blocks_as_accessed(block_ids, now)
+            self.block_allocator.mark_blocks_as_accessed(
+                block_ids,  # type: ignore
+                now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # The only need for mark block as computed is for prefix caching,

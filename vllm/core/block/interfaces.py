@@ -43,6 +43,27 @@ class Block(ABC):
     def prev_block(self) -> Optional["Block"]:
         pass
 
+    @property
+    @abstractmethod
+    def computed(self) -> bool:
+        raise NotImplementedError
+
+    @computed.setter
+    @abstractmethod
+    def computed(self, value) -> bool:
+        """Should be only used by PrefixCacingAllocator"""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def last_accessed(self) -> float:
+        raise NotImplementedError
+
+    @last_accessed.setter
+    @abstractmethod
+    def last_accessed(self, last_accessed_ts: float):
+        raise NotImplementedError
+
     class Factory(Protocol):
 
         @abstractmethod
@@ -105,11 +126,12 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def mark_blocks_as_accessed(self) -> None:
+    def mark_blocks_as_accessed(self, block_ids: List[int],
+                                now: float) -> None:
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self) -> None:
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
         pass
 
     @abstractmethod
