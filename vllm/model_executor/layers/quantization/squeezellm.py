@@ -4,10 +4,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
 
 
@@ -51,14 +51,17 @@ class SqueezeLLMConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["wbits"])
         return cls(weight_bits)
 
-    def get_linear_method(self) -> "SqueezeLLMLinearMethod":
-        return SqueezeLLMLinearMethod(self)
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+        if isinstance(layer, LinearBase):
+            return SqueezeLLMLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-class SqueezeLLMLinearMethod(LinearMethodBase):
+class SqueezeLLMLinearMethod(QuantizeMethodBase):
     """Linear method for SqueezeLLM.
 
     Args:
@@ -112,10 +115,10 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         layer.register_parameter("lookup_table", lookup_table)
         set_weight_attrs(lookup_table, extra_weight_attrs)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
         lookup_table = layer.lookup_table
         out_shape = x.shape[:-1] + (qweight.shape[-1], )

@@ -69,7 +69,7 @@ class CPUExecutor(ExecutorBase):
         # NOTE: `cpu block` for CPU backend is located on CPU memory but is
         # referred as `gpu block`. Because we want to reuse the existing block
         # management procedure.
-        logger.info(f"# CPU blocks: {num_gpu_blocks}")
+        logger.info("# CPU blocks: %d", num_gpu_blocks)
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(self,
@@ -109,12 +109,14 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
-    ) -> SamplerOutput:
+        num_lookahead_slots: int,
+    ) -> List[SamplerOutput]:
         output = await make_async(self.driver_worker.execute_model)(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
             blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy)
+            blocks_to_copy=blocks_to_copy,
+            num_lookahead_slots=num_lookahead_slots)
         return output
 
     async def check_health_async(self) -> None:

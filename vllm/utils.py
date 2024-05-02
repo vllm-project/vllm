@@ -1,10 +1,13 @@
 import asyncio
+import datetime
 import enum
 import gc
 import glob
 import os
 import socket
 import subprocess
+import tempfile
+import threading
 import uuid
 import warnings
 from collections import defaultdict
@@ -18,7 +21,7 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -222,11 +225,18 @@ def merge_async_iterators(
     ]
 
     async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        try:
+            while not all(finished) or not queue.empty():
+                item = await queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        except (Exception, asyncio.CancelledError) as e:
+            for task in _tasks:
+                # NOTE: Pass the error msg in cancel()
+                # when only Python 3.9+ is supported.
+                task.cancel()
+            raise e
         await asyncio.gather(*_tasks)
 
     return consumer()
@@ -286,8 +296,9 @@ def get_open_port() -> int:
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
-            logger.warning(f"Overwriting environment variable {k} "
-                           f"from '{os.environ[k]}' to '{v}'")
+            logger.warning(
+                "Overwriting environment variable %s "
+                "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
 
 
@@ -307,11 +318,12 @@ def get_nvcc_cuda_version() -> Optional[Version]:
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(f'CUDA_HOME is not found in the environment. '
-                        f'Using {cuda_home} as CUDA_HOME.')
+            logger.info(
+                'CUDA_HOME is not found in the environment. '
+                'Using %s as CUDA_HOME.', cuda_home)
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning('Not found nvcc in %s. Skip cuda version check!',
+                           cuda_home)
             return None
     nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
@@ -596,8 +608,8 @@ def find_nccl_library():
     # manually load the nccl library
     if so_file:
         logger.info(
-            f"Found nccl from environment variable VLLM_NCCL_SO_PATH={so_file}"
-        )
+            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s",
+            so_file)
     else:
         if torch.version.cuda is not None:
             so_file = vllm_nccl_path or find_library("libnccl.so.2")
@@ -605,5 +617,21 @@ def find_nccl_library():
             so_file = find_library("librccl.so.1")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info(f"Found nccl from library {so_file}")
+        logger.info("Found nccl from library %s", so_file)
     return so_file
+
+
+def enable_trace_function_call_for_thread() -> None:
+    """Set up function tracing for the current thread,
+    if enabled via the VLLM_TRACE_FUNCTION environment variable
+    """
+
+    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+        tmp_dir = tempfile.gettempdir()
+        filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                    f"_thread_{threading.get_ident()}_"
+                    f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                filename)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        enable_trace_function_call(log_path)

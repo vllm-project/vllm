@@ -63,7 +63,7 @@ class cmake_build_ext(build_ext):
         num_jobs = os.environ.get("MAX_JOBS", None)
         if num_jobs is not None:
             num_jobs = int(num_jobs)
-            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
+            logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
             try:
                 # os.sched_getaffinity() isn't universally available, so fall
@@ -81,8 +81,9 @@ class cmake_build_ext(build_ext):
             nvcc_threads = os.getenv("NVCC_THREADS", None)
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
-                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number"
-                            " of nvcc threads.")
+                logger.info(
+                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                    nvcc_threads)
             else:
                 nvcc_threads = 1
             num_jobs = max(1, num_jobs // nvcc_threads)
@@ -377,6 +378,7 @@ package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
 if os.environ.get("VLLM_USE_PRECOMPILED"):
+    ext_modules = []
     package_data["vllm"].append("*.so")
 
 setup(
@@ -407,7 +409,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0a1"],
+        "tensorizer": ["tensorizer==2.9.0"],
     },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,

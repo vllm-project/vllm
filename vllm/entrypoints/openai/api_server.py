@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
@@ -12,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
+from starlette.routing import Mount
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -55,8 +57,10 @@ def parse_args():
 
 
 # Add prometheus asgi middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
+route = Mount("/metrics", make_asgi_app())
+# Workaround for 307 Redirect for /metrics
+route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+app.routes.append(route)
 
 
 @app.exception_handler(RequestValidationError)
@@ -148,8 +152,8 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info(f"vLLM API server version {vllm.__version__}")
-    logger.info(f"args: {args}")
+    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("args: %s", args)
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
