@@ -87,9 +87,11 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
     # This is done in a grouped ordering to promote L2 data reuse.
-    pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_mn = num_pid_m * num_pid_n
+    # The leading dimension is split-k.
+    pid = tl.program_id(axis=0) % num_pid_mn
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -122,7 +124,7 @@ def fused_moe_kernel(
     # ----------------------------------------------------------
     # Split-K
     if SPLIT_K > 1:
-        pid_z = tl.program_id(axis=1)
+        pid_z = tl.program_id(axis=0) // num_pid_mn
         # Move the starting pointers to the correct position.
         start_k = pid_z * BLOCK_SIZE_K
         a_ptrs += start_k * stride_ak
@@ -276,7 +278,7 @@ def invoke_fused_moe_kernel(
     num_n_blocks = triton.cdiv(B.shape[1], config['BLOCK_SIZE_N'])
     split_k = config['SPLIT_K']
     even_k = (B.shape[2] % (config['BLOCK_SIZE_K'] * split_k)) == 0
-    grid = lambda META: (num_m_blocks * num_n_blocks, split_k)
+    grid = lambda META: (split_k * num_m_blocks * num_n_blocks, )
 
     if split_k == 1:
         D = C.unsqueeze(dim=2)
