@@ -17,7 +17,8 @@ from .conftest import get_logprobs_from_llm_generator
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
+        "max_logprobs": 6,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -30,7 +31,7 @@ from .conftest import get_logprobs_from_llm_generator
     "output_len",
     [
         # Use smaller output len for fast test.
-        32,
+        7,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
@@ -42,6 +43,47 @@ def test_logprobs_equality(baseline_llm_generator, test_llm_generator,
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+        "max_logprobs": 6,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-160m",
+    "num_speculative_tokens": 3,
+}])
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("num_logprobs", [6])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        7,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_diff_num_logprobs(baseline_llm_generator, test_llm_generator,
+                           batch_size: int, output_len: int,
+                           num_logprobs: int):
+    """Verify output logprobs are equal with and without spec decode.
+    This specifies a number of logprobs >1.
+    """
+    run_greedy_logprobs_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True,
+                                         logprob_rank=num_logprobs)
 
 
 @pytest.mark.parametrize(
@@ -285,7 +327,7 @@ def run_greedy_logprobs_correctness_test(baseline_llm_generator,
             # Assert each logprob/token id is correct, keyed by rank.
             for rank in sorted(set(spec_rank_to_token_id.keys())):
                 assert spec_rank_to_token_id[
-                    rank] == baseline_rank_to_token_id[rank]
+                    rank] == baseline_rank_to_token_id[rank], f"{rank}"
                 assert math.isclose(
                     a=spec_rank_to_logprob[rank],
                     b=baseline_rank_to_logprob[rank],
