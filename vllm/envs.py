@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
+    VLLM_ATTENTION_BACKEND: Optional[str] = None
+    VLLM_CPU_KVCACHE_SPACE: int = 0
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -111,8 +113,26 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
     "VLLM_LOGGING_CONFIG_PATH":
     lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+
+    # Trace function calls
+    # If set to 1, vllm will trace function calls
+    # Useful for debugging
     "VLLM_TRACE_FUNCTION":
     lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+
+    # Backend for attention computation
+    # Available options:
+    # - "TORCH_SDPA": use torch.nn.MultiheadAttention
+    # - "FLASH_ATTN": use FlashAttention
+    # - "XFORMERS": use XFormers
+    # - "ROCM_FLASH": use ROCmFlashAttention
+    "VLLM_ATTENTION_BACKEND":
+    lambda: os.getenv("VLLM_ATTENTION_BACKEND", None),
+
+    # CPU key-value cache space
+    # default is 4GB
+    "VLLM_CPU_KVCACHE_SPACE":
+    lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
 }
 
 
