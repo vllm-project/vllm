@@ -24,7 +24,7 @@ constexpr c10::Float8_e4m3fn FP8_E4M3_MAX = std::numeric_limits<c10::Float8_e4m3
 template<typename scalar_t>
 __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(const scalar_t val, const float scale) {
   float x = static_cast<float>(val) / scale;
-  float r = std::max(FP8_E4M3_MIN, std::min(x, FP8_E4M3_MAX));
+  float r = max(FP8_E4M3_MIN, min(x, FP8_E4M3_MAX));
   return static_cast<c10::Float8_e4m3fn>(r);
 }
 
