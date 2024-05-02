@@ -55,6 +55,7 @@ class EngineArgs:
     ray_workers_use_nsight: bool = False
     forced_num_gpu_blocks: Optional[int] = None
     num_lookahead_slots: int = 0
+    preemption_mode: Optional[str] = None
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -63,7 +64,6 @@ class EngineArgs:
     image_feature_size: Optional[int] = None
     scheduler_delay_factor: float = 0.0
     enable_chunked_prefill: bool = False
-    preemption_mode: Optional[str] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -372,6 +372,13 @@ class EngineArgs:
             default=False,
             help='If True, the prefill requests can be chunked based on the '
             'max_num_batched_tokens')
+        parser.add_argument(
+            '--preemption_mode',
+            type=str,
+            default=None,
+            help='If \'recompute\', the engine performs preemption by block '
+            'swapping; If \'swap\', the engine performs preemption by block '
+            'swapping.')
         return parser
 
     @classmethod
