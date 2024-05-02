@@ -612,6 +612,11 @@ class SequenceGroupMetadata:
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
 
+        # The number of speculative tokens adopted in this request.
+        # None means specuative decoding is not used.
+        # Zero means speculative decoding is disabled for some reasons.
+        self._num_speculative_tokens = None
+
         if self._token_chunk_size is None:
             if is_prompt:
                 self._token_chunk_size = list(seq_data.values())[0].get_len()

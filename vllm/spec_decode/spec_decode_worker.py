@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -54,7 +54,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def create_worker(
         cls,
         scorer_worker: WorkerBase,
-        draft_worker_kwargs,
+        draft_worker_kwargs: Dict[str, Any],
+        disable_at_queue_size: Optional[int],
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -75,6 +76,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
+            disable_at_queue_size=disable_at_queue_size,
             # TODO(cade) disable strict mode for speedup.
             rejection_sampler=RejectionSampler(strict_mode=True),
         )
@@ -84,6 +86,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: WorkerBase,
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
+        disable_at_queue_size: Optional[int] = None,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
     ):
         """
@@ -97,11 +100,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 Worker.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
+            disable_at_queue_size: If the queue size is larger than this,
+                disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
                 for testing purposes.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
+        self.disable_at_queue_size = disable_at_queue_size or float("inf")
         self.rejection_sampler = rejection_sampler
 
         self._metrics = AsyncMetricsCollector(
@@ -199,27 +205,36 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
+        # When the queue size is too large, disable speculative decoding
+        # to stop trading off throughput for latency.
+        disable_all = (execute_model_req.running_queue_size >=
+                       self.disable_at_queue_size)
+        if disable_all:
+            for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+                seq_group_metadata._num_speculative_tokens = 0
+
         # If no spec tokens, call the proposer and scorer workers normally.
-        # Used for prefill.
+        # This happens for prefill, or when the spec decode is disabled
+        # for this batch.
         if execute_model_req.num_lookahead_slots == 0 or len(
                 execute_model_req.seq_group_metadata_list) == 0:
-            return self._run_no_spec(execute_model_req)
+            return self._run_no_spec(execute_model_req,
+                                     skip_proposer=disable_all)
 
         return self._run_speculative_decoding_step(execute_model_req)
 
     @nvtx_range("spec_decode_worker._run_no_spec")
-    def _run_no_spec(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        """Run a prefill step, without any speculation. The input is sent to the
-        proposer and scorer model so that the KV cache is consistent between the
-        two.
+    def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
+                     skip_proposer: bool) -> List[SamplerOutput]:
+        """Run a prefill step, without any speculation. The input is sent to
+        the proposer and scorer model so that the KV cache is consistent
+        between the two. When skip_proposer is True, the proposer model is
+        not called, meaning that the kv-cache in proposer for requests is not
+        updated, so they cannot enable spec decode in the rest decoding.
         """
-        #logger.info("run proposer worker no spec")
+        if not skip_proposer:
+            self.proposer_worker.execute_model(execute_model_req)
 
-        self.proposer_worker.execute_model(execute_model_req)
-
-        #logger.info("run target worker no spec")
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
@@ -244,22 +259,18 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sequence.
         """
 
-        #logger.info("get spec proposals")
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
 
-        #logger.info("score proposals")
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
             proposals,
         )
 
-        #logger.info("verify proposals")
         accepted_token_ids, target_logprobs = self._verify_tokens(
             execute_model_req.seq_group_metadata_list, proposal_scores,
             proposals, execute_model_req.num_lookahead_slots)
 
-        #logger.info("create output list")
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
