@@ -119,9 +119,9 @@ def get_configs_io_bound():
     # performance model to prune the search space.
     configs = []
     for num_stages in [2, 3, 4, 5, 6]:
-        for block_m in [32]:
-            for block_k in [64]:
-                for block_n in [128, 256]:
+        for block_m in [16, 32]:
+            for block_k in [32, 64]:
+                for block_n in [32, 64, 128, 256]:
                     num_warps = 2 if block_n <= 64 else 4
                     configs.append({
                         "BLOCK_SIZE_M": block_m,
@@ -261,6 +261,7 @@ def main(args: argparse.Namespace):
             worker_idx = (worker_idx + 1) % num_gpus
         return ray.get(outputs)
 
+    w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
         # w1
         start = time.time()
@@ -269,7 +270,7 @@ def main(args: argparse.Namespace):
         logger.info(f"W1 tuning took {end - start:.2f} seconds")
         # w2
         start = time.time()
-        _tune(batch_sizes, hidden_size, shard_intermediate_size, 1)
+        _tune(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
         end = time.time()
         logger.info(f"W2 tuning took {end - start:.2f} seconds")
     else:
@@ -280,12 +281,7 @@ def main(args: argparse.Namespace):
             logger.info(f"Kernel time: {kernel_time:.2f} us")
 
         # w2
-        outputs = _benchmark(
-            [batch_size * topk for batch_size in batch_sizes],
-            hidden_size,
-            shard_intermediate_size,
-            1,
-        )
+        outputs = _benchmark(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             logger.info(f"W2 batch size: {batch_size}, config: {config}")
             logger.info(f"Kernel time: {kernel_time:.2f} us")
