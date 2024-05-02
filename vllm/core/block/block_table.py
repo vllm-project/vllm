@@ -78,8 +78,8 @@ class BlockTable:
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
-        assert token_ids
         assert not self._is_allocated
+        assert token_ids
         self._blocks = self._allocate_blocks_for_token_ids(prev_block=None,
                                                            token_ids=token_ids,
                                                            device=device)
