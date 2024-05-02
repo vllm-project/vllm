@@ -1,10 +1,13 @@
 import asyncio
+import datetime
 import enum
 import gc
 import glob
 import os
 import socket
 import subprocess
+import tempfile
+import threading
 import uuid
 import warnings
 from collections import defaultdict
@@ -18,7 +21,8 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
-from vllm.logger import init_logger
+import vllm.envs as envs
+from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
 logger = init_logger(__name__)
@@ -171,7 +175,7 @@ def get_vllm_instance_id():
     Instance id represents an instance of the VLLM. All processes in the same
     instance should have the same instance id.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -222,18 +226,25 @@ def merge_async_iterators(
     ]
 
     async def consumer():
-        while not all(finished) or not queue.empty():
-            item = await queue.get()
-            if isinstance(item, Exception):
-                raise item
-            yield item
+        try:
+            while not all(finished) or not queue.empty():
+                item = await queue.get()
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        except (Exception, asyncio.CancelledError) as e:
+            for task in _tasks:
+                # NOTE: Pass the error msg in cancel()
+                # when only Python 3.9+ is supported.
+                task.cancel()
+            raise e
         await asyncio.gather(*_tasks)
 
     return consumer()
 
 
 def get_ip() -> str:
-    host_ip = os.environ.get("HOST_IP")
+    host_ip = envs.VLLM_HOST_IP
     if host_ip:
         return host_ip
 
@@ -259,7 +270,8 @@ def get_ip() -> str:
 
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable HOST_IP.",
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
 
@@ -286,8 +298,9 @@ def get_open_port() -> int:
 def update_environment_variables(envs: Dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
-            logger.warning(f"Overwriting environment variable {k} "
-                           f"from '{os.environ[k]}' to '{v}'")
+            logger.warning(
+                "Overwriting environment variable %s "
+                "from '%s' to '%s'", k, os.environ[k], v)
         os.environ[k] = v
 
 
@@ -303,15 +316,16 @@ def cdiv(a: int, b: int) -> int:
 
 @lru_cache(maxsize=None)
 def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
+    cuda_home = envs.CUDA_HOME
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(f'CUDA_HOME is not found in the environment. '
-                        f'Using {cuda_home} as CUDA_HOME.')
+            logger.info(
+                'CUDA_HOME is not found in the environment. '
+                'Using %s as CUDA_HOME.', cuda_home)
         else:
-            logger.warning(
-                f'Not found nvcc in {cuda_home}. Skip cuda version check!')
+            logger.warning('Not found nvcc in %s. Skip cuda version check!',
+                           cuda_home)
             return None
     nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
@@ -553,29 +567,74 @@ def nccl_integrity_check(filepath):
     return version.value
 
 
+@lru_cache(maxsize=None)
+def find_library(lib_name: str) -> str:
+    """
+    Find the library file in the system.
+    `lib_name` is full filename, with both prefix and suffix.
+    This function resolves `lib_name` to the full path of the library.
+    """
+    # Adapted from https://github.com/openai/triton/blob/main/third_party/nvidia/backend/driver.py#L19 # noqa
+    # According to https://en.wikipedia.org/wiki/Filesystem_Hierarchy_Standard
+    # `/sbin/ldconfig` should exist in all Linux systems.
+    # `/sbin/ldconfig` searches the library in the system
+    libs = subprocess.check_output(["/sbin/ldconfig", "-p"]).decode()
+    # each line looks like the following:
+    # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
+    locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
+    # `LD_LIBRARY_PATH` searches the library in the user-defined paths
+    env_ld_library_path = envs.LD_LIBRARY_PATH
+    if not locs and env_ld_library_path:
+        locs = [
+            os.path.join(dir, lib_name)
+            for dir in env_ld_library_path.split(":")
+            if os.path.exists(os.path.join(dir, lib_name))
+        ]
+    if not locs:
+        raise ValueError(f"Cannot find {lib_name} in the system.")
+    return locs[0]
+
+
 def find_nccl_library():
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+    so_file = envs.VLLM_NCCL_SO_PATH
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
     if torch.version.cuda is not None:
         cuda_major = torch.version.cuda.split(".")[0]
         path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
         files = glob.glob(path)
         vllm_nccl_path = files[0] if files else None
 
     # manually load the nccl library
     if so_file:
         logger.info(
-            f"Found nccl from environment variable VLLM_NCCL_SO_PATH={so_file}"
-        )
+            "Found nccl from environment variable VLLM_NCCL_SO_PATH=%s",
+            so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or "libnccl.so.2"
+            so_file = vllm_nccl_path or find_library("libnccl.so.2")
         elif torch.version.hip is not None:
-            so_file = "librccl.so.1"
+            so_file = find_library("librccl.so.1")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
-        logger.info(f"Found nccl from library {so_file}")
+        logger.info("Found nccl from library %s", so_file)
     return so_file
+
+
+def enable_trace_function_call_for_thread() -> None:
+    """Set up function tracing for the current thread,
+    if enabled via the VLLM_TRACE_FUNCTION environment variable
+    """
+
+    if envs.VLLM_TRACE_FUNCTION:
+        tmp_dir = tempfile.gettempdir()
+        filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                    f"_thread_{threading.get_ident()}_"
+                    f"at_{datetime.datetime.now()}.log").replace(" ", "_")
+        log_path = os.path.join(tmp_dir, "vllm", get_vllm_instance_id(),
+                                filename)
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        enable_trace_function_call(log_path)

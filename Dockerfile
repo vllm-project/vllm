@@ -1,6 +1,10 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
+# Please update any changes made here to
+# docs/source/dev/dockerfile/dockerfile.rst and
+# docs/source/assets/dev/dockerfile-stages-dependency.png
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
@@ -85,7 +89,7 @@ FROM dev as flash-attn-builder
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 # flash attention version
-ARG flash_attn_version=v2.5.6
+ARG flash_attn_version=v2.5.8
 ENV FLASH_ATTN_VERSION=${flash_attn_version}
 
 WORKDIR /usr/src/flash-attention-v2

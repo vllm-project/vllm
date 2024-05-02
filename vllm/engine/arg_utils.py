@@ -52,6 +52,7 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
@@ -73,6 +74,9 @@ class EngineArgs:
     # Speculative decoding configuration.
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
+    speculative_max_model_len: Optional[int] = None
+    ngram_prompt_lookup_max: Optional[int] = None
+    ngram_prompt_lookup_min: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -237,7 +241,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32, 128],
+                            choices=[8, 16, 32],
                             help='Token block size for contiguous chunks of '
                             'tokens.')
 
@@ -375,6 +379,14 @@ class EngineArgs:
             help=('Maximum number of LoRAs to store in CPU memory. '
                   'Must be >= than max_num_seqs. '
                   'Defaults to max_num_seqs.'))
+        parser.add_argument(
+            '--fully-sharded-loras',
+            action='store_true',
+            help=('By default, only half of the LoRA computation is '
+                  'sharded with tensor parallelism. '
+                  'Enabling this will use the fully sharded layers. '
+                  'At high sequence length, max rank or '
+                  'tensor parallel size, this is likely faster.'))
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
@@ -420,16 +432,38 @@ class EngineArgs:
         parser.add_argument(
             '--speculative-model',
             type=str,
-            default=None,
+            default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
 
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
-            default=None,
+            default=EngineArgs.num_speculative_tokens,
             help='The number of speculative tokens to sample from '
             'the draft model in speculative decoding.')
+
+        parser.add_argument(
+            '--speculative-max-model-len',
+            type=str,
+            default=EngineArgs.speculative_max_model_len,
+            help='The maximum sequence length supported by the '
+            'draft model. Sequences over this length will skip '
+            'speculation.')
+
+        parser.add_argument(
+            '--ngram-prompt-lookup-max',
+            type=int,
+            default=EngineArgs.ngram_prompt_lookup_max,
+            help='Max size of window for ngram prompt lookup in speculative '
+            'decoding.')
+
+        parser.add_argument(
+            '--ngram-prompt-lookup-min',
+            type=int,
+            default=EngineArgs.ngram_prompt_lookup_min,
+            help='Min size of window for ngram prompt lookup in speculative '
+            'decoding.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=str,
@@ -481,6 +515,11 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_max_model_len=self.speculative_max_model_len,
+            enable_chunked_prefill=self.enable_chunked_prefill,
+            use_v2_block_manager=self.use_v2_block_manager,
+            ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
         )
 
         scheduler_config = SchedulerConfig(
@@ -497,6 +536,7 @@ class EngineArgs:
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
+            fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras

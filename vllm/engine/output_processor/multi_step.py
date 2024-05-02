@@ -1,4 +1,4 @@
-from typing import Callable, Iterable, List
+from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
 
@@ -11,6 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (Logprob, Sequence, SequenceGroup,
                            SequenceGroupOutput, SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self,
         detokenizer: Detokenizer,
         scheduler: Scheduler,
-        seq_counter: Iterable[int],
+        seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], PreTrainedTokenizer],
         stop_checker: StopChecker,
     ):
@@ -42,6 +43,15 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.seq_counter = seq_counter
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
+
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        # TODO(sang): Prompt logprob currently not implemented in multi step
+        # workers.
+        logger.warning(
+            "Prompt logprob is not supported by multi step workers. "
+            "(e.g., speculative decode uses multi step workers).")
+        pass
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
