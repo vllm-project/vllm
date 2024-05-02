@@ -107,6 +107,8 @@ mypy vllm/worker --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
 mypy vllm/model_executor  --config-file pyproject.toml
 mypy vllm/lora --config-file pyproject.toml
+mypy vllm/logging --config-file pyproject.toml
+mypy vllm/model_executor --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
