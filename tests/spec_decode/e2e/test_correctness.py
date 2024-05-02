@@ -35,7 +35,7 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
-from .conftest import get_output_from_llm_generator, get_logprobs_from_llm_generator
+from .conftest import get_output_from_llm_generator
 
 
 @pytest.mark.parametrize(

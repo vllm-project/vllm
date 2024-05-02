@@ -108,14 +108,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         for output_token_id, output_logprob in zip(output_token_ids, output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
-                # TODO emit logprobs in multi-step decoding.
-                # TODO get correct rank
                 logprobs=output_logprob,
-                #{output_token_id:Logprob(
-                #    logprob=0.1,
-                #    rank=1,
-                #    decoded_token="todo")
-                #    },
             )
 
             new_char_count = 0

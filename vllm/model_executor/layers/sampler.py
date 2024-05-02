@@ -87,7 +87,7 @@ class Sampler(nn.Module):
         logprobs = torch.log_softmax(logits, dim=-1, dtype=torch.float)
 
         # Sample the next tokens.
-        sample_results, maybe_sampled_tokens_tensor, maybe_logprobs_tensor = _sample(
+        sample_results, maybe_sampled_tokens_tensor = _sample(
             probs,
             logprobs,
             sampling_metadata,
@@ -98,11 +98,7 @@ class Sampler(nn.Module):
 
         if self.include_gpu_probs_tensor:
             assert maybe_sampled_tokens_tensor is not None
-            sampled_tokens_tensor = maybe_sampled_tokens_tensor
-
-            assert maybe_logprobs_tensor is not None
-            spec_logprobs_tensor = maybe_logprobs_tensor
-            on_device_tensors = (probs, sampled_tokens_tensor, spec_logprobs_tensor)
+            on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
         else:
             on_device_tensors = None
 
@@ -422,9 +418,7 @@ def _sample_with_torch(
                                                1,
                                                dtype=torch.long,
                                                device=logprobs.device)
-        spec_logprobs = logprobs.clone()
     else:
-        spec_logprobs = None
         sampled_token_ids_tensor = None
 
     # Counterintiutively, having two loops here is actually faster.
@@ -483,7 +477,7 @@ def _sample_with_torch(
             beam_search_logprobs = logprobs[sample_indices]
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
-    
+
     # GPU<->CPU sync happens in the loop below.
     # This also converts the sample output to Python objects.
 
@@ -507,7 +501,7 @@ def _sample_with_torch(
         sample_results_dict[i]
         for i in range(len(sampling_metadata.seq_groups))
     ]
-    return sample_results, sampled_token_ids_tensor, spec_logprobs
+    return sample_results, sampled_token_ids_tensor
 
 
 def _sample_with_triton_kernel(
@@ -810,26 +804,16 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     has implications on the overall design of the sampler, e.g. how to record
     accurate logprobs for the user, so this improvement is deferred to later.
     """
-    #logprobs[sample_indices, :] = -float('inf')
-    #logprobs[sample_indices, greedy_samples] = 0.0
+    # NOTE: logprobs are not modified so they can be returned to the user.
     probs[sample_indices, :] = 0
     probs[sample_indices, greedy_samples] = 1.0
-
-"""
-
-sample_results -- what is?
-[(next_token_ids, parent_ids)]
-
-Can pass in seq groups, prompt logprobs=None, sample logprobs (need to construct)
-
-"""
 
 def _build_sampler_output(
     sample_results: List[Tuple[List[int], List[int]]],
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
-    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -858,9 +842,9 @@ def _build_sampler_output(
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:
-        sampled_token_probs, sampled_token_ids, spec_logprobs = on_device_tensors
+        sampled_token_probs, spec_logprobs, sampled_token_ids = on_device_tensors
     else:
-        sampled_token_probs, sampled_token_ids, spec_logprobs = (None, None, None)
+        sampled_token_probs, spec_logprobs, sampled_token_ids = (None, None, None)
 
     return SamplerOutput(
         outputs=sampler_output,

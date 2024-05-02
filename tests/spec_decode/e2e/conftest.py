@@ -68,13 +68,14 @@ def get_output_from_llm_generator(
 
 def get_logprobs_from_llm_generator(
         llm_generator, prompts,
-        sampling_params) -> List[Dict[int, Logprob]]:
+        sampling_params) -> List[List[Dict[int, Logprob]]]:
+    """Returns a dict of (token_id: Logprob) for each generated position, for
+    each sequence in the batch.
+    """
     tokens = []
     token_ids = []
     for llm in llm_generator():
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        # outputs[0].outputs[0].logprobs[0]
-        # {590: Logprob(logprob=-4.327400207519531, rank=1, decoded_token=' my')}
         logprobs = [output.outputs[0].logprobs[:] for output in outputs]
         del llm
 
