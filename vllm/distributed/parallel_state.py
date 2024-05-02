@@ -133,7 +133,7 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_DEVICE_GROUP
+    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
     assert _TP_DEVICE_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
