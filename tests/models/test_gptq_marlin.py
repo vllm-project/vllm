@@ -28,24 +28,17 @@ gptq_marlin_not_supported = (
     capability < QUANTIZATION_METHODS["gptq_marlin"].get_min_capability())
 
 MODELS = [
-    # 4-bit, act_order==False, group_size=channelwise
+    # act_order==False, group_size=channelwise
     ("robertgshaw2/zephyr-7b-beta-channelwise-gptq", "main"),
-    # 4-bit, act_order==False, group_size=128
+    # act_order==False, group_size=128
     ("TheBloke/Llama-2-7B-GPTQ", "main"),
 
-    # 4-bit, act_order==True, group_size=128
+    # act_order==True, group_size=128
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "main"),
-    # 4-bit, act_order==True, group_size=64
+    # act_order==True, group_size=64
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-64g-actorder_True"),
-    # 4-bit, act_order==True, group_size=32
+    # act_order==True, group_size=32
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-4bit-32g-actorder_True"),
-
-    # 8-bit, act_order==True, group_size=channelwise
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit--1g-actorder_True"),
-    # 8-bit, act_order==True, group_size=128
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-128g-actorder_True"),
-    # 8-bit, act_order==True, group_size=32
-    ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-32g-actorder_True"),
 ]
 
 
@@ -72,7 +65,8 @@ def test_models(
                                     dtype=dtype,
                                     quantization="marlin",
                                     max_model_len=MAX_MODEL_LEN,
-                                    tensor_parallel_size=1)
+                                    tensor_parallel_size=1,
+                                    disable_custom_all_reduce=True)
 
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
@@ -84,7 +78,8 @@ def test_models(
                              dtype=dtype,
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
-                             tensor_parallel_size=1)
+                             tensor_parallel_size=1,
+                             disable_custom_all_reduce=True)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)

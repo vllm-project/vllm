@@ -1280,7 +1280,6 @@ thread_config_t thread_configs[] = {
 
     // thread_k, thread_n, num_threads
     {64, 256, 256}, // Default (max cache usage)
-    {32, 512, 256}, // Increase N, less cache usage
     {64, 128, 128}, // Reduce N, reduce warps
     {128, 64, 128}, // Reduce N more, but increase K
 
