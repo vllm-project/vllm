@@ -65,6 +65,7 @@ Documentation
    getting_started/neuron-installation
    getting_started/cpu-installation
    getting_started/quickstart
+   getting_started/examples/examples_index
 
 .. toctree::
    :maxdepth: 1
@@ -101,6 +102,7 @@ Documentation
    dev/sampling_params
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/dockerfile/dockerfile
 
 Indices and tables
 ==================

@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import inspect
 import os
+import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
@@ -12,12 +13,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
+from starlette.routing import Mount
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ChatCompletionResponse,
                                               CompletionRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -26,8 +29,8 @@ from vllm.usage.usage_lib import UsageContext
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-openai_serving_chat: OpenAIServingChat = None
-openai_serving_completion: OpenAIServingCompletion = None
+openai_serving_chat: OpenAIServingChat
+openai_serving_completion: OpenAIServingCompletion
 logger = init_logger(__name__)
 
 
@@ -54,8 +57,10 @@ def parse_args():
 
 
 # Add prometheus asgi middleware to route /metrics requests
-metrics_app = make_asgi_app()
-app.mount("/metrics", metrics_app)
+route = Mount("/metrics", make_asgi_app())
+# Workaround for 307 Redirect for /metrics
+route.path_regex = re.compile('^/metrics(?P<path>.*)$')
+app.routes.append(route)
 
 
 @app.exception_handler(RequestValidationError)
@@ -95,6 +100,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
         return StreamingResponse(content=generator,
                                  media_type="text/event-stream")
     else:
+        assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content=generator.model_dump())
 
 
@@ -146,8 +152,8 @@ if __name__ == "__main__":
             raise ValueError(f"Invalid middleware {middleware}. "
                              f"Must be a function or a class.")
 
-    logger.info(f"vLLM API server version {vllm.__version__}")
-    logger.info(f"args: {args}")
+    logger.info("vLLM API server version %s", vllm.__version__)
+    logger.info("args: %s", args)
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
