@@ -236,8 +236,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         return self._hashless_allocator.get_num_free_blocks() + len(
             self._unused_cached_blocks)
 
-    def get_device_related_block_id(self, absolute_id: int) -> int:
-        """Returns the relative block id on certain block allocator
+    def get_physical_block_id(self, absolute_id: int) -> int:
+        """Returns the zero-offset block id on certain block allocator
         given the absolute block id.
 
         Args:
@@ -245,7 +245,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 in whole allocator.
 
         Returns:
-            int: The relative block id on certain device.
+            int: The rzero-offset block id on certain device.
         """
         return sorted(self._all_block_indices).index(absolute_id)
 

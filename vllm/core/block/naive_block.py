@@ -142,8 +142,8 @@ class NaiveBlockAllocator(BlockAllocator):
         if refcount == 0:
             self._free_block_indices.add(block_id)
 
-    def get_device_related_block_id(self, absolute_id: int) -> int:
-        """Returns the relative block id on certain block allocator
+    def get_physical_block_id(self, absolute_id: int) -> int:
+        """Returns the zero-offset block id on certain block allocator
         given the absolute block id.
 
         Args:
@@ -151,7 +151,7 @@ class NaiveBlockAllocator(BlockAllocator):
             in whole allocator.
 
         Returns:
-            int: The relative block id on certain device.
+            int: The zero-offset block id on certain device.
         """
         return sorted(self._all_block_indices).index(absolute_id)
 
@@ -225,6 +225,7 @@ class NaiveBlockAllocator(BlockAllocator):
         # needed.
         old_block_set = set()
         new_block_count = 0
+        # TODO(cade): make sure the logic is correct and clean it up.
         for block in blocks:
             if not block.is_full and num_lookahead_slots != 0:
                 if block.num_empty_slots >= num_lookahead_slots:

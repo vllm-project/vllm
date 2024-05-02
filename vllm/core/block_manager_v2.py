@@ -254,20 +254,19 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         """
         blocks = self._get_blocks_for_swap(sequence_group,
                                            SequenceStatus.SWAPPED)
-        self.block_allocator.swap(blocks=blocks,
-                                  source_device=Device.CPU,
-                                  dest_device=Device.GPU)
+        current_swap_mapping = self.block_allocator.swap(
+            blocks=blocks, source_device=Device.CPU, dest_device=Device.GPU)
         # NOTE: Once the BlockManagerV1 implementation is deleted, we can
         # move this get_and_reset_swaps call outside of swap_in/swap_out.
         # Then the scheduler can make calls to get all swaps and all
         # copy-on-writes for the batch.
-        mapping = self.block_allocator.get_and_reset_swaps()
+
         block_number_mapping = {
-            self.block_allocator.get_device_related_block_id(
-                Device.CPU, cpu_block_id):
-            self.block_allocator.get_device_related_block_id(
-                Device.GPU, gpu_block_id)
-            for cpu_block_id, gpu_block_id in mapping.items()
+            self.block_allocator.get_physical_block_id(Device.CPU,
+                                                       cpu_block_id):
+            self.block_allocator.get_physical_block_id(Device.GPU,
+                                                       gpu_block_id)
+            for cpu_block_id, gpu_block_id in current_swap_mapping.items()
         }
         return block_number_mapping
 
@@ -297,16 +296,14 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         """
         blocks = self._get_blocks_for_swap(sequence_group,
                                            SequenceStatus.RUNNING)
-        self.block_allocator.swap(blocks=blocks,
-                                  source_device=Device.GPU,
-                                  dest_device=Device.CPU)
-        mapping = self.block_allocator.get_and_reset_swaps()
+        current_swap_mapping = self.block_allocator.swap(
+            blocks=blocks, source_device=Device.GPU, dest_device=Device.CPU)
         block_number_mapping = {
-            self.block_allocator.get_device_related_block_id(
-                Device.GPU, gpu_block_id):
-            self.block_allocator.get_device_related_block_id(
-                Device.CPU, cpu_block_id)
-            for gpu_block_id, cpu_block_id in mapping.items()
+            self.block_allocator.get_physical_block_id(Device.GPU,
+                                                       gpu_block_id):
+            self.block_allocator.get_physical_block_id(Device.CPU,
+                                                       cpu_block_id)
+            for gpu_block_id, cpu_block_id in current_swap_mapping.items()
         }
         return block_number_mapping
 

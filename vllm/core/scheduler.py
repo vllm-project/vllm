@@ -154,6 +154,8 @@ class Scheduler:
         self.prev_prompt = False
         # Latency of the last prompt step
         self.last_prompt_latency = 0.0
+        # preemption mode, RECOMPUTE or SWAP
+        self.user_specified_preemption_mode = scheduler_config.preemption_mode
 
     @property
     def lora_enabled(self) -> bool:
@@ -331,14 +333,12 @@ class Scheduler:
                 if self.running:
                     # Preempt the lowest-priority sequence groups.
                     victim_seq_group = self.running.pop()
-                    self._preempt(victim_seq_group, blocks_to_swap_out,
-                                  self.scheduler_config.preemption_mode)
+                    self._preempt(victim_seq_group, blocks_to_swap_out)
                     preempted.append(victim_seq_group)
                 else:
                     # No other sequence groups can be preempted.
                     # Preempt the current sequence group.
-                    self._preempt(seq_group, blocks_to_swap_out,
-                                  self.scheduler_config.preemption_mode)
+                    self._preempt(seq_group, blocks_to_swap_out)
                     preempted.append(seq_group)
                     break
             else:
@@ -540,7 +540,6 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: Dict[int, int],
-        preemption_mode: Optional[str] = None,
     ) -> None:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
@@ -553,12 +552,12 @@ class Scheduler:
         # over sequence groups with a single sequence.
         # TODO(woosuk): Support recomputation for sequence groups with multiple
         # sequences. This may require a more sophisticated CUDA kernel.
-        if preemption_mode is None:
+        if self.user_specified_preemption_mode is None:
             if seq_group.get_max_num_running_seqs() == 1:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
-        elif preemption_mode == "swap":
+        elif self.user_specified_preemption_mode == "swap":
             preemption_mode = PreemptionMode.SWAP
         else:
             preemption_mode = PreemptionMode.RECOMPUTE

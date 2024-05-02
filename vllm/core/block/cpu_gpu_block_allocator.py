@@ -176,10 +176,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         """
         return self._allocators[device].get_num_free_blocks()
 
-    def get_device_related_block_id(self, device: Device,
-                                    absolute_id: int) -> int:
-        """Returns the relative block id on certain device given the absolute 
-        block id.
+    def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
+        """Returns the zero-offset block id on certain device given the 
+        absolute block id.
 
         Args:
             device (Device): The device for which to query relative block id.
@@ -187,29 +186,39 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 whole allocator.
 
         Returns:
-            int: The relative block id on certain device.
+            int: The zero-offset block id on certain device.
         """
-        return self._allocators[device].get_device_related_block_id(
-            absolute_id)
+        return self._allocators[device].get_physical_block_id(absolute_id)
 
     def swap(self, blocks: List[Block], source_device: Device,
-             dest_device: Device) -> None:
+             dest_device: Device) -> dict[int, int]:
         """Execute the swap for the given blocks from source_device
-        on to dest_device, and save the swap mapping.
+        on to dest_device, save the current swap mapping and append 
+        them to the accumulated `self._swap_mapping` for each 
+        scheduling move.
 
         Args:
             blocks: List of blocks to be swapped.
             source_device (Device): Device to swap the 'blocks' from.
             dest_device (Device): Device to swap the 'blocks' to.
+        
+        Returns:
+            dict[int, int]: Swap mapping from source_device
+                on to dest_device.
         """
         source_block_ids = [block.block_id for block in blocks]
         self._allocators[source_device].swap_out(blocks)
         self._allocators[dest_device].swap_in(blocks)
         dest_block_ids = [block.block_id for block in blocks]
-        self._swap_mapping = {
-            src: dest
-            for src, dest in zip(source_block_ids, dest_block_ids)
-        }
+        # self._swap_mapping = {
+        #     src: dest
+        #     for src, dest in zip(source_block_ids, dest_block_ids)
+        # }
+        current_swap_mapping = {}
+        for src, dest in zip(source_block_ids, dest_block_ids):
+            self._swap_mapping[src] = dest
+            current_swap_mapping[src] = dest
+        return current_swap_mapping
 
     def get_num_blocks_touched(self,
                                blocks: List[Block],
