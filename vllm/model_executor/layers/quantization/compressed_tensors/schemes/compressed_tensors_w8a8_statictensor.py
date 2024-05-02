@@ -27,7 +27,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         x_split = x.split(logical_widths, dim=split_dim)
 
         for q, dq, scale in zip(x_q_split, x_split, scales):
-            ops.quant_per_tensor(q, dq, scale.item())
+            ops.static_scaled_int8_quant(q, dq, scale.item())
 
         return x_q
 

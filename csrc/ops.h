@@ -174,7 +174,7 @@ void dynamic_scaled_fp8_quant(
   torch::Tensor& input,
   torch::Tensor& scale);
 
-void quant_per_tensor(
+void static_scaled_int8_quant(
   torch::Tensor& out,
   torch::Tensor& input,
   float scale);
