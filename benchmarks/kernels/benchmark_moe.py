@@ -99,7 +99,6 @@ def benchmark_config(
 
 
 def get_configs_compute_bound():
-    # Adapted from https://github.com/openai/triton/blob/22af8d80458ee4e6269779dae0a3c34b755aade2/python/triton/ops/matmul.py#L56
     # TODO(woosuk): Implement a performance model to prune the search space.
     configs = []
     for num_stages in [3, 4, 5]:
