@@ -126,7 +126,7 @@ if triton.__version__ >= "2.1.0":
                           float("-inf"))
             qk *= sm_scale
             if SLIDING_WINDOW > 0:
-                # (cur_batch_ctx_len + offs_m[:, None]) are the positions of 
+                # (cur_batch_ctx_len + offs_m[:, None]) are the positions of
                 # Q entries in sequence
                 # (start_n + offs_n[None, :]) are the positions of
                 # KV entries in sequence
