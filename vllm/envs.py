@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
+    VLLM_USE_RAY_COMPILED_DAG: bool = False
 
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
@@ -133,6 +134,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # default is 4GB
     "VLLM_CPU_KVCACHE_SPACE":
     lambda: int(os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")),
+
+    # If the env var is set, it uses the Ray's compiled DAG API
+    # which optimizes the control plane overhead.
+    # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
+    "VLLM_USE_RAY_COMPILED_DAG":
+    lambda: bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0)),
 }
 
 
