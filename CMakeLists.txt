@@ -16,7 +16,17 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
+
+# Workaround for now until:
+#  https://github.com/pytorch/pytorch/commit/6e99f739235980e8d47e8fe6246c7466f2ce2f58
+# lands
+if ($ENV{TORCH_CUDA_ARCH_LIST} MATCHES "9.0a")
+  set(CMAKE_CUDA_FLAGS "-gencode arch=compute_90a,code=sm_90a ${CMAKE_CUDA_FLAGS}")
+  string(REPLACE "9.0a" "" TORCH_CUDA_ARCH_LIST $ENV{TORCH_CUDA_ARCH_LIST})
+endif()
+
+# Supported NVIDIA architectures.
+set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0;9.0a")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
@@ -165,7 +175,6 @@ set(VLLM_EXT_SRC
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
-  "csrc/quantization/cutlass/scaled_mm_dq.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/fp8/common.cu"
@@ -180,7 +189,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/marlin/marlin_cuda_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-    "csrc/custom_all_reduce.cu")
+    "csrc/custom_all_reduce.cu"
+    "csrc/quantization/cutlass/scaled_mm_dq_sm8x.cu"
+    "csrc/quantization/cutlass/scaled_mm_dq_sm90.cu")
 endif()
 
 define_gpu_extension_target(
@@ -189,8 +200,7 @@ define_gpu_extension_target(
   LANGUAGE ${VLLM_GPU_LANG}
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
-  #  ARCHITECTURES ${VLLM_GPU_ARCHES}
-  ARCHITECTURES 90a 
+  ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES csrc/third_party/cutlass/include;csrc/third_party/cutlass/tools/util/include
   WITH_SOABI)
 

@@ -22,7 +22,7 @@ k = 512
 
 type_A = torch.int8
 type_B = torch.int8
-type_C = torch.bfloat16
+type_C = torch.float32
 type_D = torch.bfloat16
 
 
@@ -37,7 +37,7 @@ def to_int8(tensor):
 torch.manual_seed(2023)
 tensor_A = to_int8(torch.rand(size=(m, k), device="cuda") * 10)
 tensor_B = to_int8(torch.rand(size=(n, k), device="cuda").t() * 10)
-tensor_D = torch.zeros(size=(m, n), dtype=type_C, device="cuda")
+tensor_D = torch.zeros(size=(m, n), dtype=type_D, device="cuda")
 tensor_C = torch.zeros(size=(m, n), dtype=type_C, device="cuda")
 
 tensor_scale_a = torch.rand(size=(m, 1), device="cuda")
@@ -52,7 +52,7 @@ plan = cutlass.op.Gemm(
     layout_B=cutlass.LayoutType.ColumnMajor,
     layout_C=cutlass.LayoutType.RowMajor,
     element_accumulator=torch.int32,
-    kernel_cc=90,
+    kernel_cc=80,
 )
 
 

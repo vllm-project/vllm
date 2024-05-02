@@ -18,6 +18,8 @@
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
+
+#include "common.hpp"
 // clang-format on 
 
 /////////////////////////////////////////
@@ -212,11 +214,11 @@ using StrideA = cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>;
 using StrideB = cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>;
 
 template <typename GemmKernel, typename ScaleA, typename ScaleB,
-          typename StrideC, typename InType, typename OutType>
-int entry_cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+          typename StrideC, typename ElementIn, typename ElementOut>
+void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
+                                     torch::Tensor const &b,
+                                     torch::Tensor const &a_scales,
+                                     torch::Tensor const &b_scales) {
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
@@ -228,12 +230,12 @@ int entry_cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
 
   typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
 
-  auto a_ptr = static_cast<InType *>(a.data_ptr());
-  auto b_ptr = static_cast<InType *>(b.data_ptr());
+  auto a_ptr = static_cast<ElementIn *>(a.data_ptr());
+  auto b_ptr = static_cast<ElementIn *>(b.data_ptr());
   typename GemmKernel::MainloopArguments mainloop_args{a_ptr, a_stride, b_ptr,
                                                        b_stride};
 
-  auto c_ptr = static_cast<OutType *>(out.data_ptr());
+  auto c_ptr = static_cast<ElementOut *>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
 
@@ -255,31 +257,29 @@ int entry_cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
   // Launch the CUTLASS GEMM kernel.
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   Gemm gemm_op;
+  CUTLASS_CHECK(gemm_op.can_implement(args));
   cutlass::Status status = gemm_op.run(args);
-
-  // Return a cudaError_t if the CUTLASS GEMM operator returned an error code.
-  if (status != cutlass::Status::kSuccess) {
-    return cudaErrorUnknown;
-  }
-
-  // Return success, if no errors were encountered.
-  return cudaSuccess;
+  CUTLASS_CHECK(status);
 }
 
-int cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
-                         torch::Tensor const &b, torch::Tensor const &a_scales,
-                         torch::Tensor const &b_scales) {
+#if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED)
+void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
+                               torch::Tensor const &b,
+                               torch::Tensor const &a_scales,
+                               torch::Tensor const &b_scales) {
   if (a.dtype() == torch::kInt8) {
 
-    return entry_cutlass_scaled_mm_dq<
+    return cutlass_scaled_mm_dq_dispatcher<
         int8_kernel::GemmKernel, int8_kernel::ScaleA, int8_kernel::ScaleB,
         int8_kernel::StrideC, int8_t, cutlass::bfloat16_t>(out, a, b, a_scales,
                                                            b_scales);
   } else {
 
-    return entry_cutlass_scaled_mm_dq<
+    return cutlass_scaled_mm_dq_dispatcher<
         fp8_kernel::GemmKernel, fp8_kernel::ScaleA, fp8_kernel::ScaleB,
         fp8_kernel::StrideC, cutlass::float_e4m3_t, cutlass::bfloat16_t>(
         out, a, b, a_scales, b_scales);
   }
 }
+#endif
+
