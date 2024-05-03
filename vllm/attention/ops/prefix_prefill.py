@@ -499,15 +499,14 @@ if triton.__version__ >= "2.1.0":
         off_q = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs +
             cur_head * stride_qh + offs_d[None, :] * stride_qd)
-        
+
         dim_mask = tl.where(
             tl.arange(0, BLOCK_DMODEL_PADDED) < BLOCK_DMODEL, 1, 0).to(tl.int1)
-        
-        q = tl.load(
-            Q + off_q,
-            mask=dim_mask[None, :] &
-            (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
-            other=0.0)
+
+        q = tl.load(Q + off_q,
+                    mask=dim_mask[None, :] &
+                    (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len),
+                    other=0.0)
 
         # # initialize pointer to m and l
         m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
@@ -643,8 +642,9 @@ if triton.__version__ >= "2.1.0":
             # update acc
             v = tl.load(v_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_vbs,
-                        mask=dim_mask[None, :] & ((start_n + offs_n[:, None]) <
-                        cur_batch_seq_len - cur_batch_ctx_len),
+                        mask=dim_mask[None, :] &
+                        ((start_n + offs_n[:, None]) <
+                         cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
 
             p = p.to(v.dtype)
@@ -662,8 +662,8 @@ if triton.__version__ >= "2.1.0":
         out_ptrs = Out + off_o
         tl.store(out_ptrs,
                  acc,
-                 mask=dim_mask[None, :] & (offs_m[:, None] < 
-                 cur_batch_seq_len - cur_batch_ctx_len))
+                 mask=dim_mask[None, :] &
+                 (offs_m[:, None] < cur_batch_seq_len - cur_batch_ctx_len))
         return
 
     @torch.inference_mode()
