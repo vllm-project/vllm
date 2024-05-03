@@ -22,7 +22,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
-    from vllm.distributed.device_communicators import pynccl_utils
     from vllm.distributed.device_communicators.custom_all_reduce import (
         custom_all_reduce)
     from vllm.distributed.device_communicators.parallel_state import (
@@ -36,7 +35,7 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
         return out
     if _TP_PYNCCL_COMMUNICATOR is not None and \
         not _TP_PYNCCL_COMMUNICATOR.disabled:
-        pynccl_utils.all_reduce(input_)
+        _TP_PYNCCL_COMMUNICATOR.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())

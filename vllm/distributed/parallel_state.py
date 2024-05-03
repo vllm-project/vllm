@@ -86,6 +86,8 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
+        # A small all_reduce for warmup.
+        torch.distributed.all_reduce(torch.zeros(1).cuda())
 
 
 def initialize_model_parallel(
@@ -154,8 +156,8 @@ def initialize_model_parallel(
     logger.info("vLLM is using nccl==%s",
                 _TP_PYNCCL_COMMUNICATOR.nccl.ncclGetVersion())
 
-    from vllm.distributed.device_communicators import pynccl_utils
-    pynccl_utils.comm = _TP_PYNCCL_COMMUNICATOR
+    # A small all_reduce for warmup.
+    _TP_PYNCCL_COMMUNICATOR.all_reduce(torch.zeros(1).cuda())
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -307,9 +309,8 @@ def destroy_model_parallel():
     if _TP_CPU_GROUP:
         torch.distributed.destroy_process_group(_TP_CPU_GROUP)
     _TP_CPU_GROUP = None
-    from vllm.distributed.device_communicators import pynccl_utils
-    del pynccl_utils.comm
-    pynccl_utils.comm = None
+    global _TP_PYNCCL_COMMUNICATOR
+    _TP_PYNCCL_COMMUNICATOR = None
 
     global _PIPELINE_MODEL_PARALLEL_GROUP
     if _PIPELINE_MODEL_PARALLEL_GROUP:
