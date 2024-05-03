@@ -256,6 +256,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
+        num_lookahead_slots,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
         blocks_to_swap_in: Optional[Dict[int, int]] = None,
         blocks_to_swap_out: Optional[Dict[int, int]] = None,
