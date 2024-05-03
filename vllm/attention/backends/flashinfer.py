@@ -1,9 +1,16 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
-import flashinfer
+try:
+    import flashinfer
+    from flash_attn import flash_attn_varlen_func
+    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+except ImportError:
+    flashinfer = None
+    flash_attn_varlen_func = None
+    BatchDecodeWithPagedKVCacheWrapper = None
+
 import torch
-from flash_attn import flash_attn_varlen_func
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -45,6 +52,10 @@ class FlashInferBackend(AttentionBackend):
     ) -> None:
         raise NotImplementedError
 
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [64, 128, 256]
+
 
 @dataclass
 class FlashInferMetadata(AttentionMetadataPerStage):
@@ -53,8 +64,7 @@ class FlashInferMetadata(AttentionMetadataPerStage):
 
     use_cuda_graph: bool = False
 
-    decode_wrapper: Optional[
-        flashinfer.BatchDecodeWithPagedKVCacheWrapper] = None
+    decode_wrapper: Optional[BatchDecodeWithPagedKVCacheWrapper] = None
 
     # Metadata for the prefill stage since we still
     # use flash attention for prefill.
@@ -64,7 +74,7 @@ class FlashInferMetadata(AttentionMetadataPerStage):
 
     # Metadata for the decode stage
     # Workspace buffer required by the kernel, the buffer should not
-    # be allocated/deacollated by the FalshInfermetadata
+    # be allocated/deacollated by the FalshInfermetadata object.
     workspace_buffer: Optional[torch.Tensor] = None
     # An example for paged_kv_indices, paged_kv_indptr:
     # request 1, page indices [0, 5, 8]
@@ -95,10 +105,16 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     def __post_init__(self):
         # Refer to
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        if self.head_dim is not None and self.head_dim not in [64, 128, 256]:
-            raise ValueError("Only [64, 128, 256] are supported for head_dim,",
-                             f"received {self.head_dim}.")
+        supported_head_sizes = FlashInferBackend.get_supported_head_sizes()
+        if self.head_dim is not None and self.head_dim \
+                not in supported_head_sizes:
+            raise ValueError(
+                f"Only {supported_head_sizes} are supported for head_dim,",
+                f"received {self.head_dim}.")
 
+        # When using flashinfer, we are also creating the FlashInferMetadata,
+        # which will also call post_init by default, here we want to skip the
+        # post_init if it's the prefill phase.
         if not self.is_prompt:
             self.decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
                 self.workspace_buffer, "NHD")

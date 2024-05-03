@@ -46,6 +46,7 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         return TorchSDPABackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
+        logger.warning("Eager mode is enforced for the Flashinfer backend. ")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
     else:
