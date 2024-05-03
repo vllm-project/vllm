@@ -10,9 +10,9 @@ void paged_attention_v1(
   int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& seq_lens,
   int block_size,
-  int max_context_len,
+  int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale);
@@ -28,9 +28,9 @@ void paged_attention_v2(
   int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& seq_lens,
   int block_size,
-  int max_context_len,
+  int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale);
