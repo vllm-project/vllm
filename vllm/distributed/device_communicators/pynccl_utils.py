@@ -1,4 +1,3 @@
-import contextlib
 from typing import Optional
 
 import torch
@@ -18,17 +17,6 @@ except Exception as e:
     pass
 
 comm: Optional["NCCLCommunicator"] = None
-
-
-@contextlib.contextmanager
-def set_pynccl_stream(stream: torch.cuda.Stream):
-    """Set the cuda stream for communication"""
-    try:
-        assert comm is not None
-        comm.stream = stream
-        yield
-    finally:
-        pass
 
 
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:

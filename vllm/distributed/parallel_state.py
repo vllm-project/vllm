@@ -323,7 +323,6 @@ def destroy_model_parallel():
 def with_pynccl_for_all_reduce():
     # We use pynccl for all reduce when using CUDA graph, because
     #  torch.distributed is not well supported by CUDA graph.
-    from vllm.distributed.device_communicators import pynccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
@@ -337,6 +336,10 @@ def with_pynccl_for_all_reduce():
         _TP_PYNCCL_COMMUNICATOR.disabled = True
 
         stream = torch.cuda.current_stream()
-        with pynccl_utils.set_pynccl_stream(stream):
-            yield
+        old_stream = _TP_PYNCCL_COMMUNICATOR.stream
+
+        _TP_PYNCCL_COMMUNICATOR.stream = stream
+        yield
+
+        _TP_PYNCCL_COMMUNICATOR.stream = old_stream
         _TP_PYNCCL_COMMUNICATOR.disabled = old
