@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from typing import Optional, List, Union, Dict
+from typing import Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
-                                              ChatCompletionRequest)
+from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              CompletionRequest)
 
 
 @dataclass
