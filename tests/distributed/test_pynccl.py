@@ -5,8 +5,8 @@ import torch
 
 import vllm.distributed.device_communicators.pynccl_utils as pynccl_utils
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
-                                                          ncclGetUniqueId)
+from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
+from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized, get_tensor_model_parallel_cpu_group,
     init_distributed_environment, with_pynccl_for_all_reduce)
@@ -147,7 +147,8 @@ def test_pynccl_with_cudagraph():
 
 
 def test_ncclGetUniqueId():
-    unique_id = ncclGetUniqueId()
+    lib = NCCLLibrary()
+    unique_id = lib.ncclGetUniqueId()
     # `list(unique_id.internal)` is something like this:
     # [34, -16, 23, 83, 109, -19, 59, 95, 2, 0, -86, 55, 10, -128, 0, 29, 0,
     # 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
