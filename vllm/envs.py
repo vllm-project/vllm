@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
     VLLM_TARGET_DEVICE: str = "cuda"
+    MAX_JOBS: Optional[str] = None
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -41,6 +42,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+    "MAX_JOBS":
+    lambda: os.getenv("MAX_JOBS", None),
 
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
