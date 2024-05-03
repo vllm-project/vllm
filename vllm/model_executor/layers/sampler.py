@@ -12,6 +12,7 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceGroupOutput, SequenceOutput)
+#import pdb
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
@@ -312,7 +313,8 @@ def _forced_sample(
     sample_idx = 0
     results = []
     for seq_group in selected_seq_groups:
-        seq_ids, _ = seq_group
+        #pdb.set_trace()
+        seq_ids = seq_group.seq_ids
         num_parent_seqs = len(seq_ids)
         assert num_parent_seqs == 1, (
             "Deterministic sampling should have only one seq.")
@@ -511,10 +513,10 @@ def _sample_with_torch(
                                          is_prompts, sample_indices)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.FORCED:
+            #pdb.set_trace()
             forced_samples = torch.tensor([
-                seq_groups[0][1].future_context[0][len(
-                    sampling_metadata.seq_data[seq_groups[0][0]
-                                               [0]].output_token_ids)]
+                seq_groups[0].sampling_params.future_context[0][len(
+                sampling_metadata.seq_groups[0].seq_data[0].output_token_ids)]
             ],
                                           device='cuda:0')  #
         elif sampling_type == SamplingType.GREEDY:

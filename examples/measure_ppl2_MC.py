@@ -145,14 +145,12 @@ Estimates:\n\
 \tCross-entropy_intermediate=%f\n\
 \tPerplexity_intermediate=%f",c+1,my_n_patches,my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
     ending_time = datetime.datetime.now()
-    logger.info("Done @ %s after processing for \
-%s generated {num_tokens_generated} tokens.",
-f'{ending_time:%Y-%m-%d %H:%M:%S%z}',
-f'{(ending_time-starting_time):%Y-%m-%d %H:%M:%S%z}')
+    duration = ending_time-starting_time
+    logger.info("Done @ %s generated %d tokens.",
+    f'{ending_time:%Y-%m-%d %H:%M:%S%z}', num_tokens_generated)
 
     logger.info("Integral Cross-Entropy=%f Average Cross-Entropy=\%f PPL=%f",
     my_ppl, my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
