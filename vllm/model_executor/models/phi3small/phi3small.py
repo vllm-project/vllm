@@ -391,7 +391,11 @@ class Phi3SmallForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head.weight, hidden_states,
                                        sampling_metadata)
-        if self.dummy_token_indices is not None:
+        if self.dummy_token_indices is not None and logits is not None:
+            # In case of tensor-parallelism, the logit processor under the hood
+            # does an `tensor_model_parallel_gather`, so that the vocab multiplication
+            # would happen only on rank 0. For all other ranks, the logits are returned as
+            # None. Hence only rank with not None logits should fill the dummy tokens with -inf.
             logits.index_fill_(-1, self.dummy_token_indices, -torch.inf)
         return logits
 
