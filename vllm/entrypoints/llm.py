@@ -1,16 +1,18 @@
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, overload
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import PromptStrictInputs
+from vllm.inputs import (PromptInputs, PromptStrictInputs,
+                         parse_and_batch_prompt)
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import MultiModalData
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter
+from vllm.utils import Counter, deprecate_kwargs
 
 
 class LLM:
@@ -128,13 +130,96 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
+    @overload  # DEPRECATED: single (prompt + optional token ids)
+    def generate(
+        self,
+        prompts: str,
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        prompt_token_ids: Optional[List[int]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # DEPRECATED: multi (prompt + optional token ids)
+    def generate(
+        self,
+        prompts: List[str],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        prompt_token_ids: Optional[List[List[int]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # DEPRECATED: single (token ids + optional prompt)
+    def generate(
+        self,
+        prompts: Optional[str] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        *,
+        prompt_token_ids: List[int],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # DEPRECATED: multi (token ids + optional prompt)
+    def generate(
+        self,
+        prompts: Optional[List[str]] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        *,
+        prompt_token_ids: List[List[int]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # DEPRECATED: single or multi token ids [pos-only]
+    def generate(
+        self,
+        prompts: None,
+        sampling_params: None,
+        prompt_token_ids: Union[List[int], List[List[int]]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload
     def generate(
         self,
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        /,  # We may enable `inputs` keyword after removing the old API
+        *,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @deprecate_kwargs('prompts', 'prompt_token_ids', 'multi_modal_data')
+    def generate(
+        self,
+        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+                       Optional[Union[str, List[str]]]] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -156,6 +241,96 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             completions in the same order as the input prompts.
         """
+        if prompt_token_ids is not None or multi_modal_data is not None:
+            return self._generate_v1(
+                prompts=prompts,  # type: ignore
+                sampling_params=sampling_params,
+                prompt_token_ids=prompt_token_ids,
+                use_tqdm=use_tqdm,
+                lora_request=lora_request,
+                multi_modal_data=multi_modal_data,
+            )
+
+        return self._generate_v2(
+            inputs=prompts,  # type: ignore
+            sampling_params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+        )
+
+    # DEPRECATED
+    def _generate_v1(
+        self,
+        prompts: Optional[Union[str, List[str]]],
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]],
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]],
+        use_tqdm: bool,
+        lora_request: Optional[LoRARequest],
+        multi_modal_data: Optional[MultiModalData],
+    ) -> List[RequestOutput]:
+        # skip_tokenizer_init is now checked in engine
+
+        if prompts is not None:
+            prompts = [p["text"] for p in parse_and_batch_prompt(prompts)]
+        if prompt_token_ids is not None:
+            prompt_token_ids = [
+                p["text"] for p in parse_and_batch_prompt(prompt_token_ids)
+            ]
+
+        num_requests = None
+        if prompts is not None:
+            num_requests = len(prompts)
+        if prompt_token_ids is not None:
+            if (num_requests is not None
+                    and num_requests != len(prompt_token_ids)):
+                raise ValueError("The lengths of prompts and prompt_token_ids "
+                                 "must be the same.")
+
+            num_requests = len(prompt_token_ids)
+        if num_requests is None:
+            raise ValueError("Either prompts or prompt_token_ids must be "
+                             "provided.")
+
+        inputs: List[PromptInputs] = []
+        for i in range(num_requests):
+            if prompts is not None:
+                if prompt_token_ids is not None:
+                    inputs.append({
+                        "prompt": prompts[i],
+                        "prompt_token_ids": prompt_token_ids[i],
+                        "multi_modal_data": multi_modal_data,
+                    })
+                else:
+                    inputs.append({
+                        "prompt": prompts[i],
+                        "multi_modal_data": multi_modal_data,
+                    })
+            else:
+                if prompt_token_ids is not None:
+                    inputs.append({
+                        "prompt_token_ids": prompt_token_ids[i],
+                        "multi_modal_data": multi_modal_data,
+                    })
+                else:
+                    raise AssertionError
+
+        # sampling_params is now checked in _generate_v2
+        return self._generate_v2(
+            inputs,
+            sampling_params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+        )
+
+    def _generate_v2(
+        self,
+        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]],
+        use_tqdm: bool,
+        lora_request: Optional[LoRARequest],
+    ) -> List[RequestOutput]:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
             inputs = [inputs]
@@ -183,7 +358,7 @@ class LLM:
 
     def _add_request(
         self,
-        inputs: PromptStrictInputs,
+        inputs: PromptInputs,
         sampling_params: SamplingParams,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:

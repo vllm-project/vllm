@@ -1,7 +1,67 @@
-from typing import TYPE_CHECKING, List, Optional, TypedDict, Union
+from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
+                    TypedDict, Union, cast, overload)
 
 if TYPE_CHECKING:
     from vllm.sequence import MultiModalData
+
+
+class ParsedString(TypedDict):
+    text: str
+    is_tokens: Literal[False]
+
+
+class ParsedTokens(TypedDict):
+    text: List[int]
+    is_tokens: Literal[True]
+
+
+# https://github.com/vllm-project/vllm/pull/4028
+@overload
+def parse_and_batch_prompt(
+        prompt: Union[str, List[str]]) -> Sequence[ParsedString]:
+    ...
+
+
+@overload
+def parse_and_batch_prompt(
+        prompt: Union[List[int], List[List[int]]]) -> Sequence[ParsedTokens]:
+    ...
+
+
+def parse_and_batch_prompt(
+    prompt: Union[str, List[str], List[int], List[List[int]]],
+) -> Union[Sequence[ParsedString], Sequence[ParsedTokens]]:
+    if isinstance(prompt, str):
+        # case 1: a string
+        return [ParsedString(text=prompt, is_tokens=False)]
+
+    if isinstance(prompt, list):
+        if len(prompt) == 0:
+            raise ValueError("please provide at least one prompt")
+
+        if isinstance(prompt[0], str):
+            # case 2: array of strings
+            return [
+                ParsedString(text=elem, is_tokens=False)
+                for elem in cast(List[str], prompt)
+            ]
+        if isinstance(prompt[0], int):
+            # case 3: array of tokens
+            elem = cast(List[int], prompt)
+            return [ParsedTokens(text=elem, is_tokens=True)]
+        if isinstance(prompt[0], list):
+            if len(prompt[0]) == 0:
+                raise ValueError("please provide at least one prompt")
+
+            if isinstance(prompt[0][0], int):
+                # case 4: array of token arrays
+                return [
+                    ParsedTokens(text=elem, is_tokens=True)
+                    for elem in cast(List[List[int]], prompt)
+                ]
+
+    raise ValueError("prompt must be a string, array of strings, "
+                     "array of tokens, or array of token arrays")
 
 
 class MultiModalPrompt(TypedDict, total=False):
