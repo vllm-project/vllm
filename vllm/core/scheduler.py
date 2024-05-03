@@ -440,7 +440,8 @@ class Scheduler:
                         swapped_out.append(seq_group)
                     break
             else:
-                self._append_slots(seq_group, blocks_to_copy)
+                self._append_slots(seq_group, num_running_tokens,
+                                   blocks_to_copy)
                 is_prefill = seq_group.is_prefill()
                 if is_prefill:
                     prefill_seq_groups.append(
@@ -549,7 +550,7 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             swapped_queue.popleft()
             self._swap_in(seq_group, blocks_to_swap_in)
-            self._append_slots(seq_group, blocks_to_copy)
+            self._append_slots(seq_group, num_new_tokens, blocks_to_copy)
             is_prefill = seq_group.is_prefill()
             if is_prefill:
                 prefill_seq_groups.append(
@@ -990,7 +991,7 @@ class Scheduler:
         self.running = deque(seq_group for seq_group in self.running
                              if not seq_group.is_finished())
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
+    def _allocate_and_set_running(self, seq_group: SequenceGroup, max_num_tokens: int) -> None:
         self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
@@ -998,6 +999,7 @@ class Scheduler:
     def _append_slots(
         self,
         seq_group: SequenceGroup,
+        max_num_tokens: int,
         blocks_to_copy: Dict[int, List[int]],
     ) -> None:
         """Appends new slots to the sequences in the given sequence group.
@@ -1013,7 +1015,10 @@ class Scheduler:
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(
+                seq,
+                max_num_slots=max_num_tokens,
+                num_lookahead_slots=num_lookahead_slots)
 
             for src, dests in cows.items():
                 if src not in blocks_to_copy:

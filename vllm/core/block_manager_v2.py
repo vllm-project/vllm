@@ -121,7 +121,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(self, seq_group: SequenceGroup, max_num_slots: Optional[int] = None) -> None:
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
@@ -136,7 +136,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_sliding_window=self.block_sliding_window,
         )
 
-        block_table.allocate(seq.get_token_ids())
+        token_ids = seq.get_token_ids()
+        if max_num_slots is not None:
+            token_ids = token_ids[:max_num_slots]
+
+        block_table.allocate(token_ids)
         self.block_tables[seq.seq_id] = block_table
 
         # Assign the block table for each sequence.
@@ -176,12 +180,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
+        max_num_slots: Optional[int] = None,
     ) -> Dict[int, List[int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
+        unseen = block_table.get_unseen_token_ids(seq.get_token_ids())
+        if max_num_slots is not None:
+            unseen = unseen[:max_num_slots]
+
         block_table.append_token_ids(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            token_ids=unseen,
             num_lookahead_slots=num_lookahead_slots,
         )
 

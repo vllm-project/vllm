@@ -1,6 +1,6 @@
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 
 from vllm.sequence import Sequence, SequenceGroup
@@ -54,6 +54,7 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
+        max_num_slots: Optional[int] = None,
     ) -> Dict[int, List[int]]:
         pass
 
