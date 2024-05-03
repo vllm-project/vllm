@@ -28,6 +28,12 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
 
+
+# The begin-* and end* here are used by the documentation generator
+# to extract the used env vars.
+
+# begin-env-vars-definition
+
 environment_variables: Dict[str, Callable[[], Any]] = {
     # used in distributed environment to determine the master address
     'VLLM_HOST_IP':
@@ -148,6 +154,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 }
 
+# end-env-vars-definition
 
 def __getattr__(name):
     # lazy evaluation of environment variables
