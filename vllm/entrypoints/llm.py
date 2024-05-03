@@ -7,8 +7,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding.outlines_decoding import (
-    get_local_guided_decoding_logits_processor)
+from vllm.model_executor.guided_decoding import (
+    GuidedDecodingFields, get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
@@ -131,15 +131,6 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
-    def get_guided_processor(self, params: SamplingParams):
-        guided_logits_processor = get_local_guided_decoding_logits_processor(
-            params, self.get_tokenizer())
-        if guided_logits_processor:
-            if params.logits_processors is None:
-                params.logits_processors = []
-            params.logits_processors.append(guided_logits_processor)
-        return params
-
     def generate(
         self,
         prompts: Optional[Union[str, List[str]]] = None,
@@ -159,9 +150,9 @@ class LLM:
         Args:
             prompts: A list of prompts to generate completions for.
             sampling_params: The sampling parameters for text generation. If
-                None, we use the default sampling parameters. 
-                When it is a single value, it is applied to every prompt. 
-                When it is a list, the list must have the same length as the 
+                None, we use the default sampling parameters.
+                When it is a single value, it is applied to every prompt.
+                When it is a list, the list must have the same length as the
                 prompts and it is paired one by one with the prompt.
             prompt_token_ids: A list of token IDs for the prompts. If None, we
                 use the tokenizer to convert the prompts to token IDs.
@@ -198,17 +189,14 @@ class LLM:
             if len(sampling_params) != num_requests:
                 raise ValueError("The lengths of prompts and sampling_params "
                                  "must be the same.")
-            else:
-                guided_processor_added_sampling_params = []
-                for params in sampling_params:
-                    guided_processor_added_sampling_params.append(
-                        self.get_guided_processor(params))
-                sampling_params = guided_processor_added_sampling_params
         elif isinstance(sampling_params, SamplingParams):
-            params = self.get_guided_processor(sampling_params)
-            sampling_params = [params] * num_requests
+            sampling_params = [sampling_params] * num_requests
 
-        print(sampling_params)
+        # Add guided decoding processor to the sampling params.
+        sampling_params = [
+            self._add_guided_processor(params) for params in sampling_params
+        ]
+
         if (prompts is not None and prompt_token_ids is not None
                 and len(prompts) != len(prompt_token_ids)):
             raise ValueError("The lengths of prompts and prompt_token_ids "
@@ -242,6 +230,22 @@ class LLM:
                 if multi_modal_data else None,
             )
         return self._run_engine(use_tqdm)
+
+    def _add_guided_processor(self, params: SamplingParams):
+        if options := params.guided_options:
+            if isinstance(options, dict):
+                options = GuidedDecodingFields(**options)
+            if options.guided_decoding_backend is None:
+                decoding_config = self.llm_engine.get_decoding_config()
+                options.guided_decoding_backend = (
+                    decoding_config.guided_decoding_backend)
+            guided_logits_processor = get_guided_decoding_logits_processor(
+                options, self.get_tokenizer())
+            if guided_logits_processor:
+                if params.logits_processors is None:
+                    params.logits_processors = []
+                params.logits_processors.append(guided_logits_processor)
+        return params
 
     def _add_request(
         self,

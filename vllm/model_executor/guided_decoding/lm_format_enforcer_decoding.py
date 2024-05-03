@@ -10,16 +10,14 @@ from lmformatenforcer.integrations.vllm import (
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest)
+from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 from vllm.model_executor.guided_decoding.outlines_decoding import (
     get_outlines_guided_decoding_logits_processor)
 from vllm.sampling_params import LogitsProcessor
 
 
-async def get_lm_format_enforcer_guided_decoding_logits_processor(
-        request: Union[CompletionRequest, ChatCompletionRequest],
-        tokenizer) -> Optional[LogitsProcessor]:
+def get_lm_format_enforcer_guided_decoding_logits_processor(
+        request: GuidedDecodingFields, tokenizer) -> Optional[LogitsProcessor]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -40,12 +38,11 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
         character_level_parser = RegexParser(request.guided_regex)
     elif request.guided_grammar:
         # CFG grammar not supported by LMFE, revert to outlines
-        return await get_outlines_guided_decoding_logits_processor(
+        return get_outlines_guided_decoding_logits_processor(
             request, tokenizer)
-    elif (request.response_format is not None
-          and request.response_format.type == "json_object"):
-        character_level_parser = JsonSchemaParser(
-            None)  # None means any json object
+    elif request.guided_json_object:
+        # None means any json object
+        character_level_parser = JsonSchemaParser(None)
     else:
         return None
 

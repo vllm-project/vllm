@@ -2,11 +2,14 @@
 import copy
 from enum import IntEnum
 from functools import cached_property
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Union
 
 import torch
 from pydantic import Field
 from typing_extensions import Annotated
+
+if TYPE_CHECKING:
+    from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 
 _SAMPLING_EPS = 1e-5
 
@@ -99,10 +102,8 @@ class SamplingParams:
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
-        guided_options: Allow guided decoding parameters (i.e. guided_json, 
-        guided_regex).Input is a dictionary with form 
-        dict(guided_json = "JSON_STRUCTURE"). Can only use one guided option 
-        for each sampling params. Defaults to None.
+        guided_options: Configuration dictionary for guided decoding. Refer to
+            the `GuidedDecodingFields` class for the available options.
     """
 
     def __init__(
@@ -133,7 +134,7 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-        guided_options: Optional[Dict[str, Union[list, str, dict]]] = None
+        guided_options: Optional[Union[Dict, "GuidedDecodingFields"]] = None
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -181,19 +182,6 @@ class SamplingParams:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.output_text_buffer_length = 0
-
-        guide_count = sum([
-            guided_options is not None
-            and guided_options.get("guided_json") is not None,
-            guided_options is not None
-            and guided_options.get("guided_regex") is not None,
-            guided_options is not None
-            and guided_options.get("guided_choice") is not None
-        ])
-        if guide_count > 1:
-            raise ValueError(
-                "You can only use one kind of guided decoding "
-                "('guided_json', 'guided_regex' or 'guided_choice').")
 
         self.guided_options = guided_options
 
