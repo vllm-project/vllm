@@ -345,8 +345,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 speculative decoding, default to 0.
 
         Returns:
-            AllocStatus: The AllocStatus for swapping in/out the given sequence_group 
-        on to the 'device'.
+            AllocStatus: The AllocStatus for swapping in/out the given 
+                sequence_group on to the 'device'.
         """
         blocks = self._get_blocks_for_swap(seq_group, status)
         num_blocks_touched = self.block_allocator.get_num_blocks_touched(
