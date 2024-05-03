@@ -33,8 +33,8 @@ class SequenceGroupToSample:
     # stage.
     seq_len: Optional[int]
     # The length of new query tokens to compute in the current step. None if it
-    # is in a decode stage. The length of query_len <= seq_len if chunked prefill
-    # is enabled.
+    # is in a decode stage. The length of query_len <= seq_len if chunked
+    # prefill is enabled.
     query_len: Optional[int]
     # A random number generator for sampling.
     generator: Optional[torch.Generator]

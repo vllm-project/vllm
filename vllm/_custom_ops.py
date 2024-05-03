@@ -72,8 +72,9 @@ def paged_attention_v2(
 ) -> None:
     vllm_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out, query,
                                 key_cache, value_cache, num_kv_heads, scale,
-                                block_tables, seq_lens, block_size, max_seq_len,
-                                alibi_slopes, kv_cache_dtype, kv_scale)
+                                block_tables, seq_lens, block_size,
+                                max_seq_len, alibi_slopes, kv_cache_dtype,
+                                kv_scale)
 
 
 # pos encoding ops

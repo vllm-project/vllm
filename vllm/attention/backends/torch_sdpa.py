@@ -165,7 +165,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype)
                 for seq_len, mask in zip(attn_metadata.seq_lens,
-                                        attn_metadata.attn_bias):
+                                         attn_metadata.attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
                         query[:, start:end, :],

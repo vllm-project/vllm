@@ -107,7 +107,7 @@ class ModelConfig:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
         self.max_seq_len_to_capture = (max_seq_len_to_capture
-                                      or max_context_len_to_capture)
+                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
 
@@ -202,7 +202,7 @@ class ModelConfig:
         if self.max_seq_len_to_capture is None:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
-                                         self.max_model_len)
+                                          self.max_model_len)
 
     def verify_with_parallel_config(
         self,

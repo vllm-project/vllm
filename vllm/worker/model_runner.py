@@ -135,7 +135,7 @@ class ModelRunner:
             int, int]] = None  # Set during graph capture.
 
         self.max_seq_len_to_capture = (self.model_config.max_seq_len_to_capture
-                                      if self.model_config is not None else 0)
+                                       if self.model_config is not None else 0)
 
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
@@ -374,8 +374,8 @@ class ModelRunner:
                                          device=self.device)
 
         seq_lens_tensor = torch.tensor(seq_lens,
-                                      dtype=torch.int,
-                                      device=self.device)
+                                       dtype=torch.int,
+                                       device=self.device)
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=self.device)
@@ -490,8 +490,8 @@ class ModelRunner:
             batch_size = graph_batch_size
 
         seq_lens_tensor = torch.tensor(seq_lens,
-                                      dtype=torch.int,
-                                      device=self.device)
+                                       dtype=torch.int,
+                                       device=self.device)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
@@ -796,7 +796,7 @@ class ModelRunner:
                     self.vision_language_config.image_feature_size))
         for group_id in range(max_num_seqs):
             seq_len = (max_num_batched_tokens // max_num_seqs +
-                      (group_id < max_num_batched_tokens % max_num_seqs))
+                       (group_id < max_num_batched_tokens % max_num_seqs))
             seq_data, fake_multi_modal_input = _prepare_fake_inputs(
                 seq_len, self.vision_language_config)
             seq = SequenceGroupMetadata(

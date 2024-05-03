@@ -220,8 +220,8 @@ class CPUModelRunner:
                                     dtype=torch.long,
                                     device=self.device)
         seq_lens_tensor = torch.tensor(seq_lens,
-                                      dtype=torch.int,
-                                      device=self.device)
+                                       dtype=torch.int,
+                                       device=self.device)
 
         max_block_table_len = max(
             len(block_table) for block_table in block_tables)
