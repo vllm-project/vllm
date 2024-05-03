@@ -132,7 +132,7 @@ class cmake_build_ext(build_ext):
             '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
-        verbose = bool(int(os.getenv('VERBOSE', '0')))
+        verbose = envs.VERBOSE
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
