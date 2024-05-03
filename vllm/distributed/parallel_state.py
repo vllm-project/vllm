@@ -319,14 +319,10 @@ def destroy_model_parallel():
     _PIPELINE_GLOBAL_RANKS = None
 
 
-# Whether to use pynccl for nccl all reduce.
-# We use pynccl for all reduce when using CUDA graph, because torch.distributed
-# is not well supported by CUDA graph.
-_ENABLE_PYNCCL_FOR_ALL_REDUCE = False
-
-
 @contextlib.contextmanager
 def with_pynccl_for_all_reduce():
+    # We use pynccl for all reduce when using CUDA graph, because
+    #  torch.distributed is not well supported by CUDA graph.
     from vllm.distributed.device_communicators import pynccl_utils
     """use pynccl instead of torch.distributed for all reduce"""
     tp_size = get_tensor_model_parallel_world_size()
@@ -335,11 +331,12 @@ def with_pynccl_for_all_reduce():
         # NOTE(woosuk): We don't initialize pynccl when tp_size is 1.
         yield
     else:
-        global _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        old = _ENABLE_PYNCCL_FOR_ALL_REDUCE
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = True
+        global _TP_PYNCCL_COMMUNICATOR
+        assert _TP_PYNCCL_COMMUNICATOR is not None
+        old = _TP_PYNCCL_COMMUNICATOR.disabled
+        _TP_PYNCCL_COMMUNICATOR.disabled = True
 
         stream = torch.cuda.current_stream()
         with pynccl_utils.set_pynccl_stream(stream):
             yield
-        _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
+        _TP_PYNCCL_COMMUNICATOR.disabled = old
