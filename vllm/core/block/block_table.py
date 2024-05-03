@@ -91,7 +91,8 @@ class BlockTable:
 
     def append_token_ids(self,
                          token_ids: List[int],
-                         num_lookahead_slots: int = 0) -> None:
+                         num_lookahead_slots: int = 0,
+                         num_computed_slots: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
         BlockTable.
 
@@ -112,7 +113,9 @@ class BlockTable:
 
         if self._block_sliding_window is not None:
             null_block = self._allocator.null_block
-            end_idx = (self._num_full_slots //
+            if num_computed_slots is None:
+                num_computed_slots = self._num_full_slots
+            end_idx = (num_computed_slots //
                        self._block_size) - self._block_sliding_window
             for idx in range(0, end_idx):
                 b = self._blocks[idx]

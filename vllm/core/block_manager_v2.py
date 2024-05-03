@@ -183,6 +183,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
+            num_computed_slots=seq.data.get_num_computed_tokens(),
         )
 
         # Return any new copy-on-writes.
