@@ -44,6 +44,15 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
         self.stop_checker = stop_checker
 
+    def process_prompt_logprob(self, seq_group: SequenceGroup,
+                               outputs: List[SequenceGroupOutput]) -> None:
+        # TODO(sang): Prompt logprob currently not implemented in multi step
+        # workers.
+        logger.warning(
+            "Prompt logprob is not supported by multi step workers. "
+            "(e.g., speculative decode uses multi step workers).")
+        pass
+
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.

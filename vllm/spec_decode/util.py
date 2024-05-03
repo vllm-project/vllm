@@ -133,9 +133,12 @@ def split_batch_by_proposal_len(
 
 
 def sampler_output_to_torch(
-    sampler_output_list: List[SamplerOutput],
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        sampler_output_list: List[SamplerOutput],
+        sampler_transposed: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Utility function which converts a list of SamplerOutput to tensors.
+
+        sampler_transposed here is used as the indicator for whether
+        we need do additional tensor transpose logic here.
 
         Returns:
             sampled_token_ids: torch.Tensor
@@ -152,13 +155,19 @@ def sampler_output_to_torch(
             for sampler_output in sampler_output_list
         ],
         dim=0,
-    ).transpose(0, 1)
+    )
+
+    if sampler_transposed:
+        sampled_token_probs = sampled_token_probs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output, vocab_size]
     sampled_token_logprobs = torch.stack(
         [sampler_output.logprobs for sampler_output in sampler_output_list],
         dim=0,
-    ).transpose(0, 1)
+    )
+
+    if sampler_transposed:
+        sampled_token_logprobs = sampled_token_logprobs.transpose(0, 1)
 
     # shape: [batch_size, num_sampler_output]
     sampled_token_ids = torch.stack(
@@ -167,7 +176,9 @@ def sampler_output_to_torch(
             for sampler_output in sampler_output_list
         ],
         dim=0,
-    ).transpose(0, 1)
+    )
+    if sampler_transposed:
+        sampled_token_ids = sampled_token_ids.transpose(0, 1)
 
     return sampled_token_ids, sampled_token_probs, sampled_token_logprobs
 
