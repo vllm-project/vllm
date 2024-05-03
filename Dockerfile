@@ -71,10 +71,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist
 
-# one liner to check that the size of the dist is <100MB, this is used as a test
-# case in CI system because PyPI limits the size of the wheel <100MB.
-RUN cd dist && fallocate -l 120M test_wheel
-RUN bash -c 'du -sm dist | awk \'{if ($1 > 100) exit 1}\''
+# check the size of the wheel, we cannot upload wheels larger than 100MB
+COPY .buildkite/check-wheel-size.py check-wheel-size.py
+RUN python3 check-wheel-size.py dist
 
 # the `vllm_nccl` package must be installed from source distribution
 # pip is too smart to store a wheel in the cache, and other CI jobs
