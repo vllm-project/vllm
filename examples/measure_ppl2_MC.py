@@ -95,7 +95,8 @@ def vllm_predict(CONT, llm, sampl_par):
 
 def main(args: argparse.Namespace):
 
-    logger.info("Initialising @ %s",f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S%z}')
+    logger.info("Initialising @ %s",
+                f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S%z}')
     my_ppl = 0.0
 
     my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
@@ -122,7 +123,8 @@ def main(args: argparse.Namespace):
 will try to process %d patche(s), \
 generating %d tokens in each patch \
 from the initial context of %d tokens.",
-f'{starting_time:%Y-%m-%d %H:%M:%S%z}',my_n_patches,my_n_samples,args.context_size)
+f'{starting_time:%Y-%m-%d %H:%M:%S%z}',
+my_n_patches,my_n_samples,args.context_size)
     for c in range(my_n_patches):
         CONTEXT = []
         my_sampl_par.future_context = []
@@ -145,7 +147,8 @@ Estimates:\n\
     ending_time = datetime.datetime.now()
     logger.info("Done @ %s after processing for \
 %s generated {num_tokens_generated} tokens.",
-f'{ending_time:%Y-%m-%d %H:%M:%S%z}',f'{(ending_time-starting_time):%Y-%m-%d %H:%M:%S%z}')
+f'{ending_time:%Y-%m-%d %H:%M:%S%z}',
+f'{(ending_time-starting_time):%Y-%m-%d %H:%M:%S%z}')
 
     logger.info("Integral Cross-Entropy=%f Average Cross-Entropy=\%f PPL=%f",
     my_ppl, my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
