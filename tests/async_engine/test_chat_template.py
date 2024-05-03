@@ -60,12 +60,13 @@ class MockServingChat:
     tokenizer: MockTokenizer
 
 
-def test_load_chat_template():
+@pytest.mark.asyncio
+async def test_load_chat_template():
     # Testing chatml template
     tokenizer = MockTokenizer()
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                          chat_template=chatml_jinja_path)
+    await OpenAIServingChat._load_chat_template(
+        mock_serving_chat, chat_template=chatml_jinja_path)
 
     template_content = tokenizer.chat_template
 
@@ -76,7 +77,8 @@ def test_load_chat_template():
 {% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant\\n' }}{% endif %}"""  # noqa: E501
 
 
-def test_no_load_chat_template_filelike():
+@pytest.mark.asyncio
+async def test_no_load_chat_template_filelike():
     # Testing chatml template
     template = "../../examples/does_not_exist"
     tokenizer = MockTokenizer()
@@ -84,18 +86,19 @@ def test_no_load_chat_template_filelike():
     mock_serving_chat = MockServingChat(tokenizer)
 
     with pytest.raises(ValueError, match="looks like a file path"):
-        OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                              chat_template=template)
+        await OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                                    chat_template=template)
 
 
-def test_no_load_chat_template_literallike():
+@pytest.mark.asyncio
+async def test_no_load_chat_template_literallike():
     # Testing chatml template
     template = "{{ messages }}"
     tokenizer = MockTokenizer()
 
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                          chat_template=template)
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                                chat_template=template)
     template_content = tokenizer.chat_template
 
     assert template_content == template
@@ -110,8 +113,8 @@ async def test_get_gen_prompt(model, template, add_generation_prompt,
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                          chat_template=template)
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                                chat_template=template)
 
     # Create a mock request object using keyword arguments
     mock_request = ChatCompletionRequest(

@@ -150,7 +150,7 @@ def server(zephyr_lora_files):
     ray.shutdown()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
     client = openai.AsyncOpenAI(
         base_url="http://localhost:8000/v1",
