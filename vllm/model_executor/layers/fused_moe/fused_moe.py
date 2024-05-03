@@ -203,14 +203,15 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    sorted_ids = torch.empty(
-        (topk_ids.numel() + num_experts * (block_size - 1), ),
-        dtype=torch.int32,
-        device=topk_ids.device)
-    expert_ids = torch.empty((topk_ids.numel() + num_experts, ),
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty((max_num_tokens_padded, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty((max_num_m_blocks, ),
+                             dtype=torch.int32,
+                             device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
@@ -433,6 +434,8 @@ def fused_moe(
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
+    compute_type = (tl.bfloat16
+                    if hidden_states.dtype == torch.bfloat16 else tl.float16)
 
     invoke_fused_moe_kernel(hidden_states,
                             w1,
@@ -447,7 +450,7 @@ def fused_moe(
                             False,
                             topk_ids.shape[1],
                             config,
-                            compute_type=tl.float16,
+                            compute_type=compute_type,
                             use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
@@ -465,7 +468,7 @@ def fused_moe(
                             True,
                             1,
                             config,
-                            compute_type=tl.float16,
+                            compute_type=compute_type,
                             use_fp8=use_fp8)
 
     if inplace:

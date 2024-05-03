@@ -75,6 +75,7 @@ Documentation
    serving/deploying_with_docker
    serving/distributed_serving
    serving/metrics
+   serving/env_vars
    serving/usage_stats
    serving/integrations
 
@@ -103,6 +104,7 @@ Documentation
    dev/sampling_params
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/dockerfile/dockerfile
 
 Indices and tables
 ==================
