@@ -45,7 +45,7 @@ class AsyncLLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
         enforce_eager: bool = False,
-        max_context_len_to_capture: int = 8192,
+        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
@@ -66,7 +66,7 @@ class AsyncLLM:
             gpu_memory_utilization=gpu_memory_utilization,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
+            max_seq_len_to_capture=max_seq_len_to_capture,
             engine_use_ray=True,
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
