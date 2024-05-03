@@ -75,6 +75,7 @@ Documentation
    serving/deploying_with_docker
    serving/distributed_serving
    serving/metrics
+   serving/env_vars
    serving/usage_stats
    serving/integrations
 
