@@ -12,7 +12,6 @@ from vllm.model_executor.sampling_metadata import (SamplingMetadata,
 from vllm.sampling_params import SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceGroupOutput, SequenceOutput)
-#import pdb
 
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
