@@ -222,6 +222,18 @@ def reshape_and_cache(
                                      slot_mapping, kv_cache_dtype, kv_scale)
 
 
+def reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+) -> None:
+    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                           slot_mapping, kv_cache_dtype)
+
+
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     vllm_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)

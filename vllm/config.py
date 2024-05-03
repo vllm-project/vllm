@@ -298,6 +298,11 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
+    def get_num_attention_heads(self,
+                                parallel_config: "ParallelConfig") -> int:
+        return self.hf_text_config.num_attention_heads // \
+                    parallel_config.tensor_parallel_size
+
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
