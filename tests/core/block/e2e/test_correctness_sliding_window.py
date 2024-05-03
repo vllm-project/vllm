@@ -1,10 +1,9 @@
-from itertools import cycle
 import random
+from typing import Iterable
 
 import pytest
 
-from vllm import SamplingParams, LLM
-from typing import Iterable
+from vllm import LLM, SamplingParams
 
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
@@ -36,18 +35,19 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
     # so the answer is outside sliding window, but should still be correct
 
     prompts = []
-    ans = []
+    answer = []
     indices = []
     random.seed(seed)
     for _ in range(batch_size):
         idx = random.randint(30, 90)
         indices.append(idx)
-        prompt = f"```python\n# We set a number of variables, x{idx} will be important later\n"
+        prompt = "```python\n# We set a number of variables, " + \
+                 f"x{idx} will be important later\n"
         ln = random.randint(800, 1100)
         for k in range(30, ln):
             v = random.randint(10, 99)
             if k == idx:
-                ans.append(v)
+                answer.append(v)
             prompt += f"x{k} = {v}\n"
         prompt += f"# Now, we check the value of x{idx}:\n"
         prompt += f"assert x{idx} == "
@@ -63,23 +63,23 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
     baseline_texts = get_text_from_llm_generator(baseline_llm_generator,
                                                  prompts, sampling_params)
 
-    ans2 = [int(text[0:2].strip()) for text in baseline_texts]
-    print(list(zip(indices, zip(ans, ans2))))
+    answer2 = [int(text[0:2].strip()) for text in baseline_texts]
+    print(list(zip(indices, zip(answer, answer2))))
     numok = 0
-    for a1, a2 in zip(ans, ans2):
+    for a1, a2 in zip(answer, answer2):
         if a1 == a2:
             numok += 1
-    frac_ok = numok / len(ans)
-    print(f"Numok: {numok}/{len(ans)} {frac_ok}")
+    frac_ok = numok / len(answer)
+    print(f"Numok: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok > 0.7
 
-    ans3 = [int(text[0:2].strip()) for text in baseline_texts]
+    answer3 = [int(text[0:2].strip()) for text in baseline_texts]
 
     print('Getting token ids from block manager v2')
     test_texts = get_text_from_llm_generator(test_llm_generator, prompts,
                                              sampling_params)
 
-    print(list(zip(indices, zip(ans2, ans3))))
+    print(list(zip(indices, zip(answer2, answer3))))
 
     for expected_text, actual_text in zip(baseline_texts, test_texts):
         assert expected_text == actual_text
@@ -110,18 +110,19 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed):
     # so the answer is outside sliding window, but should still be correct
 
     prompts = []
-    ans = []
+    answer = []
     indices = []
     random.seed(seed)
     for _ in range(batch_size):
         idx = random.randint(30, 90)
         indices.append(idx)
-        prompt = f"```python\n# We set a number of variables, x{idx} will be important later\n"
+        prompt = "```python\n# We set a number of variables, " + \
+                 f"x{idx} will be important later\n"
         ln = random.randint(800, 1100)
         for k in range(30, ln):
             v = random.randint(10, 99)
             if k == idx:
-                ans.append(v)
+                answer.append(v)
             prompt += f"x{k} = {v}\n"
         prompt += f"# Now, we check the value of x{idx}:\n"
         prompt += f"assert x{idx} == "
@@ -138,14 +139,14 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed):
     test_texts = get_text_from_llm_generator(test_llm_generator, prompts,
                                              sampling_params)
 
-    ans2 = [int(text[0:2].strip()) for text in test_texts]
-    print(list(zip(indices, zip(ans, ans2))))
+    answer2 = [int(text[0:2].strip()) for text in test_texts]
+    print(list(zip(indices, zip(answer, answer2))))
     numok = 0
-    for a1, a2 in zip(ans, ans2):
+    for a1, a2 in zip(answer, answer2):
         if a1 == a2:
             numok += 1
-    frac_ok = numok / len(ans)
-    print(f"Numok: {numok}/{len(ans)} {frac_ok}")
+    frac_ok = numok / len(answer)
+    print(f"Numok: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok > 0.7
 
 
