@@ -151,3 +151,6 @@ def test_swap(block_size, num_cpu_blocks, num_gpu_blocks, num_lookahead_slots,
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
+
+
+# TODO(cade/kaiyang): add comprehensive tests for swapping at allocator level.

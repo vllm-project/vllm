@@ -339,7 +339,13 @@ def test_chunked_prefill_block_manager_v2(baseline_llm_generator,
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "use_v2_block_manager": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "use_v2_block_manager": True,
+    "preemption_mode": "swap"
+}, {
+    "use_v2_block_manager": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
@@ -414,7 +420,13 @@ def test_v1_v2_greedy_equality_prefix_caching_enabled_with_preemption(
 @pytest.mark.parametrize("baseline_llm_kwargs", [{
     "enable_prefix_caching": False
 }])
-@pytest.mark.parametrize("test_llm_kwargs", [{"enable_prefix_caching": True}])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "enable_prefix_caching": True,
+    "preemption_mode": "swap"
+}, {
+    "enable_prefix_caching": True,
+    "preemption_mode": "recompute"
+}])
 @pytest.mark.parametrize("batch_size", [10])
 @pytest.mark.parametrize("seed", [1])
 def test_auto_prefix_caching_with_preemption(baseline_llm_generator,

@@ -474,11 +474,6 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
-
-            type=bool,
-            default=False,
-            help='If True, the prefill requests can be chunked based on the '
-            'max_num_batched_tokens')
         parser.add_argument(
             '--preemption_mode',
             type=str,

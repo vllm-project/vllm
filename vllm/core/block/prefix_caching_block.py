@@ -289,11 +289,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
-    def get_num_free_blocks(self) -> int:
-        # The number of free blocks is the number of hashless free
-        # blocks plus the number of hashful blocks that are unused.
-        return self._hashless_allocator.get_num_free_blocks() + len(
-            self._unused_cached_blocks)
 
     def get_physical_block_id(self, absolute_id: int) -> int:
         """Returns the zero-offset block id on certain block allocator
@@ -306,20 +301,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             int: The rzero-offset block id on certain device.
         """
-        return sorted(self._all_block_indices).index(absolute_id)
+        return sorted(self.all_block_ids).index(absolute_id)
 
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return self._hashless_allocator.all_block_ids
 
-    def promote_to_immutable_block(self, block: Block) -> BlockId:
-    def is_block_cached(self, block: "PrefixCachingBlock") -> bool:
+    def is_block_cached(self, block: Block) -> bool:
+        assert block.content_hash is not None
         if block.content_hash in self._cached_blocks:
             return True
         return False
 
-    def promote_to_immutable_block(self,
-                                   block: "PrefixCachingBlock") -> BlockId:
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
         """Once a mutable block is full, it can be promoted to an immutable
         block. This means that its content can be referenced by future blocks
         having the same prefix.
@@ -431,9 +425,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             if ids != []
         ])
 
-    def can_swap(self,
-                 blocks: List[Block],
-                 num_lookahead_slots: int = 0) -> int:
+    def get_num_blocks_touched(self,
+                               blocks: List[Block],
+                               num_lookahead_slots: int = 0) -> int:
         """Determine the number of blocks that will be touched by
         swapping in/out the given blocks from certain sequence
         group with the provided num_lookahead_slots.

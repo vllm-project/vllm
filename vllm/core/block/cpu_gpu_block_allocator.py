@@ -102,7 +102,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
-        self._swap_mapping = {}
+        self._swap_mapping: Dict[int, int] = {}
         self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
@@ -198,7 +198,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_physical_block_id(absolute_id)
 
     def swap(self, blocks: List[Block], source_device: Device,
-             dest_device: Device) -> dict[int, int]:
+             dest_device: Device) -> Dict[int, int]:
         """Execute the swap for the given blocks from source_device
         on to dest_device, save the current swap mapping and append 
         them to the accumulated `self._swap_mapping` for each 
@@ -217,14 +217,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self._allocators[source_device].swap_out(blocks)
         self._allocators[dest_device].swap_in(blocks)
         dest_block_ids = [block.block_id for block in blocks]
-        # self._swap_mapping = {
-        #     src: dest
-        #     for src, dest in zip(source_block_ids, dest_block_ids)
-        # }
-        current_swap_mapping = {}
+
+        current_swap_mapping: Dict[int, int] = {}
         for src, dest in zip(source_block_ids, dest_block_ids):
-            self._swap_mapping[src] = dest
-            current_swap_mapping[src] = dest
+            if src is not None and dest is not None:
+                self._swap_mapping[src] = dest
+                current_swap_mapping[src] = dest
         return current_swap_mapping
 
     def get_num_blocks_touched(self,
@@ -289,7 +287,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         raise NotImplementedError
 
-    def get_and_reset_swaps(self) -> dict[int, int]:
+    def get_and_reset_swaps(self) -> Dict[int, int]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default.

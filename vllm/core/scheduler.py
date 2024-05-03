@@ -523,7 +523,9 @@ class Scheduler:
             seq_group = swapped_queue[0]
 
             # If the sequence group cannot be swapped in, stop.
-            alloc_status = self.block_manager.can_swap_in(seq_group)
+            is_prefill = seq_group.is_prefill()
+            alloc_status = self.block_manager.can_swap_in(
+                seq_group, self._get_num_lookahead_slots(is_prefill))
             if alloc_status == AllocStatus.LATER:
                 break
             elif alloc_status == AllocStatus.NEVER:
