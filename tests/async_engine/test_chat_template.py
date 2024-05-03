@@ -90,14 +90,15 @@ async def test_no_load_chat_template_filelike():
                                                     chat_template=template)
 
 
-def test_no_load_chat_template_literallike():
+@pytest.mark.asyncio
+async def test_no_load_chat_template_literallike():
     # Testing chatml template
     template = "{{ messages }}"
     tokenizer = MockTokenizer()
 
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                          chat_template=template)
+    await OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                                chat_template=template)
     template_content = tokenizer.chat_template
 
     assert template_content == template
