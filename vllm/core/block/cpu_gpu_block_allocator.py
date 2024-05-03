@@ -240,7 +240,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
         Returns:
             int: the number of blocks that will be touched by
-        swapping in/out the given blocks on to the 'device'.
+                swapping in/out the given blocks on to the 'device'.
         """
         return self._allocators[device].get_num_blocks_touched(
             blocks, num_lookahead_slots)
