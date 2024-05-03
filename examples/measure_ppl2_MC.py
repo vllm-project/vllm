@@ -95,7 +95,7 @@ def vllm_predict(CONT, llm, sampl_par):
 
 def main(args: argparse.Namespace):
 
-    logger.info(f"Initialising @ {datetime.datetime.now()}")
+    logger.info("Initialising @ %s",f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S%z}')
     my_ppl = 0.0
 
     my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
@@ -118,10 +118,11 @@ def main(args: argparse.Namespace):
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    logger.info(f"Starting generation @ {starting_time} \
-will try to process {my_n_patches} patche(s), \
-generating {my_n_samples} tokens in each patch \
-from the initial context of {args.context_size} tokens.")
+    logger.info("Starting generation @ %s \
+will try to process %d patche(s), \
+generating %d tokens in each patch \
+from the initial context of %d tokens.",
+f'{starting_time:%Y-%m-%d %H:%M:%S%z}',my_n_patches,my_n_samples,args.context_size)
     for c in range(my_n_patches):
         CONTEXT = []
         my_sampl_par.future_context = []
@@ -137,16 +138,17 @@ from the initial context of {args.context_size} tokens.")
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        logger.info(f"Iteration {c+1} of {my_n_patches} Intermediate \
+        logger.info("Iteration %d of %d Intermediate \
 Estimates:\n\
-\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
-\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
+\tCross-entropy_intermediate=%f\n\
+\tPerplexity_intermediate=%f",c+1,my_n_patches,my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
     ending_time = datetime.datetime.now()
-    logger.info(f"Done @ {ending_time} after processing for \
-{ending_time-starting_time} generated {num_tokens_generated} tokens.")
+    logger.info("Done @ %s after processing for \
+%s generated {num_tokens_generated} tokens.",
+f'{ending_time:%Y-%m-%d %H:%M:%S%z}',f'{(ending_time-starting_time):%Y-%m-%d %H:%M:%S%z}')
 
-    logger.info(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
-{my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}")
+    logger.info("Integral Cross-Entropy=%f Average Cross-Entropy=\%f PPL=%f",
+    my_ppl, my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
 
 
 if __name__ == "__main__":
