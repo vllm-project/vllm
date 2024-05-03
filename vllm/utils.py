@@ -644,18 +644,18 @@ F = TypeVar('F', bound=Callable[..., Any])
 
 
 def deprecate_kwargs(*kws: str) -> Callable[[F], F]:
+    deprecated_kws = set(kws)
 
     def wrapper(fn: F) -> F:
 
         @wraps(fn)
         def inner(*args, **kwargs):
-            deprecated_kws = {k for k in kwargs if k in kws}
-            if deprecated_kws:
+            deprecated_kwargs = kwargs.keys() & deprecated_kws
+            if deprecated_kwargs:
                 warnings.warn(
                     DeprecationWarning(
-                        f"The keyword arguments {deprecated_kws}"
-                        " are deprecated and will be removed in "
-                        "a future update."),
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update."),
                     stacklevel=3,  # The inner function takes up one level
                 )
 

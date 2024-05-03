@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 from typing import List, Optional, Union
 
 from vllm.lora.request import LoRARequest
@@ -6,6 +7,7 @@ from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
 
 
+@dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
 
@@ -24,25 +26,14 @@ class CompletionOutput:
         lora_request: The LoRA request that was used to generate the output.
     """
 
-    def __init__(
-        self,
-        index: int,
-        text: str,
-        token_ids: List[int],
-        cumulative_logprob: float,
-        logprobs: Optional[SampleLogprobs],
-        finish_reason: Optional[str] = None,
-        stop_reason: Union[int, str, None] = None,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> None:
-        self.index = index
-        self.text = text
-        self.token_ids = token_ids
-        self.cumulative_logprob = cumulative_logprob
-        self.logprobs = logprobs
-        self.finish_reason = finish_reason
-        self.stop_reason = stop_reason
-        self.lora_request = lora_request
+    index: int
+    text: str
+    token_ids: List[int]
+    cumulative_logprob: float
+    logprobs: Optional[SampleLogprobs]
+    finish_reason: Optional[str] = None
+    stop_reason: Union[int, str, None] = None
+    lora_request: Optional[LoRARequest] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
