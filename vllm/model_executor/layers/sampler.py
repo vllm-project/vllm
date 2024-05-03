@@ -518,7 +518,7 @@ def _sample_with_torch(
             ],
                                           device='cuda:0')  #
         elif sampling_type == SamplingType.GREEDY:
-            greedy_samples = torch.argmax(logprobs[sample_indices.long()],
+            greedy_samples = torch.argmax(logprobs[long_sample_indices],
                                           dim=-1)
 
             if include_gpu_probs_tensor:
