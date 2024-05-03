@@ -1033,8 +1033,8 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     assert seq_group.is_prompt, (
         "Caller should ensure the sequence group is in a prefill stage.")
     seq_ids = seq_group.seq_ids
-    subquery_len = seq_group.subquery_len
-    assert subquery_len is not None
+    query_len = seq_group.query_len
+    assert query_len is not None
     # prompt has only 1 seq id.
     assert len(seq_ids) == 1
     seq_data = seq_group.seq_data[seq_ids[0]]
@@ -1042,7 +1042,7 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     prompt_tokens = seq_data.prompt_token_ids
     # +1 because we are looking for a next prompt token.
     next_token_index_start = computed_len + 1
-    next_token_index_end = min(computed_len + subquery_len + 1,
+    next_token_index_end = min(computed_len + query_len + 1,
                                len(prompt_tokens))
     next_prompt_tokens = prompt_tokens[
         next_token_index_start:next_token_index_end]
