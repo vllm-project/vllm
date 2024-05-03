@@ -1,3 +1,4 @@
+import functools
 from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
@@ -8,8 +9,8 @@ from vllm.engine.output_processor.interfaces import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Logprob, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
@@ -48,10 +49,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                                outputs: List[SequenceGroupOutput]) -> None:
         # TODO(sang): Prompt logprob currently not implemented in multi step
         # workers.
+        self._log_prompt_logprob_unsupported_warning_once()
+
+    @staticmethod
+    @functools.lru_cache()
+    def _log_prompt_logprob_unsupported_warning_once():
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
-        pass
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
@@ -89,6 +94,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                              valid_samples: List[SequenceOutput],
                              sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
+        output_logprobs = [sample.logprobs for sample in valid_samples]
 
         # Truncate to max_tokens if necessary.
         remaining_tokens = sampling_params.max_tokens - (seq.get_output_len() +
@@ -113,11 +119,11 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
-        for output_token_id in output_token_ids:
+        for output_token_id, output_logprob in zip(output_token_ids,
+                                                   output_logprobs):
             seq.append_token_id(
                 token_id=output_token_id,
-                # TODO emit logprobs in multi-step decoding.
-                logprobs={output_token_id: Logprob(0.0)},
+                logprobs=output_logprob,
             )
 
             new_char_count = 0

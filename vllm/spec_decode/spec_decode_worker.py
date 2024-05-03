@@ -5,15 +5,16 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-from vllm.sequence import (Logprob, SamplerOutput, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
-from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
+from vllm.spec_decode.util import (create_sequence_group_output,
+                                   get_all_num_logprobs, get_all_seq_ids,
+                                   get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -258,6 +259,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
         sampler_output.sampled_tokens = None
+        sampler_output.logprobs = None
         return [sampler_output]
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
@@ -298,12 +300,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
 
         #logger.info("verify proposals")
-        accepted_token_ids = self._verify_tokens(seq_group_metadata_list,
-                                                 proposal_scores, proposals, k)
+        accepted_token_ids, target_logprobs = self._verify_tokens(
+            seq_group_metadata_list, proposal_scores, proposals, k)
 
         #logger.info("create output list")
-        return self._create_output_sampler_list(seq_group_metadata_list,
-                                                accepted_token_ids, k)
+        return self._create_output_sampler_list(
+            seq_group_metadata_list,
+            accepted_token_ids,
+            target_logprobs=target_logprobs,
+            k=k)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(
@@ -312,9 +317,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposal_scores: SpeculativeScores,
         proposals: SpeculativeProposals,
         max_proposal_len: int,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Determine which speculative tokens are accepted using the
         probabilities of each token according to the proposer and scorer models.
+
+        Returns a tuple of Tensors, one for the accepted token ids and one for
+        the logprobs according to the scoring model.
         """
         proposal_lens_list = proposals.proposal_lens.tolist()
 
@@ -361,17 +369,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         non_spec_token_ids[:, 1:] = -1
         accepted_token_ids = torch.cat(
             [accepted_token_ids, non_spec_token_ids])
+        logprobs = proposal_scores.logprobs
 
         # Rearrange so that results are in the order of the original seq group
         # metadata.
         accepted_token_ids[original_indices] = accepted_token_ids.clone()
 
-        return accepted_token_ids
+        return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         accepted_token_ids: torch.Tensor,  # shape: [batch_size, k+1]
+        target_logprobs: torch.Tensor,  # shape: [batch_size, k+1, vocab_size]
         k: int,
     ) -> List[SamplerOutput]:
         """Given the accepted token ids, create a list of SamplerOutput.
@@ -379,30 +389,68 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         The output is padded with -1 tokens such that each sequence has
         the same number of outputs.
         """
-        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        batch_size, num_steps = accepted_token_ids.shape
 
-        # shape: [k+1, batch_size]
-        accepted_token_ids_by_step = accepted_token_ids.transpose(0,
-                                                                  1).tolist()
+        # Organize input tensors by step instead of by sequence.
+        target_logprobs_by_step = target_logprobs.transpose(0, 1)
+        accepted_token_ids_by_step = accepted_token_ids.transpose(0, 1)
+
+        # Get the logprobs/rank of the accepted tokens.
+        (accepted_token_id_ranks_by_step,
+         accepted_token_id_logprobs_by_step) = get_sampled_token_logprobs(
+             logprob_tensor=target_logprobs_by_step,
+             sampled_token_ids=accepted_token_ids_by_step,
+         )
+
+        # Get the top-k logprobs (which may or may not include the logprob of
+        # the accepted token).
+        (topk_logprobs_by_step,
+         topk_indices_by_step) = target_logprobs_by_step.topk(
+             k=self.scorer_worker.model_config.max_logprobs,
+             dim=-1,
+         )
+
+        # Get the sequence ids and num_logprobs (sampling parameter) in the
+        # batch.
+        seq_ids = get_all_seq_ids(seq_group_metadata_list)
+        num_logprobs_per_seq = get_all_num_logprobs(seq_group_metadata_list)
+
+        # Serialize all tensors to CPU Python lists.
+        accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
+        accepted_token_id_ranks_by_step = (
+            accepted_token_id_ranks_by_step.tolist())
+        accepted_token_id_logprobs_by_step = (
+            accepted_token_id_logprobs_by_step.tolist())
+        topk_logprobs_by_step = topk_logprobs_by_step.tolist()
+        topk_indices_by_step = topk_indices_by_step.tolist()
+
+        # Construct the output on a per-step, per-sequence basis.
         sampler_output_list = []
-        for token_ids_by_step in accepted_token_ids_by_step:
-            if all(token_id == -1 for token_id in token_ids_by_step):
+        for step_index in range(num_steps):
+            if all(token_id == -1
+                   for token_id in accepted_token_ids_by_step[step_index]):
                 break
 
             step_output_token_ids = []
-            for token_id, seq_id in zip(token_ids_by_step, seq_ids):
+            for sequence_index in range(batch_size):
+                # Each sequence may have a different num_logprobs; retrieve it.
+                num_logprobs = num_logprobs_per_seq[sequence_index]
+
                 step_output_token_ids.append(
-                    SequenceGroupOutput(
-                        samples=[
-                            SequenceOutput(
-                                parent_seq_id=seq_id,
-                                output_token=token_id,
-                                # TODO Add verifier logprobs.
-                                logprobs={token_id: Logprob(0.0)},
-                            )
-                        ],
-                        prompt_logprobs=None,
+                    create_sequence_group_output(
+                        token_id=accepted_token_ids_by_step[step_index]
+                        [sequence_index],
+                        token_id_logprob_rank=accepted_token_id_ranks_by_step[
+                            step_index][sequence_index],
+                        token_id_logprob=accepted_token_id_logprobs_by_step[
+                            step_index][sequence_index],
+                        seq_id=seq_ids[sequence_index],
+                        topk_token_ids=topk_indices_by_step[step_index]
+                        [sequence_index][:num_logprobs],
+                        topk_logprobs=topk_logprobs_by_step[step_index]
+                        [sequence_index][:num_logprobs],
                     ))
+
             sampler_output_list.append(
                 SamplerOutput(outputs=step_output_token_ids))
 
