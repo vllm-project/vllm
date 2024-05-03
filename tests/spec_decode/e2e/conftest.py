@@ -160,7 +160,7 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
 
         wait_for_gpu_memory_to_clear(
             devices=list(range(torch.cuda.device_count())),
-            threshold_bytes=2**30,
+            threshold_bytes=2 * 2**30,
             timeout_s=60,
         )
 
@@ -299,7 +299,6 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
             break
 
         if dur_s >= timeout_s:
-            breakpoint()
             raise ValueError(f'Memory of devices {devices=} not free after '
                              f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
 
