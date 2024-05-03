@@ -1,6 +1,8 @@
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Protocol
+from typing import TYPE_CHECKING
+from typing import Counter as CollectionsCounter
+from typing import Dict, List, Optional, Protocol, Union
 
 import numpy as np
 from prometheus_client import (REGISTRY, Counter, Gauge, Histogram, Info,
@@ -21,8 +23,9 @@ disable_created_metrics()
 
 # begin-metrics-definitions
 class Metrics:
+    labelname_finish_reason = "finished_reason"
 
-    def __init__(self, labelnames: List[str]):
+    def __init__(self, labelnames: List[str], max_model_len: int):
         # Unregister any existing vLLM collectors
         for collector in list(REGISTRY._collector_to_names):
             if hasattr(collector, "_name") and "vllm" in collector._name:
@@ -34,18 +37,20 @@ class Metrics:
             documentation='information of cache_config')
 
         # System stats
+        #   Scheduler State
         self.gauge_scheduler_running = Gauge(
             name="vllm:num_requests_running",
             documentation="Number of requests currently running on GPU.",
-            labelnames=labelnames)
-        self.gauge_scheduler_swapped = Gauge(
-            name="vllm:num_requests_swapped",
-            documentation="Number of requests swapped to CPU.",
             labelnames=labelnames)
         self.gauge_scheduler_waiting = Gauge(
             name="vllm:num_requests_waiting",
             documentation="Number of requests waiting to be processed.",
             labelnames=labelnames)
+        self.gauge_scheduler_swapped = Gauge(
+            name="vllm:num_requests_swapped",
+            documentation="Number of requests swapped to CPU.",
+            labelnames=labelnames)
+        #   KV Cache Usage in %
         self.gauge_gpu_cache_usage = Gauge(
             name="vllm:gpu_cache_usage_perc",
             documentation="GPU KV-cache usage. 1 means 100 percent usage.",
@@ -55,7 +60,7 @@ class Metrics:
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames)
 
-        # Raw stats from last model iteration
+        # Iteration stats
         self.counter_prompt_tokens = Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -80,18 +85,51 @@ class Metrics:
                 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75,
                 1.0, 2.5
             ])
-        self.histogram_e2e_request_latency = Histogram(
+
+        # Request stats
+        #   Latency
+        self.histogram_e2e_time_request = Histogram(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
             buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+        #   Metadata
+        self.histogram_num_prompt_tokens_request = Histogram(
+            name="vllm:request_prompt_tokens",
+            documentation="Number of prefill tokens processed.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
+        self.histogram_num_generation_tokens_request = Histogram(
+            name="vllm:request_generation_tokens",
+            documentation="Number of generation tokens processed.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
+        self.histogram_best_of_request = Histogram(
+            name="vllm:request_params_best_of",
+            documentation="Histogram of the best_of request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
+        self.histogram_n_request = Histogram(
+            name="vllm:request_params_n",
+            documentation="Histogram of the n request parameter.",
+            labelnames=labelnames,
+            buckets=[1, 2, 5, 10, 20],
+        )
+        self.counter_request_success = Counter(
+            name="vllm:request_success_total",
+            documentation="Count of successfully processed requests.",
+            labelnames=labelnames + [Metrics.labelname_finish_reason])
 
-        # Legacy metrics
+        # Deprecated in favor of vllm:prompt_tokens_total
         self.gauge_avg_prompt_throughput = Gauge(
             name="vllm:avg_prompt_throughput_toks_per_s",
             documentation="Average prefill throughput in tokens/s.",
             labelnames=labelnames,
         )
+        # Deprecated in favor of vllm:generation_tokens_total
         self.gauge_avg_generation_throughput = Gauge(
             name="vllm:avg_generation_throughput_toks_per_s",
             documentation="Average generation throughput in tokens/s.",
@@ -102,24 +140,57 @@ class Metrics:
 # end-metrics-definitions
 
 
+def build_1_2_5_buckets(max_value: int):
+    """
+    Builds a list of buckets with increasing powers of 10 multiplied by 
+    mantissa values (1, 2, 5) until the value exceeds the specified maximum.
+
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    mantissa_lst = [1, 2, 5]
+    exponent = 0
+    buckets = []
+    while True:
+        for m in mantissa_lst:
+            value = m * 10**exponent
+            if value <= max_value:
+                buckets.append(value)
+            else:
+                return buckets
+        exponent += 1
+
+
 @dataclass
 class Stats:
     """Created by LLMEngine for use by StatLogger."""
     now: float
 
-    # System stats.
-    num_running: int
-    num_waiting: int
-    num_swapped: int
-    gpu_cache_usage: float
-    cpu_cache_usage: float
+    # System stats (should have _sys suffix)
+    #   Scheduler State
+    num_running_sys: int
+    num_waiting_sys: int
+    num_swapped_sys: int
+    #   KV Cache Usage in %
+    gpu_cache_usage_sys: float
+    cpu_cache_usage_sys: float
 
-    # Raw stats from last model iteration.
-    num_prompt_tokens: int
-    num_generation_tokens: int
-    time_to_first_tokens: List[float]
-    time_per_output_tokens: List[float]
+    # Iteration stats (should have _iter suffix)
+    num_prompt_tokens_iter: int
+    num_generation_tokens_iter: int
+    time_to_first_tokens_iter: List[float]
+    time_per_output_tokens_iter: List[float]
+
+    # Request stats (should have _requests suffix)
+    #   Latency
     time_e2e_requests: List[float]
+    #   Metadata
+    num_prompt_tokens_requests: List[int]
+    num_generation_tokens_requests: List[int]
+    best_of_requests: List[int]
+    n_requests: List[int]
+    finished_reason_requests: List[str]
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
@@ -133,7 +204,8 @@ class SupportsMetricsInfo(Protocol):
 class StatLogger:
     """StatLogger is used LLMEngine to log to Promethus and Stdout."""
 
-    def __init__(self, local_interval: float, labels: Dict[str, str]) -> None:
+    def __init__(self, local_interval: float, labels: Dict[str, str],
+                 max_model_len: int) -> None:
         # Metadata for logging locally.
         self.last_local_log = time.time()
         self.local_interval = local_interval
@@ -144,7 +216,8 @@ class StatLogger:
 
         # Prometheus metrics
         self.labels = labels
-        self.metrics = Metrics(labelnames=list(labels.keys()))
+        self.metrics = Metrics(labelnames=list(labels.keys()),
+                               max_model_len=max_model_len)
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         if type == "cache_config":
@@ -158,34 +231,66 @@ class StatLogger:
         return elapsed_time > self.local_interval
 
     def _log_prometheus(self, stats: Stats) -> None:
-        # Set system stat gauges.
-        self.metrics.gauge_scheduler_running.labels(**self.labels).set(
-            stats.num_running)
-        self.metrics.gauge_scheduler_swapped.labels(**self.labels).set(
-            stats.num_swapped)
-        self.metrics.gauge_scheduler_waiting.labels(**self.labels).set(
-            stats.num_waiting)
-        self.metrics.gauge_gpu_cache_usage.labels(**self.labels).set(
-            stats.gpu_cache_usage)
-        self.metrics.gauge_cpu_cache_usage.labels(**self.labels).set(
-            stats.cpu_cache_usage)
+        # System state data
+        self._log_gauge(self.metrics.gauge_scheduler_running,
+                        stats.num_running_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_swapped,
+                        stats.num_swapped_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_waiting,
+                        stats.num_waiting_sys)
+        self._log_gauge(self.metrics.gauge_gpu_cache_usage,
+                        stats.gpu_cache_usage_sys)
+        self._log_gauge(self.metrics.gauge_cpu_cache_usage,
+                        stats.cpu_cache_usage_sys)
 
-        # Add to token counters.
-        self.metrics.counter_prompt_tokens.labels(**self.labels).inc(
-            stats.num_prompt_tokens)
-        self.metrics.counter_generation_tokens.labels(**self.labels).inc(
-            stats.num_generation_tokens)
+        # Iteration level data
+        self._log_counter(self.metrics.counter_prompt_tokens,
+                          stats.num_prompt_tokens_iter)
+        self._log_counter(self.metrics.counter_generation_tokens,
+                          stats.num_generation_tokens_iter)
+        self._log_histogram(self.metrics.histogram_time_to_first_token,
+                            stats.time_to_first_tokens_iter)
+        self._log_histogram(self.metrics.histogram_time_per_output_token,
+                            stats.time_per_output_tokens_iter)
 
-        # Observe request level latencies in histograms.
-        for ttft in stats.time_to_first_tokens:
-            self.metrics.histogram_time_to_first_token.labels(
-                **self.labels).observe(ttft)
-        for tpot in stats.time_per_output_tokens:
-            self.metrics.histogram_time_per_output_token.labels(
-                **self.labels).observe(tpot)
-        for e2e in stats.time_e2e_requests:
-            self.metrics.histogram_e2e_request_latency.labels(
-                **self.labels).observe(e2e)
+        # Request level data
+        # Latency
+        self._log_histogram(self.metrics.histogram_e2e_time_request,
+                            stats.time_e2e_requests)
+        # Metadata
+        finished_reason_counter = CollectionsCounter(
+            stats.finished_reason_requests)
+        self._log_counter_labels(self.metrics.counter_request_success,
+                                 finished_reason_counter,
+                                 Metrics.labelname_finish_reason)
+        self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
+                            stats.num_prompt_tokens_requests)
+        self._log_histogram(
+            self.metrics.histogram_num_generation_tokens_request,
+            stats.num_generation_tokens_requests)
+        self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+        self._log_histogram(self.metrics.histogram_best_of_request,
+                            stats.best_of_requests)
+
+    def _log_gauge(self, gauge: Gauge, data: Union[int, float]) -> None:
+        # Convenience function for logging to gauge.
+        gauge.labels(**self.labels).set(data)
+
+    def _log_counter(self, counter: Counter, data: Union[int, float]) -> None:
+        # Convenience function for logging to counter.
+        counter.labels(**self.labels).inc(data)
+
+    def _log_counter_labels(self, counter: Counter, data: CollectionsCounter,
+                            label_key: str) -> None:
+        # Convenience function for collection counter of labels.
+        for label, count in data.items():
+            counter.labels(**{**self.labels, label_key: label}).inc(count)
+
+    def _log_histogram(self, histogram: Histogram,
+                       data: Union[List[int], List[float]]) -> None:
+        # Convenience function for logging list to histogram.
+        for datum in data:
+            histogram.labels(**self.labels).observe(datum)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
@@ -210,8 +315,8 @@ class StatLogger:
         self._log_prometheus(stats)
 
         # Save tracked stats for token counters.
-        self.num_prompt_tokens.append(stats.num_prompt_tokens)
-        self.num_generation_tokens.append(stats.num_generation_tokens)
+        self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
+        self.num_generation_tokens.append(stats.num_generation_tokens_iter)
 
         # Log locally every local_interval seconds.
         if self._local_interval_elapsed(stats.now):
@@ -234,11 +339,11 @@ class StatLogger:
                 "CPU KV cache usage: %.1f%%",
                 prompt_throughput,
                 generation_throughput,
-                stats.num_running,
-                stats.num_swapped,
-                stats.num_waiting,
-                stats.gpu_cache_usage * 100,
-                stats.cpu_cache_usage * 100,
+                stats.num_running_sys,
+                stats.num_swapped_sys,
+                stats.num_waiting_sys,
+                stats.gpu_cache_usage_sys * 100,
+                stats.cpu_cache_usage_sys * 100,
             )
 
             # Reset tracked stats for next interval.

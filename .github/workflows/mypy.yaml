@@ -33,6 +33,7 @@ jobs:
     - name: Mypy
       run: |
         mypy vllm/attention --config-file pyproject.toml
+        mypy vllm/core --config-file pyproject.toml
         mypy vllm/distributed --config-file pyproject.toml
         mypy vllm/entrypoints --config-file pyproject.toml
         mypy vllm/executor --config-file pyproject.toml
@@ -42,9 +43,8 @@ jobs:
         mypy vllm/engine  --config-file pyproject.toml
         mypy vllm/worker --config-file pyproject.toml
         mypy vllm/spec_decode --config-file pyproject.toml
+        mypy vllm/model_executor  --config-file pyproject.toml
         mypy vllm/lora --config-file pyproject.toml
-
-        # TODO(sang): Fix nested dir
-        mypy vllm/model_executor/*.py  --config-file pyproject.toml
-        mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+        mypy vllm/logging --config-file pyproject.toml
+        mypy vllm/model_executor --config-file pyproject.toml
 

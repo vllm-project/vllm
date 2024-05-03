@@ -16,17 +16,29 @@ steps:
           limit: 5
   - wait
 
-  - label: "AMD Test"
-    agents:
-      queue: amd
-    command: bash .buildkite/run-amd-test.sh
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    {% for step in steps %}
+    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
+      - label: "AMD: {{ step.label }}"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'"
+        env:
+          DOCKER_BUILDKIT: "1"
+    {% endif %}
+    {% endfor %}
 
   - label: "Neuron Test"
+    depends_on: ~
     agents:
       queue: neuron
     command: bash .buildkite/run-neuron-test.sh
+    soft_fail: true
 
-  - label: "CPU Test"
+  - label: "Intel Test"
+    depends_on: ~
     command: bash .buildkite/run-cpu-test.sh
 
   {% for step in steps %}
@@ -44,6 +56,9 @@ steps:
     plugins:
       - kubernetes:
           podSpec:
+            {% if step.num_gpus %}
+            priorityClassName: gpu-priority-cls-{{ step.num_gpus }}
+            {% endif %}
             volumes:
               - name: dshm
                 emptyDir:

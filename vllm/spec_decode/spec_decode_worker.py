@@ -12,6 +12,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
@@ -48,8 +49,27 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """
 
     @classmethod
-    def from_workers(cls, proposer_worker: MultiStepWorker,
-                     scorer_worker: WorkerBase) -> "SpecDecodeWorker":
+    def create_worker(
+        cls,
+        scorer_worker: WorkerBase,
+        draft_worker_kwargs,
+    ) -> "SpecDecodeWorker":
+
+        if "ngram_prompt_lookup_max" in draft_worker_kwargs:
+            ngram_prompt_lookup_max = (
+                draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
+            ngram_prompt_lookup_min = (
+                draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
+        else:
+            ngram_prompt_lookup_max = 0
+
+        if ngram_prompt_lookup_max > 0:
+            proposer_worker = NGramWorker(**draft_worker_kwargs)
+            proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
+                                                  ngram_prompt_lookup_max)
+        else:
+            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
+
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
@@ -59,7 +79,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def __init__(
         self,
-        proposer_worker: MultiStepWorker,
+        proposer_worker: WorkerBase,
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
@@ -134,8 +154,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
          ) = True
-        (self.proposer_worker.model_runner.model.sampler.
-         include_gpu_probs_tensor) = True
+        self.proposer_worker.set_include_gpu_probs_tensor()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
@@ -183,8 +202,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        logger.info("spec_decode_worker.execute_model num_lookahead_slots=%d",
-                    num_lookahead_slots)
+        #logger.info("spec_decode_worker.execute_model num_lookahead_slots=%d",
+        #            num_lookahead_slots)
 
         # If no spec tokens, call the proposer and scorer workers normally.
         # Used for prefill.
@@ -216,7 +235,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer and scorer model so that the KV cache is consistent between the
         two.
         """
-        logger.info("run proposer worker no spec")
+        #logger.info("run proposer worker no spec")
 
         self.proposer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
@@ -225,7 +244,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             blocks_to_copy=blocks_to_copy,
         )
 
-        logger.info("run target worker no spec")
+        #logger.info("run target worker no spec")
         sampler_output = self.scorer_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -259,7 +278,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sequence.
         """
 
-        logger.info("get spec proposals")
+        #logger.info("get spec proposals")
         # Generate proposals using draft worker.
         assert blocks_to_swap_in is not None
         assert blocks_to_swap_out is not None
@@ -268,7 +287,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             seq_group_metadata_list, blocks_to_swap_in, blocks_to_swap_out,
             blocks_to_copy, k)
 
-        logger.info("score proposals")
+        #logger.info("score proposals")
         proposal_scores = self.scorer.score_proposals(
             seq_group_metadata_list,
             blocks_to_swap_in,
@@ -278,11 +297,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposals,
         )
 
-        logger.info("verify proposals")
+        #logger.info("verify proposals")
         accepted_token_ids = self._verify_tokens(seq_group_metadata_list,
                                                  proposal_scores, proposals, k)
 
-        logger.info("create output list")
+        #logger.info("create output list")
         return self._create_output_sampler_list(seq_group_metadata_list,
                                                 accepted_token_ids, k)
 
