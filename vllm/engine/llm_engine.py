@@ -662,9 +662,9 @@ class LLMEngine:
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
             num_generation_tokens_from_prefill_groups = 0.
-            # NOTE: if scheduler_outputs.num_prefill_groups > 0 and 
-            # the len of scheduler_outputs.scheduled_seq_groups is != 
-            # scheduler_outputs.num_prefill_groups, this means that 
+            # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
+            # the len of scheduler_outputs.scheduled_seq_groups is !=
+            # scheduler_outputs.num_prefill_groups, this means that
             # chunked prefills have been detected.
 
             for idx, scheduled_seq_group in enumerate(
