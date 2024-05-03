@@ -173,16 +173,25 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
     return generator_outer
 
 
+def maybe_assert_ngram_worker(llm):
+    # Verify the proposer worker is ngram if ngram is specified.
+    if (not isinstance(llm, AsyncLLM)
+            and llm.llm_engine.speculative_config is not None
+            and llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
+        from vllm.spec_decode.ngram_worker import NGramWorker
+        assert isinstance(
+            llm.llm_engine.model_executor.driver_worker.proposer_worker,
+            NGramWorker)
+
+
 def get_output_from_llm_generator(
         llm_generator, prompts,
         sampling_params) -> Tuple[List[str], List[List[int]]]:
     tokens = []
     token_ids = []
     for llm in llm_generator():
-        if (not isinstance(llm, AsyncLLM)
-                and llm.llm_engine.speculative_config is not None and
-                llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
-            assert isinstance(llm.llm_engine.model_executor.driver_worker.proposer_worker, NGramWorker)
+        maybe_assert_ngram_worker(llm)
+
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
