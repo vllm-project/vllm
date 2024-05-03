@@ -1,6 +1,15 @@
 import os
+import zipfile
 
 MAX_SIZE_MB = 100
+
+
+def print_top_10_largest_files(zip_file):
+    with zipfile.ZipFile(zip_file, 'r') as z:
+        file_sizes = [(f, z.getinfo(f).file_size) for f in z.namelist()]
+        file_sizes.sort(key=lambda x: x[1], reverse=True)
+        for f, size in file_sizes[:10]:
+            print(f"{f}: {size/1024*1024} MBs")
 
 
 def check_wheel_size(directory):
@@ -14,6 +23,7 @@ def check_wheel_size(directory):
                     print(
                         f"Wheel {wheel_path} is too large ({wheel_size_mb} MB) "
                         f"compare to the allowed size ({MAX_SIZE_MB} MB).")
+                    print_top_10_largest_files(wheel_path)
                     return 1
     return 0
 
