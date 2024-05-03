@@ -56,6 +56,9 @@ on:
         type: string
         required: true
 
+env:
+    VENV_BASE: "TEST"
+
 jobs:
 
     TEST:
@@ -79,13 +82,14 @@ jobs:
               with:
                 hf_token: ${{ secrets.NM_HF_TOKEN }}
                 Gi_per_thread: 1
+                nvcc_threads: 0
 
             - name: set python
               id: set_python
               uses: ./.github/actions/nm-set-python/
               with:
                 python: ${{ inputs.python }}
-                venv: TEST
+                venv: ${{ env.VENV_BASE }}
 
             - name: hf cache
               id: hf_cache

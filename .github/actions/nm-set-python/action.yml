@@ -20,7 +20,7 @@ runs:
         pyenv local ${{ inputs.python }}
         COMMIT=${{ github.sha }}
         VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-        pyenv virtualenv ${VENV} || true
+        pyenv virtualenv --force ${VENV}
         source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
         VERSION=$(python --version)
         echo "version=${VERSION}" >> "$GITHUB_OUTPUT"

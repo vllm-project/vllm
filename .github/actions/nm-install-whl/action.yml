@@ -1,0 +1,27 @@
+name: install whl
+description: 'installs found whl based on python version into specified venv'
+inputs:
+  python:
+    description: 'python version, e.g. 3.10.12'
+    required: true
+  venv:
+    description: 'name for python virtual environment'
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: install_whl
+      run: |
+        # move source directories
+        mv vllm vllm-ignore
+        mv csrc csrc-ignore
+        # activate and install
+        COMMIT=${{ github.sha }}
+        VENV="${{ env.VENV_BASE }}-${COMMIT:0:7}"
+        source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+        pip3 install -r requirements-dev.txt
+        BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
+        WHL=$(find . -type f -iname "*${BASE}*.whl")
+        WHL_BASENAME=$(basename ${WHL})
+        pip3 install ${WHL}[sparse]
+      shell: bash

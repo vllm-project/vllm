@@ -3,7 +3,7 @@
 
 set -e
 set -u
-  
+
 if [ $# -ne 2 ];
 then
   echo "run_benchmarks needs exactly 2 arguments: "
@@ -11,10 +11,10 @@ then
   echo " 2. The output path to store the benchmark results"
   exit 1
 fi
-  
+
 benchmark_config_list_file=$1
 output_directory=$2
-  
+
 for bench_config in `cat $benchmark_config_list_file`
 do
   echo "Running benchmarks for config " $bench_config

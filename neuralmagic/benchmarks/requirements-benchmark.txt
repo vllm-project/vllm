@@ -2,4 +2,3 @@
 requests
 aiohttp
 datasets
-nm-magic-wand-nightly

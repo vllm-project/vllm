@@ -67,6 +67,7 @@ jobs:
         timeout-minutes: ${{ fromJson(inputs.timeout) }}
         outputs:
             whl: ${{ steps.build.outputs.whl }}
+            tarfile: ${{ steps.build.outputs.tarfile }}
 
         steps:
 

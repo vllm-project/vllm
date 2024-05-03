@@ -1,4 +1,4 @@
-name: benchmark 
+name: benchmark
 on:
   # makes workflow reusable
   workflow_call:
@@ -19,16 +19,12 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
-      Gi_per_thread:
-        description: 'requested GiB to reserve per thread'
-        type: string
-        required: true
-      nvcc_threads:
-        description: "number of threads nvcc build threads"
-        type: string
-        required: true
       python:
         description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+      whl:
+        description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
         type: string
         required: true
       push_benchmark_results_to_gh_pages:
@@ -55,16 +51,12 @@ on:
         description: "git commit hash or branch name"
         type: string
         required: true
-      Gi_per_thread:
-        description: 'requested GiB to reserve per thread'
-        type: string
-        required: true
-      nvcc_threads:
-        description: "number of threads nvcc build threads"
-        type: string
-        required: true
       python:
         description: "python version, e.g. 3.10.12"
+        type: string
+        required: true
+      whl:
+        description: "whl to test (variable appears late binding so unusable outside 'download artifact')"
         type: string
         required: true
       push_benchmark_results_to_gh_pages:
@@ -75,11 +67,16 @@ on:
           - 'false'
         default: 'false'
 
+env:
+    VENV_BASE: "BENCHMARK"
+
 jobs:
+
   BENCHMARK:
 
     runs-on: ${{ inputs.label }}
     timeout-minutes: ${{ fromJSON(inputs.timeout) }}
+
     outputs:
       gh_action_benchmark_input_artifact_name: ${{ steps.set_gh_action_benchmark_input_artifact_name.outputs.gh_action_benchmark_input_artifact_name}}
 
@@ -96,15 +93,15 @@ jobs:
         uses: ./.github/actions/nm-set-env/
         with:
           hf_token: ${{ secrets.NM_HF_TOKEN }}
-          Gi_per_thread: ${{ inputs.Gi_per_thread }}
-          nvcc_threads: ${{ inputs.nvcc_threads }}
+          Gi_per_thread: 1
+          nvcc_threads: 0
 
       - name: set python
         id: set_python
         uses: ./.github/actions/nm-set-python/
         with:
           python: ${{ inputs.python }}
-          venv: TEST
+          venv: ${{ env.VENV_BASE }}
 
       - name: hf cache
         id: hf_cache
@@ -112,13 +109,19 @@ jobs:
         with:
           fs_cache: ${{ secrets.HF_FS_CACHE }}
 
-      - name: build
-        id: build
-        uses: ./.github/actions/nm-build-vllm/
+      - name: download whl
+        id: download
+        uses: actions/download-artifact@v4
         with:
-          python: ${{ inputs.python }}
-          venv: TEST
-          pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
+          name: ${{ inputs.whl }}
+          path: ${{ inputs.whl }}
+
+      - name: install whl
+        id: install_whl
+        uses: ./.github/actions/nm-install-whl/
+        with:
+            python: ${{ inputs.python }}
+            venv: ${{ env.VENV_BASE }}
 
       - name: run benchmarks
         uses: ./.github/actions/nm-benchmark/
@@ -126,7 +129,7 @@ jobs:
           benchmark_config_list_file: ${{ inputs.benchmark_config_list_file }}
           output_directory: benchmark-results
           python: ${{ inputs.python }}
-          venv: TEST
+          venv: ${{ env.VENV_BASE }}
 
       - name: store benchmark result artifacts
         if: success()
@@ -145,10 +148,10 @@ jobs:
           efs_dst: /EFS/benchmark_results
 
       # Produce GHA benchmark JSONs
-      - name: make github-action-benchmark JSONs 
+      - name: make github-action-benchmark JSONs
         uses: ./.github/actions/nm-produce-gha-benchmark-json
         with:
-          vllm_benchmark_jsons_path: benchmark-results 
+          vllm_benchmark_jsons_path: benchmark-results
           # Metrics that are "better" when the value is greater are stored here
           bigger_is_better_output_file_path: gh-action-benchmark-jsons/bigger_is_better.json
           # Metrics that are "better" when the value is smaller are stored here
@@ -156,7 +159,7 @@ jobs:
           # Metrics that we only want to observe are stored here
           observation_metrics_output_file_path: gh-action-benchmark-jsons/observation_metrics.json
           python: ${{ inputs.python }}
-          venv: TEST
+          venv: ${{ env.VENV_BASE }}
 
       - name: set gh action benchmark input artifact name
         id: set_gh_action_benchmark_input_artifact_name
@@ -169,7 +172,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.set_gh_action_benchmark_input_artifact_name.outputs.gh_action_benchmark_input_artifact_name}}
-          path: gh-action-benchmark-jsons 
+          path: gh-action-benchmark-jsons
           retention-days: 1
 
       - name: copy gh action benchmark JSONs to EFS store
@@ -180,13 +183,13 @@ jobs:
           src: gh-action-benchmark-jsons
           efs_dst: /EFS/benchmark_results
 
-  NM_GH_ACTION_BENCHMARK:
+  BENCHMARK_REPORT:
 
-    needs: BENCHMARK 
+    needs: [BENCHMARK]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      # Permissions required to be able to push to the nm-gh-pages branch 
+      # Permissions required to be able to push to the nm-gh-pages branch
       contents: write
 
     steps:
