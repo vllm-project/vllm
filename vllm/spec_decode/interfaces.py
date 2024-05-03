@@ -38,6 +38,11 @@ class SpeculativeScores:
     # Probabilities of the speculative tokens according to the scoring model.
     probs: torch.Tensor
 
+    # Log-probabilities of the speculative tokens according to the scoring
+    # model. These values can be used to generate Logprob objects that are
+    # returned to the user.
+    logprobs: torch.Tensor
+
     # Token ids sampled from the scoring model. Used for speculative bonus
     # tokens and also non-speculative normal decoding.
     token_ids: torch.Tensor
