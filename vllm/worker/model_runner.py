@@ -12,8 +12,7 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
-from vllm.distributed.device_communicators import (custom_all_reduce,
-                                                   pynccl_utils)
+from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -858,10 +857,6 @@ class ModelRunner:
         Since it is used for decoding-only, it assumes there's only 1 token
         per sequence in the batch.
         """
-        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
-        # deleted before the CUDA graphs.
-        self.pynccl_backend = pynccl_utils.get_nccl_backend()
-
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "

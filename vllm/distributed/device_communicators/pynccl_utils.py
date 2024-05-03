@@ -36,7 +36,3 @@ def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     assert input_.is_cuda, f"{input_} should be a cuda tensor"
     assert comm is not None
     comm.all_reduce(input_, op)
-
-
-def get_nccl_backend() -> Optional["NCCLCommunicator"]:
-    return comm
