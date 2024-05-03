@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
 
-
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -155,6 +154,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 }
 
 # end-env-vars-definition
+
 
 def __getattr__(name):
     # lazy evaluation of environment variables
