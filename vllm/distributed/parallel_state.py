@@ -4,9 +4,10 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 """Tensor and pipeline parallel groups."""
 import contextlib
-from typing import Optional
+from typing import List, Optional
 
 import torch
+from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -14,10 +15,11 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # Tensor model parallel group that the current rank belongs to.
-_TP_DEVICE_GROUP = None
-_TP_CPU_GROUP = None
+_TP_DEVICE_GROUP: Optional[ProcessGroup] = None
+_TP_CPU_GROUP: Optional[ProcessGroup] = None
+_TP_PYNCCL_COMMUNICATOR = None
 # Pipeline model parallel group that the current rank belongs to.
-_PIPELINE_MODEL_PARALLEL_GROUP = None
+_PIPELINE_MODEL_PARALLEL_GROUP: Optional[ProcessGroup] = None
 
 # when people blindly call `torch.distributed.all_reduce` etc,
 # it will use this group. It is initialized with the `backend`
@@ -41,7 +43,7 @@ _CPU_WORLD_GROUP = None
 
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
-_PIPELINE_GLOBAL_RANKS = None
+_PIPELINE_GLOBAL_RANKS: Optional[List[int]] = None
 
 _LOCAL_RANK = -1
 
@@ -133,17 +135,27 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
+    global _TP_DEVICE_GROUP, _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR
     assert _TP_DEVICE_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
-        ranks = range(i * tensor_model_parallel_size,
-                      (i + 1) * tensor_model_parallel_size)
+        ranks = list(
+            range(i * tensor_model_parallel_size,
+                  (i + 1) * tensor_model_parallel_size))
         group = torch.distributed.new_group(ranks, backend=backend)
         cpu_group = torch.distributed.new_group(ranks, backend="gloo")
         if rank in ranks:
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
+
+    from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
+    _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(group=_TP_CPU_GROUP)
+
+    logger.info("vLLM is using nccl==%s",
+                _TP_PYNCCL_COMMUNICATOR.nccl.ncclGetVersion())
+
+    from vllm.distributed.device_communicators import pynccl_utils
+    pynccl_utils.comm = _TP_PYNCCL_COMMUNICATOR
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -151,7 +163,7 @@ def initialize_model_parallel(
     assert _PIPELINE_MODEL_PARALLEL_GROUP is None, (
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
-        ranks = range(i, world_size, num_pipeline_model_parallel_groups)
+        ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _PIPELINE_MODEL_PARALLEL_GROUP = group
