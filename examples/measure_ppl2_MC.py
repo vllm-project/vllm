@@ -145,7 +145,6 @@ Estimates:\n\
 \tCross-entropy_intermediate=%f\n\
 \tPerplexity_intermediate=%f",c+1,my_n_patches,my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
     ending_time = datetime.datetime.now()
-    duration = ending_time-starting_time
     logger.info("Done @ %s generated %d tokens.",
     f'{ending_time:%Y-%m-%d %H:%M:%S%z}', num_tokens_generated)
 
