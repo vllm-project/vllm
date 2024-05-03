@@ -307,16 +307,16 @@ def destroy_model_parallel():
     if _TP_CPU_GROUP:
         torch.distributed.destroy_process_group(_TP_CPU_GROUP)
     _TP_CPU_GROUP = None
+    from vllm.distributed.device_communicators import pynccl_utils
+    del pynccl_utils.comm
+    pynccl_utils.comm = None
+
     global _PIPELINE_MODEL_PARALLEL_GROUP
     if _PIPELINE_MODEL_PARALLEL_GROUP:
         torch.distributed.destroy_process_group(_PIPELINE_MODEL_PARALLEL_GROUP)
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
-    from vllm.distributed.device_communicators import pynccl_utils
-
-    # Destroy the pynccl states if any.
-    pynccl_utils.destroy_process_group()
 
 
 # Whether to use pynccl for nccl all reduce.
