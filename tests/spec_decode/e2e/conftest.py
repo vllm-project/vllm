@@ -1,7 +1,6 @@
-from typing import Dict, List, Tuple
 import asyncio
 from itertools import cycle
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import pytest
 import ray
@@ -12,10 +11,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import MultiModalData
+from vllm.sequence import Logprob, MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
 
@@ -202,6 +200,7 @@ def get_logprobs_from_llm_generator(
         del llm
 
     return logprobs
+
 
 def run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,

@@ -11,10 +11,11 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
-                                   get_sampled_token_logprobs, nvtx_range, split_batch_by_proposal_len)
-from vllm.spec_decode.ngram_worker import NGramWorker
+                                   get_sampled_token_logprobs, nvtx_range,
+                                   split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
@@ -299,12 +300,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         )
 
         #logger.info("verify proposals")
-        accepted_token_ids, target_logprobs = self._verify_tokens(seq_group_metadata_list,
-                                                 proposal_scores, proposals, k)
+        accepted_token_ids, target_logprobs = self._verify_tokens(
+            seq_group_metadata_list, proposal_scores, proposals, k)
 
         #logger.info("create output list")
-        return self._create_output_sampler_list(seq_group_metadata_list,
-                                                accepted_token_ids, target_logprobs=target_logprobs, k=k)
+        return self._create_output_sampler_list(
+            seq_group_metadata_list,
+            accepted_token_ids,
+            target_logprobs=target_logprobs,
+            k=k)
 
     @nvtx_range("spec_decode_worker._verify_tokens")
     def _verify_tokens(

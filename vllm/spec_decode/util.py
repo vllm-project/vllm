@@ -133,8 +133,8 @@ def split_batch_by_proposal_len(
 
 
 def sampler_output_to_torch(
-        sampler_output_list: List[SamplerOutput],
-        sampler_transposed: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    sampler_output_list: List[SamplerOutput], sampler_transposed: bool
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Utility function which converts a list of SamplerOutput to tensors.
 
         sampler_transposed here is used as the indicator for whether

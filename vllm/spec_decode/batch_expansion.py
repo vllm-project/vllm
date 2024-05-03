@@ -360,8 +360,8 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sampler_output.sampled_token_ids = non_spec_sampled_tokens
         sampler_output.logprobs = non_spec_logprobs
         (non_spec_target_token_ids, non_spec_target_probs,
-         non_spec_target_logprobs) = sampler_output_to_torch([sampler_output
-                                                               ], True)
+         non_spec_target_logprobs) = sampler_output_to_torch([sampler_output],
+                                                             True)
 
         return (target_token_ids, target_probs, target_logprobs,
                 non_spec_target_token_ids, non_spec_target_probs,

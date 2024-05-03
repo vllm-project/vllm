@@ -193,10 +193,10 @@ def test_correctly_calls_rejection_sampler(k: int, batch_size: int):
                                     dtype=torch.float32,
                                     device='cuda')
     target_token_logprobs = torch.rand(1,
-                                    batch_size * (k + 1),
-                                    vocab_size,
-                                    dtype=torch.float32,
-                                    device='cuda')
+                                       batch_size * (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs,
                                                target_token_logprobs)
@@ -280,10 +280,10 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                     dtype=torch.float32,
                                     device='cuda')
     target_token_logprobs = torch.rand(1,
-                                    batch_size * (k + 1),
-                                    vocab_size,
-                                    dtype=torch.float32,
-                                    device='cuda')
+                                       batch_size * (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs,
                                                target_token_logprobs)
@@ -306,7 +306,9 @@ def test_correctly_formats_output(k: int, batch_size: int):
                                   num_lookahead_slots=k)
 
     expected_output = create_sampler_output_list(
-        token_ids=rejection_sampler_output.transpose(0, 1), probs=[None for _ in range(k + 1)], logprobs=[None for _ in range(k + 1)])
+        token_ids=rejection_sampler_output.transpose(0, 1),
+        probs=[None for _ in range(k + 1)],
+        logprobs=[None for _ in range(k + 1)])
 
     seq_ids = [
         next(iter(seq_group_metadata.seq_data.keys()))
@@ -399,10 +401,10 @@ def test_collects_metrics(k: int, batch_size: int, returns_metrics: bool):
                                     dtype=torch.float32,
                                     device='cuda')
     target_token_logprobs = torch.rand(1,
-                                    batch_size * (k + 1),
-                                    vocab_size,
-                                    dtype=torch.float32,
-                                    device='cuda')
+                                       batch_size * (k + 1),
+                                       vocab_size,
+                                       dtype=torch.float32,
+                                       device='cuda')
     target_output = create_sampler_output_list(target_token_ids,
                                                target_token_probs,
                                                target_token_logprobs)
