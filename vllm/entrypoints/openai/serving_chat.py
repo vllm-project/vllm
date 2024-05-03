@@ -44,7 +44,7 @@ class OpenAIServingChat(OpenAIServing):
                          lora_modules=lora_modules,
                          await_post_init=self._load_chat_template(
                              chat_template=chat_template))
-                         
+
         self.response_role = response_role
 
     def _parse_chat_message_content(

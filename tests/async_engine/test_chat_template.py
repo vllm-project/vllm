@@ -87,7 +87,7 @@ async def test_no_load_chat_template_filelike():
 
     with pytest.raises(ValueError, match="looks like a file path"):
         await OpenAIServingChat._load_chat_template(mock_serving_chat,
-                                              chat_template=template)
+                                                    chat_template=template)
 
 
 def test_no_load_chat_template_literallike():
