@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
+    VLLM_BUILD_WITH_NEURON: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -54,6 +55,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
     "NVCC_THREADS":
     lambda: os.getenv("NVCC_THREADS", None),
+
+    # If set, vllm will build with Neuron support
+    "VLLM_BUILD_WITH_NEURON":
+    lambda: bool(os.environ.get("VLLM_BUILD_WITH_NEURON", False)),
 
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
