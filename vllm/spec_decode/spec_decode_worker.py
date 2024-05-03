@@ -67,6 +67,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
+        logger.info("Configuring SpecDecodeWorker with proposer=%s",
+                    type(proposer_worker))
+
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
