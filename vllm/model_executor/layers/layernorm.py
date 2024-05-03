@@ -64,3 +64,8 @@ class RMSNorm(nn.Module):
             self.variance_epsilon,
         )
         return out
+
+    def extra_repr(self) -> str:
+        s = f"hidden_size={self.weight.data.size(0)}"
+        s += f", eps={self.variance_epsilon}"
+        return s

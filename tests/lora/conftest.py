@@ -144,6 +144,12 @@ def baichuan_lora_files():
 
 
 @pytest.fixture(scope="session")
+def baichuan_zero_lora_files():
+    # all the lora_B weights are initialized to zero.
+    return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
@@ -153,11 +159,11 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
     get_model_old = get_model
 
-    def get_model_patched(model_config, device_config, **kwargs):
-        return get_model_old(model_config,
-                             device_config,
-                             lora_config=LoRAConfig(max_loras=4,
-                                                    max_lora_rank=8))
+    def get_model_patched(*, model_config, device_config, **kwargs):
+        kwargs["lora_config"] = LoRAConfig(max_loras=4, max_lora_rank=8)
+        return get_model_old(model_config=model_config,
+                             device_config=device_config,
+                             **kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
         engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)

@@ -2,7 +2,10 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig
+from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
+from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 
@@ -12,7 +15,12 @@ def test_prepare_prompt(batch_size):
                                        100000,
                                        100000,
                                        enable_chunked_prefill=False)
-    model_runner = ModelRunner(None, None, scheduler_config, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=scheduler_config,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     model_runner.set_block_size(16)
 
     prompt_lens = []
@@ -92,9 +100,12 @@ def test_prepare_prompt(batch_size):
     assert len(input_positions) == sum(prompt_lens)
     torch.testing.assert_close(input_tokens, input_positions)
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory)
     assert len(input_tokens) == sum(prompt_lens)
     assert len(input_positions) == sum(prompt_lens)
     actual = sampling_metadata.selected_token_indices
@@ -118,8 +129,6 @@ def test_prepare_decode_cuda_graph(batch_size):
         "facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
@@ -129,8 +138,12 @@ def test_prepare_decode_cuda_graph(batch_size):
                                        100000,
                                        100000,
                                        enable_chunked_prefill=False)
-    model_runner = ModelRunner(model_config, None, scheduler_config, None,
-                               None)
+    model_runner = ModelRunner(model_config=model_config,
+                               parallel_config=None,
+                               scheduler_config=scheduler_config,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     model_runner.set_block_size(16)
 
     prompt_lens = []
@@ -188,9 +201,12 @@ def test_prepare_decode_cuda_graph(batch_size):
     for prompt_len in prompt_lens:
         expected_selected_token_indices.append(selected_token_start_idx)
         selected_token_start_idx += 1
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        prompt_lens,
+        subquery_lens=prompt_lens,
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory)
     actual = sampling_metadata.selected_token_indices
     expected = torch.tensor(expected_selected_token_indices,
                             device=actual.device,
@@ -205,14 +221,17 @@ def test_empty_seq_group():
         "facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
         enforce_eager=False,
     )
-    model_runner = ModelRunner(model_config, None, None, None, None)
+    model_runner = ModelRunner(model_config=model_config,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     model_runner.set_block_size(16)
     seq_group_metadata_list = []
     input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
@@ -232,27 +251,24 @@ def test_empty_seq_group():
     assert len(return_prompt_lens) == 0
 
 
+@pytest.fixture
+def distributed_init():
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+        local_rank=0)
+
+
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
-def test_hybrid_batches(batch_size, enforce_eager, monkeypatch):
-
-    def get_world_size(group=None):
-        return 1
-
-    def mock_get_process_group_ranks(group=None):
-        return [0]
-
-    monkeypatch.setattr(torch.distributed, "get_world_size", get_world_size)
-    monkeypatch.setattr(torch.distributed, "get_process_group_ranks",
-                        mock_get_process_group_ranks)
+def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
 
     model_config = ModelConfig(
         "facebook/opt-125m",
         "facebook/opt-125m",
         tokenizer_mode="auto",
         trust_remote_code=False,
-        download_dir=None,
-        load_format="dummy",
         seed=0,
         dtype="float16",
         revision=None,
@@ -262,11 +278,12 @@ def test_hybrid_batches(batch_size, enforce_eager, monkeypatch):
                                        100000,
                                        100000,
                                        enable_chunked_prefill=True)
-    model_runner = ModelRunner(model_config,
-                               None,
-                               scheduler_config,
-                               None,
-                               None,
+    model_runner = ModelRunner(model_config=model_config,
+                               parallel_config=None,
+                               scheduler_config=scheduler_config,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None,
                                is_driver_worker=True)
     model_runner.set_block_size(16)
 
