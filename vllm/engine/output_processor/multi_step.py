@@ -1,3 +1,4 @@
+import functools
 from typing import Callable, List
 
 from transformers import PreTrainedTokenizer
@@ -48,10 +49,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                                outputs: List[SequenceGroupOutput]) -> None:
         # TODO(sang): Prompt logprob currently not implemented in multi step
         # workers.
+        self._log_prompt_logprob_unsupported_warning_once()
+
+    @staticmethod
+    @functools.lru_cache()
+    def _log_prompt_logprob_unsupported_warning_once():
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
-        pass
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput]) -> None:
