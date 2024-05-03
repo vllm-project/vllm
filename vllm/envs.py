@@ -39,7 +39,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
 
     # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
-    "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+    "VLLM_TARGET_DEVICE":
+    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
 
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
