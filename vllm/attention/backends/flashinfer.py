@@ -69,7 +69,7 @@ class FlashInferMetadata(AttentionMetadataPerStage):
     # Metadata for the prefill stage since we still
     # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
-    max_prompt_len: Optional[int] = None
+    max_seq_len: Optional[int] = None
     block_tables: Optional[torch.Tensor] = None
 
     # Metadata for the decode stage
@@ -197,8 +197,8 @@ class FlashInferImpl(AttentionImpl):
                     v=value,
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_prompt_len,
-                    max_seqlen_k=prefill_meta.max_prompt_len,
+                    max_seqlen_q=prefill_meta.max_seq_len,
+                    max_seqlen_k=prefill_meta.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
