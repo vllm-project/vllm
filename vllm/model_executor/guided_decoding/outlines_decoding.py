@@ -3,10 +3,11 @@ from enum import Enum
 from functools import lru_cache
 from json import dumps as json_dumps
 from re import escape as regex_escape
-from typing import Tuple, Union, Optional
+from typing import Optional, Tuple, Union
 
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+
 from vllm.model_executor.guided_decoding.fields import GuidedDecodingFields
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
