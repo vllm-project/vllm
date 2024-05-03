@@ -9,7 +9,7 @@ def print_top_10_largest_files(zip_file):
         file_sizes = [(f, z.getinfo(f).file_size) for f in z.namelist()]
         file_sizes.sort(key=lambda x: x[1], reverse=True)
         for f, size in file_sizes[:10]:
-            print(f"{f}: {size/1024*1024} MBs")
+            print(f"{f}: {size/(1024*1024)} MBs uncompressed.")
 
 
 def check_wheel_size(directory):
@@ -18,7 +18,7 @@ def check_wheel_size(directory):
             if f.endswith(".whl"):
                 wheel_path = os.path.join(root, f)
                 wheel_size = os.path.getsize(wheel_path)
-                wheel_size_mb = wheel_size / 1024 * 1024
+                wheel_size_mb = wheel_size / (1024 * 1024)
                 if wheel_size > MAX_SIZE_MB:
                     print(
                         f"Wheel {wheel_path} is too large ({wheel_size_mb} MB) "
