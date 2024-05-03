@@ -34,7 +34,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if out is not None:
         return out
     if is_pynccl_enabled_for_all_reduce():
-        # TODO: support multiple parallel groups.
         pynccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
