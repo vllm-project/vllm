@@ -24,8 +24,6 @@ static constexpr int min_thread_k = 64;
 static constexpr int tile_size = 16;
 static constexpr int max_par   = 16;
 
-static constexpr int pack_factor_4bit = 8; // We have 8 4-bit vals inside a 32 bit
-
 template <typename T, int n>
 struct Vec {
   T             elems[n];
@@ -51,13 +49,11 @@ __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool
                "r"(smem), "l"(glob_ptr), "n"(BYTES));
 }
 
-__device__ inline void cp_async4_stream(void* smem_ptr, const void* glob_ptr) {
+__device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
   const int BYTES = 16;
   uint32_t  smem  = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile("{\n"
-               "   .reg .b64 p;\n"
-               "   createpolicy.fractional.L2::evict_first.b64 p, 1.0;"
-               "   cp.async.cg.shared.global.L2::cache_hint [%0], [%1], %2, p;\n"
+               "   cp.async.cg.shared.global [%0], [%1], %2;\n"
                "}\n" ::"r"(smem),
                "l"(glob_ptr), "n"(BYTES));
 }
