@@ -1,8 +1,8 @@
-import os
 from typing import Dict, List, Set, Tuple
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -152,8 +152,7 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
         logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
 
-    kv_cache_space_str = os.getenv("VLLM_CPU_KVCACHE_SPACE", "0")
-    kv_cache_space = int(kv_cache_space_str)
+    kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
     if kv_cache_space >= 0:
         if kv_cache_space == 0:

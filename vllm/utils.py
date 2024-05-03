@@ -21,6 +21,7 @@ import psutil
 import torch
 from packaging.version import Version, parse
 
+import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -174,7 +175,7 @@ def get_vllm_instance_id():
     Instance id represents an instance of the VLLM. All processes in the same
     instance should have the same instance id.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -243,7 +244,7 @@ def merge_async_iterators(
 
 
 def get_ip() -> str:
-    host_ip = os.environ.get("HOST_IP")
+    host_ip = envs.VLLM_HOST_IP
     if host_ip:
         return host_ip
 
@@ -269,7 +270,8 @@ def get_ip() -> str:
 
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable HOST_IP.",
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
 
@@ -314,7 +316,7 @@ def cdiv(a: int, b: int) -> int:
 
 @lru_cache(maxsize=None)
 def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
+    cuda_home = envs.CUDA_HOME
     if not cuda_home:
         cuda_home = '/usr/local/cuda'
         if os.path.isfile(cuda_home + '/bin/nvcc'):
@@ -581,7 +583,7 @@ def find_library(lib_name: str) -> str:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
     # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    env_ld_library_path = envs.LD_LIBRARY_PATH
     if not locs and env_ld_library_path:
         locs = [
             os.path.join(dir, lib_name)
@@ -594,14 +596,15 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+    so_file = envs.VLLM_NCCL_SO_PATH
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
     if torch.version.cuda is not None:
         cuda_major = torch.version.cuda.split(".")[0]
         path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
         files = glob.glob(path)
         vllm_nccl_path = files[0] if files else None
 
@@ -626,7 +629,7 @@ def enable_trace_function_call_for_thread() -> None:
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
 
-    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+    if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
