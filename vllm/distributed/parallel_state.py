@@ -343,9 +343,3 @@ def with_pynccl_for_all_reduce():
         with pynccl_utils.set_pynccl_stream(stream):
             yield
         _ENABLE_PYNCCL_FOR_ALL_REDUCE = old
-
-
-def is_pynccl_enabled_for_all_reduce():
-    """check if pynccl is enabled for all reduce"""
-    global _ENABLE_PYNCCL_FOR_ALL_REDUCE
-    return _ENABLE_PYNCCL_FOR_ALL_REDUCE
