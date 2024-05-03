@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_BUILD_WITH_NEURON: bool = False
+    VLLM_USE_PRECOMPILED: bool = False
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -59,6 +60,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will build with Neuron support
     "VLLM_BUILD_WITH_NEURON":
     lambda: bool(os.environ.get("VLLM_BUILD_WITH_NEURON", False)),
+
+    # If set, vllm will use precompiled binaries (*.so)
+    "VLLM_USE_PRECOMPILED":
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
 
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
