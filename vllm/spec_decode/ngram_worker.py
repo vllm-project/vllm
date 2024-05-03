@@ -140,11 +140,17 @@ class NGramWorker(LoraNotSupportedWorkerBase):
             device=self.device,
         )
         token_probs.scatter_(2, indices, 1)
+        token_logprobs = torch.zeros(
+            (len(seq_group_metadata_list), sample_len, self.vocab_size),
+            dtype=torch.float32,
+            device=self.device,
+        )
         for i in range(len(seq_group_metadata_list)):
             outputs.append(
                 SamplerOutput(
                     outputs=None,
                     sampled_token_probs=token_probs[i],
+                    logprobs=token_logprobs,
                     sampled_token_ids=token_ids[i],
                 ))
         return outputs, False
