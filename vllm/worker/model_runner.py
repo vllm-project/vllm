@@ -158,7 +158,7 @@ class ModelRunner:
         # (max batch size to capture, max context len to capture / block size).
         self.graph_block_tables: torch.Tensor  # Set after initial profiling.
 
-    def load_model(self) -> None:
+    def load_model(self):
         with CudaMemoryProfiler() as m:
             self.model = get_model(
                 model_config=self.model_config,

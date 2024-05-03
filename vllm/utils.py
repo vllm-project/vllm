@@ -447,13 +447,25 @@ def is_pin_memory_available() -> bool:
 
 class CudaMemoryProfiler:
 
-    def __init__(self, device=None):
+    def __init__(self, device=None, capture_max_memory: bool = False):
+        """A context manager to measure memory usage on a given device.
+
+        If capture_max_memory is True, it measures the maximum memory usage
+        during the profiling. However, it can only measure GPU memory used by
+        torch tensor. If it is False, it measures the memory delta which also
+        includes non-torch tensor GPU memory usage.
+        """
         self.device = device
+        self.capture_max_memory = capture_max_memory
 
     def current_memory_usage(self) -> float:
         # Return the memory usage in bytes.
-        torch.cuda.reset_peak_memory_stats(self.device)
-        mem = torch.cuda.max_memory_allocated(self.device)
+        if self.capture_max_memory:
+            torch.cuda.reset_peak_memory_stats(self.device)
+            mem = torch.cuda.max_memory_allocated(self.device)
+        else:
+            free, total = torch.cuda.mem_get_info(self.device)
+            mem = total - free
         return mem
 
     def __enter__(self):
