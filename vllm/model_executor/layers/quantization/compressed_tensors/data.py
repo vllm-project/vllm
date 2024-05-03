@@ -8,8 +8,3 @@ class QuantizationFields(Enum):
     strategy = "strategy"
     symmetric = "symmetric"
     dynamic = "dynamic"
-
-
-class NumBits(Enum):
-    EIGHT = "8"
-    FOUR = "4"
