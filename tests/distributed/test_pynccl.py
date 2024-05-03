@@ -40,6 +40,10 @@ def worker_fn_wrapper(fn):
     # and update the environment variables in the function
     def wrapped_fn(env):
         update_environment_variables(env)
+        import os
+        local_rank = os.environ['LOCAL_RANK']
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
         init_distributed_environment()
         fn()
 
@@ -94,7 +98,6 @@ def test_pynccl_multiple_tp():
 @worker_fn_wrapper
 def multiple_tp_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    torch.cuda.set_device(torch.distributed.get_rank())
     ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     with with_pynccl_for_all_reduce():
