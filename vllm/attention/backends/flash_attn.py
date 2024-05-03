@@ -68,22 +68,22 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     is_prompt: bool
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seqlens: Optional[List[int]]
-    # seqlens stored as a tensor.
-    seqlens_tensor: Optional[torch.Tensor]
+    seq_lens: Optional[List[int]]
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, query_len, and seqlen.
+    # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
+    # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch.
     max_query_len: Optional[int]
     # Maximum sequence length in the batch.
-    max_seqlen: Optional[int]
+    max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -221,10 +221,10 @@ class FlashAttentionImpl(AttentionImpl):
                     q=query,
                     k=key,
                     v=value,
-                    cu_seqlens_q=prefill_meta.seq_start_loc,
-                    cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_seqlen,
-                    max_seqlen_k=prefill_meta.max_seqlen,
+                    cu_seq_lens_q=prefill_meta.seq_start_loc,
+                    cu_seq_lens_k=prefill_meta.seq_start_loc,
+                    max_seq_len_q=prefill_meta.max_seq_len,
+                    max_seq_len_k=prefill_meta.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -245,7 +245,7 @@ class FlashAttentionImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.seqlens_tensor,
+                    prefill_meta.seq_lens_tensor,
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
@@ -258,8 +258,8 @@ class FlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seqlens_tensor,
-                decode_meta.max_seqlen,
+                decode_meta.seq_lens_tensor,
+                decode_meta.max_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,

@@ -15,9 +15,9 @@ class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    seqlens_tensor: Optional[torch.Tensor]
+    seq_lens_tensor: Optional[torch.Tensor]
     # Maximum sequence length in the batch.
-    max_seqlen: Optional[int]
+    max_seq_len: Optional[int]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -84,8 +84,8 @@ class PagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        seqlens: torch.Tensor,
-        max_seqlen: int,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
@@ -96,7 +96,7 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        max_num_partitions = ((max_seqlen + _PARTITION_SIZE - 1) //
+        max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
         # PagedAttention V1 or V2. If the number of partitions is 1, we use
@@ -105,7 +105,7 @@ class PagedAttention:
         # to parallelize.
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
-        use_v1 = (max_seqlen <= 8192
+        use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
         if use_v1:
             # Run PagedAttention V1.
@@ -117,9 +117,9 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                seqlens,
+                seq_lens,
                 block_size,
-                max_seqlen,
+                max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
@@ -149,9 +149,9 @@ class PagedAttention:
                 num_kv_heads,
                 scale,
                 block_tables,
-                seqlens,
+                seq_lens,
                 block_size,
-                max_seqlen,
+                max_seq_len,
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
@@ -167,7 +167,7 @@ class PagedAttention:
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         subquery_start_loc: torch.Tensor,
-        seqlens_tensor: torch.Tensor,
+        seq_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
@@ -184,7 +184,7 @@ class PagedAttention:
             block_tables,
             # subquery_start_loc is (batch_size + 1,)
             subquery_start_loc[:-1],
-            seqlens_tensor,
+            seq_lens_tensor,
             context_lens,
             max_query_len,
             alibi_slopes,

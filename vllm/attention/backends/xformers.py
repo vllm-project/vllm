@@ -68,22 +68,22 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     is_prompt: bool
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seqlens: Optional[List[int]]
-    # seqlens stored as a tensor.
-    seqlens_tensor: Optional[torch.Tensor]
+    seq_lens: Optional[List[int]]
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
+    # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
     # Maximum query length in the batch.
     max_query_len: Optional[int]
     # FIXME: It is for flash attn.
     # Maximum sequence length in the batch.
-    max_seqlen: Optional[int]
+    max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -241,7 +241,7 @@ class XFormersImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.seqlens_tensor,
+                    prefill_meta.seq_lens_tensor,
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
@@ -256,8 +256,8 @@ class XFormersImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seqlens_tensor,
-                decode_meta.max_seqlen,
+                decode_meta.seq_lens_tensor,
+                decode_meta.max_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -288,7 +288,7 @@ class XFormersImpl(AttentionImpl):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
-        assert attn_metadata.seqlens is not None
+        assert attn_metadata.seq_lens is not None
         original_query = query
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].
@@ -309,7 +309,7 @@ class XFormersImpl(AttentionImpl):
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.seqlens)
+                    attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
@@ -317,7 +317,7 @@ class XFormersImpl(AttentionImpl):
             else:
                 attn_metadata.attn_bias = _make_alibi_bias(
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
-                    attn_metadata.seqlens)
+                    attn_metadata.seq_lens)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -342,8 +342,8 @@ class XFormersImpl(AttentionImpl):
         # one. This is inefficient, especially when we have many short prompts.
         output = torch.empty_like(original_query)
         start = 0
-        for i, seqlen in enumerate(attn_metadata.seqlens):
-            end = start + seqlen
+        for i, seq_len in enumerate(attn_metadata.seq_lens):
+            end = start + seq_len
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
                 key[None, start:end],
@@ -353,7 +353,7 @@ class XFormersImpl(AttentionImpl):
                 scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
             output[start:end].copy_(out.view_as(original_query[start:end]))
-            start += seqlen
+            start += seq_len
         return output
 
 
@@ -361,13 +361,13 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    seqlens: List[int],
+    seq_lens: List[int],
 ) -> LowerTriangularMaskWithTensorBias:
     attn_biases = []
-    for seqlen in seqlens:
-        bias = torch.arange(seqlen, dtype=dtype)
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(seqlen, 1)`
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
         # here. We find that both biases give the same results, but
         # the bias below more accurately follows the original ALiBi
         # paper.
@@ -375,16 +375,16 @@ def _make_alibi_bias(
         # element.
         bias = bias[None, :] - bias[:, None]
 
-        padded_len = (seqlen + 7) // 8 * 8
+        padded_len = (seq_len + 7) // 8 * 8
         num_heads = alibi_slopes.shape[0]
         bias = torch.empty(
             1,  # batch size
             num_heads,
-            seqlen,
+            seq_len,
             padded_len,
             device=alibi_slopes.device,
             dtype=dtype,
-        )[:, :, :, :seqlen].copy_(bias)
+        )[:, :, :, :seq_len].copy_(bias)
         bias.mul_(alibi_slopes[:, None, None])
         if num_heads != num_kv_heads:
             bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))

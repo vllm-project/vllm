@@ -20,7 +20,7 @@ class SequenceGroupToSample:
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
+    # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
     # Sequence ids for the sequence group in a previous step.
@@ -31,9 +31,9 @@ class SequenceGroupToSample:
     # The length of the sequence (all tokens seen in the past + new token to
     # compute attention) of the sequence group. None if it is in a decode
     # stage.
-    seqlen: Optional[int]
+    seq_len: Optional[int]
     # The length of new query tokens to compute in the current step. None if it
-    # is in a decode stage. The length of query_len <= seqlen if chunked prefill
+    # is in a decode stage. The length of query_len <= seq_len if chunked prefill
     # is enabled.
     query_len: Optional[int]
     # A random number generator for sampling.
@@ -55,7 +55,7 @@ class SequenceGroupToSample:
         if len(self.prompt_logprob_indices) > 0:
             assert self.sampling_params.prompt_logprobs is not None
         if self.is_prompt:
-            assert self.seqlen is not None
+            assert self.seq_len is not None
             assert self.query_len is not None
 
 
@@ -198,7 +198,7 @@ def _prepare_seq_groups(
         is_prompt = seq_group_metadata.is_prompt
         generator: Optional[torch.Generator] = None
         # If the current seq group is in decode stage, it is None.
-        seqlen: Optional[int] = None
+        seq_len: Optional[int] = None
         query_len: Optional[int] = None
         prompt_logprob_indices: List[int] = []
         sample_indices: List[int] = []
@@ -213,7 +213,7 @@ def _prepare_seq_groups(
             num_prefill_sample = len(seq_ids)
             assert num_prefill_sample == 1
             assert query_lens is not None and seq_lens is not None
-            query_len, seqlen = query_lens[i], seq_lens[i]
+            query_len, seq_len = query_lens[i], seq_lens[i]
             # If we need sampling, exclude num_prefill_sample tokens from
             # prompt logprob.
             prompt_logprob_len = (query_len - num_prefill_sample
@@ -276,7 +276,7 @@ def _prepare_seq_groups(
                 seq_ids=seq_ids,
                 sampling_params=sampling_params,
                 seq_data=seq_group_metadata.seq_data,
-                seqlen=seqlen,
+                seq_len=seq_len,
                 query_len=query_len,
                 generator=generator,
                 is_prompt=is_prompt,
