@@ -85,7 +85,7 @@ def test_guided_json_completion(sample_json_schema, llm):
         prompts=[
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
-        ],
+        ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
     )
