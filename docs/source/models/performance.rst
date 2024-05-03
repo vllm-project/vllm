@@ -17,14 +17,18 @@ By default, vLLM scheduler prioritizes prefills and doesn't batch prefill and de
 
 Once chunked prefill is enabled, the policy is changed to
 
-- prioritize decode requests. It batches all pending decode requests.
-- When there are available token_budget (`max_num_batched_tokens`), it puts pending prefills. If the last pending prefill cannot fit into `max_num_batched_tokens`, it chunks it.
+- prioritize decode requests. It batches all pending decode requests to the batch before scheduling any prefill.
+- When there are available token_budget (`max_num_batched_tokens`), it schedules pending prefills. If a last pending prefill request cannot fit into `max_num_batched_tokens`, it chunks it.
 
 This policy has two benefits.
 
-- It improves ITL (inter token latency) because decode requests are prioritized. Most of LLM requests' e2e latency is dominated by ITL, so it improves e2e latency.
+- It improves ITL (inter token latency) and generation decode because decode requests are prioritized.
 - It helps achieving better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
 
-You can tune `max_num_batched_tokens` to optimize TTFT or ITL. By default, it is set to 512, which has the best ITL on A100 in the initial benchmark. Smaller batch size achieves better ITL because there are less prefills interrupting decodes. Higher batch size achieves better TTFT as you can put more prefill to the batch. If `max_num_batched_tokens` is same as `max_model_len`, that's almost the equivalent to the default scheduling policy (except that it still prioritizes decodes).
+`max_num_batched_tokens` takes an important role to tune the performance.
+By default, it is set to 512, which has the best ITL on A100 in the initial benchmark.
+Smaller batch size achieves better ITL because there are less prefills interrupting decodes.
+Higher batch size achieves better TTFT as you can put more prefill to the batch.
+If `max_num_batched_tokens` is same as `max_model_len`, that's almost the equivalent to the default scheduling policy (except that it still prioritizes decodes).
 
 See related papers for more details (https://arxiv.org/pdf/2401.08671 or https://arxiv.org/pdf/2308.16369). 
