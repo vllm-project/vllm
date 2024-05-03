@@ -334,7 +334,7 @@ def with_pynccl_for_all_reduce():
         global _TP_PYNCCL_COMMUNICATOR
         assert _TP_PYNCCL_COMMUNICATOR is not None
         old = _TP_PYNCCL_COMMUNICATOR.disabled
-        _TP_PYNCCL_COMMUNICATOR.disabled = True
+        _TP_PYNCCL_COMMUNICATOR.disabled = False
 
         stream = torch.cuda.current_stream()
         old_stream = _TP_PYNCCL_COMMUNICATOR.stream
