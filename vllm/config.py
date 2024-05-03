@@ -104,8 +104,8 @@ class ModelConfig:
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
         if self.max_context_len_to_capture is not None:
-            logger.warning("`max_context_len_to_capture` is deprecated. "
-                           "Use `max_seqlen_to_capture` instead.")
+            raise ValueError("`max_context_len_to_capture` is deprecated. "
+                             "Use `max_seqlen_to_capture` instead.")
         self.max_seqlen_to_capture = (max_seqlen_to_capture
                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs

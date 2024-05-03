@@ -616,7 +616,7 @@ __global__ void paged_attention_v2_reduce_kernel(
     num_kv_heads,                                                                             \
     scale,                                                                                    \
     block_tables_ptr,                                                                         \
-    seqlens_ptr,                                                                         \
+    seqlens_ptr,                                                                              \
     max_num_blocks_per_seq,                                                                   \
     alibi_slopes_ptr,                                                                         \
     q_stride,                                                                                 \
