@@ -10,6 +10,9 @@ import torch
 from vllm import CompletionOutput, SamplingParams
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinLinearMethod)
+from vllm.model_executor.layers.quantization.marlin import MarlinLinearMethod
 
 PROMPT = "On the surface of Mars, we found"
 
@@ -62,7 +65,10 @@ def test_lm_head(
                      model_runner.model.lm_head)
 
     if lm_head_quantized:
-        assert isinstance(lm_head_layer.linear_method, GPTQLinearMethod)
+        assert isinstance(
+            lm_head_layer.linear_method,
+            (GPTQLinearMethod, GPTQMarlinLinearMethod, MarlinLinearMethod))
+
     else:
         assert isinstance(lm_head_layer.linear_method, UnquantizedLinearMethod)
 

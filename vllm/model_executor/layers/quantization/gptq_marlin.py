@@ -11,6 +11,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -85,7 +86,7 @@ class GPTQMarlinConfig(QuantizationConfig):
     """Config class for GPTQ Marlin"""
 
     def __init__(self, weight_bits: int, group_size: int, desc_act: bool,
-                 is_sym: bool) -> None:
+                 sym: bool, lm_head_quantized: bool) -> None:
         if desc_act and group_size == -1:
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
@@ -94,7 +95,8 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.desc_act = desc_act
-        self.is_sym = is_sym
+        self.sym = sym
+        self.lm_head_quantized = lm_head_quantized
 
         # Verify
         if self.weight_bits not in GPTQ_MARLIN_SUPPORTED_NUM_BITS:
@@ -107,9 +109,9 @@ class GPTQMarlinConfig(QuantizationConfig):
                 f"Marlin does not support group_size = {self.group_size}. "
                 f"Only group_sizes = {GPTQ_MARLIN_SUPPORTED_GROUP_SIZES} "
                 "are supported.")
-        if self.is_sym not in GPTQ_MARLIN_SUPPORTED_SYM:
+        if self.sym not in GPTQ_MARLIN_SUPPORTED_SYM:
             raise ValueError(
-                f"Marlin does not support is_sym = {self.is_sym}. "
+                f"Marlin does not support is_sym = {self.sym}. "
                 f"Only sym = {GPTQ_MARLIN_SUPPORTED_SYM} are supported.")
 
         # Init
@@ -122,7 +124,8 @@ class GPTQMarlinConfig(QuantizationConfig):
     def __repr__(self) -> str:
         return (f"GPTQMarlinConfig(weight_bits={self.weight_bits}, "
                 f"group_size={self.group_size}, "
-                f"desc_act={self.desc_act})")
+                f"desc_act={self.desc_act}, "
+                f"lm_head_quantized={self.lm_head_quantized})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -145,14 +148,21 @@ class GPTQMarlinConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         desc_act = cls.get_from_keys(config, ["desc_act"])
-        is_sym = cls.get_from_keys(config, ["sym"])
-        return cls(weight_bits, group_size, desc_act, is_sym)
+        sym = cls.get_from_keys(config, ["sym"])
+        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
+                                                       False)
+        return cls(weight_bits, group_size, desc_act, sym, lm_head_quantized)
 
     def get_quant_method(
             self,
             layer: torch.nn.Module) -> Optional["GPTQMarlinLinearMethod"]:
         if isinstance(layer, LinearBase):
             return GPTQMarlinLinearMethod(self)
+
+        # lm_head can be optionally quantized
+        if isinstance(layer, ParallelLMHead) and self.lm_head_quantized:
+            return GPTQMarlinLinearMethod(self)
+
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -165,11 +175,6 @@ class GPTQMarlinConfig(QuantizationConfig):
         group_size = quant_config.get("group_size", None)
         sym = quant_config.get("sym", None)
         desc_act = quant_config.get("desc_act", None)
-        lm_head_quantized = quant_config.get("lm_head", False)
-
-        # TODO FIX ME: marlin is not compatible with quantized lm_head.
-        if lm_head_quantized:
-            return False
 
         # If we cannot find the info needed in the config, cannot convert.
         if (num_bits is None or group_size is None or sym is None
@@ -199,6 +204,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
     Args:
         quant_config: The GPTQ Marlin quantization config.
     """
+    QUANTIZED = True
 
     def __init__(self, quant_config: GPTQMarlinConfig) -> None:
         self.quant_config = quant_config
