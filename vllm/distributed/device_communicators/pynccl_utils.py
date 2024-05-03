@@ -38,11 +38,5 @@ def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     comm.all_reduce(input_, op)
 
 
-def get_world_size() -> int:
-    """Returns the world size."""
-    assert comm is not None
-    return comm.world_size
-
-
 def get_nccl_backend() -> Optional["NCCLCommunicator"]:
     return comm
