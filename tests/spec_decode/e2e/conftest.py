@@ -182,8 +182,7 @@ def get_output_from_llm_generator(
         if (not isinstance(llm, AsyncLLM)
                 and llm.llm_engine.speculative_config is not None and
                 llm.llm_engine.speculative_config.ngram_prompt_lookup_max > 0):
-            assert ("set_ngram_window_size" in dir(
-                llm.llm_engine.model_executor.driver_worker.proposer_worker))
+            assert isinstance(llm.llm_engine.model_executor.driver_worker.proposer_worker, NGramWorker)
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
