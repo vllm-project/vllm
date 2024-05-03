@@ -63,7 +63,7 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def can_swap_in(self, seq_group: SequenceGroup,
-                    num_lookahead_slots: int) -> bool:
+                    num_lookahead_slots: int) -> AllocStatus:
         pass
 
     @abstractmethod
