@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
+from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import Logprob, SequenceGroup
 
@@ -410,7 +411,7 @@ def test_running_prefill_prioritized_over_swap():
 
     # Add 1 more task. Swap is not possible, so prefill is running.
     scheduler.block_manager.can_swap_in = MagicMock()
-    scheduler.block_manager.can_swap_in.return_value = False
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
 
     _, seq_group2 = create_dummy_prompt("2", prompt_length=60)
     scheduler.add_seq_group(seq_group2)
@@ -423,7 +424,7 @@ def test_running_prefill_prioritized_over_swap():
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
 
     # Now although swap is possible, running prefill is prioritized.
-    scheduler.block_manager.can_swap_in.return_value = True
+    scheduler.block_manager.can_swap_in.return_value = AllocStatus.OK
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
