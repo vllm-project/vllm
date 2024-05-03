@@ -118,7 +118,7 @@ class cmake_build_ext(build_ext):
         # Select the build type.
         # Note: optimization level + debug info are set by the build type
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
-        cfg = os.getenv("CMAKE_BUILD_TYPE", default_cfg)
+        cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         # where .so files will be written, should be the same for all extensions
         # that use the same CMakeLists.txt.

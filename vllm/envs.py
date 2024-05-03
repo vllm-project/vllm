@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     VLLM_BUILD_WITH_NEURON: bool = False
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_INSTALL_PUNICA_KERNELS: bool = False
+    CMAKE_BUILD_TYPE: Optional[str] = None
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -65,8 +66,16 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will use precompiled binaries (*.so)
     "VLLM_USE_PRECOMPILED":
     lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
+
+    # If set, vllm will install Punica kernels
     "VLLM_INSTALL_PUNICA_KERNELS":
     lambda: bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0"))),
+
+    # CMake build type
+    # If not set, defaults to "Debug" or "RelWithDebInfo"
+    # Available options: "Debug", "Release", "RelWithDebInfo"
+    "CMAKE_BUILD_TYPE":
+    lambda: os.getenv("CMAKE_BUILD_TYPE"),
 
     # Root directory for VLLM configuration files
     # Note that this not only affects how vllm finds its configuration files
