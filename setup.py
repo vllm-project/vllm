@@ -92,7 +92,7 @@ class cmake_build_ext(build_ext):
             # environment variable (if defined) or 1.
             # when it is set, we reduce `num_jobs` to avoid
             # overloading the system.
-            nvcc_threads = os.getenv("NVCC_THREADS", None)
+            nvcc_threads = envs.NVCC_THREADS
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
                 logger.info(
