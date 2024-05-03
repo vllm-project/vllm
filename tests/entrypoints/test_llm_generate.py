@@ -27,8 +27,9 @@ TOKEN_IDS = [
 def llm():
     yield LLM(model="facebook/opt-125m",
               max_num_batched_tokens=4096,
-              enforce_eager=True,
-              tensor_parallel_size=1)
+              tensor_parallel_size=1,
+              gpu_memory_utilization=0.10,
+              enforce_eager=True)
 
     cleanup()
 

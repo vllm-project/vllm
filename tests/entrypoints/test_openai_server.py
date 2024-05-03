@@ -121,7 +121,7 @@ def zephyr_lora_files():
     return snapshot_download(repo_id=LORA_NAME)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def server(zephyr_lora_files):
     ray.init()
     server_runner = ServerRunner.remote([
@@ -133,6 +133,8 @@ def server(zephyr_lora_files):
         "--max-model-len",
         "8192",
         "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         # lora config below
         "--enable-lora",
         "--lora-modules",
@@ -150,7 +152,7 @@ def server(zephyr_lora_files):
     ray.shutdown()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
     client = openai.AsyncOpenAI(
         base_url="http://localhost:8000/v1",
@@ -888,7 +890,3 @@ async def test_long_seed(server, client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
