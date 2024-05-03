@@ -15,12 +15,16 @@ from vllm.distributed import (broadcast_tensor_dict,
 from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import CudaMemoryProfiler
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+
+logger = init_logger(__name__)
 
 
 class Worker(WorkerBase):
@@ -187,7 +191,12 @@ class Worker(WorkerBase):
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.gpu_cache)
+            with CudaMemoryProfiler() as m:
+                self.model_runner.capture_model(self.gpu_cache)
+                torch.cuda.synchronize()
+
+        logger.info("Capturing cuda graph took %.4f GB GPU memory.",
+                    m.consumed_memory / float(2**30))
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
