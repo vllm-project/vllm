@@ -297,8 +297,7 @@ def init_worker_distributed_environment(
 
     # A small all_reduce for warmup.
     torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if pynccl_utils.is_initialized():
-        pynccl_utils.all_reduce(torch.zeros(1).cuda())
+    pynccl_utils.all_reduce(torch.zeros(1).cuda())
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

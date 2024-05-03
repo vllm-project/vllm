@@ -20,11 +20,6 @@ except Exception as e:
 comm: Optional["NCCLCommunicator"] = None
 
 
-def is_initialized() -> bool:
-    """Returns whether the NCCL backend is initialized."""
-    return comm is not None
-
-
 @contextlib.contextmanager
 def set_pynccl_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""

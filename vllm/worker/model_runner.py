@@ -1056,8 +1056,7 @@ class CUDAGraphRunner:
 
 @contextlib.contextmanager
 def _maybe_pynccl():
-    if pynccl_utils.is_initialized(
-    ) and not custom_all_reduce.is_initialized():
+    if not custom_all_reduce.is_initialized():
         with with_pynccl_for_all_reduce():
             yield
     else:
