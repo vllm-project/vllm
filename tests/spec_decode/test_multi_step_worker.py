@@ -6,8 +6,8 @@ import torch
 
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplerOutput
-from vllm.spec_decode.multi_step_worker import (DraftModelTop1Proposer,
-                                                MultiStepWorker)
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
+from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 from .utils import (assert_logprobs_dict_allclose, create_batch,
@@ -34,7 +34,7 @@ def test_assert_enough_kv_space(num_steps: int):
         list(range(block_size * 2)),
     ]
 
-    final_seq_lens = [
+    final_prompt_lens = [
         len(prompt + output) + num_steps
         for prompt, output in zip(prompts, prev_output_tokens)
     ]
@@ -43,7 +43,7 @@ def test_assert_enough_kv_space(num_steps: int):
         prompts,
         num_gpu_blocks,
         block_size,
-        final_seq_lens,
+        final_prompt_lens,
         continuations=prev_output_tokens)
 
     assert_enough_kv_space = MultiStepWorker._assert_enough_kv_space  # pylint: disable=protected-access
@@ -103,22 +103,26 @@ def test_same_output_for_single_step():
         [6, 7, 8, 9, 10],
     ]
 
-    final_seq_lens = [len(prompt) + num_steps for prompt in prompts]
+    final_prompt_lens = [len(prompt) + num_steps for prompt in prompts]
 
     multi_step_execute_model_data = create_execute_model_data(
         seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size,
-            final_seq_lens=final_seq_lens))
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens=final_prompt_lens))
 
     single_step_execute_model_data = create_execute_model_data(
         seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts, num_gpu_blocks, block_size,
-            final_seq_lens=final_seq_lens))
+            prompts,
+            num_gpu_blocks,
+            block_size,
+            final_prompt_lens=final_prompt_lens))
 
     zero_kv_cache(multi_step_worker.cache_engine)
     set_random_seed(seed)
-    actual_output = multi_step_worker.execute_model_multi_step(
-        **multi_step_execute_model_data.to_dict(), num_steps=num_steps)
+    actual_output, _ = multi_step_worker.sampler_output(
+        **multi_step_execute_model_data.to_dict(), sample_len=num_steps)
     assert len(actual_output) == num_steps
     actual_output = actual_output[0]
 
@@ -181,7 +185,7 @@ def test_same_output_for_multi_step():
         random.randint(0, 1000) for _ in range(random.randint(10, 20))
     ] for _ in range(10)]
 
-    final_seq_lens = [len(prompt) + num_steps for prompt in prompts]
+    final_prompt_lens = [len(prompt) + num_steps for prompt in prompts]
 
     rand_seeds = list(random.randint(0, 100) for _ in range(num_steps))
     multi_step_worker.execute_model = patch_execute_model_with_seeds(
@@ -195,13 +199,13 @@ def test_same_output_for_multi_step():
             num_gpu_blocks,
             block_size,
             continuations=continuations,
-            final_seq_lens=final_seq_lens), )
+            final_prompt_lens=final_prompt_lens), )
 
     # Run multi-step.
     zero_kv_cache(multi_step_worker.cache_engine)
     set_random_seed(seed)
-    multi_step_output = multi_step_worker.execute_model_multi_step(
-        **execute_model_data.to_dict(), num_steps=num_steps)
+    multi_step_output, _ = multi_step_worker.sampler_output(
+        **execute_model_data.to_dict(), sample_len=num_steps)
 
     # Run single-step repeatedly.
     zero_kv_cache(worker.cache_engine)
@@ -217,7 +221,7 @@ def test_same_output_for_multi_step():
                 num_gpu_blocks,
                 block_size,
                 continuations=continuations,
-                final_seq_lens=final_seq_lens))
+                final_prompt_lens=final_prompt_lens))
 
         single_step_output.extend(
             worker.execute_model(**execute_model_data.to_dict(), ))
@@ -266,7 +270,7 @@ def test_same_output_for_multi_step():
 
 @torch.inference_mode()
 def test_draft_proposals_full_speculation_len():
-    """Verify DraftModelTop1Proposer correctly handles case where all sequences
+    """Verify Top1Proposer correctly handles case where all sequences
     can speculate.
     """
     k = 10
@@ -275,13 +279,13 @@ def test_draft_proposals_full_speculation_len():
     device = 'cuda:0'
 
     draft_worker = MagicMock()
-    proposer = DraftModelTop1Proposer(
-        draft_worker=draft_worker,
+    proposer = Top1Proposer(
+        worker=draft_worker,
         device=device,
-        max_model_len=2048,
         vocab_size=vocab_size,
+        max_proposal_len=2048,
     )
-    draft_worker.execute_model_multi_step.return_value = [
+    draft_worker.sampler_output.return_value = [
         SamplerOutput(
             outputs=[],
             sampled_token_probs=torch.rand(batch_size,
@@ -294,13 +298,13 @@ def test_draft_proposals_full_speculation_len():
                                             device=device,
                                             dtype=torch.long),
         ) for _ in range(k)
-    ]
+    ], True
 
     execute_model_data, _, _ = create_batch(batch_size, k)
 
     proposals = proposer.get_proposals(
         **execute_model_data.to_dict(),
-        max_proposal_len=k,
+        proposal_len=k,
     )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
@@ -315,7 +319,7 @@ def test_draft_proposals_full_speculation_len():
 
 @torch.inference_mode()
 def test_draft_proposals_no_speculations():
-    """Verify DraftModelTop1Proposer correctly handles case where no sequences
+    """Verify Top1Proposer correctly handles case where no sequences
     can speculate.
     """
     k = 10
@@ -325,11 +329,11 @@ def test_draft_proposals_no_speculations():
     prompt_len = 10
 
     draft_worker = MagicMock()
-    proposer = DraftModelTop1Proposer(
-        draft_worker=draft_worker,
+    proposer = Top1Proposer(
+        worker=draft_worker,
         device=device,
-        max_model_len=prompt_len + k - 1,
         vocab_size=vocab_size,
+        max_proposal_len=prompt_len + k - 1,
     )
 
     execute_model_data, _, _ = create_batch(batch_size,
@@ -338,7 +342,7 @@ def test_draft_proposals_no_speculations():
 
     proposals = proposer.get_proposals(
         **execute_model_data.to_dict(),
-        max_proposal_len=k,
+        proposal_len=k,
     )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
@@ -353,7 +357,7 @@ def test_draft_proposals_no_speculations():
 
 @torch.inference_mode()
 def test_draft_proposals_mixed_k():
-    """Verify DraftModelTop1Proposer correctly handles case some sequences can
+    """Verify Top1Proposer correctly handles case some sequences can
     speculate and some can't.
     """
     k = 10
@@ -374,14 +378,14 @@ def test_draft_proposals_mixed_k():
          for _ in range(expected_num_no_proposal_seqs)] + [small_prompt_len]
 
     draft_worker = MagicMock()
-    proposer = DraftModelTop1Proposer(
-        draft_worker=draft_worker,
+    proposer = Top1Proposer(
+        worker=draft_worker,
         device=device,
-        max_model_len=long_prompt_len + prev_output_token_len + k - 1,
         vocab_size=vocab_size,
+        max_proposal_len=long_prompt_len + prev_output_token_len + k - 1,
     )
 
-    draft_worker.execute_model_multi_step.return_value = [
+    draft_worker.sampler_output.return_value = [
         SamplerOutput(
             outputs=[],
             sampled_token_probs=torch.rand(expected_num_proposal_seqs,
@@ -395,7 +399,7 @@ def test_draft_proposals_mixed_k():
                 device=device,
                 dtype=torch.long),
         ) for _ in range(k)
-    ]
+    ], True
 
     execute_model_data, _, _ = create_batch(
         batch_size,
@@ -406,7 +410,7 @@ def test_draft_proposals_mixed_k():
 
     proposals = proposer.get_proposals(
         **execute_model_data.to_dict(),
-        max_proposal_len=k,
+        proposal_len=k,
     )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
