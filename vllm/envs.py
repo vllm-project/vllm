@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_TARGET_DEVICE: str = "cuda"
 
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
@@ -34,6 +35,22 @@ if TYPE_CHECKING:
 # begin-env-vars-definition
 
 environment_variables: Dict[str, Callable[[], Any]] = {
+
+    # ================== Installation Time Env Vars ==================
+
+    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
+    "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+
+    # Root directory for VLLM configuration files
+    # Note that this not only affects how vllm finds its configuration files
+    # during runtime, but also affects how vllm installs its configuration
+    # files during **installation**.
+    "VLLM_CONFIG_ROOT":
+    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
+        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
+
+    # ================== Runtime Env Vars ==================
+
     # used in distributed environment to determine the master address
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
@@ -92,14 +109,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
     "S3_ENDPOINT_URL":
     lambda: os.environ.get("S3_ENDPOINT_URL", None),
-
-    # Root directory for VLLM configuration files
-    # Note that this not only affects how vllm finds its configuration files
-    # during runtime, but also affects how vllm installs its configuration
-    # files during **installation**.
-    "VLLM_CONFIG_ROOT":
-    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
-        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
 
     # Usage stats collection
     "VLLM_USAGE_STATS_SERVER":
