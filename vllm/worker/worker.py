@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.distributed
@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
+                              get_tensor_model_parallel_cpu_group,
                               init_distributed_environment)
 from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -60,6 +61,10 @@ class Worker(WorkerBase):
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
 
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
         self.vision_language_config = vision_language_config
         if self.vision_language_config:
             assert not self.lora_config, (
@@ -78,8 +83,8 @@ class Worker(WorkerBase):
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine = None
-        self.gpu_cache = None
+        self.cache_engine: CacheEngine
+        self.gpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -219,7 +224,7 @@ class Worker(WorkerBase):
             assert blocks_to_swap_in is not None
             assert blocks_to_swap_out is not None
             assert blocks_to_copy is not None
-            data = {
+            data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
@@ -233,6 +238,9 @@ class Worker(WorkerBase):
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
 
+        assert blocks_to_swap_in is not None
+        assert blocks_to_swap_out is not None
+        assert blocks_to_copy is not None
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
@@ -281,6 +289,9 @@ def init_worker_distributed_environment(
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
 
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                      parallel_config.pipeline_parallel_size)
+
     if pynccl_utils.is_initialized():
         pynccl_world_size = pynccl_utils.get_world_size()
         if pynccl_world_size != parallel_config.world_size:
@@ -291,15 +302,9 @@ def init_worker_distributed_environment(
     elif parallel_config.world_size > 1:
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
+        # NOTE(kaichao): By default, pynccl is initialized for tp group.
         pynccl_utils.init_process_group(
-            world_size=parallel_config.world_size,
-            local_rank=local_rank,
-            rank=rank,
-            init_method=distributed_init_method,
-        )
-
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+            group=get_tensor_model_parallel_cpu_group())
 
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:

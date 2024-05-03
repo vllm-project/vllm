@@ -4,13 +4,20 @@ import time
 from typing import Dict, List, Literal, Optional, Union
 
 import torch
-from pydantic import BaseModel, Field, conint, model_validator
+from openai.types.chat import ChatCompletionMessageParam
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Annotated
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
 
-class ErrorResponse(BaseModel):
+class OpenAIBaseModel(BaseModel):
+    # OpenAI API does not allow extra fields
+    model_config = ConfigDict(extra="forbid")
+
+
+class ErrorResponse(OpenAIBaseModel):
     object: str = "error"
     message: str
     type: str
@@ -18,7 +25,7 @@ class ErrorResponse(BaseModel):
     code: int
 
 
-class ModelPermission(BaseModel):
+class ModelPermission(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"modelperm-{random_uuid()}")
     object: str = "model_permission"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -30,10 +37,10 @@ class ModelPermission(BaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: str = False
+    is_blocking: bool = False
 
 
-class ModelCard(BaseModel):
+class ModelCard(OpenAIBaseModel):
     id: str
     object: str = "model"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -43,26 +50,26 @@ class ModelCard(BaseModel):
     permission: List[ModelPermission] = Field(default_factory=list)
 
 
-class ModelList(BaseModel):
+class ModelList(OpenAIBaseModel):
     object: str = "list"
     data: List[ModelCard] = Field(default_factory=list)
 
 
-class UsageInfo(BaseModel):
+class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
 
 
-class ResponseFormat(BaseModel):
+class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
-    type: str = Literal["text", "json_object"]
+    type: Literal["text", "json_object"]
 
 
-class ChatCompletionRequest(BaseModel):
+class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: List[Dict[str, str]]
+    messages: List[ChatCompletionMessageParam]
     model: str
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
@@ -72,7 +79,9 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
@@ -139,6 +148,11 @@ class ChatCompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-chat-completion-extra-params
 
@@ -152,6 +166,7 @@ class ChatCompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -202,7 +217,7 @@ class ChatCompletionRequest(BaseModel):
         return data
 
 
-class CompletionRequest(BaseModel):
+class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str
@@ -213,9 +228,11 @@ class CompletionRequest(BaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[int] = None
     max_tokens: Optional[int] = 16
-    n: Optional[int] = 1
+    n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     suffix: Optional[str] = None
@@ -235,7 +252,7 @@ class CompletionRequest(BaseModel):
     min_tokens: Optional[int] = 0
     skip_special_tokens: Optional[bool] = True
     spaces_between_special_tokens: Optional[bool] = True
-    truncate_prompt_tokens: Optional[conint(ge=1)] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     # doc: end-completion-sampling-params
 
     # doc: begin-completion-extra-params
@@ -277,6 +294,11 @@ class CompletionRequest(BaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-completion-extra-params
 
@@ -289,6 +311,7 @@ class CompletionRequest(BaseModel):
             def logit_bias_logits_processor(
                     token_ids: List[int],
                     logits: torch.Tensor) -> torch.Tensor:
+                assert self.logit_bias is not None
                 for token_id, bias in self.logit_bias.items():
                     # Clamp the bias between -100 and 100 per OpenAI API spec
                     bias = min(100, max(-100, bias))
@@ -340,19 +363,19 @@ class CompletionRequest(BaseModel):
         return data
 
 
-class LogProbs(BaseModel):
+class LogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
     top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
 
 
-class CompletionResponseChoice(BaseModel):
+class CompletionResponseChoice(OpenAIBaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = Field(
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
@@ -361,7 +384,7 @@ class CompletionResponseChoice(BaseModel):
     )
 
 
-class CompletionResponse(BaseModel):
+class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -370,12 +393,12 @@ class CompletionResponse(BaseModel):
     usage: UsageInfo
 
 
-class CompletionResponseStreamChoice(BaseModel):
+class CompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     text: str
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = Field(
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = Field(
         default=None,
         description=(
             "The stop string or token id that caused the completion "
@@ -384,7 +407,7 @@ class CompletionResponseStreamChoice(BaseModel):
     )
 
 
-class CompletionStreamResponse(BaseModel):
+class CompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
     object: str = "text_completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -393,20 +416,20 @@ class CompletionStreamResponse(BaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class ChatMessage(BaseModel):
+class ChatMessage(OpenAIBaseModel):
     role: str
     content: str
 
 
-class ChatCompletionResponseChoice(BaseModel):
+class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
-class ChatCompletionResponse(BaseModel):
+class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: str = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
@@ -415,20 +438,20 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 
-class DeltaMessage(BaseModel):
+class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
 
 
-class ChatCompletionResponseStreamChoice(BaseModel):
+class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[Literal["stop", "length"]] = None
-    stop_reason: Union[None, int, str] = None
+    finish_reason: Optional[str] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
-class ChatCompletionStreamResponse(BaseModel):
+class ChatCompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))

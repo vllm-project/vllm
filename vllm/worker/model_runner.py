@@ -20,12 +20,11 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import (CudaMemoryProfiler, async_tensor_h2d, is_hip,
-                        is_pin_memory_available, make_tensor_with_pad,
-                        maybe_expand_dim)
+from vllm.utils import (CudaMemoryProfiler, is_hip, is_pin_memory_available,
+                        make_tensor_with_pad)
 
 logger = init_logger(__name__)
 
@@ -128,29 +127,34 @@ class ModelRunner:
                               if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
-        self.model = None
-        self.block_size = None  # Set after initial profiling.
-        self.lora_manager = None
+        # Set after load_model.
+        self.lora_manager: LRUCacheWorkerLoRAManager = None
 
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
-        self.graph_memory_pool = None  # Set during graph capture.
+        self.graph_memory_pool: Optional[Tuple[
+            int, int]] = None  # Set during graph capture.
 
         self.max_context_len_to_capture = (
             self.model_config.max_context_len_to_capture
             if self.model_config is not None else 0)
-        # When using CUDA graph, the input block tables must be padded to
-        # max_context_len_to_capture. However, creating the block table in
-        # Python can be expensive. To optimize this, we cache the block table
-        # in numpy and only copy the actual input content at every iteration.
-        # The shape of the cached block table will be
-        # (max batch size to capture, max context len to capture / block size).
-        self.graph_block_tables = None  # Set after initial profiling.
+
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
+
+        # Lazy initialization
+        self.model: torch.nn.Module  # Set after load_model
+        self.block_size: int  # Set after initial profiling.
+        # When using CUDA graph, the input block tables must be padded to
+        # max_context_len_to_capture. However, creating the block table in
+        # Python can be expensive. To optimize this, we cache the block table
+        # in numpy and only copy the actual input content at every iteration.
+        # The shape of the cached block table will be
+        # (max batch size to capture, max context len to capture / block size).
+        self.graph_block_tables: torch.Tensor  # Set after initial profiling.
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -165,8 +169,8 @@ class ModelRunner:
             )
 
         self.model_memory_usage = m.consumed_memory
-        logger.info(f"Loading model weights took "
-                    f"{self.model_memory_usage / float(2**30):.4f} GB")
+        logger.info("Loading model weights took %.4f GB",
+                    self.model_memory_usage / float(2**30))
 
         if self.lora_config:
             assert hasattr(self.model, "supported_lora_modules"
@@ -191,18 +195,19 @@ class ModelRunner:
                     self.model.load_kv_cache_scales(
                         self.model_config.quantization_param_path)
                 else:
-                    raise RuntimeError("Using FP8 KV cache and scaling "
-                                       "factors provided but model "
-                                       f"{self.model.__class__} does not "
-                                       "support loading scaling factors.")
+                    raise RuntimeError(
+                        "Using FP8 KV cache and scaling factors provided but "
+                        "model %s does not support loading scaling factors.",
+                        self.model.__class__)
             else:
-                logger.warn("Using FP8 KV cache but no scaling factors "
-                            "provided. Defaulting to scaling factors of 1.0. "
-                            "This may lead to less accurate results!")
+                logger.warning(
+                    "Using FP8 KV cache but no scaling factors "
+                    "provided. Defaulting to scaling factors of 1.0. "
+                    "This may lead to less accurate results!")
         elif self.model_config.quantization_param_path is not None:
-            logger.warn("KV cache scaling factors provided, "
-                        "but the KV cache data type is not FP8. "
-                        "KV cache scaling factors will not be used.")
+            logger.warning("KV cache scaling factors provided, "
+                           "but the KV cache data type is not FP8. "
+                           "KV cache scaling factors will not be used.")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
@@ -489,16 +494,16 @@ class ModelRunner:
                 lora_index_mapping.append(0)
             batch_size = graph_batch_size
 
-        context_lens = torch.tensor(context_lens,
-                                    dtype=torch.int,
-                                    device=self.device)
+        context_lens_tensor = torch.tensor(context_lens,
+                                           dtype=torch.int,
+                                           device=self.device)
 
         if use_captured_graph:
             # When using cuda-graph all these tensors should be
             # padded.
-            assert context_lens.shape[0] == len(input_tokens)
-            assert context_lens.shape[0] == len(input_positions)
-            assert context_lens.shape[0] == len(slot_mapping)
+            assert context_lens_tensor.shape[0] == len(input_tokens)
+            assert context_lens_tensor.shape[0] == len(input_positions)
+            assert context_lens_tensor.shape[0] == len(slot_mapping)
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
@@ -527,7 +532,7 @@ class ModelRunner:
             max_prompt_len=None,
             subquery_start_loc=None,
             seq_start_loc=None,
-            context_lens=context_lens,
+            context_lens=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
@@ -541,109 +546,11 @@ class ModelRunner:
             slot_mapping=slot_mapping,
         )
 
-    def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
-    ) -> SamplingMetadata:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        selected_token_indices: List[int] = []
-        generators: List[torch.Generator] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices = {t: [] for t in SamplingType}
-        categorized_sample_indices_start_idx = 0
-        categorized_sampled_token_indices_start_idx = 0
-
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            if seq_group_metadata.is_prompt:
-                assert len(seq_ids) == 1
-                assert subquery_lens is not None
-                subquery_len = subquery_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].append([
-                        categorized_sample_indices_start_idx,
-                        categorized_sampled_token_indices_start_idx
-                    ])
-                categorized_sample_indices_start_idx += 1
-                categorized_sampled_token_indices_start_idx += 1
-
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += subquery_len
-
-                if sampling_params.seed is not None:
-                    seq_group_metadata.state.generator = torch.Generator(
-                        device=self.device).manual_seed(sampling_params.seed)
-            else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        zip(
-                            range(
-                                categorized_sample_indices_start_idx,
-                                categorized_sample_indices_start_idx +
-                                num_seqs),
-                            range(
-                                categorized_sampled_token_indices_start_idx,
-                                categorized_sampled_token_indices_start_idx +
-                                num_seqs)))
-                categorized_sample_indices_start_idx += num_seqs
-                categorized_sampled_token_indices_start_idx += num_seqs
-
-            if sampling_params.seed is not None:
-                generators.append(seq_group_metadata.state.generator)
-
-        selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=self.device,
-                                                  pin_memory=self.pin_memory)
-
-        categorized_sample_indices = {
-            t: maybe_expand_dim(
-                async_tensor_h2d(seq_ids,
-                                 dtype=torch.int,
-                                 target_device=self.device,
-                                 pin_memory=self.pin_memory), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        sampling_metadata = SamplingMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
-        return sampling_metadata
-
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[int], LoRAMapping, torch.Tensor]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
             prefill_reqs = []
             decode_reqs = []
@@ -675,9 +582,9 @@ class ModelRunner:
                 decode_lora_requests,
                 decode_slot_mapping,
             ) = self._prepare_decode(decode_reqs)
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens)
+            sampling_metadata = SamplingMetadata.prepare(
+                seq_group_metadata_list, prompt_lens, subquery_lens,
+                self.device, self.pin_memory)
 
             if not self.scheduler_config.chunked_prefill_enabled:
                 assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -741,6 +648,7 @@ class ModelRunner:
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
             else:
+                assert decode_attn_metadata is not None
                 metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
 
@@ -777,12 +685,9 @@ class ModelRunner:
                     **metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
-                seq_data=None,
-                prompt_lens=None,
                 selected_token_indices=selected_token_indices,
                 categorized_sample_indices=None,
-                generators=None,
-                perform_sampling=False,
+                num_prompts=0,
             )
 
             # if it is a mixed batch, decode attn_metadata is broadcasted
@@ -809,7 +714,7 @@ class ModelRunner:
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
@@ -841,7 +746,7 @@ class ModelRunner:
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
-        if not sampling_metadata.perform_sampling:
+        if not self.is_driver_worker:
             return None
 
         # Sample the next token.
@@ -849,6 +754,7 @@ class ModelRunner:
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
+
         return output
 
     @torch.inference_mode()
@@ -918,12 +824,12 @@ class ModelRunner:
         torch.cuda.synchronize()
         return
 
-    def remove_all_loras(self) -> bool:
+    def remove_all_loras(self):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
-        return self.lora_manager.remove_all_loras()
+        self.lora_manager.remove_all_loras()
 
-    def set_active_loras(self, lora_requests: List[LoRARequest],
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
                          lora_mapping: LoRAMapping) -> None:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -1044,7 +950,7 @@ class ModelRunner:
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
-        logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
+        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
     def __del__(self) -> None:
         # Delete the CUDA graphs before deleting the pynccl communicator.
@@ -1065,9 +971,15 @@ class CUDAGraphRunner:
 
     def __init__(self, model: nn.Module):
         self.model = model
-        self.graph = None
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
+
+        self._graph: Optional[torch.cuda.CUDAGraph] = None
+
+    @property
+    def graph(self):
+        assert self._graph is not None
+        return self._graph
 
     def capture(
         self,
@@ -1078,7 +990,7 @@ class CUDAGraphRunner:
         memory_pool,
         **kwargs,
     ) -> None:
-        assert self.graph is None
+        assert self._graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
@@ -1095,8 +1007,8 @@ class CUDAGraphRunner:
         # Capture the graph.
         # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        self.graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self.graph, pool=memory_pool):  # noqa: SIM117
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
             with _maybe_pynccl():
                 hidden_states = self.model(
                     input_ids,
