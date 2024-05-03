@@ -145,6 +145,8 @@ class LLMEngine:
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
+        self.tokenizer: Optional[BaseTokenizerGroup]
+
         if not self.model_config.skip_tokenizer_init:
             tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(tokenizer)
@@ -301,28 +303,27 @@ class LLMEngine:
         # the closure used to initialize Ray worker actors
         raise RuntimeError("LLMEngine should not be pickled!")
 
-    def _require_tokenizer(self, fail_msg: Optional[str] = None):
-        if self.tokenizer is None:
-            if fail_msg is None:
-                fail_msg = ("Unable to get tokenizer because "
-                            "skip_tokenizer_init is True")
-
-            raise ValueError(fail_msg)
-
-        return self.tokenizer
-
     def __del__(self):
         # Shutdown model executor when engine is garbage collected
         # Use getattr since __init__ can fail before the field is set
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
+    MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
+                                   "skip_tokenizer_init is True")
+
+    def get_tokenizer_group(self, fail_msg: str = MISSING_TOKENIZER_GROUP_MSG):
+        if self.tokenizer is None:
+            raise ValueError(fail_msg)
+
+        return self.tokenizer
+
     def get_tokenizer(self) -> "PreTrainedTokenizer":
-        return self._require_tokenizer().get_lora_tokenizer(None)
+        return self.get_tokenizer_group().get_lora_tokenizer(None)
 
     def get_tokenizer_for_seq(self,
                               sequence: Sequence) -> "PreTrainedTokenizer":
-        return self._require_tokenizer().get_lora_tokenizer(
+        return self.get_tokenizer_group().get_lora_tokenizer(
             sequence.lora_request)
 
     def _init_tokenizer(self, **tokenizer_init_kwargs):
@@ -405,8 +406,8 @@ class LLMEngine:
             inputs = {"prompt": inputs}
 
         if "prompt_token_ids" not in inputs:
-            tokenizer = self._require_tokenizer("prompts must be None if "
-                                                "skip_tokenizer_init is True")
+            tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                                 "skip_tokenizer_init is True")
 
             prompt_token_ids = tokenizer.encode(request_id=request_id,
                                                 prompt=inputs["prompt"],
