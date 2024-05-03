@@ -9,8 +9,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 try:
-    from vllm.distributed.device_communicators.pynccl import (NCCLCommunicator,
-                                                              ncclGetVersion)
+    from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
@@ -40,8 +39,8 @@ def set_pynccl_stream(stream: torch.cuda.Stream):
 def init_process_group(group: Optional[ProcessGroup] = None) -> None:
     assert not is_initialized()
     global comm
-    logger.info("vLLM is using nccl==%s", ncclGetVersion())
     comm = NCCLCommunicator(group=group)
+    logger.info("vLLM is using nccl==%s", comm.nccl.ncclGetVersion())
 
 
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:

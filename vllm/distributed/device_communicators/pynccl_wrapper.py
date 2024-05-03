@@ -150,6 +150,11 @@ class NCCLLibrary:
             buffer_type, buffer_type, ctypes.c_size_t, ncclDataType_t,
             ncclRedOp_t, ncclComm_t, cudaStream_t
         ]),
+
+        # be cautious! this is a collective call, it will block until all
+        # processes in the communicator have called this function.
+        # because Python object destruction can happen in random order,
+        # it is better not to call it at all.
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
     ]
