@@ -350,7 +350,7 @@ class LLMEngine:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
-    def _add_request(
+    def _add_processed_request(
         self,
         request_id: str,
         processed_inputs: LLMInputs,
@@ -396,7 +396,7 @@ class LLMEngine:
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
 
-    def encode_request(
+    def process_model_inputs(
         self,
         request_id: str,
         inputs: PromptInputs,
@@ -470,11 +470,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = self.encode_request(request_id=request_id,
-                                               inputs=inputs,
-                                               lora_request=lora_request)
+        processed_inputs = self.process_model_inputs(request_id=request_id,
+                                                     inputs=inputs,
+                                                     lora_request=lora_request)
 
-        return self._add_request(
+        return self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             sampling_params=sampling_params,

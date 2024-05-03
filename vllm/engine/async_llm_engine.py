@@ -229,7 +229,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         return request_outputs
 
-    async def encode_request_async(
+    async def process_model_inputs_async(
         self,
         request_id: str,  # pylint: disable=unused-argument
         inputs: PromptInputs,
@@ -267,10 +267,10 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = await self.encode_request_async(
+        processed_inputs = await self.process_model_inputs_async(
             request_id=request_id, inputs=inputs, lora_request=lora_request)
 
-        return self._add_request(
+        return self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             sampling_params=sampling_params,
@@ -552,12 +552,13 @@ class AsyncLLMEngine:
             arrival_time = time.time()
 
         if self.engine_use_ray:
-            processed_inputs = await self.engine.encode_request_async.remote(  # type: ignore
-                request_id=request_id,
-                inputs=inputs,
-                lora_request=lora_request)
+            processed_inputs = await self.engine.process_model_inputs_async \
+                .remote(  # type: ignore
+                    request_id=request_id,
+                    inputs=inputs,
+                    lora_request=lora_request)
         else:
-            processed_inputs = await self.engine.encode_request_async(
+            processed_inputs = await self.engine.process_model_inputs_async(
                 request_id=request_id,
                 inputs=inputs,
                 lora_request=lora_request)
