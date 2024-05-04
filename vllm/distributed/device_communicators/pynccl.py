@@ -81,8 +81,9 @@ class NCCLCommunicator:
                 self.world_size, self.unique_id, self.rank)
             self.stream = torch.cuda.Stream()
 
-        # A small all_reduce for warmup.
-        self.all_reduce(torch.zeros(1, device=device))
+            # A small all_reduce for warmup.
+            self.all_reduce(torch.zeros(1, device=device))
+            self.stream.synchronize()
 
     def all_reduce(self,
                    tensor: torch.Tensor,
