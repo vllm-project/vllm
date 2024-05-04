@@ -87,7 +87,10 @@ def init_distributed_environment(
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
         # A small all_reduce for warmup.
-        torch.distributed.all_reduce(torch.zeros(1).cuda())
+        data = torch.zeros(1)
+        if torch.cuda.is_available():
+            data = data.to(device=f"cuda:{local_rank}")
+        torch.distributed.all_reduce(data)
 
 
 def initialize_model_parallel(
