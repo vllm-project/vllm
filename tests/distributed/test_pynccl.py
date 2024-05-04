@@ -3,12 +3,12 @@ import multiprocessing
 import pytest
 import torch
 
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.communication_op import (
+    tensor_model_parallel_all_reduce, use_pynccl_allreduce)
 from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
-                                             init_distributed_environment,
-                                             with_pynccl_for_all_reduce)
+                                             init_distributed_environment)
 from vllm.utils import update_environment_variables
 
 
@@ -54,7 +54,8 @@ def worker_fn_wrapper(fn):
 def worker_fn():
     comm = NCCLCommunicator()
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(comm.rank)
-    comm.all_reduce(tensor)
+    with comm.enable():
+        comm.all_reduce(tensor)
     result = tensor.mean().cpu().item()
     assert result == comm.world_size
 
@@ -75,16 +76,17 @@ def multiple_tp_worker_fn():
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     comm = NCCLCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    # two groups can communicate independently
-    if torch.distributed.get_rank() in [0, 1]:
-        comm.all_reduce(tensor)
-        comm.all_reduce(tensor)
-        result = tensor.mean().cpu().item()
-        assert result == 4
-    else:
-        comm.all_reduce(tensor)
-        result = tensor.mean().cpu().item()
-        assert result == 2
+    with comm.enable():
+        # two groups can communicate independently
+        if torch.distributed.get_rank() in [0, 1]:
+            comm.all_reduce(tensor)
+            comm.all_reduce(tensor)
+            result = tensor.mean().cpu().item()
+            assert result == 4
+        else:
+            comm.all_reduce(tensor)
+            result = tensor.mean().cpu().item()
+            assert result == 2
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
@@ -100,7 +102,7 @@ def multiple_tp_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with with_pynccl_for_all_reduce():
+    with use_pynccl_allreduce():
         # two tp groups can communicate independently
         if torch.distributed.get_rank() in [0, 1]:
             tensor = tensor_model_parallel_all_reduce(tensor)
@@ -129,7 +131,7 @@ def worker_fn_with_cudagraph():
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(graph, stream=comm.stream):
+        with torch.cuda.graph(graph, stream=comm.stream), comm.enable():
             # operation during the graph capture is recorded but not executed
             # see https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#creating-a-graph-using-stream-capture # noqa
             comm.all_reduce(a)

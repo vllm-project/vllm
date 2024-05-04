@@ -3,11 +3,25 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
+from contextlib import contextmanager
 
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size)
+
+
+@contextmanager
+def use_pynccl_allreduce():
+    from vllm.distributed.device_communicators import custom_all_reduce
+    if not custom_all_reduce.is_initialized():
+        from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
+        assert _TP_PYNCCL_COMMUNICATOR is not None
+        with _TP_PYNCCL_COMMUNICATOR.enable(
+                stream=torch.cuda.current_stream()):
+            yield
+    else:
+        yield
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:

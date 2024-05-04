@@ -134,7 +134,7 @@ class NCCLCommunicator:
             enable = self.available
 
         if stream is None:
-            stream = torch.cuda.current_stream()
+            stream = self.stream
 
         old_disable = self.disabled
         old_stream = self.stream
