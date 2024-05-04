@@ -10,8 +10,10 @@ from logging.config import dictConfig
 from os import path
 from typing import Dict, Optional
 
-VLLM_CONFIGURE_LOGGING = int(os.getenv("VLLM_CONFIGURE_LOGGING", "1"))
-VLLM_LOGGING_CONFIG_PATH = os.getenv("VLLM_LOGGING_CONFIG_PATH")
+import vllm.envs as envs
+
+VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
+VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 
 _FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"

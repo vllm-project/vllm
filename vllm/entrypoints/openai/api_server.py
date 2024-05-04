@@ -1,10 +1,10 @@
 import asyncio
 import importlib
 import inspect
-import os
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from typing import Any, Set
 
 import fastapi
 import uvicorn
@@ -16,6 +16,7 @@ from prometheus_client import make_asgi_app
 from starlette.routing import Mount
 
 import vllm
+import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
@@ -33,6 +34,8 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 logger = init_logger(__name__)
 
+_running_tasks: Set[asyncio.Task[Any]] = set()
+
 
 @asynccontextmanager
 async def lifespan(app: fastapi.FastAPI):
@@ -43,7 +46,9 @@ async def lifespan(app: fastapi.FastAPI):
             await engine.do_log_stats()
 
     if not engine_args.disable_log_stats:
-        asyncio.create_task(_force_log())
+        task = asyncio.create_task(_force_log())
+        _running_tasks.add(task)
+        task.add_done_callback(_running_tasks.remove)
 
     yield
 
@@ -129,7 +134,7 @@ if __name__ == "__main__":
         allow_headers=args.allowed_headers,
     )
 
-    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+    if token := envs.VLLM_API_KEY or args.api_key:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):

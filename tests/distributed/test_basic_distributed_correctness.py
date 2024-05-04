@@ -18,6 +18,7 @@ import torch
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -35,6 +36,8 @@ def test_models(
     max_tokens: int,
     worker_use_ray: bool,
 ) -> None:
+    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    enforce_eager = backend_by_env_var == "FLASHINFER"
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
@@ -43,6 +46,7 @@ def test_models(
     vllm_model = vllm_runner(model,
                              dtype=dtype,
                              tensor_parallel_size=2,
+                             enforce_eager=enforce_eager,
                              worker_use_ray=worker_use_ray)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model

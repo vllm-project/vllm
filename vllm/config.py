@@ -1,6 +1,5 @@
 import enum
 import json
-import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
@@ -24,10 +23,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# If true, will load models from ModelScope instead of Hugging Face Hub.
-VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
-                                     "False").lower() == "true"
-
 _GB = 1 << 30
 
 
@@ -36,6 +31,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+            It is also used as the content for `model_name` tag in metrics 
+            output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -68,9 +65,16 @@ class ModelConfig:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
+        served_model_name: The model name used in metrics tag `model_name`,
+            matches the model name exposed via the APIs. If multiple model 
+            names provided, the first name will be used. If not specified, 
+            the model name will be the same as `model`.
     """
 
     def __init__(
@@ -89,8 +93,10 @@ class ModelConfig:
         quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -104,6 +110,11 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        if self.max_context_len_to_capture is not None:
+            raise ValueError("`max_context_len_to_capture` is deprecated. "
+                             "Use `max_seq_len_to_capture` instead.")
+        self.max_seq_len_to_capture = (max_seq_len_to_capture
+                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
 
@@ -113,6 +124,8 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
+        self.served_model_name = get_served_model_name(model,
+                                                       served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_quantization()
@@ -195,10 +208,10 @@ class ModelConfig:
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        if self.max_context_len_to_capture is None:
-            self.max_context_len_to_capture = self.max_model_len
-        self.max_context_len_to_capture = min(self.max_context_len_to_capture,
-                                              self.max_model_len)
+        if self.max_seq_len_to_capture is None:
+            self.max_seq_len_to_capture = self.max_model_len
+        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
+                                          self.max_model_len)
 
     def verify_with_parallel_config(
         self,
@@ -293,6 +306,11 @@ class ModelConfig:
         # parallel size so each GPU has at least one KV head.
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
+
+    def get_num_attention_heads(self,
+                                parallel_config: "ParallelConfig") -> int:
+        return self.hf_text_config.num_attention_heads // \
+                    parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -601,8 +619,9 @@ class SchedulerConfig:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
             if enable_chunked_prefill:
-                # For chunked prefill, choose the well-tuned batch size.
-                self.max_num_batched_tokens = 768
+                # It is the values that have the best balance between ITL
+                # and TTFT on A100. Note it is not optimized for throughput.
+                self.max_num_batched_tokens = 512
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -780,8 +799,8 @@ class SpeculativeConfig:
                 max_model_len=None,
                 quantization=draft_quantization,
                 enforce_eager=target_model_config.enforce_eager,
-                max_context_len_to_capture=target_model_config.
-                max_context_len_to_capture,
+                max_seq_len_to_capture=target_model_config.
+                max_seq_len_to_capture,
                 max_logprobs=target_model_config.max_logprobs,
             )
 
@@ -1141,6 +1160,22 @@ def _get_and_verify_max_len(
                 "to incorrect model outputs or CUDA errors. Make sure the "
                 "value is correct and within the model context size.")
     return int(max_model_len)
+
+
+def get_served_model_name(model: str,
+                          served_model_name: Optional[Union[str, List[str]]]):
+    """
+    If the input is a non-empty list, the first model_name in 
+    `served_model_name` is taken. 
+    If the input is a non-empty string, it is used directly. 
+    For cases where the input is either an empty string or an 
+    empty list, the fallback is to use `self.model`.
+    """
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name
 
 
 @dataclass
