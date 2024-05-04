@@ -1167,13 +1167,11 @@ def get_served_model_name(model: str,
     For cases where the input is either an empty string or an 
     empty list, the fallback is to use `self.model`.
     """
-    if isinstance(served_model_name, list) and served_model_name:
-        model_name_res = served_model_name[0]
-    elif isinstance(served_model_name, str) and served_model_name:
-        model_name_res = served_model_name
-    else:
-        model_name_res = model
-    return model_name_res
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name
 
 
 @dataclass
