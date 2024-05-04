@@ -1,9 +1,9 @@
 from collections import namedtuple
+from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
-from contextlib import contextmanager
 
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
