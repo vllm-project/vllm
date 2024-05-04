@@ -36,7 +36,6 @@ def test_models(
                                                        max_tokens,
                                                        num_logprobs)
     del vllm_model
-    # breakpoint()
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
