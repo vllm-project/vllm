@@ -72,9 +72,9 @@ class ModelConfig:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
-            matches the model name exposed via the APIs. If multiple model names 
-            provided, the first name will be used. If not specified, the model
-            name will be the same as `model`.
+            matches the model name exposed via the APIs. If multiple model 
+            names provided, the first name will be used. If not specified, 
+            the model name will be the same as `model`.
     """
 
     def __init__(
