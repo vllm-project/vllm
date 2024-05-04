@@ -71,8 +71,8 @@ class ModelConfig:
             to eager mode
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
-        served_model_name: 'The model name used in metrics tag `model_name`,
-            same to the model name exposed in service. If multiple model names 
+        served_model_name: The model name used in metrics tag `model_name`,
+            matches the model name exposed via the APIs. If multiple model names 
             provided, the first name will be used. If not specified, the model
             name will be the same as `model`.
     """
