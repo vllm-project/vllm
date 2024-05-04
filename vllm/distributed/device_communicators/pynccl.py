@@ -22,7 +22,6 @@ class NCCLCommunicator:
         group: Optional[ProcessGroup] = None,
         device: Optional[Union[int, str, torch.device]] = None,
         library_path: Optional[str] = None,
-        disabled: bool = False,
     ):
         """
         Args:
@@ -32,28 +31,9 @@ class NCCLCommunicator:
                 it will be bind to f"cuda:{local_rank}".
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
-            disabled: if True, the communicator will be disabled. This object
-                will not do anything, just serve as a placeholder.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
         """
-        # explicit disable, e.g. world_size == 1
-        self.disabled = disabled
-        if disabled:
-            self.available = False
-            return
-        try:
-            self.nccl = NCCLLibrary(library_path)
-        except Exception:
-            # disable because of missing NCCL library
-            # e.g. in a non-GPU environment
-            self.available = False
-            return
-        self.available = True
-        self.disabled = False
-
-        logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
-
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
@@ -62,6 +42,26 @@ class NCCLCommunicator:
         # note: this rank is the rank in the group
         self.rank = dist.get_rank(group)
         self.world_size = dist.get_world_size(group)
+
+        # if world_size == 1, no need to create communicator
+        if self.world_size == 1:
+            self.available = False
+            self.disabled = True
+            return
+        try:
+            self.nccl = NCCLLibrary(library_path)
+        except Exception:
+            # disable because of missing NCCL library
+            # e.g. in a non-GPU environment
+            self.available = False
+            self.disabled = True
+            return
+
+        self.available = True
+        self.disabled = False
+
+        logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
+
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
@@ -126,7 +126,7 @@ class NCCLCommunicator:
         """
         if enable is None:
             # guess a default value when not specified
-            enable = self.world_size > 1 and self.available
+            enable = self.available
 
         if stream is None:
             stream = torch.cuda.current_stream()

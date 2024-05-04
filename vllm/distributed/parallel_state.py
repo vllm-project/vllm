@@ -162,7 +162,7 @@ def initialize_model_parallel(
     _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(
         group=_TP_CPU_GROUP,
         device=_LOCAL_RANK,
-        disabled=tensor_model_parallel_size == 1)
+    )
 
     # by default it is disabled, e.g. in profiling models and prefill phase.
     # to use it, we have to use under `with_pynccl_for_all_reduce`, usually
