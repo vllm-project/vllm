@@ -224,8 +224,9 @@ class LLM:
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
+        truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
         prompt, prompt_token_ids = self._validate_prompt(
-            prompt, prompt_token_ids, sampling_params)
+            prompt, prompt_token_ids, truncate_prompt_tokens)
         self.llm_engine.add_request(request_id,
                                     prompt,
                                     sampling_params,
@@ -264,9 +265,13 @@ class LLM:
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> Tuple[Optional[str], Optional[List[int]]]:
 
+        if not (prompt or prompt_token_ids):
+            raise ValueError("Either prompt or prompt_ids should be provided.")
+        if (prompt and prompt_token_ids):
+            raise ValueError(
+                "Only one of prompt or prompt_ids should be provided.")
         if truncate_prompt_tokens is not None:
             if prompt_token_ids is None:
-                assert prompt is not None
                 prompt_token_ids = self.llm_engine.tokenizer.tokenizer(
                     prompt).input_ids
             prompt_token_ids = prompt_token_ids[-truncate_prompt_tokens:]
