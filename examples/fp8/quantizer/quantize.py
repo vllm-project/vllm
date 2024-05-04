@@ -25,7 +25,7 @@ import time
 import ammo.torch.quantization as atq
 import numpy as np
 import torch
-from ammo.torch.export import export_model_config
+from ammo.torch.export import model_config_export
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -301,7 +301,7 @@ def main(args):
             ])
 
             # export safetensors
-            export_model_config(
+            model_config_export(
                 model,
                 model_type,
                 getattr(torch, args.dtype),
