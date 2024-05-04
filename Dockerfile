@@ -53,7 +53,7 @@ ARG CUDATOOLKIT='12.1'
 RUN apt-get install -y libxml2 build-essential
 
 # use /root/download for manual cache
-RUN --mount=type=cache,target=/root/download <<EOF bash
+RUN <<EOF bash
 # download url from https://developer.nvidia.com/cuda-toolkit-archive
 mkdir -p /usr/local/cuda
 
