@@ -164,11 +164,6 @@ def initialize_model_parallel(
         device=_LOCAL_RANK,
     )
 
-    # by default it is disabled, e.g. in profiling models and prefill phase.
-    # to use it, we have to use under `with_pynccl_for_all_reduce`, usually
-    # when we are using CUDA graph.
-    _TP_PYNCCL_COMMUNICATOR.disabled = True
-
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS

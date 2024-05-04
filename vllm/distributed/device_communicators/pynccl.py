@@ -97,6 +97,11 @@ class NCCLCommunicator:
             self.all_reduce(torch.zeros(1, device=device))
             self.stream.synchronize()
 
+        # by default it is disabled, e.g. in profiling models and prefill phase.
+        # to use it, we have to use under `with obj.enable()`, usually
+        # when we are using CUDA graph.
+        self.disabled = True
+
     def all_reduce(self,
                    tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
