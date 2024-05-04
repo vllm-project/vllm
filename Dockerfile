@@ -1,3 +1,6 @@
+# syntax=docker/dockerfile:1
+# the above line is important for the multiline format in dockerfile
+
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -5,18 +8,83 @@
 # docs/source/dev/dockerfile/dockerfile.rst and
 # docs/source/assets/dev/dockerfile-stages-dependency.png
 
+#################### BASE Python IMAGE ####################
+FROM ubuntu:22.04 AS python
+
+# install miniconda as python environment manager
+# use /root/download for manual cache
+RUN --mount=type=cache,target=/root/download <<EOF bash
+apt-get update -y
+apt-get install -y wget git vim
+mkdir -p /opt/conda
+if [ ! -f /root/download/miniconda.sh ]; then
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /root/download/miniconda.sh
+else
+    echo "/root/download/miniconda.sh already exists."
+fi
+
+bash /root/download/miniconda.sh -b -u -p /opt/conda
+
+# this is useful for login shell
+# inside dockerfile, however, RUN command is executed with non-login shell
+# so we still need to manipulate PATH
+/opt/conda/bin/conda init bash
+EOF
+
+ARG PYTHON='3.9'
+
+# add conda and pythhon/pip to path
+ENV PATH="/opt/conda/bin:${PATH}"
+
+# install python
+# cache location found from `conda info`
+RUN --mount=type=cache,target=/root/.conda/pkgs conda install -y python=${PYTHON}
+
+# now `python` is a new python
+# and `pip` is the corresponding pip
+#################### BASE Python IMAGE ####################
+
+#################### BASE cuda IMAGE ####################
+FROM python AS cudatoolkit
+
+ARG CUDATOOLKIT='12.1'
+
+# required for cuda toolkit install
+RUN apt-get install -y libxml2 build-essential
+
+# use /root/download for manual cache
+RUN --mount=type=cache,target=/root/download <<EOF bash
+# download url from https://developer.nvidia.com/cuda-toolkit-archive
+mkdir -p /usr/local/cuda
+
+if [[ "$CUDATOOLKIT" == "11.8" ]]; then
+    if [ ! -f /root/download/${CUDATOOLKIT}-installer.run ]; then
+    wget -q https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda_11.8.0_520.61.05_linux.run -O /root/download/${CUDATOOLKIT}-installer.run
+    else
+        echo "/root/download/${CUDATOOLKIT}-installer.run already exists."
+    fi
+elif [[ "$CUDATOOLKIT" == "12.1" ]]; then
+    if [ ! -f /root/download/${CUDATOOLKIT}-installer.run ]; then
+    wget -q https://developer.download.nvidia.com/compute/cuda/12.1.1/local_installers/cuda_12.1.1_530.30.02_linux.run -O /root/download/${CUDATOOLKIT}-installer.run
+    else
+        echo "/root/download/${CUDATOOLKIT}-installer.run already exists."
+    fi
+else
+    echo "Unsupported CUDA version: $CUDATOOLKIT"
+fi
+
+chmod +x /root/download/${CUDATOOLKIT}-installer.run
+/bin/bash /root/download/${CUDATOOLKIT}-installer.run --silent --toolkit --installpath=/usr/local/cuda
+EOF
+
+# now `/usr/local/cuda` is a new cudatoolkit
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="/usr/local/cuda/bin/:${PATH}"
+#################### BASE cuda IMAGE ####################
+
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
-
-RUN apt-get update -y \
-    && apt-get install -y python3-pip git
-
-# Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
-# this won't be needed for future versions of this docker image
-# or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.4/compat/
+FROM cudatoolkit AS dev
 
 WORKDIR /workspace
 
@@ -106,17 +174,8 @@ RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
+FROM python AS vllm-base
 WORKDIR /vllm-workspace
-
-RUN apt-get update -y \
-    && apt-get install -y python3-pip git vim
-
-# Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
-# this won't be needed for future versions of this docker image
-# or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.4/compat/
 
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
