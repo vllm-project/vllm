@@ -1,6 +1,7 @@
+import math
 import random
 import time
-import math
+
 import pytest
 import torch
 from xformers import ops as xops
@@ -39,6 +40,7 @@ def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         slopes = torch.cat(
             [slopes, torch.pow(extra_base, extra_powers)], dim=0)
     return slopes
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
@@ -81,10 +83,10 @@ def test_contexted_kv_attention_alibi(
     query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
     query.uniform_(-1e-3, 1e-3)
     output = torch.empty(num_tokens, num_heads, head_size, dtype=dtype)
-    
+
     kv = torch.empty(sum(seq_lens), 2, num_kv_heads, head_size, dtype=dtype)
     kv.uniform_(-1e-3, 1e-3)
-    key, value = kv.unbind(dim=1) 
+    key, value = kv.unbind(dim=1)
 
     k_cache = torch.zeros(cache_size,
                           block_size,
@@ -101,7 +103,7 @@ def test_contexted_kv_attention_alibi(
     values = torch.arange(0, cache_size, dtype=torch.long)
     values = values[torch.randperm(cache_size)]
     block_table = values[:BS * max_block_per_request].view(
-        BS, max_block_per_request) 
+        BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
     b_ctx_len = torch.tensor(ctx_lens, dtype=torch.long)
     b_start_loc = torch.cumsum(torch.tensor([0] + query_lens[:-1],
@@ -193,20 +195,25 @@ def test_contexted_kv_attention_alibi(
                       None, :].expand(value.shape[0], num_kv_heads,
                                       num_queries_per_kv, value.shape[-1])
 
-    # NOTE: We have to pad query tensor in order to reuse 
+    # NOTE: We have to pad query tensor in order to reuse
     # _make_alibi_bias function.
     if query.shape[0] != key.shape[0]:
-        query_pad = torch.empty(sum(seq_lens), num_heads, head_size, dtype=dtype)
+        query_pad = torch.empty(sum(seq_lens),
+                                num_heads,
+                                head_size,
+                                dtype=dtype)
         query_pad.uniform_(-1e-3, 1e-3)
         seq_start = 0
         query_start = 0
         for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
             seq_end = seq_start + seq_len
             query_end = query_start + query_len
-            query_pad[seq_start:seq_end, ...] = torch.cat(
-                    [torch.zeros(seq_len - query_len, num_heads, head_size, dtype=dtype),
-                    query[query_start:query_end, ...]], dim=0
-                )
+            query_pad[seq_start:seq_end, ...] = torch.cat([
+                torch.zeros(
+                    seq_len - query_len, num_heads, head_size, dtype=dtype),
+                query[query_start:query_end, ...]
+            ],
+                                                          dim=0)
             seq_start += seq_len
             query_start += query_len
         query = query_pad
@@ -214,10 +221,9 @@ def test_contexted_kv_attention_alibi(
     query = query.unsqueeze(0)
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)
-    
+
     from vllm.attention.backends.xformers import _make_alibi_bias
-    attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, 
-                                 dtype, seq_lens)
+    attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype, seq_lens)
     output_ref = torch.empty_like(output)
     seq_start = 0
     query_start = 0
@@ -230,16 +236,18 @@ def test_contexted_kv_attention_alibi(
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len
-        out = xops.memory_efficient_attention_forward(
-            query[:, seq_start:seq_end],
-            key[:, seq_start:seq_end],
-            value[:, seq_start:seq_end],
-            attn_bias=attn_bias[i],
-            p=0.0,
-            scale=scale)
+        out = xops.memory_efficient_attention_forward(query[:,
+                                                            seq_start:seq_end],
+                                                      key[:,
+                                                          seq_start:seq_end],
+                                                      value[:,
+                                                            seq_start:seq_end],
+                                                      attn_bias=attn_bias[i],
+                                                      p=0.0,
+                                                      scale=scale)
         out = out.view_as(query[:, seq_start:seq_end])
-        output_ref[query_start:query_end, ...].copy_(
-            out[:, seq_len-query_len:, ...].squeeze(0))
+        output_ref[query_start:query_end,
+                   ...].copy_(out[:, seq_len - query_len:, ...].squeeze(0))
         seq_start += seq_len
         query_start += query_len
     end_time = time.time()
