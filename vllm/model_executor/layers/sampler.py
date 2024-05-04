@@ -103,8 +103,7 @@ class Sampler(nn.Module):
 
         if self.include_gpu_probs_tensor:
             assert maybe_sampled_tokens_tensor is not None
-            sampled_tokens_tensor = maybe_sampled_tokens_tensor
-            on_device_tensors = (probs, sampled_tokens_tensor)
+            on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
         else:
             on_device_tensors = None
 
@@ -965,8 +964,7 @@ def _modify_greedy_probs_inplace(logprobs: torch.Tensor, probs: torch.Tensor,
     has implications on the overall design of the sampler, e.g. how to record
     accurate logprobs for the user, so this improvement is deferred to later.
     """
-    logprobs[sample_indices, :] = -float('inf')
-    logprobs[sample_indices, greedy_samples] = 0.0
+    # NOTE: logprobs are not modified so they can be returned to the user.
     probs[sample_indices, :] = 0
     probs[sample_indices, greedy_samples] = 1.0
 
@@ -976,7 +974,8 @@ def _build_sampler_output(
     sampling_metadata: SamplingMetadata,
     prompt_logprobs: List[Optional[PromptLogprobs]],
     sample_logprobs: List[SampleLogprobs],
-    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor]],
+    on_device_tensors: Optional[Tuple[torch.Tensor, torch.Tensor,
+                                      torch.Tensor]],
 ) -> SamplerOutput:
     """Construct Python objects with the output of sampling.
 
@@ -1005,14 +1004,17 @@ def _build_sampler_output(
 
     # If not specified, store None values in SamplerOutput.
     if on_device_tensors is not None:
-        sampled_token_probs, sampled_token_ids = on_device_tensors
+        (sampled_token_probs, logprobs_tensor,
+         sampled_token_ids) = on_device_tensors
     else:
-        sampled_token_probs, sampled_token_ids = (None, None)
+        sampled_token_probs, logprobs_tensor, sampled_token_ids = (None, None,
+                                                                   None)
 
     return SamplerOutput(
         outputs=sampler_output,
         sampled_token_probs=sampled_token_probs,
         sampled_token_ids=sampled_token_ids,
+        logprobs=logprobs_tensor,
     )
 
 
@@ -1033,8 +1035,8 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     assert seq_group.is_prompt, (
         "Caller should ensure the sequence group is in a prefill stage.")
     seq_ids = seq_group.seq_ids
-    subquery_len = seq_group.subquery_len
-    assert subquery_len is not None
+    query_len = seq_group.query_len
+    assert query_len is not None
     # prompt has only 1 seq id.
     assert len(seq_ids) == 1
     seq_data = seq_group.seq_data[seq_ids[0]]
@@ -1042,7 +1044,7 @@ def _get_next_prompt_tokens(seq_group: SequenceGroupToSample) -> List[int]:
     prompt_tokens = seq_data.prompt_token_ids
     # +1 because we are looking for a next prompt token.
     next_token_index_start = computed_len + 1
-    next_token_index_end = min(computed_len + subquery_len + 1,
+    next_token_index_end = min(computed_len + query_len + 1,
                                len(prompt_tokens))
     next_prompt_tokens = prompt_tokens[
         next_token_index_start:next_token_index_end]

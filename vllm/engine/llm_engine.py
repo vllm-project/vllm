@@ -23,8 +23,9 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalData
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupMetadata, SequenceStatus)
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -586,12 +587,16 @@ class LLMEngine:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         if not scheduler_outputs.is_empty():
-            output = self.model_executor.execute_model(
+            execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
-                num_lookahead_slots=scheduler_outputs.num_lookahead_slots)
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                running_queue_size=scheduler_outputs.running_queue_size,
+            )
+            output = self.model_executor.execute_model(
+                execute_model_req=execute_model_req)
         else:
             output = []
 

@@ -39,17 +39,17 @@ def paged_attention_v1(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v1(out, query, key_cache, value_cache,
-                                num_kv_heads, scale, block_tables,
-                                context_lens, block_size, max_context_len,
-                                alibi_slopes, kv_cache_dtype, kv_scale)
+                                num_kv_heads, scale, block_tables, seq_lens,
+                                block_size, max_seq_len, alibi_slopes,
+                                kv_cache_dtype, kv_scale)
 
 
 def paged_attention_v2(
@@ -63,17 +63,17 @@ def paged_attention_v2(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out, query,
                                 key_cache, value_cache, num_kv_heads, scale,
-                                block_tables, context_lens, block_size,
-                                max_context_len, alibi_slopes, kv_cache_dtype,
+                                block_tables, seq_lens, block_size,
+                                max_seq_len, alibi_slopes, kv_cache_dtype,
                                 kv_scale)
 
 
@@ -220,6 +220,18 @@ def reshape_and_cache(
 ) -> None:
     vllm_cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                      slot_mapping, kv_cache_dtype, kv_scale)
+
+
+def reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+) -> None:
+    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                           slot_mapping, kv_cache_dtype)
 
 
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
