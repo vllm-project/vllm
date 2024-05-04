@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from typing import Optional, Union
 
 # ===================== import region =====================
@@ -39,14 +40,16 @@ class NCCLCommunicator:
         # explicit disable, e.g. world_size == 1
         self.disabled = disabled
         if disabled:
+            self.available = False
             return
         try:
             self.nccl = NCCLLibrary(library_path)
         except Exception:
-            self.disabled = True
+            # disable because of missing NCCL library
+            # e.g. in a non-GPU environment
+            self.available = False
             return
-        # disable because of missing NCCL library
-        # e.g. in a non-GPU environment
+        self.available = True
         self.disabled = False
 
         logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
@@ -113,3 +116,27 @@ class NCCLCommunicator:
                                 ncclDataTypeEnum.from_torch(tensor.dtype),
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
+
+    @contextmanager
+    def enable(self,
+               enable: Optional[bool] = None,
+               stream: Optional[torch.cuda.Stream] = None):
+        """
+        A context manager to enable or disable the communicator.
+        """
+        if enable is None:
+            # guess a default value when not specified
+            enable = self.world_size > 1 and self.available
+
+        if stream is None:
+            stream = torch.cuda.current_stream()
+
+        old_disable = self.disabled
+        old_stream = self.stream
+
+        self.stream = stream
+        self.disabled = not enable
+        yield
+
+        self.disabled = old_disable
+        self.stream = old_stream
