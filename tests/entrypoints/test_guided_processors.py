@@ -57,7 +57,9 @@ def test_guided_logits_processors():
     """Basic unit test for RegexLogitsProcessor and JSONLogitsProcessor."""
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
     regex_LP = RegexLogitsProcessor(TEST_REGEX, tokenizer)
-    json_LP = JSONLogitsProcessor(TEST_SCHEMA, tokenizer)
+    json_LP = JSONLogitsProcessor(TEST_SCHEMA,
+                                  tokenizer,
+                                  whitespace_pattern=None)
 
     regex_LP.init_state()
     token_ids = tokenizer.encode(

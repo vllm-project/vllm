@@ -80,8 +80,8 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`core42/jais-13b`, :code:`core42/jais-13b-chat`, :code:`core42/jais-30b-v3`, :code:`core42/jais-30b-chat-v3`, etc.
     -
   * - :code:`LlamaForCausalLM`
-    - LLaMA, LLaMA-2, Vicuna, Alpaca, Yi
-    - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
+    - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
+    - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
     - ✅︎
   * - :code:`MiniCPMForCausalLM`
     - MiniCPM
@@ -101,7 +101,7 @@ Alongside each architecture, we include some popular models that use it.
     -
   * - :code:`OLMoForCausalLM`
     - OLMo
-    - :code:`allenai/OLMo-1B`, :code:`allenai/OLMo-7B`, etc.
+    - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
@@ -114,6 +114,10 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
+    -
+  * - :code:`Phi3ForCausalLM`
+    - Phi-3
+    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
     -
   * - :code:`QWenLMHeadModel`
     - Qwen

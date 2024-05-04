@@ -11,12 +11,14 @@
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
 import logging
+import os
 import sys
 from typing import List
 
 from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
+sys.path.append(os.path.abspath("../.."))
 
 # -- Project information -----------------------------------------------------
 
@@ -46,7 +48,7 @@ templates_path = ['_templates']
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns: List[str] = []
+exclude_patterns: List[str] = ["**/*.template.rst"]
 
 # Exclude the prompt "$" when copying code
 copybutton_prompt_text = r"\$ "
@@ -71,6 +73,13 @@ html_theme_options = {
 # so a file named "default.css" will overwrite the builtin "default.css".
 # html_static_path = ['_static']
 
+
+# Generate additional rst documentation here.
+def setup(app):
+    from docs.source.generate_examples import generate_examples
+    generate_examples()
+
+
 # Mock out external dependencies here.
 autodoc_mock_imports = [
     "cpuinfo",
@@ -89,9 +98,10 @@ autodoc_mock_imports = [
 for mock_target in autodoc_mock_imports:
     if mock_target in sys.modules:
         logger.info(
-            f"Potentially problematic mock target ({mock_target}) found; "
+            "Potentially problematic mock target (%s) found; "
             "autodoc_mock_imports cannot mock modules that have already "
-            "been loaded into sys.modules when the sphinx build starts.")
+            "been loaded into sys.modules when the sphinx build starts.",
+            mock_target)
 
 
 class MockedClassDocumenter(autodoc.ClassDocumenter):

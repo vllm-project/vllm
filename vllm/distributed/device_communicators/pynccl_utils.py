@@ -2,7 +2,7 @@ import contextlib
 from typing import Optional
 
 import torch
-from torch.distributed import ReduceOp
+from torch.distributed import ProcessGroup, ReduceOp
 
 from vllm.logger import init_logger
 
@@ -14,7 +14,7 @@ try:
 except Exception as e:
     # in non-NVIDIA environments, we can't import the nccl module
     # e.g. when running on machines with AMD GPUs
-    logger.info(f"Failed to import NCCL library: {e}")
+    logger.info("Failed to import NCCL library: %s", e)
     logger.info("It is expected if you are not running on NVIDIA GPUs.")
     pass
 
@@ -30,28 +30,24 @@ def is_initialized() -> bool:
 def set_pynccl_stream(stream: torch.cuda.Stream):
     """Set the cuda stream for communication"""
     try:
+        assert comm is not None
         comm.stream = stream
         yield
     finally:
         pass
 
 
-def init_process_group(world_size: int,
-                       rank: int,
-                       init_method: str,
-                       local_rank: int = -1) -> None:
+def init_process_group(group: Optional[ProcessGroup] = None) -> None:
     assert not is_initialized()
     global comm
-    logger.info(f"vLLM is using nccl=={ncclGetVersion()}")
-    comm = NCCLCommunicator(init_method=init_method,
-                            world_size=world_size,
-                            local_rank=local_rank,
-                            rank=rank)
+    logger.info("vLLM is using nccl==%s", ncclGetVersion())
+    comm = NCCLCommunicator(group=group)
 
 
 def all_reduce(input_: torch.Tensor, op=ReduceOp.SUM) -> None:
     """All-reduces the input tensor across the process group."""
     assert input_.is_cuda, f"{input_} should be a cuda tensor"
+    assert comm is not None
     comm.all_reduce(input_, op)
 
 
@@ -62,8 +58,9 @@ def destroy_process_group() -> None:
 
 def get_world_size() -> int:
     """Returns the world size."""
+    assert comm is not None
     return comm.world_size
 
 
-def get_nccl_backend():
+def get_nccl_backend() -> Optional["NCCLCommunicator"]:
     return comm

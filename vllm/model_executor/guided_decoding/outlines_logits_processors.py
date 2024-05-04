@@ -18,16 +18,20 @@ import json
 import math
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Optional, Union
+from typing import Callable, DefaultDict, Dict, List, Union
 
 import torch
-from outlines.fsm.fsm import CFGFSM, RegexFSM
+from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 
 class BaseLogitsProcessor:
+
+    def __init__(self):
+        # Child class should use initialize in their init.
+        self.fsm: FSM
 
     def init_state(self):
         """Initialize the FSM states."""
@@ -76,10 +80,9 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
 
-    def __init__(self,
-                 schema: Union[str, Dict, BaseModel],
+    def __init__(self, schema: Union[str, Dict, BaseModel],
                  tokenizer: PreTrainedTokenizerBase,
-                 whitespace_pattern: Optional[str] = None):
+                 whitespace_pattern: Union[str, None]):
         """Compile the FSM that drives the JSON-guided generation.
 
         Parameters
@@ -126,6 +129,11 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         fsm = CFGFSM(cfg, tokenizer)
         self.fsm = fsm
+
+    def init_state(self):
+        """Initialize state with a CFGFSM copy."""
+        super().init_state()
+        self.fsm = self.fsm.copy()
 
 
 @lru_cache
