@@ -769,26 +769,23 @@ def _get_logprobs(
     selected_logprobs = logprobs[[
         query_indices_gpu,
         next_token_ids_gpu,
-    ]]
+    ]].to('cpu', non_blocking=True)
     ranks = _get_ranks(
         logprobs[query_indices_gpu],
         next_token_ids_gpu,
-    )
+    ).to('cpu', non_blocking=True)
     assert selected_logprobs.shape[0] == ranks.shape[0]
 
     # Logprobs of topk tokens for a batch of sequence groups.
     # (num_query_tokens_across_batch).
-    if largest_num_logprobs > 0:
+    if largest_num_logprobs > 1:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
-        top_logprobs = top_logprobs.cpu()
-        top_token_ids = top_token_ids.cpu()
+        top_logprobs = top_logprobs.to('cpu', non_blocking=True)
+        top_token_ids = top_token_ids.to('cpu', non_blocking=True)
     else:
         top_logprobs, top_token_ids = None, None
-
-    selected_logprobs = selected_logprobs.cpu()
-    ranks = ranks.cpu()
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
@@ -874,47 +871,39 @@ def _get_sampled_logprob_if_needed(
 ):
     """Compute the sample logprob if needed."""
     seq_ids = seq_group.seq_ids
-    num_logprobs = seq_group.sampling_params.logprobs
-    if num_logprobs is None:
-        num_logprobs = 0
+    num_logprobs = seq_group.sampling_params.logprobs or 0
     sampled_logprobs: SampleLogprobs = []
     next_token_ids, parent_seq_ids = sample_result
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        for (next_token_id, parent_id) in zip(next_token_ids, parent_seq_ids):
-            # Calculate the sample logprob of the real sampled tokens.
-            # Use tuple here for performance (to use to_list()).
-            # token_id: (logprob, rank_from_vocab)
-            sampled_logprobs_dict: Dict[int, Tuple[float, int]] = {
-                next_token_id:
-                (selected_logprobs[selected_logprobs_idx].item(),
-                 ranks[selected_logprobs_idx].item())
+        # Pre-fetch all required selected_logprobs and ranks
+        selected_logprob_items = selected_logprobs[
+            selected_logprobs_idx:selected_logprobs_idx +
+            len(next_token_ids)].tolist()
+        rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
+                           len(next_token_ids)].tolist()
+        for idx, (next_token_id,
+                  parent_id) in enumerate(zip(next_token_ids, parent_seq_ids)):
+            sampled_logprobs_dict = {
+                next_token_id: (selected_logprob_items[idx], rank_items[idx])
             }
-            # +1 to go to the next sampled token. Note that
-            # selected_logprobs can contain duplicates unlike top_logprobs
-            # when beam search is enabled.
-            selected_logprobs_idx += 1
-
-            # Second, add top K logprobs along with its rank.
-            if num_logprobs >= 0:
-                sampled_logprobs_dict.update(
-                    zip(
-                        top_token_ids[top_logprob_idx +
-                                      parent_id, :num_logprobs].tolist(),
-                        zip(
-                            top_logprobs[top_logprob_idx +
-                                         parent_id, :num_logprobs].tolist(),
-                            # This is rank. Since top_logprob is sorted, we
-                            # can just use a range here.
-                            range(1, num_logprobs + 1))))
+            if num_logprobs > 1:
+                top_ids = top_token_ids[top_logprob_idx +
+                                        parent_id, :num_logprobs].tolist()
+                top_probs = top_logprobs[top_logprob_idx +
+                                         parent_id, :num_logprobs].tolist()
+                sampled_logprobs_dict.update({
+                    int(top_id): (float(top_prob), rank)
+                    for rank, (top_id, top_prob
+                               ) in enumerate(zip(top_ids, top_probs), start=1)
+                })
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_and_rank)
                 for token_id, logprob_and_rank in
                 sampled_logprobs_dict.items()
             })
-        # There are len(seq_ids) number of sampled tokens for the current
-        # sequence group in top_logprobs. Jump to the next seq_group.
+        selected_logprobs_idx += len(next_token_ids)
         top_logprob_idx += len(seq_ids)
     return sampled_logprobs, top_logprob_idx, selected_logprobs_idx
 
