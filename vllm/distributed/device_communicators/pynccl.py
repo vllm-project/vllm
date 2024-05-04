@@ -39,6 +39,9 @@ class NCCLCommunicator:
             self.disabled = True
             return
         self.disabled = False
+
+        logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
+
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
@@ -77,6 +80,9 @@ class NCCLCommunicator:
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank)
             self.stream = torch.cuda.Stream()
+
+        # A small all_reduce for warmup.
+        self.all_reduce(torch.zeros(1, device=device))
 
     def all_reduce(self,
                    tensor: torch.Tensor,
