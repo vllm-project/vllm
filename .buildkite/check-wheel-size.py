@@ -19,7 +19,7 @@ def check_wheel_size(directory):
                 wheel_path = os.path.join(root, f)
                 wheel_size = os.path.getsize(wheel_path)
                 wheel_size_mb = wheel_size / (1024 * 1024)
-                if wheel_size > MAX_SIZE_MB:
+                if wheel_size_mb > MAX_SIZE_MB:
                     print(
                         f"Wheel {wheel_path} is too large ({wheel_size_mb} MB) "
                         f"compare to the allowed size ({MAX_SIZE_MB} MB).")
