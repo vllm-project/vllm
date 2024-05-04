@@ -16,7 +16,7 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.1/compat/
+RUN ldconfig /usr/local/cuda-12.4/compat/
 
 WORKDIR /workspace
 
@@ -116,7 +116,7 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.1/compat/
+RUN ldconfig /usr/local/cuda-12.4/compat/
 
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
