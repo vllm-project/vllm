@@ -10,9 +10,9 @@ void paged_attention_v1(
   int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& seq_lens,
   int block_size,
-  int max_context_len,
+  int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale);
@@ -28,9 +28,9 @@ void paged_attention_v2(
   int num_kv_heads,
   float scale,
   torch::Tensor& block_tables,
-  torch::Tensor& context_lens,
+  torch::Tensor& seq_lens,
   int block_size,
-  int max_context_len,
+  int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale);
@@ -124,6 +124,26 @@ torch::Tensor marlin_gemm(
     int64_t size_m, 
     int64_t size_n, 
     int64_t size_k);
+
+torch::Tensor gptq_marlin_gemm(
+  torch::Tensor &a,
+  torch::Tensor &b_q_weight,
+  torch::Tensor &b_scales,
+  torch::Tensor &g_idx,
+  torch::Tensor &perm,
+  torch::Tensor &workspace,
+  int64_t num_bits,
+  int64_t size_m,
+  int64_t size_n,
+  int64_t size_k,
+  bool is_k_full);
+
+torch::Tensor gptq_marlin_repack(
+  torch::Tensor &b_q_weight,
+  torch::Tensor &perm,
+  int64_t size_k,
+  int64_t size_n,
+  int64_t num_bits);
 #endif
 
 void squeezellm_gemm(
