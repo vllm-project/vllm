@@ -24,7 +24,7 @@ einops # required for MPT
 requests
 ray
 peft
-awscli
+awscli==1.32.98 # specify version to avoid dependency hell
 
 # Benchmarking
 aiohttp
