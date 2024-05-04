@@ -106,7 +106,7 @@ class LLMEngine:
             "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
             "quantization=%s, enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, seed=%d)",
+            "decoding_config=%r, seed=%d, served_model_name=%s)",
             vllm.__version__,
             model_config.model,
             speculative_config,
@@ -129,6 +129,7 @@ class LLMEngine:
             device_config.device,
             decoding_config,
             model_config.seed,
+            model_config.served_model_name,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -219,7 +220,7 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model),
+                labels=dict(model_name=model_config.served_model_name),
                 max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
 

@@ -1,3 +1,5 @@
+from typing import List
+
 import pytest
 from prometheus_client import REGISTRY
 
@@ -74,6 +76,34 @@ def test_metric_counter_generation_tokens(
     assert vllm_generation_count == metric_count, (
         f"generation token count: {vllm_generation_count!r}\n"
         f"metric: {metric_count!r}")
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize(
+    "served_model_name",
+    [None, [], ["ModelName0"], ["ModelName0", "ModelName1", "ModelName2"]])
+def test_metric_set_tag_model_name(vllm_runner, model: str, dtype: str,
+                                   served_model_name: List[str]) -> None:
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             disable_log_stats=False,
+                             gpu_memory_utilization=0.3,
+                             served_model_name=served_model_name)
+    stat_logger = vllm_model.model.llm_engine.stat_logger
+    metrics_tag_content = stat_logger.labels["model_name"]
+
+    del vllm_model
+
+    if served_model_name is None or served_model_name == []:
+        assert metrics_tag_content == model, (
+            f"Metrics tag model_name is wrong! expect: {model!r}\n"
+            f"actual: {metrics_tag_content!r}")
+    else:
+        assert metrics_tag_content == served_model_name[0], (
+            f"Metrics tag model_name is wrong! expect: "
+            f"{served_model_name[0]!r}\n"
+            f"actual: {metrics_tag_content!r}")
 
 
 @pytest.mark.parametrize("model", MODELS)

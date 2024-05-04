@@ -31,6 +31,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+            It is also used as the content for `model_name` tag in metrics 
+            output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -69,6 +71,10 @@ class ModelConfig:
             to eager mode
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
+        served_model_name: The model name used in metrics tag `model_name`,
+            matches the model name exposed via the APIs. If multiple model 
+            names provided, the first name will be used. If not specified, 
+            the model name will be the same as `model`.
     """
 
     def __init__(
@@ -90,6 +96,7 @@ class ModelConfig:
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -117,6 +124,8 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
+        self.served_model_name = get_served_model_name(model,
+                                                       served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_quantization()
@@ -1148,6 +1157,22 @@ def _get_and_verify_max_len(
                 "to incorrect model outputs or CUDA errors. Make sure the "
                 "value is correct and within the model context size.")
     return int(max_model_len)
+
+
+def get_served_model_name(model: str,
+                          served_model_name: Optional[Union[str, List[str]]]):
+    """
+    If the input is a non-empty list, the first model_name in 
+    `served_model_name` is taken. 
+    If the input is a non-empty string, it is used directly. 
+    For cases where the input is either an empty string or an 
+    empty list, the fallback is to use `self.model`.
+    """
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name
 
 
 @dataclass
