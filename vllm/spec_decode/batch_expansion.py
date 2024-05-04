@@ -1,9 +1,10 @@
 from itertools import chain, count
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Iterator, List, Tuple
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput, SequenceData,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import (get_all_seq_ids, nvtx_range,
@@ -40,11 +41,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     @nvtx_range("BatchExpansionTop1Scorer.score_proposals")
     def score_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        k: int,
+        execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
     ) -> SpeculativeScores:
         """Score the proposed tokens via the scorer model.
@@ -57,11 +54,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         no speculation is produced for that sequence.
 
         Args:
-            seq_group_metadata_list: The input sequence group metadata.
-            blocks_to_swap_in: This is passed to the worker during scoring.
-            blocks_to_swap_out: This is passed to the worker during scoring.
-            blocks_to_copy: This is passed to the worker during scoring.
-            k: The fixed proposal length.
+            execute_model_req: The execution request.
             proposals: The speculative proposals to score.
         Returns:
             SpeculativeScores: The scores of each speculative token, along with
@@ -80,28 +73,25 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
 
         (spec_indices, non_spec_indices, target_seq_group_metadata_list,
          num_scoring_tokens) = self._expand_batch(
-             seq_group_metadata_list=seq_group_metadata_list,
+             seq_group_metadata_list=execute_model_req.seq_group_metadata_list,
              proposal_token_ids_list=proposal_token_ids_list_without_skips,
              proposal_lens_list=proposal_lens_list,
          )
 
         target_sampler_output = self._scorer_worker.execute_model(
-            seq_group_metadata_list=target_seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-        )
+            execute_model_req=execute_model_req.clone(
+                seq_group_metadata_list=target_seq_group_metadata_list, ))
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 
         all_tokens, all_probs, spec_logprobs = self._contract_batch(
-            contracted_bs=len(seq_group_metadata_list),
+            contracted_bs=len(execute_model_req.seq_group_metadata_list),
             target_sampler_output=target_sampler_output,
             proposals=proposals,
             num_scoring_tokens=num_scoring_tokens,
             non_spec_indices=non_spec_indices,
             spec_indices=spec_indices,
-            k=k,
+            k=execute_model_req.num_lookahead_slots,
         )
 
         return SpeculativeScores(

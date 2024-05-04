@@ -1,10 +1,10 @@
 import torch
 
+from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
-from .utils import (create_execute_model_data,
-                    create_seq_group_metadata_from_prompts, create_worker)
+from .utils import create_seq_group_metadata_from_prompts, create_worker
 
 
 def test_ngram_algo_correctness_for_single_no_match():
@@ -44,17 +44,15 @@ def test_ngram_algo_correctness_for_single_no_match():
 
     proposal_len = 5
     final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
-    ngram_sampler_output_data = create_execute_model_data(
-        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts,
-            num_gpu_blocks,
-            block_size,
-            final_prompt_lens=final_prompt_lens))
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(
-        **ngram_sampler_output_data.to_dict(),
-        proposal_len=proposal_len,
-    )
+    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list,
+        num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -113,17 +111,15 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
 
     proposal_len = 5
     final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
-    ngram_sampler_output_data = create_execute_model_data(
-        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts,
-            num_gpu_blocks,
-            block_size,
-            final_prompt_lens=final_prompt_lens))
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(
-        **ngram_sampler_output_data.to_dict(),
-        proposal_len=proposal_len,
-    )
+    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list,
+        num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -185,17 +181,15 @@ def test_ngram_algo_correctness_for_batches_match_all():
 
     proposal_len = 5
     final_prompt_lens = [len(prompt) + proposal_len for prompt in prompts]
-    ngram_sampler_output_data = create_execute_model_data(
-        seq_group_metadata_list=create_seq_group_metadata_from_prompts(
-            prompts,
-            num_gpu_blocks,
-            block_size,
-            final_prompt_lens=final_prompt_lens))
+    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+        prompts,
+        num_gpu_blocks,
+        block_size,
+        final_prompt_lens=final_prompt_lens)
 
-    proposals = proposer.get_proposals(
-        **ngram_sampler_output_data.to_dict(),
-        proposal_len=proposal_len,
-    )
+    proposals = proposer.get_proposals(execute_model_req=ExecuteModelRequest(
+        seq_group_metadata_list=seq_group_metadata_list,
+        num_lookahead_slots=proposal_len), )
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)

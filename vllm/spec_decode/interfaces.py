@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 import torch
 
-from vllm.sequence import SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest
 
 
 @dataclass
@@ -58,11 +57,7 @@ class SpeculativeProposer(ABC):
     @abstractmethod
     def get_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        max_proposal_len: int,
+        execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
         raise NotImplementedError
 
@@ -72,11 +67,7 @@ class SpeculativeScorer(ABC):
     @abstractmethod
     def score_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        k: int,
+        execute_model_req: ExecuteModelRequest,
         proposals: SpeculativeProposals,
     ) -> SpeculativeScores:
         raise NotImplementedError
