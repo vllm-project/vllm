@@ -182,7 +182,7 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
     from examples.multilora_inference import (create_test_prompts,
                                               process_requests)
 
-    model_ref = "meta-llama/Llama-2-7b-hf"
+    model_ref = "meta-llama/Meta-Llama-3-8B-Instruct"
     lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
     test_prompts = create_test_prompts(lora_path)
 

@@ -6,7 +6,7 @@ Run:
 ```sh
 TEST_DIST_MODEL=facebook/opt-125m pytest \
     test_basic_distributed_correctness.py
-TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
+TEST_DIST_MODEL=meta-llama/Meta-Llama-3-8B-Instruct \
     test_basic_distributed_correctness.py
 ```
 """

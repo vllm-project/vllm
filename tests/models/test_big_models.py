@@ -7,7 +7,7 @@ Run `pytest tests/models/test_big_models.py`.
 import pytest
 
 MODELS = [
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
     # "mistralai/Mistral-7B-v0.1",  # Broken
     # "Deci/DeciLM-7b",  # Broken
     # "tiiuae/falcon-7b",  # Broken

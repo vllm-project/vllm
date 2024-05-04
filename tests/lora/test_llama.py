@@ -6,7 +6,7 @@ from vllm.lora.request import LoRARequest
 
 from .conftest import cleanup
 
-MODEL_PATH = "meta-llama/Llama-2-7b-hf"
+MODEL_PATH = "meta-llama/Meta-Llama-3-8B-Instruct"
 
 
 def do_sample(llm, lora_path: str, lora_id: int):

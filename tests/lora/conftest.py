@@ -155,7 +155,7 @@ def tinyllama_lora_files():
 
 
 @pytest.fixture
-def llama_2_7b_engine_extra_embeddings() -> nn.Module:
+def llama_3_8b_engine_extra_embeddings() -> nn.Module:
     cleanup()
     get_model_old = get_model
 
@@ -166,14 +166,15 @@ def llama_2_7b_engine_extra_embeddings() -> nn.Module:
                              **kwargs)
 
     with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
+        engine = vllm.LLM("meta-llama/Meta-Llama-3-8B-Instruct",
+                          enable_lora=False)
     yield engine.llm_engine
     del engine
     cleanup()
 
 
 @pytest.fixture
-def llama_2_7b_model_extra_embeddings(
-        llama_2_7b_engine_extra_embeddings) -> nn.Module:
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
+def llama_3_8b_model_extra_embeddings(
+        llama_3_8b_engine_extra_embeddings) -> nn.Module:
+    yield (llama_3_8b_engine_extra_embeddings.model_executor.driver_worker.
            model_runner.model)

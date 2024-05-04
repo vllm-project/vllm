@@ -23,6 +23,7 @@ TOKENIZERS = [
     "mosaicml/mpt-7b",
     "tiiuae/falcon-7b",
     "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct",
     "codellama/CodeLlama-7b-hf",
 ]
 
