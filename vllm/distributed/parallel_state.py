@@ -160,7 +160,8 @@ def initialize_model_parallel(
 
     from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
     _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(group=_TP_CPU_GROUP,
-                                               device=_LOCAL_RANK)
+                                               device=_LOCAL_RANK,
+                                               disabled=world_size == 1)
 
     # Build the pipeline model-parallel groups.
     global _PIPELINE_MODEL_PARALLEL_GROUP
