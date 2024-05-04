@@ -12,6 +12,8 @@ You can enable the feature by specifying
 .. code-block:: python
 
     llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_chunked_prefill=True)
+    # Set max_num_batched_tokens to tune performance.
+    llm = LLM(model="meta-llama/Llama-2-7b-hf", enable_chunked_prefill=True, max_num_batched_tokens=2048)
 
 By default, vLLM scheduler prioritizes prefills and doesn't batch prefill and decode to the same batch. This policy optimizes the TTFT (time to first token), but incurs slower ITL (inter token latency) and inefficient GPU utilization.
 
@@ -25,10 +27,11 @@ This policy has two benefits.
 - It improves ITL (inter token latency) and generation decode because decode requests are prioritized.
 - It helps achieving better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
 
-`max_num_batched_tokens` takes an important role to tune the performance.
+You can tune the performance by changing `max_num_batched_tokens`.
 By default, it is set to 512, which has the best ITL on A100 in the initial benchmark.
 Smaller batch size achieves better ITL because there are less prefills interrupting decodes.
 Higher batch size achieves better TTFT as you can put more prefill to the batch.
 If `max_num_batched_tokens` is same as `max_model_len`, that's almost the equivalent to the default scheduling policy (except that it still prioritizes decodes).
+Note that the default batch size (512) is optimized for ITL, and it may have lower throughput than the default scheduler. We recommend you to set `max_num_batched_tokens > 2048` for throughput.
 
 See related papers for more details (https://arxiv.org/pdf/2401.08671 or https://arxiv.org/pdf/2308.16369). 
