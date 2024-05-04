@@ -47,6 +47,7 @@ class NCCLCommunicator:
         if self.world_size == 1:
             self.available = False
             self.disabled = True
+            self.stream = None
             return
         try:
             self.nccl = NCCLLibrary(library_path)
@@ -55,6 +56,7 @@ class NCCLCommunicator:
             # e.g. in a non-GPU environment
             self.available = False
             self.disabled = True
+            self.stream = None
             return
 
         self.available = True
