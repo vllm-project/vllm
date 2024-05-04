@@ -1,8 +1,10 @@
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
+from pydantic import Field
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from typing_extensions import Annotated
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
@@ -222,7 +224,8 @@ class LLM:
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
-        prompt, prompt_token_ids = self._validate_prompt(prompt, prompt_token_ids, sampling_params)
+        prompt, prompt_token_ids = self._validate_prompt(
+            prompt, prompt_token_ids, sampling_params)
         self.llm_engine.add_request(request_id,
                                     prompt,
                                     sampling_params,
@@ -256,14 +259,15 @@ class LLM:
 
     def _validate_prompt(
         self,
-        prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]],
-        sampling_params: SamplingParams,
-    ) -> Optional[str]:
+        prompt: Optional[str] = None,
+        prompt_token_ids: Optional[List[int]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    ) -> Tuple[Optional[str], Optional[List[int]]]:
 
-        if sampling_params.truncate_prompt_tokens is not None:
+        if truncate_prompt_tokens is not None:
             if prompt_token_ids is None:
-                prompt_token_ids = self.llm_engine.tokenizer.tokenizer(prompt).input_ids
-            prompt_token_ids = prompt_token_ids[-sampling_params.truncate_prompt_tokens:]
+                assert prompt is not None
+                prompt_token_ids = self.llm_engine.tokenizer.tokenizer(
+                    prompt).input_ids
+            prompt_token_ids = prompt_token_ids[-truncate_prompt_tokens:]
         return prompt, prompt_token_ids
-        
