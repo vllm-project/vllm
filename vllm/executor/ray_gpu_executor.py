@@ -10,7 +10,7 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
@@ -166,21 +166,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int = 0) -> List[SamplerOutput]:
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         all_outputs = self._run_workers(
             "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-                "num_lookahead_slots": num_lookahead_slots,
-            },
+            driver_kwargs={"execute_model_req": execute_model_req},
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
         # Only the driver worker returns the sampling results.
