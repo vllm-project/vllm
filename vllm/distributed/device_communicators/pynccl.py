@@ -21,6 +21,7 @@ class NCCLCommunicator:
         group: Optional[ProcessGroup] = None,
         device: Optional[Union[int, str, torch.device]] = None,
         library_path: Optional[str] = None,
+        disabled: bool = False,
     ):
         """
         Args:
@@ -30,14 +31,22 @@ class NCCLCommunicator:
                 it will be bind to f"cuda:{local_rank}".
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
+            disabled: if True, the communicator will be disabled. This object
+                will not do anything, just serve as a placeholder.
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
         """
+        # explicit disable, e.g. world_size == 1
+        self.disabled = disabled
+        if disabled:
+            return
         try:
             self.nccl = NCCLLibrary(library_path)
         except Exception:
             self.disabled = True
             return
+        # disable because of missing NCCL library
+        # e.g. in a non-GPU environment
         self.disabled = False
 
         logger.info("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
