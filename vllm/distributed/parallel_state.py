@@ -82,8 +82,13 @@ def init_distributed_environment(
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
         # see https://github.com/pytorch/pytorch/issues/122816
-        if local_rank == -1 and distributed_init_method == "env://":
-            local_rank = envs.LOCAL_RANK
+        if local_rank == -1:
+            # local rank not set, this usually happens in single-node
+            # setting, where we can use rank as local rank
+            if distributed_init_method == "env://":
+                local_rank = envs.LOCAL_RANK
+            else:
+                local_rank = rank
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
         # A small all_reduce for warmup.
