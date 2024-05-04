@@ -72,14 +72,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.watermark = watermark
         assert watermark >= 0.0
 
-        assert not enable_caching, "Prefix caching not yet supported"
         self.enable_caching = enable_caching
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         self.block_allocator = CpuGpuBlockAllocator.create(
-            # Currently, only naive blocks are supported (no prefix caching).
-            allocator_type="naive",
+            allocator_type="prefix_caching" if enable_caching else "naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             block_size=block_size,
@@ -192,19 +190,30 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         assert all(b is not None for b in block_ids)
-        return block_ids
+        return block_ids  # type: ignore
 
-    def access_all_blocks_in_seq(self, seq, now):
-        # TODO add prefix caching support.
-        # Tracked here https://github.com/vllm-project/vllm/issues/3667
-        pass
+    def access_all_blocks_in_seq(self, seq: Sequence, now: float):
+        # Update the last accessed time of all the blocks accessed
+        # in this step.
+        # And the accessed time is only useful for prefix caching now,
+        # as it support internal evictor policy for which cached
+        # block could be refilled, to keep cached content could be reused
+        # at max extend.
+        if self.enable_caching:
+            block_table = self.block_tables[seq.seq_id]
+            block_ids = []
+            for block_id in block_table.physical_block_ids:
+                block_ids.append(block_id)
+            self.block_allocator.mark_blocks_as_accessed(
+                block_ids,  # type: ignore
+                now)
 
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
-        # We ignore the sequence group as its not necessary. After the batch is
-        # formed by the scheduler, we do not need to mark blocks from individual
-        # sequence groups as computed -- all blocks in the batch can be marked
-        # as computed.
-        self.block_allocator.mark_blocks_as_computed()
+        # The only need for mark block as computed is for prefix caching,
+        # while currently we could determine whether one block is computed
+        # or not by check whether it has content hash.
+        # So this function is useless for block_v2.
+        pass
 
     def get_common_computed_block_ids(
             self, seqs: List[Sequence]) -> GenericSequence[int]:
@@ -220,16 +229,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         seq_block_ids = [
             self.block_tables[seq.seq_id].physical_block_ids for seq in seqs
         ]
+        # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(
-            seq_block_ids)
+            seq_block_ids)  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         src_block_table = self.block_tables[parent_seq.seq_id]
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
     def can_swap_in(self, seq_group: SequenceGroup,
-                    num_lookahead_slots: int) -> bool:
-        return False
+                    num_lookahead_slots: int) -> AllocStatus:
+        return AllocStatus.LATER
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:

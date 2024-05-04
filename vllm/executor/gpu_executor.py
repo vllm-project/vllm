@@ -1,11 +1,12 @@
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -23,30 +24,47 @@ class GPUExecutor(ExecutorBase):
         else:
             self._init_spec_worker()
 
-    def _init_non_spec_worker(self):
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU.")
-
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = Worker(
+    def _get_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+        """Return worker init args for a given rank."""
+        if distributed_init_method is None:
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
+        return dict(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             device_config=self.device_config,
             cache_config=self.cache_config,
             load_config=self.load_config,
-            local_rank=0,
-            rank=0,
+            local_rank=local_rank,
+            rank=rank,
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
+            is_driver_worker=rank == 0,
         )
+
+    def _create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
+        wrapper = WorkerWrapperBase(
+            worker_module_name="vllm.worker.worker",
+            worker_class_name="Worker",
+        )
+        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
+                                                      distributed_init_method))
+        return wrapper.worker
+
+    def _init_non_spec_worker(self):
+        assert self.parallel_config.world_size == 1, (
+            "GPUExecutor only supports single GPU.")
+
+        self.driver_worker = self._create_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
@@ -55,46 +73,23 @@ class GPUExecutor(ExecutorBase):
         """
         assert self.speculative_config is not None
 
-        from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
-        from vllm.worker.worker import Worker
 
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
+        target_worker = self._create_worker()
 
-        target_worker = Worker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
-        )
-
-        draft_worker = MultiStepWorker(
+        draft_worker_kwargs = self._get_worker_kwargs()
+        # Override draft-model specific worker args.
+        draft_worker_kwargs.update(
             model_config=self.speculative_config.draft_model_config,
             parallel_config=self.speculative_config.draft_parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
             # TODO allow draft-model specific load config.
-            load_config=self.load_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
+            #load_config=self.load_config,
         )
 
-        spec_decode_worker = SpecDecodeWorker.from_workers(
-            proposer_worker=draft_worker, scorer_worker=target_worker)
+        spec_decode_worker = SpecDecodeWorker.create_worker(
+            scorer_worker=target_worker,
+            draft_worker_kwargs=draft_worker_kwargs,
+        )
 
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
@@ -122,20 +117,9 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        num_lookahead_slots: int,
-    ) -> List[SamplerOutput]:
-        output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-            num_lookahead_slots=num_lookahead_slots,
-        )
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        output = self.driver_worker.execute_model(execute_model_req)
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -159,14 +143,8 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
 
     async def execute_model_async(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
-        output = await make_async(self.driver_worker.execute_model)(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy)
+        output = await make_async(self.driver_worker.execute_model
+                                  )(execute_model_req=execute_model_req, )
         return output

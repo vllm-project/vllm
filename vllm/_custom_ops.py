@@ -39,17 +39,17 @@ def paged_attention_v1(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v1(out, query, key_cache, value_cache,
-                                num_kv_heads, scale, block_tables,
-                                context_lens, block_size, max_context_len,
-                                alibi_slopes, kv_cache_dtype, kv_scale)
+                                num_kv_heads, scale, block_tables, seq_lens,
+                                block_size, max_seq_len, alibi_slopes,
+                                kv_cache_dtype, kv_scale)
 
 
 def paged_attention_v2(
@@ -63,17 +63,17 @@ def paged_attention_v2(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out, query,
                                 key_cache, value_cache, num_kv_heads, scale,
-                                block_tables, context_lens, block_size,
-                                max_context_len, alibi_slopes, kv_cache_dtype,
+                                block_tables, seq_lens, block_size,
+                                max_seq_len, alibi_slopes, kv_cache_dtype,
                                 kv_scale)
 
 
@@ -167,6 +167,24 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
     return vllm_ops.aqlm_dequant(codes, codebooks, codebook_partition_sizes)
 
 
+# gptq_marlin
+def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
+                       size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+                                       num_bits)
+
+
+def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                     b_scales: torch.Tensor, g_idx: torch.Tensor,
+                     perm: torch.Tensor, workspace: torch.Tensor,
+                     num_bits: int, size_m: int, size_n: int, size_k: int,
+                     is_k_full: bool) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
+                                     workspace, num_bits, size_m, size_n,
+                                     size_k, is_k_full)
+
+
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
@@ -202,6 +220,18 @@ def reshape_and_cache(
 ) -> None:
     vllm_cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
                                      slot_mapping, kv_cache_dtype, kv_scale)
+
+
+def reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+) -> None:
+    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                           slot_mapping, kv_cache_dtype)
 
 
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,

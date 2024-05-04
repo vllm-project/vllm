@@ -1,6 +1,5 @@
 import enum
 import json
-import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
@@ -23,10 +22,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
 
 logger = init_logger(__name__)
-
-# If true, will load models from ModelScope instead of Hugging Face Hub.
-VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
-                                     "False").lower() == "true"
 
 _GB = 1 << 30
 
@@ -70,7 +65,10 @@ class ModelConfig:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: 'The model name used in metrics tag `model_name`,
@@ -95,6 +93,7 @@ class ModelConfig:
         quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
@@ -111,6 +110,11 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        if self.max_context_len_to_capture is not None:
+            raise ValueError("`max_context_len_to_capture` is deprecated. "
+                             "Use `max_seq_len_to_capture` instead.")
+        self.max_seq_len_to_capture = (max_seq_len_to_capture
+                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.skip_tokenizer_init = skip_tokenizer_init
 
@@ -204,10 +208,10 @@ class ModelConfig:
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        if self.max_context_len_to_capture is None:
-            self.max_context_len_to_capture = self.max_model_len
-        self.max_context_len_to_capture = min(self.max_context_len_to_capture,
-                                              self.max_model_len)
+        if self.max_seq_len_to_capture is None:
+            self.max_seq_len_to_capture = self.max_model_len
+        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
+                                          self.max_model_len)
 
     def verify_with_parallel_config(
         self,
@@ -303,6 +307,11 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
+    def get_num_attention_heads(self,
+                                parallel_config: "ParallelConfig") -> int:
+        return self.hf_text_config.num_attention_heads // \
+                    parallel_config.tensor_parallel_size
+
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
@@ -362,7 +371,8 @@ class CacheConfig:
         elif self.cache_dtype == "fp8":
             if not is_hip():
                 nvcc_cuda_version = get_nvcc_cuda_version()
-                if nvcc_cuda_version < Version("11.8"):
+                if nvcc_cuda_version is not None \
+                        and nvcc_cuda_version < Version("11.8"):
                     raise ValueError(
                         "FP8 is not supported when cuda version is"
                         "lower than 11.8.")
@@ -690,6 +700,8 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -716,6 +728,10 @@ class SpeculativeConfig:
             use_v2_block_manager (bool): Whether vLLM is configured to use the
                 v2 block manager or not. Used for raising an error since the v2
                 block manager is required with spec decode.
+            ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
+                window, if provided.
+            ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
+                window, if provided.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -750,39 +766,57 @@ class SpeculativeConfig:
         draft_code_revision = None
         draft_quantization = None
 
-        draft_model_config = ModelConfig(
-            model=speculative_model,
-            tokenizer=target_model_config.tokenizer,
-            tokenizer_mode=target_model_config.tokenizer_mode,
-            trust_remote_code=target_model_config.trust_remote_code,
-            dtype=target_model_config.dtype,
-            seed=target_model_config.seed,
-            revision=draft_revision,
-            code_revision=draft_code_revision,
-            tokenizer_revision=target_model_config.tokenizer_revision,
-            max_model_len=None,
-            quantization=draft_quantization,
-            enforce_eager=target_model_config.enforce_eager,
-            max_context_len_to_capture=target_model_config.
-            max_context_len_to_capture,
-            max_logprobs=target_model_config.max_logprobs,
-        )
+        if speculative_model == "[ngram]":
+            assert (ngram_prompt_lookup_max is not None
+                    and ngram_prompt_lookup_max > 0)
+            if ngram_prompt_lookup_min is None:
+                ngram_prompt_lookup_min = 0
+            else:
+                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
 
-        draft_model_config.max_model_len = (
-            SpeculativeConfig._maybe_override_draft_max_model_len(
-                speculative_max_model_len,
-                draft_model_config.max_model_len,
-                target_model_config.max_model_len,
-            ))
+            # TODO: current we still need extract vocab_size from target model
+            # config, in future, we may try refactor it out, and set
+            # draft related config as None here.
+            draft_model_config = target_model_config
+            draft_parallel_config = target_parallel_config
+        else:
+            ngram_prompt_lookup_max = 0
+            ngram_prompt_lookup_min = 0
+            draft_model_config = ModelConfig(
+                model=speculative_model,
+                tokenizer=target_model_config.tokenizer,
+                tokenizer_mode=target_model_config.tokenizer_mode,
+                trust_remote_code=target_model_config.trust_remote_code,
+                dtype=target_model_config.dtype,
+                seed=target_model_config.seed,
+                revision=draft_revision,
+                code_revision=draft_code_revision,
+                tokenizer_revision=target_model_config.tokenizer_revision,
+                max_model_len=None,
+                quantization=draft_quantization,
+                enforce_eager=target_model_config.enforce_eager,
+                max_seq_len_to_capture=target_model_config.
+                max_seq_len_to_capture,
+                max_logprobs=target_model_config.max_logprobs,
+            )
 
-        draft_parallel_config = (
-            SpeculativeConfig.create_draft_parallel_config(
-                target_parallel_config))
+            draft_model_config.max_model_len = (
+                SpeculativeConfig._maybe_override_draft_max_model_len(
+                    speculative_max_model_len,
+                    draft_model_config.max_model_len,
+                    target_model_config.max_model_len,
+                ))
+
+            draft_parallel_config = (
+                SpeculativeConfig.create_draft_parallel_config(
+                    target_parallel_config))
 
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min,
         )
 
     @staticmethod
@@ -850,6 +884,8 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
+        ngram_prompt_lookup_max: int,
+        ngram_prompt_lookup_min: int,
     ):
         """Create a SpeculativeConfig object.
 
@@ -862,6 +898,8 @@ class SpeculativeConfig:
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
+        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max
+        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min
 
         self._verify_args()
 
@@ -885,7 +923,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        draft_model = self.draft_model_config.model
+        if self.ngram_prompt_lookup_max > 0:
+            draft_model = "[ngram]"
+        else:
+            draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 

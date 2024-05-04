@@ -58,7 +58,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
     slot_mapping: torch.Tensor
-    prompt_lens: Optional[List[int]]
+    seq_lens: Optional[List[int]]
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -136,7 +136,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                                                 kv_scale)
 
         if attn_metadata.is_prompt:
-            assert attn_metadata.prompt_lens is not None
+            assert attn_metadata.seq_lens is not None
             if (kv_cache is None or attn_metadata.block_tables.numel() == 0):
                 if self.num_kv_heads != self.num_heads:
                     key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -147,13 +147,13 @@ class TorchSDPABackendImpl(AttentionImpl):
                     if self.alibi_slopes is not None:
                         att_masks = _make_alibi_bias(
                             self.alibi_slopes, query.dtype,
-                            attn_metadata.prompt_lens)  # type: ignore
+                            attn_metadata.seq_lens)  # type: ignore
                     elif self.sliding_window is not None:
                         att_masks = _make_sliding_window_bias(
-                            attn_metadata.prompt_lens, self.sliding_window,
+                            attn_metadata.seq_lens, self.sliding_window,
                             query.dtype)  # type: ignore
                     else:
-                        att_masks = [None] * len(attn_metadata.prompt_lens)
+                        att_masks = [None] * len(attn_metadata.seq_lens)
                     attn_metadata.attn_bias = att_masks
 
                 query = query.movedim(0, query.dim() - 2)
@@ -164,9 +164,9 @@ class TorchSDPABackendImpl(AttentionImpl):
                 output = torch.empty(
                     (num_tokens, self.num_heads, self.head_size),
                     dtype=query.dtype)
-                for prompt_len, mask in zip(attn_metadata.prompt_lens,
-                                            attn_metadata.attn_bias):
-                    end = start + prompt_len
+                for seq_len, mask in zip(attn_metadata.seq_lens,
+                                         attn_metadata.attn_bias):
+                    end = start + seq_len
                     sub_out = scaled_dot_product_attention(
                         query[:, start:end, :],
                         key[:, start:end, :],
@@ -189,8 +189,8 @@ class TorchSDPABackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.block_tables,
-                attn_metadata.context_lens,
-                attn_metadata.max_context_len,
+                attn_metadata.seq_lens_tensor,
+                attn_metadata.max_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -205,13 +205,13 @@ class TorchSDPABackendImpl(AttentionImpl):
 def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     dtype: torch.dtype,
-    prompt_lens: List[int],
+    seq_lens: List[int],
 ) -> List[torch.Tensor]:
     attn_biases = []
-    for prompt_len in prompt_lens:
-        bias = torch.arange(prompt_len, dtype=dtype)
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(prompt_len, 1)`
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
         # here. We find that both biases give the same results, but
         # the bias below more accurately follows the original ALiBi
         # paper.
@@ -221,7 +221,7 @@ def _make_alibi_bias(
         bias = bias[None, :].repeat((num_heads, 1, 1))
         bias.mul_(alibi_slopes[:, None, None])
         inf_mask = torch.empty(
-            (1, prompt_len, prompt_len),
+            (1, seq_len, seq_len),
             dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
         attn_biases.append((bias + inf_mask).to(dtype))
 
@@ -229,14 +229,14 @@ def _make_alibi_bias(
 
 
 def _make_sliding_window_bias(
-    prompt_lens: List[int],
+    seq_lens: List[int],
     window_size: Optional[int],
     dtype: torch.dtype,
 ) -> List[torch.Tensor]:
     attn_biases = []
-    for prompt_len in prompt_lens:
+    for seq_len in seq_lens:
         tensor = torch.full(
-            (1, prompt_len, prompt_len),
+            (1, seq_len, seq_len),
             dtype=dtype,
             fill_value=1,
         )
