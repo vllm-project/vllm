@@ -159,12 +159,14 @@ def initialize_model_parallel(
             _TP_CPU_GROUP = cpu_group
 
     from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
-    _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(group=_TP_CPU_GROUP,
-                                               device=_LOCAL_RANK,
-                                               disabled=world_size == 1)
+    _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(
+        group=_TP_CPU_GROUP,
+        device=_LOCAL_RANK,
+        disabled=tensor_model_parallel_size == 1)
 
-    # by default it is disabled, e.g. in profiling models
-    # to use it, we have to use under `with_pynccl_for_all_reduce`
+    # by default it is disabled, e.g. in profiling models and prefill phase.
+    # to use it, we have to use under `with_pynccl_for_all_reduce`, usually
+    # when we are using CUDA graph.
     _TP_PYNCCL_COMMUNICATOR.disabled = True
 
     # Build the pipeline model-parallel groups.
