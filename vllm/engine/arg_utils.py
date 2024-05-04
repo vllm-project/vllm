@@ -412,14 +412,14 @@ class EngineArgs:
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
         # Related to Vision-language models such as llava
-        parser.add_argument(
-            '--image-input-type',
-            type=nullable_str,
-            default=None,
-            choices=[
-                t.name.lower() for t in VisionLanguageConfig.ImageInputType
-            ],
-            help=('The image input type passed into vLLM.'))
+        parser.add_argument('--image-input-type',
+                            type=nullable_str,
+                            default=None,
+                            choices=[
+                                t.name.lower()
+                                for t in VisionLanguageConfig.ImageInputType
+                            ],
+                            help=('The image input type passed into vLLM.'))
         parser.add_argument('--image-token-id',
                             type=int,
                             default=None,
