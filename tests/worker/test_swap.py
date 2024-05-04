@@ -1,6 +1,7 @@
 import torch
 
 from vllm.engine.arg_utils import EngineArgs
+from vllm.sequence import ExecuteModelRequest
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
 
@@ -54,10 +55,14 @@ def test_swap() -> None:
 
     # Test swap out.
     blocks_to_swap_out = {3: 72, 56: 35, 84: 34}
-    worker.execute_model(seq_group_metadata_list=[],
-                         blocks_to_swap_in={},
-                         blocks_to_swap_out=blocks_to_swap_out,
-                         blocks_to_copy={})
+    execute_model_req = ExecuteModelRequest(
+        seq_group_metadata_list=[],
+        blocks_to_swap_in={},
+        blocks_to_swap_out=blocks_to_swap_out,
+        blocks_to_copy={},
+    )
+    worker.execute_model(execute_model_req=execute_model_req)
+
     for i in range(num_layers):
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
@@ -66,14 +71,19 @@ def test_swap() -> None:
             assert allclose(gpu_value_cache[src], cpu_value_cache[dst])
 
     # Test swap in.
-    blocks_to_swap_in = {19: 45, 67: 23, 12: 78, 40: 99, 1: 71}
-    worker.execute_model(seq_group_metadata_list=[],
-                         blocks_to_swap_in=blocks_to_swap_in,
-                         blocks_to_swap_out={},
-                         blocks_to_copy={})
+    execute_model_req.blocks_to_swap_out = {}
+    execute_model_req.blocks_to_swap_in = {
+        19: 45,
+        67: 23,
+        12: 78,
+        40: 99,
+        1: 71
+    }
+    worker.execute_model(execute_model_req=execute_model_req)
+
     for i in range(num_layers):
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
-        for src, dst in blocks_to_swap_in.items():
+        for src, dst in execute_model_req.blocks_to_swap_in.items():
             assert allclose(gpu_key_cache[dst], cpu_key_cache[src])
             assert allclose(gpu_value_cache[dst], cpu_value_cache[src])
