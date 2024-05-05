@@ -1,8 +1,9 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
+from transformers import JambaConfig
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
@@ -24,16 +25,15 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.mamba_metadata import MambaCacheParams
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
-from vllm.transformers_utils.configs.jamba import JambaConfig
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -166,6 +166,7 @@ class JambaMambaMixer(nn.Module):
                     hidden_states,
                     (self.conv_kernel_size - hidden_states.shape[-1], 0))
                 cache_params.conv_state.copy_(conv_states)
+
             hidden_states = causal_conv1d_fn(
                 hidden_states,
                 conv_weights,
@@ -246,8 +247,8 @@ class JambaMambaMixer(nn.Module):
                 offset += prompt_len
             cache = MambaCacheParams(
                 True,
-                conv_state=conv_state[self.layer_idx],
-                ssm_state=ssm_state[self.layer_idx],
+                conv_state=conv_state,
+                ssm_state=ssm_state,
             )
             padded_hidden_states = self.mamba_forward(padded_hidden_states,
                                                       cache_params=cache)
@@ -259,8 +260,8 @@ class JambaMambaMixer(nn.Module):
                 offset += prompt_len
         else:
             cache = MambaCacheParams(False,
-                                     conv_state=conv_state[self.layer_idx],
-                                     ssm_state=ssm_state[self.layer_idx])
+                                     conv_state=conv_state,
+                                     ssm_state=ssm_state)
             hidden_states = self.mamba_forward(hidden_states.unsqueeze(1),
                                                cache_params=cache)
             hidden_states = hidden_states.squeeze(1)
@@ -304,7 +305,6 @@ class JambaMoE(nn.Module):
                 self.num_total_experts,
                 bias=False,
                 params_dtype=self.params_dtype,
-                linear_method=None,
             )
 
         self.ws = nn.Parameter(
@@ -443,8 +443,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         config: JambaConfig,
         actual_num_experts: int,
         actual_num_experts_per_tok: int,
-        layer_idx: int,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -474,12 +473,12 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
                                         config.hidden_size,
                                         bias=False,
-                                        linear_method=linear_method)
+                                        quant_config=quant_config)
 
         self.attn = Attention(
             self.num_heads,
@@ -548,7 +547,7 @@ class JambaModel(nn.Module):
     def __init__(
         self,
         config: JambaConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
@@ -585,8 +584,7 @@ class JambaModel(nn.Module):
                         config,
                         actual_num_experts=actual_num_experts,
                         actual_num_experts_per_tok=actual_num_experts_per_tok,
-                        layer_idx=i,
-                        linear_method=linear_method,
+                        quant_config=quant_config
                     ))
             else:
                 module_list.append(
@@ -616,17 +614,24 @@ class JambaModel(nn.Module):
         for i in range(len(self.layers)):
             layer = self.layers[i]
             kv_cache = None
+            current_ssm_state = None
+            current_conv_state = None
             if isinstance(layer, JambaAttentionDecoderLayer):
                 kv_cache = kv_caches[(i - self.config.attn_layer_offset) //
                                      self.config.attn_layer_period]
+            if isinstance(layer, JambaMambaDecoderLayer):
+                current_state_layer = i - (1 + (i - self.config.attn_layer_offset) // self.config.attn_layer_period)
+                current_ssm_state = ssm_state[current_state_layer]
+                current_conv_state = conv_state[current_state_layer]
+
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
                 residual=residual,
-                conv_state=conv_state,
-                ssm_state=ssm_state,
+                conv_state=current_conv_state,
+                ssm_state=current_ssm_state,
             )
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states
@@ -657,13 +662,16 @@ class JambaForCausalLM(nn.Module):
     def __init__(
         self,
         config: JambaConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.model = JambaModel(config, linear_method, lora_config=lora_config)
+        self.model = JambaModel(
+            config,
+            quant_config=quant_config,
+            lora_config=lora_config
+        )
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -686,11 +694,16 @@ class JambaForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         attn_metadata: AttentionMetadata,
-        conv_state: torch.Tensor,
-        ssm_state: torch.Tensor,
+        seqlen_agnostic_cache: Tuple[torch.Tensor,torch.Tensor],
     ):
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, conv_state, ssm_state)
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            seqlen_agnostic_cache[0],
+            seqlen_agnostic_cache[1]
+        )
         return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor,
@@ -707,13 +720,7 @@ class JambaForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights( self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -732,13 +739,7 @@ class JambaForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path,
-                cache_dir,
-                load_format,
-                revision,
-                fall_back_to_pt=True
-        ):  # erez - might need to change later to False
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 
