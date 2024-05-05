@@ -1,4 +1,5 @@
 import contextlib
+from dataclasses import dataclass
 import time
 from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
@@ -21,7 +22,6 @@ from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.mamba_metadata import RequestInfo
 from vllm.model_executor.model_loader import get_model
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
@@ -39,6 +39,11 @@ _BATCH_SIZE_ALIGNMENT = 8
 _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
     _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
 ]
+
+@dataclass
+class RequestInfo:
+    request_id: str
+    seqs_id: List[int]
 
 
 class PreparePromptMetadata(NamedTuple):

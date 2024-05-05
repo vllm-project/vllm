@@ -1,5 +1,6 @@
 # coding=utf-8
 """Inference-only Jurassic model."""
+from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -19,7 +20,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
@@ -29,13 +29,19 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.mamba_metadata import MambaCacheParams
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
+
+@dataclass
+class MambaCacheParams:
+    is_prompt: bool = False
+    conv_state: torch.Tensor = torch.Tensor()
+    ssm_state: torch.Tensor = torch.Tensor()
+
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
