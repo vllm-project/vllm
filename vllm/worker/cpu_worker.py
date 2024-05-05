@@ -248,7 +248,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
     def cache_copy(
         self,
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
         if blocks_to_copy:
             self.cache_engine.copy(blocks_to_copy)
@@ -269,6 +269,9 @@ class CPUWorker(LoraNotSupportedWorkerBase):
             num_seq_groups: int = len(seq_group_metadata_list)
             assert execute_model_req is not None
             blocks_to_copy = execute_model_req.blocks_to_copy
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device="cpu",
+                                          dtype=torch.int64).view(-1, 2)
             assert len(execute_model_req.blocks_to_swap_in) == 0
             assert len(execute_model_req.blocks_to_swap_out) == 0
             data: Dict[str, Any] = {
