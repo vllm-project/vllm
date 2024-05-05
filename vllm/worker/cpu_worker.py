@@ -250,7 +250,7 @@ class CPUWorker(LoraNotSupportedWorkerBase):
         self,
         blocks_to_copy: torch.Tensor,
     ) -> None:
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
