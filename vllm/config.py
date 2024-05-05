@@ -2,7 +2,7 @@ import enum
 import json
 import os
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Union, Tuple
 
 import torch
 from packaging.version import Version
@@ -275,14 +275,52 @@ class ModelConfig:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
-    def get_num_attention_layers(self,
-                                 parallel_config: "ParallelConfig") -> int:
+    def contains_seqlen_agnostic_layers(self) -> int:
+        return self.hf_config.model_type in ["jamba"]
+
+    def get_layers_block_type(self,
+        parallel_config: "ParallelConfig") -> List[str]:
         num_layers = self.get_num_layers(parallel_config)
-        is_mamba = self.hf_config.model_type in ["jamba"]
-        if is_mamba:
-            attention_period = self.hf_config.attn_layer_period
-            num_layers = max(num_layers // attention_period, 1)
-        return num_layers
+        # Transformers supports layers_block_type @property
+        return getattr(
+            self.hf_config,
+            "layers_block_type",
+            ["attention"] * num_layers
+        )
+
+    def get_num_attention_layers(self, parallel_config: "ParallelConfig") -> int:
+        return len([t for t in self.get_layers_block_type(
+            parallel_config
+        ) if t == "attention"])
+
+    def get_num_seqlen_agnostic_layers(
+        self,
+        parallel_config: "ParallelConfig"
+    ) -> int:
+        return len([t for t in self.get_layers_block_type(
+            parallel_config
+        ) if t != "attention"])
+
+    def get_num_seqlen_agnostic_cache_shape(
+        self,
+        parallel_config
+    ) -> Tuple[Optional[Tuple[int,int]],Optional[Tuple[int,int]]]:
+        world_size = parallel_config.tensor_parallel_size
+        hidden_size = self.get_hidden_size()
+        conv_state_shape = None
+        temporal_state_shape = None
+        if self.hf_config.model_type in ["jamba"]:
+            conv_state_shape = (
+                self.hf_config.mamba_expand * hidden_size // world_size,
+                self.hf_config.mamba_d_conv,
+            )
+            temporal_state_shape = (
+                self.hf_config.mamba_expand * self.hf_config.hidden_size // world_size,
+                self.hf_config.mamba_d_state,
+            )
+
+        return conv_state_shape, temporal_state_shape
+
 
 
 class CacheConfig:
