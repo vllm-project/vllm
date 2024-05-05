@@ -650,7 +650,7 @@ def test_schedule_decode_blocks_to_copy_update():
     assert output.blocks_to_swap_out == {}
     # Since append_slot returns the source -> dist mapping, it should
     # applied.
-    assert output.blocks_to_copy.tolist() == [[2, 3]]
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_schedule_swapped_simple():
@@ -853,7 +853,7 @@ def test_schedule_swapped_blocks_to_copy():
     assert len(remaining_swapped) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
-    assert output.blocks_to_copy.tolist() == [[2, 3]]
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_scheduling_budget():
