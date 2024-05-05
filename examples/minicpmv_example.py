@@ -1,4 +1,5 @@
 import math
+
 import torch
 from PIL import Image
 from torchvision import transforms
@@ -70,11 +71,12 @@ def get_grid_placeholder(grid, query_num):
 
 
 class MiniCPMV_VLLM:
+
     def __init__(self) -> None:
         self.config = AutoConfig.from_pretrained('openbmb/MiniCPM-V-2',
-                                            trust_remote_code=True)
+                                                 trust_remote_code=True)
         self.tokenizer = AutoTokenizer.from_pretrained('openbmb/MiniCPM-V-2',
-                                                trust_remote_code=True)
+                                                       trust_remote_code=True)
         self.llm = LLM(
             model="openbmb/MiniCPM-V-2",
             image_input_type="pixel_values",
@@ -97,7 +99,8 @@ class MiniCPMV_VLLM:
         final_placeholder = image_placeholder
 
         if best_grid is not None:
-            final_placeholder += get_grid_placeholder(best_grid, self.config.query_num)
+            final_placeholder += get_grid_placeholder(best_grid,
+                                                      self.config.query_num)
 
         return final_placeholder - 1
 
@@ -111,9 +114,10 @@ class MiniCPMV_VLLM:
             "<AI>" + '<unk>' * addtion_tokens
 
         outputs = self.llm.generate(prompt,
-                            multi_modal_data=MultiModalData(
-                                type=MultiModalData.Type.IMAGE, data=images),
-                            sampling_params=sampling_params)
+                                    multi_modal_data=MultiModalData(
+                                        type=MultiModalData.Type.IMAGE,
+                                        data=images),
+                                    sampling_params=sampling_params)
         return outputs[0].outputs[0].text
 
 
