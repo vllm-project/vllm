@@ -9,7 +9,7 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 __all__ = [
     "LLM",
