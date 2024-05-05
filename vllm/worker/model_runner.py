@@ -185,6 +185,11 @@ class ModelRunner:
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
 
+        # Set encoder/decoder field
+        self.is_encoder_decoder = False if self.model_config is None else \
+                                        getattr(self.model_config.hf_config, \
+                                                "is_encoder_decoder", False)
+
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
