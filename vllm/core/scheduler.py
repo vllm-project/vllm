@@ -177,7 +177,7 @@ class SchedulerRunningOutputs:
     # The blocks to swap out.
     blocks_to_swap_out: Dict[int, int]
     # The blocks to copy.
-    blocks_to_copy: Dict[int, List[int]]
+    blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
 
@@ -189,7 +189,7 @@ class SchedulerRunningOutputs:
             preempted=[],
             swapped_out=[],
             blocks_to_swap_out={},
-            blocks_to_copy={},
+            blocks_to_copy=[],
             num_lookahead_slots=0,
         )
 
@@ -209,7 +209,7 @@ class SchedulerSwappedInOutputs:
     # The blocks to swap in.
     blocks_to_swap_in: Dict[int, int]
     # The blocks to copy.
-    blocks_to_copy: Dict[int, List[int]]
+    blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
     # Infeasible sequence groups.
@@ -221,7 +221,7 @@ class SchedulerSwappedInOutputs:
             decode_seq_groups=[],
             prefill_seq_groups=[],
             blocks_to_swap_in={},
-            blocks_to_copy={},
+            blocks_to_copy=[],
             num_lookahead_slots=0,
             infeasible_seq_groups=[],
         )
@@ -394,7 +394,7 @@ class Scheduler:
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_out: Dict[int, int] = {}
-        blocks_to_copy: Dict[int, List[int]] = {}
+        blocks_to_copy: List[Tuple[int, int]] = []
 
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
@@ -511,7 +511,7 @@ class Scheduler:
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: Dict[int, int] = {}
-        blocks_to_copy: Dict[int, List[int]] = {}
+        blocks_to_copy: List[Tuple[int, int]] = []
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
         now = time.time()
@@ -1011,17 +1011,18 @@ class Scheduler:
     def _append_slots(
         self,
         seq_group: SequenceGroup,
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: List[Tuple[int, int]],
     ) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
         Args:
             seq_group (SequenceGroup): The sequence group containing the
                 sequences to append slots to.
-            blocks_to_copy (Dict[int, List[int]]): A dictionary mapping source
-                block indices to lists of destination block indices. This
-                dictionary is updated with the new source and destination block
-                indices for the appended slots.
+            blocks_to_copy (List[Tuple[int, int]]): A list of tuple of two
+                ints, the first int is the source block index, and the second
+                int is the destination block index. This list is updated with
+                the new source and destination block indices for the appended
+                slots.
         """
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
 
@@ -1029,9 +1030,8 @@ class Scheduler:
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
 
             for src, dests in cows.items():
-                if src not in blocks_to_copy:
-                    blocks_to_copy[src] = []
-                blocks_to_copy[src].extend(dests)
+                for dest in dests:
+                    blocks_to_copy.append((src, dest))
 
     def _preempt(
         self,
