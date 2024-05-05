@@ -4,15 +4,13 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
 import torch
-from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
-                        is_neuron)
+from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
 GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
@@ -369,13 +367,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8":
-            if not is_hip():
-                nvcc_cuda_version = get_nvcc_cuda_version()
-                if nvcc_cuda_version is not None \
-                        and nvcc_cuda_version < Version("11.8"):
-                    raise ValueError(
-                        "FP8 is not supported when cuda version is"
-                        "lower than 11.8.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "

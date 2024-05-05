@@ -19,7 +19,6 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
 
 import psutil
 import torch
-from packaging.version import Version, parse
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -314,27 +313,6 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
-@lru_cache(maxsize=None)
-def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = envs.CUDA_HOME
-    if not cuda_home:
-        cuda_home = '/usr/local/cuda'
-        if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                'CUDA_HOME is not found in the environment. '
-                'Using %s as CUDA_HOME.', cuda_home)
-        else:
-            logger.warning('Not found nvcc in %s. Skip cuda version check!',
-                           cuda_home)
-            return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
-    output = nvcc_output.split()
-    release_idx = output.index("release") + 1
-    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
-    return nvcc_cuda_version
-
-
 def _generate_random_fp8(
     tensor: torch.tensor,
     low: float,
@@ -560,7 +538,7 @@ def maybe_expand_dim(tensor: torch.Tensor,
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
-    
+
     When a key conflicts, the values in dict1 is prioritized.
     """
     merged_dict = defaultdict(list)
