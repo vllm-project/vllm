@@ -46,8 +46,9 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
             prompt_is_tokens = True
             prompts = prompt  # case 4: array of token arrays
         else:
-            raise ValueError("prompt must be a string, array of strings, "
-                             "array of tokens, or array of token arrays")
+            raise ValueError(
+                "prompt must be a string, array of strings, array of tokens, or array of token arrays"
+            )
     return prompt_is_tokens, prompts
 
 
@@ -59,7 +60,8 @@ class OpenAIServingCompletion(OpenAIServing):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         debug=False)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -133,8 +135,7 @@ class OpenAIServingCompletion(OpenAIServing):
             int, RequestOutput]] = merge_async_iterators(*generators)
 
         # Similar to the OpenAI API, when n != best_of, we do not stream the
-        # results. In addition, we do not stream the results when use
-        # beam search.
+        # results. In addition, we do not stream the results when use beam search.
         stream = (request.stream
                   and (request.best_of is None or request.n == request.best_of)
                   and not request.use_beam_search)
@@ -202,8 +203,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * request.n
-                    # TODO(simon): optimize the performance by avoiding full
-                    # text O(n^2) sending.
+                    # TODO(simon): optimize the performance by avoiding full text O(n^2) sending.
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
@@ -212,8 +212,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_token_ids = res.prompt_token_ids
                         top_logprobs = res.prompt_logprobs
                         has_echoed[i] = True
-                    elif (request.echo and request.max_tokens > 0
-                          and not has_echoed[i]):
+                    elif request.echo and request.max_tokens > 0 and not has_echoed[
+                            i]:
                         # echo the prompt and first token
                         delta_text = res.prompt + output.text
                         delta_token_ids = (res.prompt_token_ids +

@@ -29,11 +29,15 @@ class LoRAModulePath:
 
 class OpenAIServing:
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+    def __init__(self,
+                 engine: AsyncLLMEngine,
+                 model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+                 lora_modules: Optional[List[LoRAModulePath]],
+                 debug: bool = False):
         super().__init__()
 
+        self.debug = debug
         self.engine = engine
         self.max_model_len = model_config.max_model_len
 
@@ -124,6 +128,8 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        if self.debug:
+            logger.warning("Error response : %s" % message)
         return ErrorResponse(message=message,
                              type=err_type,
                              code=status_code.value)
@@ -214,9 +220,8 @@ class OpenAIServing:
 
         if token_num + request.max_tokens > self.max_model_len:
             raise ValueError(
-                f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, you requested "
-                f"{request.max_tokens + token_num} tokens "
+                f"This model's maximum context length is {self.max_model_len} tokens. "
+                f"However, you requested {request.max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.", )

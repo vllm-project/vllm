@@ -70,11 +70,23 @@ def make_arg_parser():
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument("--enable-api-tools",
+                        action="store_true",
+                        help="Enable OpenAI-like tools API "
+                        "(only function calls are currently supported)")
+    parser.add_argument("--enable-tools-response-merge",
+                        action="store_true",
+                        help="Enable merging of tools response "
+                        "into one message, if multiple tools are used.")
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
                         help="The role name to return if "
                         "`request.add_generation_prompt=true`.")
+    parser.add_argument("--tools-role",
+                        type=nullable_str,
+                        default="tool",
+                        help="The role name of the response of tools.")
     parser.add_argument("--ssl-keyfile",
                         type=nullable_str,
                         default=None,
@@ -92,6 +104,13 @@ def make_arg_parser():
         type=int,
         default=int(ssl.CERT_NONE),
         help="Whether client certificate is required (see stdlib ssl module's)"
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=
+        "Enable API internals and templates reloading but do not deallocate the engine, "
+        "and also enable extra logs. This should only be used for development purpose."
     )
     parser.add_argument(
         "--root-path",

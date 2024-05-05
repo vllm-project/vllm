@@ -10,8 +10,9 @@ from typing import Tuple, Union
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest, CompletionRequest,
+    ChatCompletionNamedToolChoiceParam)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
     CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
 
@@ -86,8 +87,16 @@ async def get_outlines_guided_decoding_logits_processor(
 def _get_guide_and_mode(
     request: Union[CompletionRequest, ChatCompletionRequest]
 ) -> Union[Tuple[str, GuidedDecodingMode], Tuple[None, None]]:
-
-    if request.guided_json:
+    if isinstance(request, ChatCompletionRequest) and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam):
+        # Guided generation for tools/functions parameters
+        if request.tool_choice.type == "function":
+            for tool in request.tools:
+                if tool.type == "function" and tool.function.name == request.tool_choice.function.name:
+                    json = json_dumps(tool.function.parameters, sort_keys=True)
+                    return json, GuidedDecodingMode.JSON
+        return None, None
+    elif request.guided_json:
         json = request.guided_json
         if isinstance(json, dict):
             # turn dict into hashable string

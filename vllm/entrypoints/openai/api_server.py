@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import importlib
 import inspect
 import re
@@ -27,15 +28,17 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.tools import OpenAIToolsPrompter
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
-openai_serving_chat: OpenAIServingChat
-openai_serving_completion: OpenAIServingCompletion
-openai_serving_embedding: OpenAIServingEmbedding
-
+vllm_engine: AsyncLLMEngine = None
+vllm_engine_args = None
+openai_serving_chat: OpenAIServingChat = None
+openai_serving_completion: OpenAIServingCompletion = None
+openai_serving_embedding: OpenAIServingEmbedding = None
 logger = init_logger(__name__)
 
 _running_tasks: Set[asyncio.Task] = set()
@@ -47,9 +50,9 @@ async def lifespan(app: fastapi.FastAPI):
     async def _force_log():
         while True:
             await asyncio.sleep(10)
-            await engine.do_log_stats()
+            await vllm_engine.do_log_stats()
 
-    if not engine_args.disable_log_stats:
+    if not vllm_engine_args.disable_log_stats:
         task = asyncio.create_task(_force_log())
         _running_tasks.add(task)
         task.add_done_callback(_running_tasks.remove)
@@ -65,6 +68,56 @@ def parse_args():
     return parser.parse_args()
 
 
+def _loadServingServices():
+    """ Load or reload the OpenAI service.
+        This function should only be called once on initialization, but may be called to reload the API internals.
+        Reloading must be used for development purpose only. """
+    global openai_serving_chat
+    global openai_serving_completion
+    global openai_serving_embedding
+    if openai_serving_chat is not None:
+        del openai_serving_chat
+    if openai_serving_completion is not None:
+        del openai_serving_completion
+    if openai_serving_embedding is not None:
+        del openai_serving_embedding
+
+    event_loop: Optional[asyncio.AbstractEventLoop]
+    try:
+        event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        event_loop = None
+
+    if event_loop is not None and event_loop.is_running():
+        # If the current is instanced by Ray Serve,
+        # there is already a running event loop
+        model_config = event_loop.run_until_complete(
+            vllm_engine.get_model_config())
+    else:
+        # When using single vLLM without engine_use_ray
+        model_config = asyncio.run(vllm_engine.get_model_config())
+
+    openai_tools_prompter = OpenAIToolsPrompter(
+        debug=args.debug) if args.enable_api_tools else None
+    openai_serving_chat = OpenAIServingChat(
+        engine=vllm_engine,
+        model_config=model_config,
+        served_model_names=served_model_names,
+        response_role=args.response_role,
+        tools_role=args.tools_role,
+        lora_modules=args.lora_modules,
+        chat_template=args.chat_template,
+        openai_tools_prompter=openai_tools_prompter,
+        debug=args.debug,
+        tools_response_merge=args.enable_tools_response_merge)
+
+    openai_serving_completion = OpenAIServingCompletion(
+        vllm_engine, model_config, served_model_names, args.lora_modules)
+    openai_serving_embedding = OpenAIServingEmbedding(vllm_engine,
+                                                      model_config,
+                                                      served_model_names)
+
+
 # Add prometheus asgi middleware to route /metrics requests
 route = Mount("/metrics", make_asgi_app())
 # Workaround for 307 Redirect for /metrics
@@ -73,7 +126,11 @@ app.routes.append(route)
 
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(_, exc):
+async def validation_exception_handler(req: Request, exc: Exception):
+    if "--debug" in sys.argv:
+        logger.warning("Request error (headers) : %s" % str(dict(req.headers)))
+        logger.warning("Request error (body) : %s" % str(
+            (await req.body()).decode("utf-8")))
     err = openai_serving_chat.create_error_response(message=str(exc))
     return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
 
@@ -83,6 +140,16 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+
+if "--debug" in sys.argv:
+
+    @app.post("/debug/reload-server")
+    async def debug_reload_server() -> Response:
+        """Reload the API internals. Danger !"""
+        logger.warning("Debugging server reload called.")
+        _loadServingServices()
+        return Response(status_code=200)
 
 
 @app.get("/v1/models")
@@ -169,44 +236,32 @@ if __name__ == "__main__":
         elif inspect.iscoroutinefunction(imported):
             app.middleware("http")(imported)
         else:
-            raise ValueError(f"Invalid middleware {middleware}. "
-                             f"Must be a function or a class.")
+            raise ValueError(
+                f"Invalid middleware {middleware}. Must be a function or a class."
+            )
 
     logger.info("vLLM API server version %s", vllm.__version__)
     logger.info("args: %s", args)
+
+    if args.debug:
+        logger.warning(
+            "\n"
+            "##########################################################################\n"
+            "Debugging mode enabled. This should only be used for development purpose.\n"
+            "If It's not the case, you should disable this !\n"
+            "##########################################################################\n"
+        )
 
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
 
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine = AsyncLLMEngine.from_engine_args(
-        engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+    vllm_engine_args = AsyncEngineArgs.from_cli_args(args)
+    vllm_engine = AsyncLLMEngine.from_engine_args(
+        vllm_engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+    _loadServingServices()
 
-    event_loop: Optional[asyncio.AbstractEventLoop]
-    try:
-        event_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        event_loop = None
-
-    if event_loop is not None and event_loop.is_running():
-        # If the current is instanced by Ray Serve,
-        # there is already a running event loop
-        model_config = event_loop.run_until_complete(engine.get_model_config())
-    else:
-        # When using single vLLM without engine_use_ray
-        model_config = asyncio.run(engine.get_model_config())
-
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
-                                            served_model_names,
-                                            args.response_role,
-                                            args.lora_modules,
-                                            args.chat_template)
-    openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
-    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
-                                                      served_model_names)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
