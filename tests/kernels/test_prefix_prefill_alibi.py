@@ -18,6 +18,7 @@ CUDA_DEVICES = [
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
+    # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
     closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
     base = torch.tensor(
         2**(-(2**-(math.log2(closest_power_of_2) - 3))),
@@ -208,12 +209,7 @@ def test_contexted_kv_attention_alibi(
         for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
             seq_end = seq_start + seq_len
             query_end = query_start + query_len
-            query_pad[seq_start:seq_end, ...] = torch.cat([
-                torch.zeros(
-                    seq_len - query_len, num_heads, head_size, dtype=dtype),
-                query[query_start:query_end, ...]
-            ],
-                                                          dim=0)
+            query_pad[seq_start:seq_end, ...] = torch.cat([torch.zeros(seq_len - query_len, num_heads, head_size, dtype=dtype), query[query_start:query_end, ...]], dim=0)
             seq_start += seq_len
             query_start += query_len
         query = query_pad
@@ -232,19 +228,17 @@ def test_contexted_kv_attention_alibi(
     # FIXME(DefTruth): Because xformers does not support dynamic sequence
     # lengths with custom attention bias, we process each prompt one by
     # one. This is inefficient, especially when we have many short prompts.
-    # reference: vllm/attention/backends/xformers.py#343
+    # modified from: vllm/attention/backends/xformers.py#L343
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len
-        out = xops.memory_efficient_attention_forward(query[:,
-                                                            seq_start:seq_end],
-                                                      key[:,
-                                                          seq_start:seq_end],
-                                                      value[:,
-                                                            seq_start:seq_end],
-                                                      attn_bias=attn_bias[i],
-                                                      p=0.0,
-                                                      scale=scale)
+        out = xops.memory_efficient_attention_forward(
+            query[:, seq_start:seq_end],
+            key[:, seq_start:seq_end],
+            value[:, seq_start:seq_end],
+            attn_bias=attn_bias[i],
+            p=0.0,
+            scale=scale)
         out = out.view_as(query[:, seq_start:seq_end])
         output_ref[query_start:query_end,
                    ...].copy_(out[:, seq_len - query_len:, ...].squeeze(0))
