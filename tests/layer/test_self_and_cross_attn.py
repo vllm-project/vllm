@@ -84,6 +84,10 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_a
         key[bdx,kv_prompt_len:] = 0
         value[bdx,kv_prompt_len:] = 0
 
+    query=query.unsqueeze(-2)
+    key=key.unsqueeze(-2)
+    value=value.unsqueeze(-2)
+
     return query,key,value,q_prompt_lens,kv_prompt_lens
 
 def pack_tensor(unpacked_tensor,prompt_lens, device='cuda:0'):
