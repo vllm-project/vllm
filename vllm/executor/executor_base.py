@@ -96,7 +96,7 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def release_mamba_cache(self, requests_id: List[str]) -> None:
+    def release_seqlen_agnostic_cache(self, requests_id: List[str]) -> None:
         raise NotImplementedError
 
     def shutdown(self) -> None:

@@ -518,7 +518,7 @@ class LLMEngine:
         ]
 
         if len(finished_seq_groups_req_ids) > 0:
-            self.model_executor.release_mamba_cache(
+            self.model_executor.release_seqlen_agnostic_cache(
                 finished_seq_groups_req_ids)
         self.scheduler.free_finished_seq_groups()
 
