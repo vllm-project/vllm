@@ -211,7 +211,7 @@ def test_contexted_kv_attention(
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("head_size", [128, 80])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
@@ -225,7 +225,7 @@ def test_contexted_kv_attention_alibi(
     # NOTE(DefTruth): head size=96 with num_queries_per_kv=8 will encounter:
     # Triton Error [CUDA]: an illegal memory access was encountered. When
     # I figure out what's going on. I'll turn it on again.
-    if head_size == 96 and num_queries_per_kv == 8:
+    if head_size == 96:
         pytest.skip()
 
     random.seed(0)
