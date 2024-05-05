@@ -222,8 +222,8 @@ def test_contexted_kv_attention_alibi(
     dtype: torch.dtype,
     device: str,
 ) -> None:
-    # NOTE(DefTruth): head size=96 with num_queries_per_kv=8 will encounter: 
-    # Triton Error [CUDA]: an illegal memory access was encountered. When 
+    # NOTE(DefTruth): head size=96 with num_queries_per_kv=8 will encounter:
+    # Triton Error [CUDA]: an illegal memory access was encountered. When
     # I figure out what's going on. I'll turn it on again.
     if head_size == 96 and num_queries_per_kv == 8:
         pytest.skip()
@@ -239,8 +239,10 @@ def test_contexted_kv_attention_alibi(
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
     torch.cuda.set_device(device)
+
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         import math
+
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
         closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
         base = torch.tensor(
@@ -256,7 +258,7 @@ def test_contexted_kv_attention_alibi(
                 dtype=torch.float32,
             )
             num_remaining_heads = min(closest_power_of_2,
-                                    total_num_heads - closest_power_of_2)
+                                      total_num_heads - closest_power_of_2)
             extra_powers = torch.arange(start=1,
                                         end=1 + 2 * num_remaining_heads,
                                         step=2,
@@ -264,6 +266,7 @@ def test_contexted_kv_attention_alibi(
             slopes = torch.cat(
                 [slopes, torch.pow(extra_base, extra_powers)], dim=0)
         return slopes
+
     alibi_slopes = _get_alibi_slopes(num_heads).to(device)
 
     MAX_SEQ_LEN = 1024
@@ -377,9 +380,9 @@ def test_contexted_kv_attention_alibi(
     end_time = time.time()
     print(f"triton Time: {(end_time - start_time)*1000:.2f} ms")
     scale = float(1.0 / (head_size**0.5))
-    
-    # NOTE: In order to reuse _make_alibi_bias function, 
-    # We have to pad query tensor before MQA/GQA expanding, 
+
+    # NOTE: In order to reuse _make_alibi_bias function,
+    # We have to pad query tensor before MQA/GQA expanding,
     if query.shape[0] != key.shape[0]:
         query_pad = torch.empty(sum(seq_lens),
                                 num_heads,
@@ -444,8 +447,8 @@ def test_contexted_kv_attention_alibi(
                                                       scale=scale)
         out = out.view_as(query[:, seq_start:seq_end]).view(
             seq_len, num_heads, head_size)
-        output_ref[query_start:query_end, ...].copy_(
-            out[seq_len - query_len:, ...])
+        output_ref[query_start:query_end, ...].copy_(out[seq_len - query_len:,
+                                                         ...])
         seq_start += seq_len
         query_start += query_len
     end_time = time.time()
