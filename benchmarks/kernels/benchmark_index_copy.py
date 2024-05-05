@@ -26,13 +26,17 @@ def write_to_kv_cache(
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(k_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(v_cache, True)
+    k_cache = k_cache.flatten(0, 1)
+    key = key.flatten(0, 1)
     k_cache = k_cache.index_copy_(0, slot_mapping, key)
+    v_cache = v_cache.flatten(0, 1)
+    value = value.flatten(0, 1)
     v_cache = v_cache.index_copy_(0, slot_mapping, value)
 
 
 def benchmark(num_blocks: int):
-    key = torch.randn(BATCH_SIZE * SEQ_LEN, NUM_KV_HEADS, HEAD_SIZE, device=device, dtype=DTYPE)
-    k_cache = torch.randn(num_blocks * BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, device=device, dtype=DTYPE)
+    key = torch.randn(BATCH_SIZE, SEQ_LEN, NUM_KV_HEADS, HEAD_SIZE, device=device, dtype=DTYPE)
+    k_cache = torch.randn(num_blocks, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE, device=device, dtype=DTYPE)
     value = torch.randn_like(key)
     v_cache = torch.randn_like(k_cache)
     slot_mapping = torch.randint(0, num_blocks, (BATCH_SIZE, SEQ_LEN), device=device, dtype=torch.int64)
