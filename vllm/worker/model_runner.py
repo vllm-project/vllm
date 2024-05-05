@@ -1224,7 +1224,7 @@ class CUDAGraphRunner:
         # Run the graph.
         self.graph.replay()
 
-        # in-place edit of the mamba cache states as in the KV cache
+        # in-place edit of the seqlen agnostic cache states as in the KV cache
         if "seqlen_agnostic_cache" in kwargs: 
             kwargs["seqlen_agnostic_cache"][0].copy_(
                 self.input_buffers["seqlen_agnostic_cache"][0],
