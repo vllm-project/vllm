@@ -513,7 +513,7 @@ def get_rope(
                                                     base, is_neox_style,
                                                     scaling_factor,
                                                     **extra_kwargs)
-        elif scaling_type == 'longrope':
+        elif scaling_type in ("longrope", "su"):
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
             original_max_position = rope_scaling[
