@@ -144,46 +144,37 @@ class ModelRunner:
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
-        # cache in_wsl result
-        self.mamba_cache: Optional[Tuple[torch.Tensor, torch.Tensor]]
-        self.is_mamba = self.model_config.hf_config.model_type == "jamba"
-        self.request2i: Dict[str, Dict[int, int]] = {}
+        self.seqlen_agnostic_cache: Optional[Tuple[torch.Tensor, torch.Tensor]]
+        self.seqlen_agnostic_gc_cache_buffer: Optional[Tuple[torch.Tensor, torch.Tensor]]
+        self.contains_seqlen_agnostic_layers = self.model_config.contains_seqlen_agnostic_layers()
+        self.seqlen_agnostic_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
 
         self.attn_backend = get_attn_backend(
             self.model_config.dtype if model_config is not None else None)
 
-    @torch.inference_mode()
-    def prepare_contiguous_mamba_cache(self, dtype):
-        if not self.is_mamba or self.mamba_cache is not None:
+    def prepare_seqlen_agnostic_cache(self, dtype):
+        if not self.contains_seqlen_agnostic_layers:
             return
-        hf_config = self.model_config.hf_config
-        num_layers = hf_config.num_hidden_layers
+        num_seqlen_agnostic_layers = self.model_config.get_num_seqlen_agnostic_layers(self.parallel_config)
         max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1]
-        world_size = get_tensor_model_parallel_world_size()
-        conv_state_shape = (
-            num_layers,
-            max_batch_size,
-            hf_config.mamba_expand * hf_config.hidden_size // world_size,
-            hf_config.mamba_d_conv,
-        )
-        ssm_state_shape = (
-            num_layers,
-            max_batch_size,
-            hf_config.mamba_expand * hf_config.hidden_size // world_size,
-            hf_config.mamba_d_state,
-        )
-        self.mamba_cache = (torch.empty(size=conv_state_shape,
-                                        dtype=dtype,
-                                        device="cuda"),
-                            torch.empty(size=ssm_state_shape,
-                                        dtype=dtype,
-                                        device="cuda"))
-        self.mamba_cache4gc = (torch.empty(size=conv_state_shape,
-                                           dtype=dtype,
-                                           device="cuda"),
-                               torch.empty(size=ssm_state_shape,
-                                           dtype=dtype,
-                                           device="cuda"))
+        conv_state_shape, temporal_state_shape = self.model_config.get_num_seqlen_agnostic_cache_shape(self.parallel_config)
+        assert conv_state_shape is not None and temporal_state_shape is not None
+        for buffername in [
+            "seqlen_agnostic_cache",
+            "seqlen_agnostic_gc_cache_buffer",
+        ]:
+            buffer = (
+                torch.empty(
+                size=(num_seqlen_agnostic_layers,max_batch_size) 
+                        + conv_state_shape, dtype=dtype,
+                device="cuda"), 
+                torch.empty(
+                size=(num_seqlen_agnostic_layers,max_batch_size) +
+                        temporal_state_shape, dtype=dtype,
+                device="cuda")
+            )
+            setattr(self,buffername, buffer)
+                
 
         # Lazy initialization
         self.model: torch.nn.Module  # Set after load_model
@@ -675,7 +666,6 @@ class ModelRunner:
                             seqs_id=list(req.seq_data.keys()))
                 for req in seq_group_metadata_list
             ]
-
             metadata_dict = {
                 "input_tokens": input_tokens,
                 "input_positions": input_positions,
@@ -758,10 +748,10 @@ class ModelRunner:
                 sampling_metadata, lora_requests, lora_mapping,
                 multi_modal_input, requests_info)
 
-    def release_mamba_cache(self, finished_seq_groups_req_ids: List[str]):
+    def release_seqlen_agnostic_cache(self, finished_seq_groups_req_ids: List[str]):
         for req_id in finished_seq_groups_req_ids:
-            if req_id in self.request2i:
-                self.request2i.pop(req_id)
+            if req_id in self.seqlen_agnostic_cache_indices_mapping:
+                self.seqlen_agnostic_cache_indices_mapping.pop(req_id)
 
     @torch.inference_mode()
     def execute_model(
@@ -795,16 +785,15 @@ class ModelRunner:
         if self.vision_language_config:
             execute_model_kwargs.update({"image_input": multi_modal_input})
 
-        if self.is_mamba:
-            if self.mamba_cache is None:
-                self.prepare_contiguous_mamba_cache(self.model_config.dtype)
-            conv_state, ssm_state, indices = self._prepare_request_mamba_cache(
-                requests_info, input_tokens.shape[0] if
-                attn_metadata.prefill_metadata is None else len(requests_info))
+        current_seqlen_agnostic_cache = None
+        if self.contains_seqlen_agnostic_layers:
+            if getattr(self, "seqlen_agnostic_cache", None) is None:
+                self.prepare_seqlen_agnostic_cache(self.model_config.dtype)
+            batch_size = input_tokens.shape[0] if attn_metadata.prefill_metadata is None else len(requests_info)
+            current_seqlen_agnostic_cache, indices = self._prepare_current_run_seqlen_agnostic_cache(requests_info, batch_size)
             execute_model_kwargs = {
                 **execute_model_kwargs,
-                "conv_state": conv_state,
-                "ssm_state": ssm_state,
+                "seqlen_agnostic_cache": current_seqlen_agnostic_cache,
             }
 
         hidden_states = model_executable(**execute_model_kwargs)
@@ -816,10 +805,9 @@ class ModelRunner:
         if not self.is_driver_worker:
             return None
 
-        if self.is_mamba and self.mamba_cache is not None:
+        if self.contains_seqlen_agnostic_layers:
             for i, offset in enumerate(indices):
-                self.mamba_cache[0][:, offset].copy_(conv_state[:, i])
-                self.mamba_cache[1][:, offset].copy_(ssm_state[:, i])
+                self._copy_seqlen_agnostic_cache(offset, i, current_seqlen_agnostic_cache)
 
         # Sample the next token.
         output = self.model.sample(
@@ -829,11 +817,11 @@ class ModelRunner:
 
         return output
 
-    def _get_first_free_mamba_cache_index(self) -> int:
-        if self.is_mamba and self.mamba_cache is not None:
-            max_possible_bs = self.mamba_cache[0].shape[1]
+    def _first_free_index_in_seqlen_agnostic_cache(self) -> int:
+        if self.contains_seqlen_agnostic_layers and self.seqlen_agnostic_cache is not None:
+            max_possible_bs = self.seqlen_agnostic_cache[0].shape[1]
             occupied = [
-                id for seq_ids in self.request2i.values()
+                id for seq_ids in self.seqlen_agnostic_cache_indices_mapping.values()
                 for id in seq_ids.values()
             ]
             first_free_index = [
@@ -842,46 +830,77 @@ class ModelRunner:
             return first_free_index
         return 0
 
-    def _prepare_request_mamba_cache(self, requests_info: List[RequestInfo],
-                                     batch_size: int):
-        indices = []
-        if self.mamba_cache is None:
-            return
-        max_possible_bs = self.mamba_cache[0].shape[1]
+
+    def _copy_seqlen_agnostic_cache(self, index_to, index_from, from_buffer):
+        assert self.seqlen_agnostic_cache is not None
+        self.seqlen_agnostic_cache[0][:,index_to].copy_(from_buffer[0][:,index_from])
+        self.seqlen_agnostic_cache[1][:,index_to].copy_(from_buffer[1][:,index_from])
+
+
+    def _assign_seq_id_to_seqlen_agnostic_cache(
+        self,
+        cur_rid: str,
+        seqs_id: List[int]
+    ) -> List[int]:
+        indices_for_current_run = []
+        for seq_id in seqs_id:
+            if cur_rid not in self.seqlen_agnostic_cache_indices_mapping:
+                self.seqlen_agnostic_cache_indices_mapping[cur_rid] = {}
+                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
+                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
+                index_for_current_run = first_free_index
+            ## case of decoding n>1, copy prefill cache to decoding indices
+            elif seq_id not in (seq_ids2indices := self.seqlen_agnostic_cache_indices_mapping[cur_rid]):
+                first_free_index = self._first_free_index_in_seqlen_agnostic_cache()
+                index_exist = list(seq_ids2indices.values())[0]
+                self._copy_seqlen_agnostic_cache(
+                    index_from=index_exist,
+                    index_to=first_free_index,
+                    from_buffer=self.seqlen_agnostic_cache
+                )
+                self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id] = first_free_index
+                index_for_current_run = first_free_index
+            else:
+                index_for_current_run = self.seqlen_agnostic_cache_indices_mapping[cur_rid][seq_id]
+
+            indices_for_current_run.append(index_for_current_run)
+        return indices_for_current_run
+
+
+    # def _find_seq_len_agnostic_pad_index(self, indices_for_current_run, max_possible_bs) -> int:
+    #     occupied_indices = set([i for s_ids in 
+    #                 self.seqlen_agnostic_cache_indices_mapping.values() 
+    #                 for i in s_ids.values()]).union(indices_for_current_run)
+    #     pad_index = [ i not in  occupied_indices for i in range(
+    #         max_possible_bs
+    #     ) ].index(True)
+    #     return pad_index
+    #
+    #
+    #
+    def _prepare_current_run_seqlen_agnostic_cache(
+        self,
+        requests_info: List[RequestInfo],
+        batch_size: int
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor] ,List[int]]:
+        indices_for_current_run = []
         for request_info in requests_info:
             cur_rid = request_info.request_id
-            if cur_rid not in self.request2i:
-                self.request2i[cur_rid] = {}
-                for seq_id in request_info.seqs_id:
-                    f_free_index = self._get_first_free_mamba_cache_index()
-                    self.request2i[cur_rid][seq_id] = f_free_index
-                    indices.append(f_free_index)
-            else:
-                for seq_id in request_info.seqs_id:
-                    if seq_id not in self.request2i[cur_rid]:
-                        f_free_index = self._get_first_free_mamba_cache_index()
-                        ## case of decoding n>1
-                        i_exist = list(self.request2i[cur_rid].values())[0]
-                        self.mamba_cache[0][:, f_free_index].copy_(
-                            self.mamba_cache[0][:, i_exist])
-                        self.mamba_cache[1][:, f_free_index].copy_(
-                            self.mamba_cache[1][:, i_exist])
-                        self.request2i[cur_rid][seq_id] = f_free_index
-                    indices.append(self.request2i[cur_rid][seq_id])
+            indices_for_current_run += self._assign_seq_id_to_seqlen_agnostic_cache(
+                cur_rid,
+                request_info.seqs_id
+            )
         ## Pad the batch in case of running batch that was not captured via CG
-        padded_indices = indices
-        for _ in range(batch_size - len(indices)):
-            occu = [
-                i for s_ids in self.request2i.values() for i in s_ids.values()
-            ]
-            padded_indices += [[
-                i not in set(occu).union(padded_indices)
-                for i in range(max_possible_bs)
-            ].index(True)]
+        padded_indices = indices_for_current_run.copy()
+        pad_index = self._first_free_index_in_seqlen_agnostic_cache()
 
-        conv_state = self.mamba_cache[0][:, padded_indices]
-        ssm_state = self.mamba_cache[1][:, padded_indices]
-        return conv_state, ssm_state, indices
+        for _ in range(batch_size - len(indices_for_current_run)):
+            padded_indices.append(pad_index)
+
+        conv_state = self.seqlen_agnostic_cache[0][:,padded_indices]
+        temporal_state = self.seqlen_agnostic_cache[1][:,padded_indices]
+
+        return (conv_state, temporal_state), indices_for_current_run
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -948,7 +967,7 @@ class ModelRunner:
         kv_caches = [None] * num_layers
         self.execute_model(seqs, kv_caches)
         torch.cuda.synchronize()
-        self.request2i = {}
+        self.seqlen_agnostic_cache_indices_mapping = {}
         return
 
     def remove_all_loras(self):
@@ -1063,7 +1082,7 @@ class ModelRunner:
                     )
                     self.set_active_loras(set(), lora_mapping)
 
-                graph_runner = CUDAGraphRunner(self.model, self.is_mamba)
+                graph_runner = CUDAGraphRunner(self.model)
                 capture_inputs = {
                     "input_ids": input_tokens[:batch_size],
                     "positions": input_positions[:batch_size],
@@ -1071,11 +1090,12 @@ class ModelRunner:
                     "attn_metadata": attn_metadata,
                     "memory_pool": self.graph_memory_pool,
                 }
-                if self.is_mamba:
-                    capture_inputs["conv_state"] = self.mamba_cache4gc[
-                        0][:, :batch_size]
-                    capture_inputs["ssm_state"] = self.mamba_cache4gc[
-                        1][:, :batch_size]
+                if self.contains_seqlen_agnostic_layers:
+                    assert self.seqlen_agnostic_gc_cache_buffer is not None
+                    capture_inputs["seqlen_agnostic_cache"] = (
+                        self.seqlen_agnostic_gc_cache_buffer[0][:, :batch_size],
+                        self.seqlen_agnostic_gc_cache_buffer[1][:, :batch_size],
+                    )
                 graph_runner.capture(**capture_inputs)
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -1102,11 +1122,10 @@ class ModelRunner:
 
 class CUDAGraphRunner:
 
-    def __init__(self, model: nn.Module, is_mamba: bool):
+    def __init__(self, model: nn.Module):
         self.model = model
         self.input_buffers: Dict[str, torch.Tensor] = {}
         self.output_buffers: Dict[str, torch.Tensor] = {}
-        self.is_mamba = is_mamba
 
         self._graph: Optional[torch.cuda.CUDAGraph] = None
 
@@ -1122,30 +1141,20 @@ class CUDAGraphRunner:
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         memory_pool,
-        conv_state: Optional[torch.Tensor] = None,
-        ssm_state: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
         assert self._graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        model_inputs = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "kv_caches": kv_caches,
-            "attn_metadata": attn_metadata,
-            **kwargs
-        }
-        if self.is_mamba:
-            model_inputs = {
-                **model_inputs,
-                "conv_state": conv_state,
-                "ssm_state": ssm_state,
-            }
-
         with _maybe_pynccl():
-            self.model(**model_inputs)
+            self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
         torch.cuda.synchronize()
 
         # Capture the graph.
@@ -1154,7 +1163,13 @@ class CUDAGraphRunner:
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
             with _maybe_pynccl():
-                hidden_states = self.model(**model_inputs)
+                hidden_states = self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    attn_metadata,
+                    **kwargs,
+                )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
@@ -1165,16 +1180,8 @@ class CUDAGraphRunner:
             "slot_mapping": attn_metadata.slot_mapping,
             "context_lens": attn_metadata.decode_metadata.context_lens,
             "block_tables": attn_metadata.decode_metadata.block_tables,
-            "conv_state": conv_state,
-            "ssm_state": ssm_state
+            **kwargs,
         }
-        if self.is_mamba:
-            self.input_buffers = {
-                **self.input_buffers,
-                "conv_state": conv_state,
-                "ssm_state": ssm_state,
-            }
-
         self.output_buffers = {"hidden_states": hidden_states}
         return
 
@@ -1184,8 +1191,6 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        conv_state: Optional[torch.Tensor] = None,
-        ssm_state: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
@@ -1200,18 +1205,30 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.context_lens, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        if self.is_mamba and conv_state is not None and ssm_state is not None:
-            self.input_buffers["conv_state"].copy_(conv_state,
-                                                   non_blocking=True)
-            self.input_buffers["ssm_state"].copy_(ssm_state, non_blocking=True)
+
+        if "seqlen_agnostic_cache" in kwargs: 
+            self.input_buffers["seqlen_agnostic_cache"][0].copy_(
+                kwargs["seqlen_agnostic_cache"][0],
+                non_blocking=True
+            )
+            self.input_buffers["seqlen_agnostic_cache"][1].copy_(
+                kwargs["seqlen_agnostic_cache"][1],
+                non_blocking=True
+            )
 
         # Run the graph.
         self.graph.replay()
 
         # in-place edit of the mamba cache states as in the KV cache
-        if self.is_mamba and conv_state is not None and ssm_state is not None:
-            ssm_state.copy_(self.input_buffers["ssm_state"])
-            conv_state.copy_(self.input_buffers["conv_state"])
+        if "seqlen_agnostic_cache" in kwargs: 
+            kwargs["seqlen_agnostic_cache"][0].copy_(
+                self.input_buffers["seqlen_agnostic_cache"][0],
+                non_blocking=True
+            )
+            kwargs["seqlen_agnostic_cache"][1].copy_(
+                self.input_buffers["seqlen_agnostic_cache"][1],
+                non_blocking=True
+            )
 
         # Return the output tensor.
         return self.output_buffers["hidden_states"]
