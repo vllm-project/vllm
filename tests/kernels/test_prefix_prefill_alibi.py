@@ -209,7 +209,12 @@ def test_contexted_kv_attention_alibi(
         for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
             seq_end = seq_start + seq_len
             query_end = query_start + query_len
-            query_pad[seq_start:seq_end, ...] = torch.cat([torch.zeros(seq_len - query_len, num_heads, head_size, dtype=dtype), query[query_start:query_end, ...]], dim=0)
+            query_pad[seq_start:seq_end, ...] = torch.cat([
+                torch.zeros(
+                    seq_len - query_len, num_heads, head_size, dtype=dtype),
+                query[query_start:query_end, ...]
+            ],
+                                                          dim=0)
             seq_start += seq_len
             query_start += query_len
         query = query_pad
@@ -232,13 +237,15 @@ def test_contexted_kv_attention_alibi(
     for i, (query_len, seq_len) in enumerate(zip(query_lens, seq_lens)):
         seq_end = seq_start + seq_len
         query_end = query_start + query_len
-        out = xops.memory_efficient_attention_forward(
-            query[:, seq_start:seq_end],
-            key[:, seq_start:seq_end],
-            value[:, seq_start:seq_end],
-            attn_bias=attn_bias[i],
-            p=0.0,
-            scale=scale)
+        out = xops.memory_efficient_attention_forward(query[:,
+                                                            seq_start:seq_end],
+                                                      key[:,
+                                                          seq_start:seq_end],
+                                                      value[:,
+                                                            seq_start:seq_end],
+                                                      attn_bias=attn_bias[i],
+                                                      p=0.0,
+                                                      scale=scale)
         out = out.view_as(query[:, seq_start:seq_end])
         output_ref[query_start:query_end,
                    ...].copy_(out[:, seq_len - query_len:, ...].squeeze(0))
