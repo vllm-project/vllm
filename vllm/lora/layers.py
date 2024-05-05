@@ -771,6 +771,7 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         return lora_a
 
     def slice_lora_b(self, lora_b: List[torch.Tensor]) -> List[torch.Tensor]:
+        lora_b_q, lora_b_k, lora_b_v = None, None, None
         if lora_b[0] is not None:
             lora_b_q = lora_b[0][:, self.q_proj_shard_size *
                                  self.q_shard_id:self.q_proj_shard_size *
