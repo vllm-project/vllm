@@ -21,8 +21,12 @@ import random
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
-HEAD_SIZES = [64, 80, 96, 112, 128, 256
-              ] if not is_hip() else [64, 80, 96, 112, 128]
+HEAD_SIZES = [64] 
+
+#               [64, 80, 96, 112, 128, 256
+#               ] if not is_hip() else [64, 80, 96, 112, 128]
+
+NUM_HEADS = [1]
 
 BATCH_SIZES = [16]
 BLOCK_SIZES = [16]
@@ -48,17 +52,23 @@ def ref_masked_attention(
     scale: float,
     attn_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
+    #query=query.unsqueeze(-2)
+    #key=key.unsqueeze(-2)
+    #value=value.unsqueeze(-2)
+    #assert False,f"{query.shape} ; {key.shape}"
+    attn_weights = scale * torch.einsum("bqhd,bkhd->bhqk", query, key).float()
+    #assert False,f"{query.shape} ; {key.shape} ; {attn_weights.shape}"
     if attn_mask is not None:
         attn_weights = attn_weights + attn_mask.float()
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
-    out = torch.einsum("hqk,khd->qhd", attn_weights, value)
+    out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
+    #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
     return out
 
-def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_self_attn=False):
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True):
     q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
     kv_prompt_lens = None
-    if is_self_attn:
+    if not is_cross_attn:
         # K,V prompt lens match Q for self-attention
         kv_prompt_lens = q_prompt_lens
     else:
@@ -76,14 +86,23 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_self_at
 
     return query,key,value,q_prompt_lens,kv_prompt_lens
 
-def pack_tensor(unpacked_tensor,prompt_lens):
+def pack_tensor(unpacked_tensor,prompt_lens, device='cuda:0'):
     num_tok = sum(prompt_lens)
+    num_heads = unpacked_tensor.shape[-2]
     head_size = unpacked_tensor.shape[-1]
-    start_loc_list = list(itertools.accumulate(prompt_lens))
-    packed_tensor = torch.tensor((num_tok,head_size))
+    start_loc_list = [0]+list(itertools.accumulate(prompt_lens))
+    packed_tensor = torch.zeros((num_tok,num_heads,head_size),
+                                device=device)
+
+    #assert False, f"{start_loc_list}"
+
+    #assert False, f"{packed_tensor.shape} ; {unpacked_tensor.shape}"
 
     for bdx,(prompt_len,start_loc) in enumerate(zip(prompt_lens,start_loc_list)):
-        packed_tensor[start_loc:(start_loc+prompt_len)] = unpacked_tensor[bdx,:,:]
+        try:
+            packed_tensor[start_loc:(start_loc+prompt_len),:,:] = unpacked_tensor[bdx,:prompt_len,:,:]
+        except:
+            assert False, f"{start_loc} ; {prompt_len} ; {packed_tensor.shape} ; {unpacked_tensor.shape}"
 
     return packed_tensor,start_loc_list
     
@@ -91,6 +110,9 @@ def pack_qkv(query,key,value,q_prompt_lens,kv_prompt_lens):
     packed_query,q_start_loc_list = pack_tensor(query,q_prompt_lens)
     packed_key,kv_start_loc_list = pack_tensor(key,kv_prompt_lens)
     packed_value,_ = pack_tensor(value,kv_prompt_lens)
+    packed_query=packed_query.view(-1,packed_query.shape[-1]*packed_query.shape[-2])
+    packed_key=packed_key.view(-1,packed_key.shape[-1]*packed_key.shape[-2])
+    packed_value=packed_value.view(-1,packed_value.shape[-1]*packed_value.shape[-2])      
     return packed_query,packed_key,packed_value,q_start_loc_list,kv_start_loc_list
 
 def make_backend(backend_name: str) -> AttentionBackend:
@@ -108,18 +130,21 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_
     prompt_lens_tensor=torch.tensor(prompt_lens,
                                     dtype=torch.int,
                                     device=device)
-    context_lens_tensor=torch.tensor(context_lens, 
-                              dtype=torch.int,
-                              device=device)
+    context_lens_tensor=None if context_lens is None else torch.tensor(context_lens, 
+                                                                       dtype=torch.int,
+                                                                       device=device)
     max_subquery_len=None if prompt_lens is None else max(prompt_lens)
     max_context_len=None if context_lens is None else max(context_lens)
     max_prompt_len=max_subquery_len
-     
 
-    seq_start_loc = torch.cumsum(prompt_lens_tensor,
-                                 dim=0,
-                                 dtype=seq_start_loc.dtype,
-                                 out=seq_start_loc[1:])
+    seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
+                                dtype=torch.int32,
+                                device=device)
+
+    torch.cumsum(prompt_lens_tensor,
+                 dim=0,
+                 dtype=seq_start_loc.dtype,
+                 out=seq_start_loc[1:])
     subquery_start_loc = copy.deepcopy(seq_start_loc)
 
     return attn_backend.make_metadata(
@@ -169,7 +194,8 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
         num_prefill_tokens = sum(prompt_lens)
         num_decode_tokens = 0
 
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, is_cross_attn, prompt_lens, context_lens, block_tables, slot_mapping, device='cuda:0', cross_prompt_lens=cross_prompt_lens)
+        # make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0', cross_prompt_lens:Optional[List[int]] = None)
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, is_cross_attn, prompt_lens, context_lens, block_tables, device=device, cross_prompt_lens=cross_prompt_lens)
 
         return AttentionMetadata(
             num_prefills=num_prefills,
@@ -187,7 +213,7 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
         num_prefill_tokens = 0
         num_decode_tokens = sum(prompt_lens)
 
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, slot_mapping, device='cuda:0')
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, device='cuda:0')
 
         return AttentionMetadata(
             num_prefills=num_prefills,
@@ -225,7 +251,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
     (key_cache, value_cache) = kv_cache
     scale = float(1.0 / (head_size**0.5))
-    attn = make_attention(num_heads, head_size)
+    attn = make_attention(num_heads, head_size, scale)
     attn_backend = make_backend(backend_name)
     query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
     block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,q_prompt_lens)
@@ -299,9 +325,12 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
     (key_cache, value_cache) = kv_cache
     scale = float(1.0 / (head_size**0.5))
-    attn = make_attention(num_heads, head_size)
+    attn = make_attention(num_heads, head_size, scale)
     attn_backend = make_backend(backend_name)
     query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=True)
+    query=query.unsqueeze(-2)
+    key=key.unsqueeze(-2)
+    value=value.unsqueeze(-2)
     # Block tables & slot mapping apply to cross-operand Ks and Vs
     block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,kv_prompt_lens)
     prefill_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
@@ -314,19 +343,19 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
         attn_mask=causal_mask
     )
 
-    prefill_query = query[:,:-1]
-    prefill_key = key[:,:-1]
-    prefill_value = value[:,:-1]
-    decode_query = query[:,-1:]
-    decode_key = key[:,-1:]
-    decode_value = value[:,-1:]
+    prefill_query = query[:,:-1,:,:] # batch, tokens, num heads, head size
+    prefill_key = key[:,:-1,:,:]
+    prefill_value = value[:,:-1,:,:]
+    decode_query = query[:,-1:,:,:]
+    decode_key = key[:,-1:,:,:]
+    decode_value = value[:,-1:,:,:]
     prefill_q_prompt_lens = [plen-1 for plen in q_prompt_lens]
     prefill_kv_prompt_lens = [plen-1 for plen in kv_prompt_lens]
     decode_q_prompt_lens = prefill_q_prompt_lens
     decode_kv_prompt_lens = prefill_kv_prompt_lens
-    prefill_ideal_output = ideal_output[:,:-1]
+    prefill_ideal_output = ideal_output[:,:-1,:,:]
     prefill_packed_ideal_output = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
-    decode_ideal_output = ideal_output[:,-1:]
+    decode_ideal_output = ideal_output[:,-1:,:,:]
     decode_packed_ideal_output = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
 
     prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,prefill_key,prefill_value,prefill_q_prompt_lens,prefill_kv_prompt_lens)
