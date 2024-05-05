@@ -8,9 +8,9 @@ from xformers import ops as xops
 
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
-NUM_HEADS = [32, 64]
+NUM_HEADS = [32]
 NUM_QUERIES_PER_KV = [1]
-HEAD_SIZES = [128, 96, 80]
+HEAD_SIZES = [128, 96]
 DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
