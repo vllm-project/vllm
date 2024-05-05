@@ -133,9 +133,9 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_
     context_lens_tensor=None if context_lens is None else torch.tensor(context_lens, 
                                                                        dtype=torch.int,
                                                                        device=device)
-    max_subquery_len=None if prompt_lens is None else max(prompt_lens)
+    max_query_len=None if prompt_lens is None else max(prompt_lens)
     max_context_len=None if context_lens is None else max(context_lens)
-    max_prompt_len=max_subquery_len
+    max_prompt_len=max_query_len
 
     seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
                                 dtype=torch.int32,
@@ -145,20 +145,20 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_
                  dim=0,
                  dtype=seq_start_loc.dtype,
                  out=seq_start_loc[1:])
-    subquery_start_loc = copy.deepcopy(seq_start_loc)
+    query_start_loc = copy.deepcopy(seq_start_loc)
 
     return attn_backend.make_metadata(
                             is_prompt=is_prompt,
                             is_cross_attn=is_cross_attn,
-                            prompt_lens=prompt_lens,
-                            prompt_lens_tensor=prompt_lens_tensor,
-                            cross_prompt_lens=cross_prompt_lens,
-                            max_subquery_len=max_subquery_len,
-                            max_context_len=max_context_len,
-                            max_prompt_len=max_prompt_len,
-                            subquery_start_loc=subquery_start_loc,
+                            seq_lens=prompt_lens,
+                            seq_lens_tensor=prompt_lens_tensor,
+                            cross_seq_lens=cross_prompt_lens,
+                            max_query_len=max_query_len,
+                            #max_context_len=max_context_len,
+                            max_seq_len=max_prompt_len,
+                            subquery_start_loc=query_start_loc,
                             seq_start_loc=seq_start_loc,
-                            context_lens=context_lens_tensor,
+                            context_lens_tensor=context_lens_tensor,
                             block_tables=block_tables,
                             use_cuda_graph=False,
                         )

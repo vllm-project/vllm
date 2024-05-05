@@ -106,10 +106,10 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Need to make KV cache read-only for cross-attention
     is_cross_attn: bool = False
 
-    # (batch_size,). The "cross-prompt-length" per sequence,i.e. the key/value
-    # prompt length (usually encoder prompt length) in the cross-attention
-    # computation. None if it is self-attention
-    cross_prompt_lens: Optional[List[int]] = None
+    # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
+    # sequence length (usually encoder sequence length) in the cross-attention
+    # computation. None if this is self-attention
+    cross_seq_lens: Optional[List[int]] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -317,8 +317,12 @@ class XFormersImpl(AttentionImpl):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.seq_lens)
+                if attn_metadata.is_cross_attn:
+                    attn_bias = BlockDiagonalMask.from_seqlens(
+                        attn_metadata.seq_lens,attn_metadata.cross_seq_lens)
+                else:
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
