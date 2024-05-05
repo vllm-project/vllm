@@ -25,6 +25,9 @@ def check_wheel_size(directory):
                         f"compare to the allowed size ({MAX_SIZE_MB} MB).")
                     print_top_10_largest_files(wheel_path)
                     return 1
+                else:
+                    print(f"Wheel {wheel_path} is within the allowed size "
+                          f"({wheel_size_mb} MB).")
     return 0
 
 
