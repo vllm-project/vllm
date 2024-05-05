@@ -1,8 +1,4 @@
 import math
-try:
-    import timm
-except ImportError:
-    raise ImportError('Please install timm==0.9.10') from ImportError
 import torch
 from PIL import Image
 from torchvision import transforms
