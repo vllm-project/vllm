@@ -271,9 +271,7 @@ def _make_alibi_bias(
 ) -> List[torch.Tensor]:
     attn_biases = []
     for seq_len in seq_lens:
-        bias = torch.arange(seq_len,
-                            dtype=dtype,
-                            device=alibi_slopes.device)
+        bias = torch.arange(seq_len, dtype=dtype, device=alibi_slopes.device)
         # NOTE(zhuohan): HF uses
         #     `bias = bias[None, :].repeat(seq_len, 1)`
         # here. We find that both biases give the same results, but

@@ -15,7 +15,7 @@ from vllm.distributed import (broadcast_tensor_dict,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import is_xpu
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import raise_if_cache_size_invalid
@@ -191,18 +191,20 @@ class XPUWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        blocks_to_swap_in: Optional[Dict[int, int]],
-        blocks_to_swap_out: Optional[Dict[int, int]],
-        blocks_to_copy: Optional[Dict[int, List[int]]],
-        num_lookahead_slots: int = 0,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
+        if execute_model_req is None:
+            seq_group_metadata_list = None
+        else:
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             num_seq_groups = len(seq_group_metadata_list)
-            assert blocks_to_swap_in is not None
-            assert blocks_to_swap_out is not None
-            assert blocks_to_copy is not None
+            assert execute_model_req is not None
+            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
+            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
+            blocks_to_copy = execute_model_req.blocks_to_copy
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
