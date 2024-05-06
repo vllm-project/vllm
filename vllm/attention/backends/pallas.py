@@ -109,6 +109,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
+        query = query * self.scale
         if attn_metadata.is_prompt:
             # assert attn_metadata.block_tables is None
             assert seq_len % 16 == 0
@@ -152,7 +153,7 @@ def write_to_kv_cache(
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
     key_cache = key_cache.flatten(0, 1)
     key = key.flatten(0, 1)
-    key_cache = key_cache.index_copy_(0, slot_mapping, key)
+    key_cache.index_copy_(0, slot_mapping, key)
     value_cache = value_cache.flatten(0, 1)
     value = value.flatten(0, 1)
-    value_cache = value_cache.index_copy_(0, slot_mapping, value)
+    value_cache.index_copy_(0, slot_mapping, value)
