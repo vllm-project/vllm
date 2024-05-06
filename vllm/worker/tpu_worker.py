@@ -1,9 +1,9 @@
 import os
 from typing import Dict, List, Optional, Tuple
 
-import jax
-import jax.numpy as jnp
 import torch
+import torch_xla.runtime as xr
+import torch_xla.core.xla_model as xm
 
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
@@ -55,26 +55,30 @@ class TPUWorker(LoraNotSupportedWorkerBase):
             scheduler_config,
             device_config,
             vision_language_config=vision_language_config)
+        self.device = None
         self.tpu_cache = None
 
     def init_device(self) -> None:
+        os.environ["PJRT_DEVICE"] = "TPU"
+        self.device = xm.xla_device()
+        self.device_config.device = self.device
+        torch.set_grad_enabled(False)
+        torch.set_default_dtype(self.model_config.dtype)
+
         # Set random seed.
         # TODO: Set random seed for JAX
         set_random_seed(self.model_config.seed)
+        xm.set_rng_state(self.model_config.seed, self.device)
 
         # Use persistent cache to avoid recompilation.
-        jax.config.update("jax_compilation_cache_dir",
-                          os.path.expanduser("~/.vllm/jax_cache"))
-
-        # DELETE
-        # from jax_smi import initialise_tracking
-        # initialise_tracking()
+        xr.initialize_cache(os.path.expanduser("~/.vllm/torch_xla_cache"),
+                            readonly=False)
 
     def load_model(self):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        num_tpu_blocks = 2000
+        num_tpu_blocks = 1000
         return num_tpu_blocks, 0
 
     def initialize_cache(
@@ -86,17 +90,18 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
         self.block_size = self.cache_config.block_size
 
-        dtype = _torch_dtype_to_jax(self.cache_dtype)
+        dtype = self.cache_dtype
         num_layers = self.model_config.get_num_layers(self.parallel_config)
         num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
         head_size = self.model_config.get_head_size()
 
         self.tpu_cache = []
         for _ in range(num_layers):
-            key_cache = jnp.zeros(
-                (num_kv_heads, num_gpu_blocks * self.block_size, head_size),
-                dtype=dtype)
-            value_cache = jnp.zeros_like(key_cache)
+            key_cache = torch.zeros(
+                (num_gpu_blocks, self.block_size, num_kv_heads, head_size),
+                dtype=dtype,
+                device=self.device)
+            value_cache = torch.zeros_like(key_cache)
             self.tpu_cache.append((key_cache, value_cache))
         self.model_runner.block_size = self.block_size
         self._warmup_model()
@@ -104,7 +109,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
     def _warmup_model(self) -> None:
         # NOTE(woosuk): Because of buffer donation, the reference to the cache
         # should be updated after the warmup.
-        self.tpu_cache = self.model_runner.warmup_model(self.tpu_cache)
+        self.model_runner.warmup_model(self.tpu_cache)
 
     def get_cache_block_size_bytes(self) -> int:
         head_size = self.model_config.get_head_size()
@@ -140,16 +145,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         if num_seq_groups == 0:
             return {}
 
-        output, kv_caches = self.model_runner.execute_model(
+        output = self.model_runner.execute_model(
             seq_group_metadata_list, self.tpu_cache)
-        self.tpu_cache = kv_caches
         return output
-
-
-def _torch_dtype_to_jax(dtype: torch.dtype) -> jnp.dtype:
-    mapping = {
-        torch.float32: jnp.float32,
-        torch.float16: jnp.float16,
-        torch.bfloat16: jnp.bfloat16,
-    }
-    return mapping[dtype]

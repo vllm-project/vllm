@@ -2,9 +2,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import jax
-import jax.numpy as jnp
+import torch
+import torch_xla.core.xla_model as xm
 
+from vllm.attention import get_attn_backend
 from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VisionLanguageConfig)
 from vllm.logger import init_logger
@@ -40,50 +41,70 @@ class TPUModelRunner:
                            "The model will run without sliding window.")
         self.model = None
         self.block_size = None
-        self.compiled_fn = jax.jit(self._execute_step, donate_argnums=(7, ))
         # FIXME(woosuk)
         self.block_tables = np.zeros((_MAX_NUM_SEQS, _MAX_NUM_BLOCKS_PER_SEQ),
                                      dtype=np.int32)
+        self.device = None
+        self.attn_backend = get_attn_backend(torch.bfloat16)
 
     def load_model(self) -> None:
-        from huggingface_hub import snapshot_download
+        self.device = self.device_config.device
 
-        from vllm.model_executor.models.jax.gemma import Transformer
-
-        assert self.model_config.hf_config.model_type == "gemma"
-        self.model = Transformer(self.model_config.hf_config)
-
-        model_name = "google/gemma-7b-flax"
-        model_dir = snapshot_download(model_name)
-        params = load_and_format_params(model_dir + "/7b/")["transformer"]
-        self.params = {"params": params}
-        self.cpu_device = jax.devices("cpu")[0]
+        from vllm.model_executor.models.tpu.gemma import GemmaForCausalLM
+        model = GemmaForCausalLM.from_pretrained(
+            self.model_config.model, config=self.model_config.hf_config)
+        model = model.eval()
+        model = model.to(self.device)
+        if False:
+            self.model = torch.compile(model,
+                                       backend="openxla_eval",
+                                       fullgraph=True)
+        else:
+            self.model = model
 
     def warmup_model(
         self,
-        tpu_caches: List[Tuple[jax.Array, jax.Array]],
-    ) -> List[Tuple[jax.Array, jax.Array]]:
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> None:
+        return
         # Prefill
         logger.info("Compiling the model with different input shapes...")
         start = time.time()
         for batch_size in [1]:
-            for seq_len in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
+            for seq_len in [8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16]:
                 if batch_size * seq_len > 8192:
                     continue
-                token_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-                position_ids = jnp.zeros((batch_size, seq_len),
-                                         dtype=jnp.int32)
-                slot_mapping = jnp.zeros((batch_size, seq_len),
-                                         dtype=jnp.int32)
+                token_ids = torch.zeros((batch_size, seq_len),
+                                        dtype=torch.int32,
+                                        device=self.device)
+                position_ids = torch.zeros((batch_size, seq_len),
+                                           dtype=torch.int32,
+                                           device=self.device)
+                slot_mapping = torch.zeros((batch_size, seq_len),
+                                           dtype=torch.int64,
+                                           device=self.device)
                 block_tables = None
                 context_lens = None
-                prompt_lens = jnp.ones((batch_size, ), dtype=jnp.int32)
+                attn_metadata = self.attn_backend.make_metadata(
+                    num_prefills=0,
+                    num_prefill_tokens=0,
+                    num_decode_tokens=0,
+                    prefill_metadata=None,
+                    decode_metadata=None,
+                    kv_cache_dtype=None,
+                    slot_mapping=slot_mapping,
+                    block_tables=block_tables,
+                    context_lens=context_lens,
+                    is_prompt=True,
+                )
+                xm.mark_step()
 
                 # Dummy run.
-                _, tpu_caches = self.compiled_fn(self.params, token_ids,
-                                                 position_ids, slot_mapping,
-                                                 block_tables, context_lens,
-                                                 prompt_lens, tpu_caches)
+                self.model(token_ids, position_ids, kv_caches, attn_metadata)
+                xm.mark_step()
+                logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
+
+        xm.wait_device_ops()
         end = time.time()
         logger.info(f"Compilation for prefill done in {(end - start):.2f} s.")
 
@@ -91,21 +112,42 @@ class TPUModelRunner:
         start = time.time()
         for batch_size in [1, 2, 4, 8] + [16 * i for i in range(1, 17)]:
             seq_len = 1
-            token_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-            position_ids = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-            slot_mapping = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
-            block_tables = jnp.zeros((batch_size, _MAX_NUM_BLOCKS_PER_SEQ),
-                                     dtype=jnp.int32)
-            context_lens = jnp.ones((batch_size, ), dtype=jnp.int32)
-            prompt_lens = jnp.ones((batch_size, ), dtype=jnp.int32)
+            token_ids = torch.zeros((batch_size, seq_len),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            position_ids = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            slot_mapping = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int64,
+                                       device=self.device)
+            block_tables = torch.zeros((batch_size, _MAX_NUM_BLOCKS_PER_SEQ),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            context_lens = torch.ones((batch_size, ),
+                                      dtype=torch.int32,
+                                      device=self.device)
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=0,
+                num_prefill_tokens=0,
+                num_decode_tokens=0,
+                prefill_metadata=None,
+                decode_metadata=None,
+                kv_cache_dtype=None,
+                slot_mapping=slot_mapping,
+                block_tables=block_tables,
+                context_lens=context_lens,
+                is_prompt=False,
+            )
+            xm.mark_step()
 
-            _, tpu_caches = self.compiled_fn(self.params, token_ids,
-                                             position_ids, slot_mapping,
-                                             block_tables, context_lens,
-                                             prompt_lens, tpu_caches)
+            # Dummy run.
+            self.model(token_ids, position_ids, kv_caches, attn_metadata)
+            xm.mark_step()
+
+        xm.wait_device_ops()
         end = time.time()
         logger.info(f"Compilation for decode done in {(end - start):.2f} s.")
-        return tpu_caches
 
     def _prepare_prompt(
         self,
@@ -148,18 +190,34 @@ class TPUModelRunner:
         input_tokens = _make_array_with_pad(input_tokens,
                                             max_prompt_len,
                                             pad=0,
-                                            dtype=jnp.int32)
+                                            dtype=torch.int32,
+                                            device=self.device)
         input_positions = _make_array_with_pad(input_positions,
                                                max_prompt_len,
                                                pad=0,
-                                               dtype=jnp.int32)
+                                               dtype=torch.int32,
+                                               device=self.device)
         slot_mapping = _make_array_with_pad(slot_mapping,
                                             max_prompt_len,
                                             pad=_PAD_SLOT_ID,
-                                            dtype=jnp.int32)
-        prompt_lens = jnp.asarray(prompt_lens, dtype=jnp.int32)
-        return (input_tokens, input_positions, slot_mapping, None, None,
-                prompt_lens)
+                                            dtype=torch.int64,
+                                            device=self.device)
+        prompt_lens = torch.tensor(prompt_lens,
+                                   dtype=torch.int32,
+                                   device=self.device)
+        attn_metadata = self.attn_backend.make_metadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=0,
+            prefill_metadata=None,
+            decode_metadata=None,
+            kv_cache_dtype=None,
+            slot_mapping=slot_mapping,
+            block_tables=None,
+            context_lens=None,
+            is_prompt=True,
+        )
+        return input_tokens, input_positions, attn_metadata, prompt_lens
 
     def _prepare_decode(
         self,
@@ -203,18 +261,39 @@ class TPUModelRunner:
         slot_mapping = slot_mapping + [[_PAD_SLOT_ID]] * num_paddings
         context_lens = context_lens + [0] * num_paddings
 
-        input_tokens = jnp.asarray(input_tokens, dtype=jnp.int32)
-        input_positions = jnp.asarray(input_positions, dtype=jnp.int32)
-        slot_mapping = jnp.asarray(slot_mapping, dtype=jnp.int32)
-        context_lens = jnp.asarray(context_lens, dtype=jnp.int32)
+        input_tokens = torch.tensor(input_tokens,
+                                    dtype=torch.int32,
+                                    device=self.device)
+        input_positions = torch.tensor(input_positions,
+                                       dtype=torch.int32,
+                                       device=self.device)
+        slot_mapping = torch.tensor(slot_mapping,
+                                    dtype=torch.int64,
+                                    device=self.device)
+        context_lens = torch.tensor(context_lens,
+                                    dtype=torch.int32,
+                                    device=self.device)
+        block_tables = torch.tensor(self.block_tables[:batch_size],
+                                    dtype=torch.int32,
+                                    device=self.device)
+        input_lens = torch.tensor([1] * batch_size,
+                                  dtype=torch.int32,
+                                  device=self.device)
+        attn_metadata = self.attn_backend.make_metadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=0,
+            prefill_metadata=None,
+            decode_metadata=None,
+            kv_cache_dtype=None,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            is_prompt=False,
+        )
+        return input_tokens, input_positions, attn_metadata, input_lens
 
-        block_tables = jnp.asarray(self.block_tables[:batch_size],
-                                   dtype=jnp.int32)
-        input_lens = jnp.asarray([1] * batch_size, dtype=jnp.int32)
-        return (input_tokens, input_positions, slot_mapping, block_tables,
-                context_lens, input_lens)
-
-    def prepare_input_arrays(
+    def prepare_inputs(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ):
@@ -229,57 +308,50 @@ class TPUModelRunner:
 
     def _execute_step(
         self,
-        params: Dict[str, Any],
-        token_ids: jax.Array,
-        position_ids: jax.Array,
-        slot_mapping: jax.Array,
-        block_tables: Optional[jax.Array],
-        context_lens: Optional[jax.Array],
-        input_lens: jax.Array,
-        kv_caches: List[jax.Array],
-    ) -> tuple[jax.Array, List[jax.Array]]:
+        token_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        attn_metadata: Any,
+        input_lens: torch.Tensor,
+    ) -> torch.Tensor:
         batch_size, seq_len = token_ids.shape
-        base_indicies = jnp.arange(batch_size, dtype=jnp.int32) * seq_len
+        base_indicies = torch.arange(batch_size, dtype=torch.int32) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
-        logits, new_kv_caches = self.model.apply(
-            params,
+        logits = self.model(
             token_ids,
             position_ids,
-            slot_mapping,
-            block_tables,
-            context_lens,
             kv_caches,
-            logits_indices,
+            attn_metadata,
         )
+        logits = logits.view(-1, logits.shape[-1])
+        logits = logits[logits_indices]
         # TODO(woosuk): Support sampling with temperature and top_p.
-        next_token_ids = jnp.argmax(logits, axis=-1)
-        return next_token_ids, new_kv_caches
+        next_token_ids = torch.argmax(logits, axis=-1)
+        return next_token_ids
 
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-        kv_caches: List[Tuple[jax.Array, jax.Array]],
-    ) -> Tuple[Optional[SamplerOutput], List[Tuple[jax.Array, jax.Array]]]:
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> Tuple[Optional[SamplerOutput]]:
         from vllm.sequence import SequenceOutput, SequenceGroupOutput, Logprob
 
         start = time.time()
-        inputs = self.prepare_input_arrays(seq_group_metadata_list)
+        inputs = self.prepare_inputs(seq_group_metadata_list)
         end = time.time()
-        # print(inputs[0].shape)
-        # print(f"prepare_input_arrays: {(end - start) * 1000:.2f} ms")
+        # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids, new_kv_caches = self.compiled_fn(
-            self.params, *inputs, kv_caches)
-        next_token_ids.block_until_ready()
+        next_token_ids = self._execute_step(inputs[0], inputs[1], kv_caches,
+                                            inputs[2], inputs[3])
         end = time.time()
         # print(f"compiled_fn: {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids = jax.device_put(next_token_ids, self.cpu_device)
+        next_token_ids = next_token_ids.cpu()
         end = time.time()
-        # print(f"jax.device_put: {(end - start) * 1000:.2f} ms")
+        # print(f".cpu(): {(end - start) * 1000:.2f} ms")
 
         next_token_ids = next_token_ids.tolist()
         i = 0
@@ -297,17 +369,18 @@ class TPUModelRunner:
                 i += 1
 
             sampler_outputs.append(SequenceGroupOutput(seq_outputs, None))
-        return SamplerOutput(sampler_outputs), new_kv_caches
+        return [SamplerOutput(sampler_outputs)]
 
 
 def _make_array_with_pad(
     x: List[List[int]],
     max_len: int,
     pad: int,
-    dtype: jnp.dtype,
-) -> jax.Array:
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
     padded_x = [pad_to_max_length(x_i, max_len, pad) for x_i in x]
-    return jnp.asarray(padded_x, dtype)
+    return torch.tensor(padded_x, dtype=dtype, device=device)
 
 
 def _get_padded_prefill_len(x: int) -> int:
@@ -328,65 +401,3 @@ def _get_padded_batch_size(batch_size: int) -> int:
         return 8
     else:
         return ((batch_size + 15) // 16) * 16
-
-
-import functools
-from typing import Any, Mapping
-
-import orbax.checkpoint
-
-Params = Mapping[str, Any]
-
-
-def load_and_format_params(path: str) -> Params:
-    """Loads parameters and formats them for compatibility."""
-    params = load_params(path)
-    param_state = jax.tree_util.tree_map(jnp.array, params)
-    remapped_params = param_remapper(param_state)
-    nested_params = nest_params(remapped_params)
-    return nested_params
-
-
-@functools.cache
-def load_params(path: str) -> Params:
-    """Loads parameters from a checkpoint path."""
-    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    params = checkpointer.restore(path)
-    return params
-
-
-def param_remapper(orig_params: Params) -> Params:
-    """Remaps params to new module layout.
-
-  This is needed here because the model definition  does not have a separate
-  `mlp` module.
-
-  Args:
-    orig_params: original dict of parameters in Gemma format.
-
-  Returns:
-    dict of params with different names.
-  """
-    new_params = {}
-    for k, v in orig_params.items():
-        if 'mlp/' in k:
-            layer_name, param = k.rsplit('/', maxsplit=1)
-            if layer_name not in new_params:
-                new_params[layer_name] = {}
-            if 'w' in v:
-                new_params[layer_name][param] = v['w']
-        else:
-            new_params[k] = v
-    return new_params
-
-
-def nest_params(params: Params) -> Params:
-    """Nests params as a dict of dicts rather than a flat dict."""
-    nested_params = {}
-    for path, param in params.items():
-        *path, leaf = path.split('/')
-        subdict = nested_params
-        for key in path:
-            subdict = subdict.setdefault(key, {})
-        subdict[leaf] = param
-    return nested_params
