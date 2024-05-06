@@ -63,7 +63,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
 
+        disable_bonus_tokens = True
         if ngram_prompt_lookup_max > 0:
+            disable_bonus_tokens = False
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
@@ -78,7 +80,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             scorer_worker,
             disable_at_queue_size=disable_at_queue_size,
             # TODO(cade) disable strict mode for speedup.
-            rejection_sampler=RejectionSampler(strict_mode=True),
+            rejection_sampler=RejectionSampler(
+                disable_bonus_tokens=disable_bonus_tokens, strict_mode=True),
         )
 
     def __init__(
