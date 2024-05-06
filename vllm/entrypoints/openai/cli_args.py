@@ -25,8 +25,9 @@ class LoRAParserAction(argparse.Action):
 def make_arg_parser():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server.")
-    parser.add_argument("--host", type=str, default=None, help="host name")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="host")
     parser.add_argument("--port", type=int, default=8000, help="port number")
+    parser.add_argument("--workers", type=int, default=1, help="workers number")
     parser.add_argument(
         "--uvicorn-log-level",
         type=str,

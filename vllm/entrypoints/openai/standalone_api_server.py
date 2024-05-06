@@ -1,19 +1,24 @@
 """
 How to run:
 from root directory run command
-uvicorn vllm.entrypoints.openai.standalone_api_server:get_app --host 0.0.0.0 --port 8000 --log-level info
+python3 <path_to_file>/standalone_api_server --host 0.0.0.0 --port 8000 --log-level info --workers 4
 """
 
 import asyncio
+import importlib
+import inspect
+import os
 
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import fastapi
+import uvicorn
 from fastapi import Request, FastAPI, APIRouter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
+from starlette.middleware.cors import CORSMiddleware
 
 import vllm
 from vllm import AsyncLLMEngine, AsyncEngineArgs, EngineArgs
@@ -37,6 +42,9 @@ async def lifespan(app: fastapi.FastAPI):
             await asyncio.sleep(10)
             await engine.do_log_stats()
 
+    if not engine_args.disable_log_stats:
+        asyncio.create_task(_force_log())
+
     yield
 
 
@@ -47,9 +55,6 @@ def parse_args():
 
 router = APIRouter()
 app = FastAPI(lifespan=lifespan)
-engine = None
-openai_serving_chat = None
-openai_serving_completion = None
 
 
 @app.exception_handler(RequestValidationError)
@@ -114,31 +119,72 @@ def get_app(*args) -> FastAPI:
 
     :return: application.
     """
-    global engine
-    global openai_serving_chat
-    global openai_serving_completion
-
     metrics_app = make_asgi_app()
 
     app.mount("/metrics", metrics_app)
     app.include_router(router=router)
 
-    openai_config_dict = {
-        "response_role": "assistant",
-        "lora_modules": None,
-        "chat_template": None,
-        "served_model_names": ["facebook/opt-125m"],
+    return app
 
-    }
-    engine_args = AsyncEngineArgs("facebook/opt-125m")
-    # engine_args = AsyncEngineArgs.from_cli_args(argparse.Namespace(**engine_config_dict))
+
+if __name__ == "__main__":
+    args = parse_args()
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=args.allowed_origins,
+        allow_credentials=args.allow_credentials,
+        allow_methods=args.allowed_methods,
+        allow_headers=args.allowed_headers,
+    )
+
+    if token := os.environ.get("VLLM_API_KEY") or args.api_key:
+
+        @app.middleware("http")
+        async def authentication(request: Request, call_next):
+            root_path = "" if args.root_path is None else args.root_path
+            if not request.url.path.startswith(f"{root_path}/v1"):
+                return await call_next(request)
+            if request.headers.get("Authorization") != "Bearer " + token:
+                return JSONResponse(content={"error": "Unauthorized"},
+                                    status_code=401)
+            return await call_next(request)
+
+    for middleware in args.middleware:
+        module_path, object_name = middleware.rsplit(".", 1)
+        imported = getattr(importlib.import_module(module_path), object_name)
+        if inspect.isclass(imported):
+            app.add_middleware(imported)
+        elif inspect.iscoroutinefunction(imported):
+            app.middleware("http")(imported)
+        else:
+            raise ValueError(f"Invalid middleware {middleware}. "
+                             f"Must be a function or a class.")
+
+    logger.info(f"vLLM API server version {vllm.__version__}")
+    logger.info(f"args: {args}")
+
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+    engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-    openai_serving_chat = OpenAIServingChat(engine, openai_config_dict["served_model_names"],
-                                            openai_config_dict["response_role"],
-                                            openai_config_dict["lora_modules"],
-                                            openai_config_dict["chat_template"])
+    openai_serving_chat = OpenAIServingChat(engine, served_model_names,
+                                            args.response_role,
+                                            args.lora_modules,
+                                            args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, openai_config_dict["served_model_names"], openai_config_dict["lora_modules"])
+        engine, served_model_names, args.lora_modules)
 
-    return app
+    app.root_path = args.root_path
+    uvicorn.run("vllm.entrypoints.openai.standalone_api_server:get_app",
+                host=args.host,
+                port=args.port,
+                log_level=args.uvicorn_log_level,
+                ssl_keyfile=args.ssl_keyfile,
+                ssl_certfile=args.ssl_certfile,
+                ssl_ca_certs=args.ssl_ca_certs,
+                ssl_cert_reqs=args.ssl_cert_reqs,
+                workers=args.workers)
