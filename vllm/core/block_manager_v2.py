@@ -238,8 +238,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
     def can_swap_in(self, seq_group: SequenceGroup,
-                    num_lookahead_slots: int) -> bool:
-        return False
+                    num_lookahead_slots: int) -> AllocStatus:
+        return AllocStatus.LATER
 
     def swap_in(self, seq_group: SequenceGroup,
                 num_lookahead_slots: int) -> Dict[int, int]:
