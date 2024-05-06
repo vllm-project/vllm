@@ -15,6 +15,7 @@ more-complex-and-more-flexible.
   - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
+
 ## Logging Configuration Environment Variables
 
 ### `VLLM_CONFIGURE_LOGGING`
@@ -48,7 +49,6 @@ disabled, an error will occur while starting vLLM.
 ## Examples
 
 ### Example 1: Customize vLLM root logger
-
 
 For this example, we will customize the vLLM root logger to use
 [`python-json-logger`](https://github.com/madzak/python-json-logger) to log to
