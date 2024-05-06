@@ -1,6 +1,6 @@
 from enum import Enum
 
-__all__ = ["QuantizationFields", "NumBits"]
+__all__ = ["QuantizationFields"]
 
 
 class QuantizationFields(Enum):

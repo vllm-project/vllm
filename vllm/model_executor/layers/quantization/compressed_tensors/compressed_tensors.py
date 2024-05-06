@@ -35,7 +35,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         }
 
         # Update the ignore list: layer with q_proj are replaced to be qkv_proj
-        # drop duplicates?
         for layer in self.ignore:
             for k in llama_mapping:
                 if k in layer:
@@ -66,6 +65,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
+
         config = config["compression_config"]["quantization_config"]
 
         layer_quant_details: Dict[str, Any] = dict()

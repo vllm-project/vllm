@@ -66,6 +66,7 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         set_weight_attrs(weight, {"weight_loader": weight_loader})
+        set_weight_attrs(weight, {"logical_widths": output_partition_sizes})
 
         layer.register_parameter("weight_scale", weight_scale)
         set_weight_attrs(weight_scale, {"weight_loader": weight_loader})
@@ -78,20 +79,11 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         layer.register_parameter("weight_zero_point", weight_zero_point)
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
 
-    # Determine per token input scales on the fly
-    def _quantize_activation(self, x: torch.Tensor):
-        x_q = torch.empty_like(x, dtype=torch.int8)
-        input_scales = torch.empty(x.numel() // x.shape[-1],
-                                   dtype=x.dtype,
-                                   device=x.device)
-        ops.quant_per_token(x_q, x, input_scales)
-        return x_q, input_scales
-
-    def _quantize(self,
-                  x: torch.Tensor,
-                  scales: torch.Tensor,
-                  logical_widths: List[int],
-                  split_dim: int = 0) -> torch.Tensor:
+    def _quantize_weights(self,
+                          x: torch.Tensor,
+                          scales: torch.Tensor,
+                          logical_widths: List[int],
+                          split_dim: int = 0) -> torch.Tensor:
 
         x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
         x_q_split = x_q.split(logical_widths, dim=split_dim)
@@ -102,22 +94,31 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
 
         return x_q
 
+    # Determine per token input scales on the fly
+    def _quantize_activation(self, x: torch.Tensor):
+        x_q = torch.empty_like(x, dtype=torch.int8)
+        input_scales = torch.empty((x.numel() // x.shape[-1], 1),
+                                   dtype=x.dtype,
+                                   device=x.device)
+        ops.quant_per_token(x_q, x, input_scales)
+        return x_q, input_scales
+
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
         weight_scale = layer.weight_scale
-        logical_widths = weight.logical_widths
 
         from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
             cutlass_gemm_dq)
 
         x_q, input_scales = self._quantize_activation(x)
         if self.fake_quant:
+            logical_widths = weight.logical_widths
             w_scales = [
                 weight_scale[sum(logical_widths[:i])].item()
                 for i in range(len(logical_widths))
             ]
             w_scales = torch.FloatTensor(w_scales, device=torch.device("cpu"))
-            w_q = self._quantize(weight, w_scales, logical_widths)
+            w_q = self._quantize_weights(weight, w_scales, logical_widths)
             return cutlass_gemm_dq(x_q, w_q, x.dtype, weight_scale,
                                    input_scales)
         return cutlass_gemm_dq(x_q, weight, x.dtype, weight_scale,
