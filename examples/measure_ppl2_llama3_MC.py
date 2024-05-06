@@ -45,18 +45,17 @@ import argparse
 import datetime
 import math
 
-from transformers import LlamaTokenizer
+from llama.tokenizer import ChatFormat, Tokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-
 def get_wikitext2_text(tokenizer):
     with open(args.data) as f:
         test_text = "\n".join(line.strip() for line in f)
-        test_enc = tokenizer(test_text)
+        test_enc = tokenizer.encode(test_text,bos=True,eos=True)
 
     return test_enc, test_text
 
@@ -95,11 +94,10 @@ def vllm_predict(CONT, llm, sampl_par):
 
 def main(args: argparse.Namespace):
 
-    logger.info("Initialising @ %s",
-                f'{datetime.datetime.now():%Y-%m-%d %H:%M:%S%z}')
+    logger.info(f"Initialising @ {datetime.datetime.now()}")
     my_ppl = 0.0
 
-    my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
+    my_tokenizer = Tokenizer(args.model+"/original/tokenizer.model")
     logger.info("Loaded the tokenizer.")
 
     logger.info("Initializing the engine.")
@@ -113,44 +111,44 @@ def main(args: argparse.Namespace):
     my_n_samples = args.sample_size
 
     my_n_patches = math.ceil(
-        (len(my_test_enc['input_ids']) - args.context_size - 1) / my_n_samples)
+        (len(my_test_enc) - args.context_size - 1) / my_n_samples)
+
     if args.patch_size is not None:
         my_n_patches = args.patch_size
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    logger.info("Starting generation @ %s \
-will try to process %d patche(s), \
-generating %d tokens in each patch \
-from the initial context of %d tokens.",
-f'{starting_time:%Y-%m-%d %H:%M:%S%z}',
-my_n_patches,my_n_samples,args.context_size)
+    logger.info(f"Starting generation @ {starting_time} \
+will try to process {my_n_patches} patche(s), \
+generating {my_n_samples} tokens in each patch \
+from the initial context of {args.context_size} tokens.")
     for c in range(my_n_patches):
         CONTEXT = []
         my_sampl_par.future_context = []
         CONTEXT.append(
-            my_test_enc['input_ids'][c * my_n_samples:c * my_n_samples +
+            my_test_enc[c * my_n_samples:c * my_n_samples +
                                      args.context_size])
         upper_boundary = min((c + 1) * my_n_samples + args.context_size,
-                             len(my_test_enc['input_ids']))
+                              len(my_test_enc))
+
         my_sampl_par.future_context.append(
-            my_test_enc['input_ids'][c * my_n_samples +
+            my_test_enc[c * my_n_samples +
                                      args.context_size:upper_boundary])
         my_sampl_par.max_tokens = len(my_sampl_par.future_context[0])
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        logger.info("Iteration %d of %d Intermediate \
+        logger.info(f"Iteration {c+1} of {my_n_patches} Intermediate \
 Estimates:\n\
-\tCross-entropy_intermediate=%f\n\
-\tPerplexity_intermediate=%f",c+1,my_n_patches,my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
+\tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
+\tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}")
     ending_time = datetime.datetime.now()
-    logger.info("Done @ %s generated %d tokens.",
-    f'{ending_time:%Y-%m-%d %H:%M:%S%z}', num_tokens_generated)
+    logger.info(f"Done @ {ending_time} after processing for \
+{ending_time-starting_time} generated {num_tokens_generated} tokens.")
 
-    logger.info("Integral Cross-Entropy=%f Average Cross-Entropy=\%f PPL=%f",
-    my_ppl, my_ppl/num_tokens_generated,math.exp(my_ppl/num_tokens_generated))
-
+    logger.info(f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
+{my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}")
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Benchmark the latency of processing a single batch of '
