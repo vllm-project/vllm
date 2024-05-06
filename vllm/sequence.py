@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
+from opentelemetry.context.context import Context
 
 from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
@@ -414,6 +415,7 @@ class SequenceGroup:
             for an embedding model.
         encoder_seq: Optional, the single encoder sequence. Should be None
                      unless you are working with an encoder/decoder model.
+        trace_context: OpenTelemetry trace context.
     """
 
     def __init__(
@@ -426,6 +428,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        trace_context: Optional[Context] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -441,6 +444,7 @@ class SequenceGroup:
         self.embeddings = embeddings
         self.pooling_params = pooling_params
         self.encoder_seq = encoder_seq
+        self.trace_context = trace_context
 
     @property
     def prompt(self) -> Optional[str]:

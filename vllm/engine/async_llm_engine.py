@@ -4,6 +4,7 @@ from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
                     Set, Tuple, Type, Union)
 
+from opentelemetry.context.context import Context
 from transformers import PreTrainedTokenizer
 
 import vllm.envs as envs
@@ -285,6 +286,7 @@ class _AsyncLLMEngine(LLMEngine):
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -301,6 +303,7 @@ class _AsyncLLMEngine(LLMEngine):
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_context=trace_context,
         )
 
     async def check_health_async(self) -> None:
@@ -545,6 +548,7 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> AsyncStream:
         if self.log_requests:
             if isinstance(inputs, str):
@@ -586,6 +590,7 @@ class AsyncLLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_context=trace_context,
         )
 
         return stream
@@ -596,6 +601,7 @@ class AsyncLLMEngine:
         sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
@@ -610,6 +616,7 @@ class AsyncLLMEngine:
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            trace_context: OpenTelemetry trace context.
 
         Yields:
             The output `RequestOutput` objects from the LLMEngine
@@ -663,6 +670,7 @@ class AsyncLLMEngine:
                 inputs,
                 sampling_params,
                 lora_request=lora_request,
+                trace_context=trace_context,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
@@ -672,6 +680,7 @@ class AsyncLLMEngine:
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> AsyncIterator[EmbeddingRequestOutput]:
         """Generate outputs for a request from an embedding model.
 
@@ -686,6 +695,7 @@ class AsyncLLMEngine:
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
+            trace_context: OpenTelemetry trace context.
 
         Yields:
             The output `EmbeddingRequestOutput` objects from the LLMEngine
@@ -737,6 +747,7 @@ class AsyncLLMEngine:
                 inputs,
                 pooling_params,
                 lora_request=lora_request,
+                trace_context=trace_context,
         ):
             yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
@@ -747,6 +758,7 @@ class AsyncLLMEngine:
         params: Union[SamplingParams, PoolingParams],
         *,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
@@ -758,6 +770,7 @@ class AsyncLLMEngine:
             params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_context=trace_context,
         )
 
         try:

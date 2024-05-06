@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Type, TypeVar, Union
 
+from opentelemetry.context.context import Context
+from opentelemetry.trace import SpanKind
 from transformers import GenerationConfig, PreTrainedTokenizer
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
@@ -31,6 +33,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
+from vllm.tracing import init_tracer
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -41,6 +44,8 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
+
+tracer = init_tracer("vllm.llm_engine")
 
 
 def _load_generation_config_dict(model_config: ModelConfig):
@@ -436,6 +441,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        trace_context: Optional[Context] = None,
     ) -> None:
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -453,6 +459,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
+                trace_context=trace_context,
             )
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
@@ -499,6 +506,7 @@ class LLMEngine:
         params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
+        trace_context: Optional[Context] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -516,6 +524,7 @@ class LLMEngine:
                 :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
+            trace_context: OpenTelemetry trace context.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -557,6 +566,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
+            trace_context=trace_context,
         )
 
     def _create_sequence_group_with_sampling(
@@ -566,6 +576,7 @@ class LLMEngine:
         sampling_params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
+        trace_context: Optional[Context] = None,
     ) -> SequenceGroup:
         """Creates a SequenceGroup with SamplingParams."""
         max_logprobs = self.get_model_config().max_logprobs
@@ -587,11 +598,14 @@ class LLMEngine:
             self.generation_config_fields)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  sampling_params=sampling_params,
-                                  lora_request=lora_request)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+            trace_context=trace_context,
+        )
 
         return seq_group
 
@@ -919,6 +933,8 @@ class LLMEngine:
                         for seq in seq_group.get_finished_seqs()
                     ])
 
+                    self.create_trace_span(seq_group, now)
+
             # Number of generation tokens.
             #   num_batched_tokens equals the number of prompt_tokens plus the
             #   number of decode_tokens in a single iteration. So,
@@ -978,3 +994,43 @@ class LLMEngine:
 
     def check_health(self) -> None:
         self.model_executor.check_health()
+
+    def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
+        arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
+        with tracer.start_as_current_span(
+                "llm_request",
+                kind=SpanKind.SERVER,
+                context=seq_group.trace_context,
+                start_time=arrival_time_nano_seconds) as seq_span:
+            metrics = seq_group.metrics
+            ttft = metrics.first_token_time - metrics.arrival_time
+            e2e_time = now - seq_group.metrics.arrival_time
+            # attribute names are based on
+            # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
+            seq_span.set_attribute("gen_ai.response.model",
+                                   self.model_config.model)
+            seq_span.set_attribute("gen_ai.request.id", seq_group.request_id)
+            seq_span.set_attribute("gen_ai.request.temperature",
+                                   seq_group.sampling_params.temperature)
+            seq_span.set_attribute("gen_ai.request.top_p",
+                                   seq_group.sampling_params.top_p)
+            seq_span.set_attribute("gen_ai.request.max_tokens",
+                                   seq_group.sampling_params.max_tokens)
+            seq_span.set_attribute("gen_ai.request.best_of",
+                                   seq_group.sampling_params.best_of)
+            seq_span.set_attribute("gen_ai.request.n",
+                                   seq_group.sampling_params.n)
+            seq_span.set_attribute("gen_ai.usage.num_sequences",
+                                   seq_group.num_seqs())
+            seq_span.set_attribute("gen_ai.usage.prompt_tokens",
+                                   len(seq_group.prompt_token_ids))
+            seq_span.set_attribute(
+                "gen_ai.usage.completion_tokens",
+                sum([
+                    seq.get_output_len()
+                    for seq in seq_group.get_finished_seqs()
+                ]))
+            seq_span.set_attribute("gen_ai.latency.time_in_queue",
+                                   seq_group.metrics.time_in_queue)
+            seq_span.set_attribute("gen_ai.latency.time_to_first_token", ttft)
+            seq_span.set_attribute("gen_ai.latency.e2e", e2e_time)
