@@ -161,19 +161,6 @@ class GemmaAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         k = apply_rotary_emb(k, freqs_cis)
 
-        # q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        # k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        # v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        # assert self.num_kv_heads == self.num_heads  # FIXME(woosuk): Support GQA.
-        # attn_output = torch.ops.xla.flash_attention(
-        #     q.permute(0, 2, 1, 3),
-        #     k.permute(0, 2, 1, 3),
-        #     v.permute(0, 2, 1, 3),
-        #     True,
-        # )
-        # attn_output = attn_output.permute(0, 2, 1, 3)
-        # attn_output = attn_output.reshape(batch_size, seq_len, self.num_heads * self.head_dim)
-
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         o = self.o_proj(attn_output)
         return o
@@ -287,7 +274,6 @@ class GemmaForCausalLM(PreTrainedModel):
                                          theta=rope_theta)
         self.register_buffer('freqs_cis', freqs_cis)
 
-    @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -305,6 +291,16 @@ class GemmaForCausalLM(PreTrainedModel):
             attn_metadata=attn_metadata,
         )
         return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        indices: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+        hidden_states = hidden_states[indices]
+        logits = F.linear(hidden_states, self.model.embed_tokens.weight)
+        return logits
 
 
 if __name__ == "__main__":

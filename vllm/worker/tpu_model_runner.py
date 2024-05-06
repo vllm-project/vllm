@@ -53,14 +53,10 @@ class TPUModelRunner:
         from vllm.model_executor.models.tpu.gemma import GemmaForCausalLM
         model = GemmaForCausalLM.from_pretrained(
             self.model_config.model, config=self.model_config.hf_config)
-        model = model.eval()
-        model = model.to(self.device)
-        if False:
-            self.model = torch.compile(model,
-                                       backend="openxla_eval",
-                                       fullgraph=True)
-        else:
-            self.model = model
+        self.model = model.eval().to(self.device)
+        # self.model = torch.compile(self.model,
+        #                             backend="openxla_eval",
+        #                             fullgraph=True)
 
     def warmup_model(
         self,
@@ -318,14 +314,13 @@ class TPUModelRunner:
         base_indicies = torch.arange(batch_size, dtype=torch.int32) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
-        logits = self.model(
+        hidden_states = self.model(
             token_ids,
             position_ids,
             kv_caches,
             attn_metadata,
         )
-        logits = logits.view(-1, logits.shape[-1])
-        logits = logits[logits_indices]
+        logits = self.model.compute_logits(hidden_states, logits_indices)
         # TODO(woosuk): Support sampling with temperature and top_p.
         next_token_ids = torch.argmax(logits, axis=-1)
         return next_token_ids
