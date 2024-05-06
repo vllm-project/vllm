@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
