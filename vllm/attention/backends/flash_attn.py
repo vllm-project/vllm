@@ -10,6 +10,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
 
+_SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
+
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -28,8 +30,8 @@ class FlashAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        if block_size != 16:
-            raise ValueError("FlashAttention only supports block size 16.")
+        if block_size % 16 != 0:
+            raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -166,11 +168,10 @@ class FlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        suppored_head_sizes = [32, 64, 96, 128, 160, 192, 224, 256]
-        if head_size not in suppored_head_sizes:
+        if head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {suppored_head_sizes}.")
+                f"Supported head sizes are: {_SUPPORTED_HEAD_SIZES}.")
 
     def forward(
         self,
