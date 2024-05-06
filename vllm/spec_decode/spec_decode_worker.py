@@ -86,8 +86,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: WorkerBase,
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
-        disable_at_queue_size: Optional[int] = None,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
+        disable_at_queue_size: Optional[int] = None,
     ):
         """
         Create a SpecDecodeWorker.

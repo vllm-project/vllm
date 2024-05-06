@@ -30,8 +30,8 @@ def test_disable_spec_tokens(queue_size: int):
     worker = SpecDecodeWorker(proposer_worker=draft_worker,
                               scorer_worker=target_worker,
                               rejection_sampler=rejection_sampler,
-                              disable_at_queue_size=disable_at_queue_size,
-                              metrics_collector=metrics_collector)
+                              metrics_collector=metrics_collector,
+                              disable_at_queue_size=disable_at_queue_size)
 
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
