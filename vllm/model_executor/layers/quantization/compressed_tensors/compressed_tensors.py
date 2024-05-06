@@ -3,13 +3,13 @@ from typing import Any, Dict, Iterable, List, Optional
 import torch
 #from compressed_tensors.quantization.lifecycle.apply import (
 #    find_first_name_or_class_match) # TODO: needed
-from compressed_tensors.quantization.quant_args import QuantizationStrategy
+from compressed_tensors.quantization.quant_args import (QuantizationArgs,
+                                                        QuantizationStrategy)
+from pydantic import BaseModel
 
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.compressed_tensors.data import (
-    QuantizationFields)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
     CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
@@ -20,11 +20,6 @@ class CompressedTensorsConfig(QuantizationConfig):
     def __init__(self, layer_quant_details: Dict[str, Any], ignore: List[str]):
         self.ignore = ignore
         self.layer_quant_details = layer_quant_details
-
-        self.num_bits = QuantizationFields.num_bits.value
-        self.strategy = QuantizationFields.strategy.value
-        self.symmetric = QuantizationFields.symmetric.value
-        self.dynamic = QuantizationFields.dynamic.value
 
         llama_mapping = {
             "q_proj": "qkv_proj",
@@ -75,10 +70,12 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 layer_quant_details[target] = {}
-                layer_quant_details[target]["weight"] = quant_config.get(
-                    "weights")
-                layer_quant_details[target]["input"] = quant_config.get(
-                    "input_activations")
+                layer_quant_details[target][
+                    "weight"] = QuantizationArgs.parse_obj(
+                        quant_config.get("weights"))
+                layer_quant_details[target][
+                    "input"] = QuantizationArgs.parse_obj(
+                        quant_config.get("input_activations"))
 
         return cls(layer_quant_details=layer_quant_details, ignore=ignore)
 
@@ -86,37 +83,33 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _is_static_tensor_w8a8(self, weight_quant: Dict, input_quant: Dict):
-        is_8_bits = weight_quant.get(self.num_bits) == input_quant.get(
-            self.num_bits) == 8
-        is_tensor = weight_quant.get(self.strategy) == input_quant.get(
-            self.strategy) == QuantizationStrategy.TENSOR.value
-        is_symmetric = weight_quant.get(self.symmetric) and input_quant.get(
-            self.symmetric)
-        is_static = not weight_quant.get(self.dynamic) and not input_quant.get(
-            self.dynamic)
+    def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel):
+        is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+        is_tensor = (weight_quant.strategy == input_quant.strategy ==
+                     QuantizationStrategy.TENSOR.value)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_static = not weight_quant.dynamic and not input_quant.dynamic
 
         if is_8_bits and is_tensor and is_symmetric and is_static:
             return True
         return False
 
-    def _is_dynamic_token_w8a8(self, weight_quant: Dict, input_quant: Dict):
-        is_8_bits = weight_quant.get(self.num_bits) == input_quant.get(
-            self.num_bits) == 8
-        is_token_tensor = (weight_quant.get(self.strategy)
+    def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel):
+        is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+        is_token_tensor = (weight_quant.strategy
                            == QuantizationStrategy.TENSOR.value) and (
-                               input_quant.get(self.strategy) == "token"
+                               input_quant.strategy == "token"
                            )  # TODO: QuantizationStrategy should have token
-        is_symmetric = weight_quant.get(self.symmetric) and input_quant.get(
-            self.symmetric)
-        is_dynamic = not weight_quant.get(self.dynamic) and input_quant.get(
-            self.dynamic)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
         if is_8_bits and is_token_tensor and is_symmetric and is_dynamic:
             return True
         return False
 
-    def _get_schema(self, weight_quant: Dict, input_quant: Dict):
+    def _get_schema(self, weight_quant: BaseModel, input_quant: BaseModel):
         if self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor(
                 fake_quant=self.fake_quant)
