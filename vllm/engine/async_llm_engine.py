@@ -195,7 +195,7 @@ class RequestTracker:
 
         total_running_requests = len(running_requests)
         out_of_quota_running_requests = (total_running_requests -
-                                         ENGINE_MAX_CONCURRENT_REQUESTS)
+                                         ENGINE_MAX_CONCURRENT_REQUESTS) + 1
         if out_of_quota_running_requests > 0:
             for i in range(out_of_quota_running_requests):
                 k, _ = running_requests[i]
