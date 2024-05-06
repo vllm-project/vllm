@@ -23,6 +23,7 @@ class Fp8Config(QuantizationConfig):
         self,
         is_checkpoint_fp8_serialized: bool = False,
         activation_scheme: str = "dynamic",
+        lm_head_quantized: bool = False,
     ) -> None:
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         if is_checkpoint_fp8_serialized:
@@ -32,6 +33,7 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(
                 f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
+        self.lm_head_quantized = lm_head_quantized
 
     @classmethod
     def get_name(cls) -> str:
@@ -54,8 +56,11 @@ class Fp8Config(QuantizationConfig):
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = ("fp8" in quant_method)
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
+        lm_head_quantized = cls.get_from_keys_optional(config, ["lm_head"],
+                                                       False)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-                   activation_scheme=activation_scheme)
+                   activation_scheme=activation_scheme,
+                   lm_head_quantized=lm_head_quantized)
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["Fp8LinearMethod"]:
@@ -67,7 +72,7 @@ class Fp8Config(QuantizationConfig):
         return []
 
     def is_lm_head_quantized(self) -> bool:
-        return False
+        return self.lm_head_quantized
 
 
 class Fp8LinearMethod(LinearMethodBase):
