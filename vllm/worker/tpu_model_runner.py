@@ -339,14 +339,16 @@ class TPUModelRunner:
 
         start = time.time()
         inputs = self.prepare_inputs(seq_group_metadata_list)
+        xm.mark_step()
         end = time.time()
         # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
         next_token_ids = self._execute_step(inputs[0], inputs[1], kv_caches,
                                             inputs[2], inputs[3])
+        xm.mark_step()
         end = time.time()
-        # print(f"compiled_fn: {(end - start) * 1000:.2f} ms")
+        # print(f"model(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
         next_token_ids = next_token_ids.cpu()
