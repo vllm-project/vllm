@@ -8,7 +8,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs
+from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
+                                 SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
 from vllm.engine.output_processor.interfaces import (
@@ -21,8 +22,8 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (MultiModalData, SamplerOutput, Sequence,
-                           SequenceGroup, SequenceGroupMetadata,
+from vllm.sequence import (ExecuteModelRequest, MultiModalData, SamplerOutput,
+                           Sequence, SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
@@ -105,7 +106,7 @@ class LLMEngine:
             "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
             "quantization=%s, enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, seed=%d)",
+            "decoding_config=%r, seed=%d, served_model_name=%s)",
             vllm.__version__,
             model_config.model,
             speculative_config,
@@ -128,6 +129,7 @@ class LLMEngine:
             device_config.device,
             decoding_config,
             model_config.seed,
+            model_config.served_model_name,
         )
         # TODO(woosuk): Print more configs in debug mode.
 
@@ -218,7 +220,7 @@ class LLMEngine:
         if self.log_stats:
             self.stat_logger = StatLogger(
                 local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.model),
+                labels=dict(model_name=model_config.served_model_name),
                 max_model_len=self.model_config.max_model_len)
             self.stat_logger.info("cache_config", self.cache_config)
 
@@ -485,7 +487,7 @@ class LLMEngine:
     def _process_model_outputs(
         self,
         output: List[SamplerOutput],
-        scheduled_seq_groups: List[SequenceGroup],
+        scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> List[RequestOutput]:
@@ -582,12 +584,16 @@ class LLMEngine:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         if not scheduler_outputs.is_empty():
-            output = self.model_executor.execute_model(
+            execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=seq_group_metadata_list,
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
-                num_lookahead_slots=scheduler_outputs.num_lookahead_slots)
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                running_queue_size=scheduler_outputs.running_queue_size,
+            )
+            output = self.model_executor.execute_model(
+                execute_model_req=execute_model_req)
         else:
             output = []
 
@@ -596,16 +602,18 @@ class LLMEngine:
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
         # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(
-                self._get_stats(scheduler_outputs, model_output=output))
+        self.do_log_stats(scheduler_outputs, output)
 
         return request_outputs
 
-    def do_log_stats(self) -> None:
+    def do_log_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
+            self.stat_logger.log(
+                self._get_stats(scheduler_outputs, model_output))
 
     def _get_stats(
             self,
@@ -659,10 +667,10 @@ class LLMEngine:
         # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
             num_generation_tokens_from_prefill_groups = 0.
-            if scheduler_outputs.num_prefill_groups > 0 and len(
-                    scheduler_outputs.scheduled_seq_groups
-            ) != scheduler_outputs.num_prefill_groups:
-                print("DETECTED CHUNKED")
+            # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
+            # the len of scheduler_outputs.scheduled_seq_groups is !=
+            # scheduler_outputs.num_prefill_groups, this means that
+            # chunked prefills have been detected.
 
             for idx, scheduled_seq_group in enumerate(
                     scheduler_outputs.scheduled_seq_groups):

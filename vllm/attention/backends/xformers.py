@@ -66,28 +66,24 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
-    prompt_lens_tensor: Optional[torch.Tensor]
+    # (batch_size,). The sequence length per sequence. Sequence length means
+    # the computed tokens + new tokens None if it is a decoding.
+    seq_lens: Optional[List[int]]
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
-    #                                   |- subquery_len -|
+    # |-------------------- seq_len ----------------------|
+    #                                   |-- query_len ---|
 
-    # WARNING(sang): context_len has different definition depending on if it is
-    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
-    # When it is for decoding, it includes a new token.
-
-    # Maximum subquery length in the batch.
-    max_subquery_len: Optional[int]
+    # Maximum query length in the batch.
+    max_query_len: Optional[int]
     # FIXME: It is for flash attn.
-    # Maximum prompt length in the batch.
-    max_prompt_len: Optional[int]
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -97,6 +93,9 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,) A tensor of context lengths (tokens that are computed
+    # so far).
+    context_lens_tensor: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -242,10 +241,11 @@ class XFormersImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.prompt_lens_tensor,
-                    prefill_meta.context_lens,
-                    prefill_meta.max_subquery_len,
+                    prefill_meta.seq_lens_tensor,
+                    prefill_meta.context_lens_tensor,
+                    prefill_meta.max_query_len,
                     self.alibi_slopes,
+                    self.sliding_window,
                 )
                 assert output[:num_prefill_tokens].shape == out.shape
                 output[:num_prefill_tokens] = out
@@ -256,8 +256,8 @@ class XFormersImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.context_lens,
-                decode_meta.max_context_len,
+                decode_meta.seq_lens_tensor,
+                decode_meta.max_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -288,7 +288,7 @@ class XFormersImpl(AttentionImpl):
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         """
-        assert attn_metadata.prompt_lens is not None
+        assert attn_metadata.seq_lens is not None
         original_query = query
         if self.num_kv_heads != self.num_heads:
             # GQA/MQA requires the shape [B, M, G, H, K].
@@ -309,7 +309,7 @@ class XFormersImpl(AttentionImpl):
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
                 attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.prompt_lens)
+                    attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
@@ -317,7 +317,7 @@ class XFormersImpl(AttentionImpl):
             else:
                 attn_metadata.attn_bias = _make_alibi_bias(
                     self.alibi_slopes, self.num_kv_heads, query.dtype,
-                    attn_metadata.prompt_lens)
+                    attn_metadata.seq_lens)
 
         # No alibi slopes.
         # TODO(woosuk): Too many view operations. Let's try to reduce
@@ -342,8 +342,8 @@ class XFormersImpl(AttentionImpl):
         # one. This is inefficient, especially when we have many short prompts.
         output = torch.empty_like(original_query)
         start = 0
-        for i, prompt_len in enumerate(attn_metadata.prompt_lens):
-            end = start + prompt_len
+        for i, seq_len in enumerate(attn_metadata.seq_lens):
+            end = start + seq_len
             out = xops.memory_efficient_attention_forward(
                 query[None, start:end],
                 key[None, start:end],
@@ -353,7 +353,7 @@ class XFormersImpl(AttentionImpl):
                 scale=self.scale)
             # TODO(woosuk): Unnecessary copy. Optimize.
             output[start:end].copy_(out.view_as(original_query[start:end]))
-            start += prompt_len
+            start += seq_len
         return output
 
 
@@ -361,13 +361,13 @@ def _make_alibi_bias(
     alibi_slopes: torch.Tensor,
     num_kv_heads: int,
     dtype: torch.dtype,
-    prompt_lens: List[int],
+    seq_lens: List[int],
 ) -> LowerTriangularMaskWithTensorBias:
     attn_biases = []
-    for prompt_len in prompt_lens:
-        bias = torch.arange(prompt_len, dtype=dtype)
+    for seq_len in seq_lens:
+        bias = torch.arange(seq_len, dtype=dtype)
         # NOTE(zhuohan): HF uses
-        #     `bias = bias[None, :].repeat(prompt_len, 1)`
+        #     `bias = bias[None, :].repeat(seq_len, 1)`
         # here. We find that both biases give the same results, but
         # the bias below more accurately follows the original ALiBi
         # paper.
@@ -375,16 +375,16 @@ def _make_alibi_bias(
         # element.
         bias = bias[None, :] - bias[:, None]
 
-        padded_len = (prompt_len + 7) // 8 * 8
+        padded_len = (seq_len + 7) // 8 * 8
         num_heads = alibi_slopes.shape[0]
         bias = torch.empty(
             1,  # batch size
             num_heads,
-            prompt_len,
+            seq_len,
             padded_len,
             device=alibi_slopes.device,
             dtype=dtype,
-        )[:, :, :, :prompt_len].copy_(bias)
+        )[:, :, :, :seq_len].copy_(bias)
         bias.mul_(alibi_slopes[:, None, None])
         if num_heads != num_kv_heads:
             bias = bias.unflatten(1, (num_kv_heads, num_heads // num_kv_heads))

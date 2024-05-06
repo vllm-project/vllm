@@ -1,6 +1,6 @@
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
-from vllm.core.block.interfaces import (Block, BlockAllocator,
+from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
@@ -57,15 +57,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
         if allocator_type == "naive":
-            gpu_allocator = NaiveBlockAllocator(
-                create_block=NaiveBlock,
+            gpu_allocator: BlockAllocator = NaiveBlockAllocator(
+                create_block=NaiveBlock,  # type: ignore
                 num_blocks=num_gpu_blocks,
                 block_size=block_size,
                 block_ids=gpu_block_ids,
             )
 
-            cpu_allocator = NaiveBlockAllocator(
-                create_block=NaiveBlock,
+            cpu_allocator: BlockAllocator = NaiveBlockAllocator(
+                create_block=NaiveBlock,  # type: ignore
                 num_blocks=num_cpu_blocks,
                 block_size=block_size,
                 block_ids=cpu_block_ids,
@@ -105,7 +105,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             Device.GPU: gpu_block_allocator,
         }
 
-        self._block_ids_to_allocator = {}
+        self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
         for _, allocator in self._allocators.items():
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
@@ -149,7 +149,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             block (Block): The block to be freed.
         """
-        allocator = self._block_ids_to_allocator[block.block_id]
+        block_id = block.block_id
+        assert block_id is not None
+        allocator = self._block_ids_to_allocator[block_id]
         return allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -163,7 +165,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: A new list of blocks that shares the same memory as the
                 original sequence.
         """
-        allocator = self._block_ids_to_allocator[last_block.block_id]
+        block_id = last_block.block_id
+        assert block_id is not None
+        allocator = self._block_ids_to_allocator[block_id]
         return allocator.fork(last_block)
 
     def get_num_free_blocks(self, device: Device) -> int:
@@ -171,12 +175,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
         Args:
             device (Device): The device for which to query the number of free
-                blocks.
+                blocks. AssertionError is raised if None is passed.
 
         Returns:
             int: The number of free blocks available on the specified device.
         """
         return self._allocators[device].get_num_free_blocks()
+
+    def get_num_total_blocks(self, device: Device) -> int:
+        return self._allocators[device].get_num_total_blocks()
 
     def clear_copy_on_writes(self) -> Dict[int, List[int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
@@ -190,10 +197,18 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         device = Device.GPU
         return self._allocators[device].clear_copy_on_writes()
 
-    def mark_blocks_as_computed(self) -> None:
+    def mark_blocks_as_accessed(self, block_ids: List[int],
+                                now: float) -> None:
+        """Mark blocks as accessed, only use for prefix caching."""
         # Prefix caching only supported on GPU.
         device = Device.GPU
-        return self._allocators[device].mark_blocks_as_computed()
+        return self._allocators[device].mark_blocks_as_accessed(block_ids, now)
+
+    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
+        """Mark blocks as accessed, only use for prefix caching."""
+        # Prefix caching only supported on GPU.
+        device = Device.GPU
+        return self._allocators[device].mark_blocks_as_computed(block_ids)
 
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
@@ -202,5 +217,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].get_common_computed_block_ids(
             seq_block_ids)
 
-    def all_block_ids(self) -> frozenset[int]:
+    @property
+    def all_block_ids(self) -> FrozenSet[int]:
         return frozenset(self._block_ids_to_allocator.keys())
+
+    def promote_to_immutable_block(self, block: Block) -> BlockId:
+        raise NotImplementedError
+
+    def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
+        raise NotImplementedError

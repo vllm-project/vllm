@@ -19,8 +19,8 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
 
 import psutil
 import torch
-from packaging.version import Version, parse
 
+import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
 T = TypeVar("T")
@@ -174,7 +174,7 @@ def get_vllm_instance_id():
     Instance id represents an instance of the VLLM. All processes in the same
     instance should have the same instance id.
     """
-    return os.environ.get("VLLM_INSTANCE_ID", f"vllm-instance-{random_uuid()}")
+    return envs.VLLM_INSTANCE_ID or f"vllm-instance-{random_uuid()}"
 
 
 @lru_cache(maxsize=None)
@@ -243,7 +243,7 @@ def merge_async_iterators(
 
 
 def get_ip() -> str:
-    host_ip = os.environ.get("HOST_IP")
+    host_ip = envs.VLLM_HOST_IP
     if host_ip:
         return host_ip
 
@@ -269,7 +269,8 @@ def get_ip() -> str:
 
     warnings.warn(
         "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable HOST_IP.",
+        "The value can be set by the environment variable"
+        " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2)
     return "0.0.0.0"
 
@@ -312,27 +313,6 @@ def cdiv(a: int, b: int) -> int:
     return -(a // -b)
 
 
-@lru_cache(maxsize=None)
-def get_nvcc_cuda_version() -> Optional[Version]:
-    cuda_home = os.environ.get('CUDA_HOME')
-    if not cuda_home:
-        cuda_home = '/usr/local/cuda'
-        if os.path.isfile(cuda_home + '/bin/nvcc'):
-            logger.info(
-                'CUDA_HOME is not found in the environment. '
-                'Using %s as CUDA_HOME.', cuda_home)
-        else:
-            logger.warning('Not found nvcc in %s. Skip cuda version check!',
-                           cuda_home)
-            return None
-    nvcc_output = subprocess.check_output([cuda_home + "/bin/nvcc", "-V"],
-                                          universal_newlines=True)
-    output = nvcc_output.split()
-    release_idx = output.index("release") + 1
-    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
-    return nvcc_cuda_version
-
-
 def _generate_random_fp8(
     tensor: torch.tensor,
     low: float,
@@ -353,21 +333,9 @@ def _generate_random_fp8(
     del tensor_tmp
 
 
-def create_kv_caches_with_random(
-    num_blocks: int,
-    block_size: int,
-    num_layers: int,
-    num_heads: int,
-    head_size: int,
-    cache_dtype: Optional[Union[str, torch.dtype]],
-    model_dtype: Optional[Union[str, torch.dtype]] = None,
-    seed: int = 0,
-    device: Optional[str] = "cuda",
-) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-
+def get_kv_cache_torch_dtype(
+        cache_dtype: Optional[Union[str, torch.dtype]],
+        model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
             if isinstance(model_dtype, str):
@@ -386,6 +354,55 @@ def create_kv_caches_with_random(
         torch_dtype = cache_dtype
     else:
         raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
+    return torch_dtype
+
+
+def create_kv_caches_with_random_flash(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    assert cache_dtype != "fp8"
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+    key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
+    scale = head_size**-0.5
+    key_caches, value_caches = [], []
+    for _ in range(num_layers):
+        key_value_cache = torch.empty(size=key_value_cache_shape,
+                                      dtype=torch_dtype,
+                                      device=device)
+        key_value_cache.uniform_(-scale, scale)
+        key_caches.append(key_value_cache[:, 0])
+        value_caches.append(key_value_cache[:, 1])
+    return key_caches, value_caches
+
+
+def create_kv_caches_with_random(
+    num_blocks: int,
+    block_size: int,
+    num_layers: int,
+    num_heads: int,
+    head_size: int,
+    cache_dtype: Optional[Union[str, torch.dtype]],
+    model_dtype: Optional[Union[str, torch.dtype]] = None,
+    seed: int = 0,
+    device: Optional[str] = "cuda",
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+
+    torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
@@ -521,7 +538,7 @@ def maybe_expand_dim(tensor: torch.Tensor,
 def merge_dicts(dict1: Dict[Any, List[Any]],
                 dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
     """Merge 2 dicts that have key -> List of items.
-    
+
     When a key conflicts, the values in dict1 is prioritized.
     """
     merged_dict = defaultdict(list)
@@ -581,7 +598,7 @@ def find_library(lib_name: str) -> str:
     # libcuda.so.1 (libc6,x86-64) => /lib/x86_64-linux-gnu/libcuda.so.1
     locs = [line.split()[-1] for line in libs.splitlines() if lib_name in line]
     # `LD_LIBRARY_PATH` searches the library in the user-defined paths
-    env_ld_library_path = os.getenv("LD_LIBRARY_PATH")
+    env_ld_library_path = envs.LD_LIBRARY_PATH
     if not locs and env_ld_library_path:
         locs = [
             os.path.join(dir, lib_name)
@@ -594,14 +611,15 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
-    so_file = os.environ.get("VLLM_NCCL_SO_PATH", "")
+    so_file = envs.VLLM_NCCL_SO_PATH
+    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
 
     # check if we have vllm-managed nccl
     vllm_nccl_path = None
     if torch.version.cuda is not None:
         cuda_major = torch.version.cuda.split(".")[0]
         path = os.path.expanduser(
-            f"~/.config/vllm/nccl/cu{cuda_major}/libnccl.so.*")
+            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
         files = glob.glob(path)
         vllm_nccl_path = files[0] if files else None
 
@@ -626,7 +644,7 @@ def enable_trace_function_call_for_thread() -> None:
     if enabled via the VLLM_TRACE_FUNCTION environment variable
     """
 
-    if int(os.getenv("VLLM_TRACE_FUNCTION", "0")):
+    if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"

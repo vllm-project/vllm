@@ -12,6 +12,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
@@ -50,7 +51,7 @@ class TensorizerConfig:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -102,7 +103,7 @@ class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -118,8 +119,9 @@ class TensorizerArgs:
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
       num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is 1. This greatly increases
-          performance.
+          from the source file. Default is `None`, which will dynamically set
+          the number of readers based on the number of available 
+          resources and model size. This greatly increases performance.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
@@ -134,13 +136,10 @@ class TensorizerArgs:
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = (self.s3_access_key_id
-                                 or os.environ.get("S3_ACCESS_KEY_ID")) or None
-        self.s3_secret_access_key = (
-            self.s3_secret_access_key
-            or os.environ.get("S3_SECRET_ACCESS_KEY")) or None
-        self.s3_endpoint = (self.s3_endpoint
-                            or os.environ.get("S3_ENDPOINT_URL")) or None
+        self.s3_access_key_id = self.s3_access_key_id or envs.S3_ACCESS_KEY_ID
+        self.s3_secret_access_key = (self.s3_secret_access_key
+                                     or envs.S3_SECRET_ACCESS_KEY)
+        self.s3_endpoint = self.s3_endpoint or envs.S3_ENDPOINT_URL
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -200,10 +199,12 @@ class TensorizerArgs:
             "use for decryption. Can be a file path or S3 network URI.")
         group.add_argument(
             "--num-readers",
-            default=1,
+            default=None,
             type=int,
             help="Controls how many threads are allowed to read concurrently "
-            "from the source file.")
+            "from the source file. Default is `None`, which will dynamically "
+            "set the number of readers based on the available resources "
+            "and model size. This greatly increases performance.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
@@ -330,7 +331,7 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info("Deserialized %s in %0.2fs, %f/s", total_bytes_str,
+        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
                     end - start, per_second)
         logger.info("Memory usage before: %s", before_mem)
         logger.info("Memory usage after: %s", after_mem)
