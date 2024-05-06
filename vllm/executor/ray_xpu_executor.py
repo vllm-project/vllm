@@ -2,19 +2,20 @@ import asyncio
 import os
 import pickle
 from collections import defaultdict
+from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig, VisionLanguageConfig)
-from vllm.engine.ray_utils import RayWorkerWrapper, ray
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
+from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        get_vllm_instance_id, make_async)
+                        make_async)
 
 if ray is not None:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -108,7 +109,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
-        self.driver_dummy_worker: RayWorkerWrapper = None
+        self.driver_dummy_worker: Optional[RayWorkerWrapper] = None
         # The remaining workers are the actual ray actors.
         self.workers: List[RayWorkerWrapper] = []
 
@@ -130,6 +131,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
             )(RayWorkerWrapper).remote(
                 worker_module_name="vllm.worker.xpu_worker",
                 worker_class_name="XPUWorker",
+                trust_remote_code=self.model_config.trust_remote_code,
             )
 
             worker_ip = ray.get(worker.get_node_ip.remote())
@@ -140,6 +142,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
                 self.driver_worker = RayWorkerWrapper(
                     worker_module_name="vllm.worker.xpu_worker",
                     worker_class_name="XPUWorker",
+                    trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
                 # Else, added to the list of workers.
@@ -163,21 +166,13 @@ class RayXPUExecutor(DistributedGPUExecutor):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        VLLM_INSTANCE_ID = get_vllm_instance_id()
+        # VLLM_INSTANCE_ID = get_vllm_instance_id()
 
+        # TODO: add env var for xpu
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = []
-        for (node_id, _) in worker_node_and_gpu_ids:
-            all_args_to_update_environment_variables.append([{
-                "CUDA_VISIBLE_DEVICES":
-                ",".join(map(str, node_gpus[node_id])),
-                "VLLM_INSTANCE_ID":
-                VLLM_INSTANCE_ID,
-                "VLLM_TRACE_FUNCTION":
-                os.getenv("VLLM_TRACE_FUNCTION", "0"),
-            }])
-        self._run_workers("update_environment_variables",
-                          all_args=all_args_to_update_environment_variables)
+        # all_args_to_update_environment_variables = []
+        # self._run_workers("update_environment_variables",
+        #                   all_args=all_args_to_update_environment_variables)
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
@@ -266,39 +261,39 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any]] = None,
+        driver_args: Optional[Tuple[Any, ...]] = None,
         driver_kwargs: Optional[Dict[str, Any]] = None,
-        all_args: Optional[List[List[Any]]] = None,
+        all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
         max_concurrent_workers: Optional[int] = None,
         use_ray_compiled_dag: bool = False,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers.
-        all_args and all_kwargs are used to pass heterogeneous arguments,
-        i.e. different arguments for each worker.
+        """Runs the given method on all workers. Can be used in the following
+        ways:
+
+        - args/kwargs: All workers share the same args/kwargs
+        - args/kwargs and driver_args/driver_kwargs: Driver worker has
+          different args
+        - all_args/all_kwargs: args/kwargs for each worker are specified
+          individually
         """
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        # for mypy type checking
-        assert driver_args is not None
-        assert driver_kwargs is not None
-        if all_args is None:
-            all_args = [driver_args] + [args] * len(self.workers)
-        if all_kwargs is None:
-            all_kwargs = [driver_kwargs] + [kwargs] * len(self.workers)
-
-        # for mypy type checking
-        assert all_args is not None
-        assert all_kwargs is not None
 
         if max_concurrent_workers:
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
+
+        if driver_args is None:
+            driver_args = args if all_args is None else all_args[0]
+        if driver_kwargs is None:
+            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
+
+        count = len(self.workers)
+        all_worker_args = repeat(args, count) if all_args is None \
+            else islice(all_args, 1, None)
+        all_worker_kwargs = repeat(kwargs, count) if all_kwargs is None \
+            else islice(all_kwargs, 1, None)
 
         if use_ray_compiled_dag:
             # Right now, compiled DAG can only accept a single
@@ -311,22 +306,18 @@ class RayXPUExecutor(DistributedGPUExecutor):
                 worker.execute_method.remote(method, *worker_args,
                                              **worker_kwargs)
                 for (worker, worker_args, worker_kwargs
-                     ) in zip(self.workers, all_args[1:], all_kwargs[1:])
+                     ) in zip(self.workers, all_worker_args, all_worker_kwargs)
             ]
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
 
         # Start the driver worker after all the ray workers.
         if not use_dummy_driver:
             driver_worker_output = self.driver_worker.execute_method(
-                method, *all_args[0], **all_kwargs[0])
+                method, *driver_args, **driver_kwargs)
         else:
+            assert self.driver_dummy_worker is not None
             driver_worker_output = ray.get(
                 self.driver_dummy_worker.execute_method.remote(
-                    method, *all_args[0], **all_kwargs[0]))
+                    method, *driver_args, **driver_kwargs))
         # Get the results of the ray workers.
         if self.workers:
             if use_ray_compiled_dag:
@@ -359,8 +350,9 @@ class RayXPUExecutor(DistributedGPUExecutor):
         # a dummy value for now. It will be fixed soon.
         with InputNode() as input_data:
             forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.bind(input_data)
-                for worker in self.workers
+                worker.execute_model_compiled_dag_remote.
+                bind(  # type: ignore[attr-defined]
+                    input_data) for worker in self.workers
             ])
         return forward_dag.experimental_compile()
 
