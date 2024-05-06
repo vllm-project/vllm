@@ -52,3 +52,17 @@ VLLM_SERVE_bench:
         --backend vllm \
         --tokenizer /root/HF_models/vicuna-7b-v1.5/ --dataset /root/HF_models/ShareGPT_V3_unfiltered_cleaned_split.json \
         --request-rate 10
+
+VLLM_2S_Serve:
+	ray stop
+	OMP_DISPLAY_ENV=VERBOSE VLLM_CPU_KVCACHE_SPACE=40 OMP_PROC_BIND=close numactl --physcpubind=32-63 --membind=1 ray start --head --num-cpus=32 --num-gpus=0
+	cd benchmarks && OMP_DISPLAY_ENV=VERBOSE VLLM_CPU_KVCACHE_SPACE=40 OMP_PROC_BIND=close numactl --physcpubind=0-31 --membind=0 python3 -m vllm.entrypoints.openai.api_server --model lmsys/vicuna-7b-v1.5 --dtype=bfloat16 --device cpu -tp=2 
+
+VLLM_2S_Serve_Ray:
+	ray stop
+	OMP_DISPLAY_ENV=VERBOSE OMP_NUM_THREADS=32 VLLM_CPU_KVCACHE_SPACE=40 OMP_PROC_BIND=close OMP_WAIT_POLICY=active numactl --physcpubind=0-31 --membind=0 ray start --head --num-cpus=32 --num-gpus=0
+	OMP_DISPLAY_ENV=VERBOSE OMP_NUM_THREADS=32 VLLM_CPU_KVCACHE_SPACE=40 OMP_PROC_BIND=close OMP_WAIT_POLICY=active numactl --physcpubind=48-79 --membind=1 ray start --address=auto --num-cpus=32 --num-gpus=0
+	cd benchmarks && OMP_NUM_THREADS=32 numactl --physcpubind=32 --membind=0 python3 -m vllm.entrypoints.openai.api_server --model lmsys/vicuna-7b-v1.5 --dtype=bfloat16 --device cpu --engine-use-ray --disable-log-stats -tp=2
+
+VLLM_bench_client:
+	cd benchmarks && python3 benchmark_serving.py --backend vllm --model lmsys/vicuna-7b-v1.5 --tokenizer lmsys/vicuna-7b-v1.5 --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json --request-rate 8 --num-prompts 1000

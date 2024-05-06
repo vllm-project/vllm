@@ -367,8 +367,6 @@ class AsyncLLMEngine:
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "cpu":
-            assert distributed_executor_backend is None, (
-                "Distributed execution is not supported with the CPU backend.")
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
         elif distributed_executor_backend == "ray":
@@ -446,19 +444,38 @@ class AsyncLLMEngine:
                      **kwargs) -> Union[_AsyncLLMEngine, "ray.ObjectRef"]:
         if not self.engine_use_ray:
             engine_class = self._engine_class
-        elif self.worker_use_ray:
-            engine_class = ray.remote(num_cpus=0)(self._engine_class).remote
         else:
             # FIXME(woosuk): This is a bit hacky. Be careful when changing the
             # order of the arguments.
             cache_config = kwargs["cache_config"]
             parallel_config = kwargs["parallel_config"]
-            if parallel_config.tensor_parallel_size == 1:
-                num_gpus = cache_config.gpu_memory_utilization
+            device_config = kwargs["device_config"]
+            if device_config.device_type == "cpu":
+                import os
+                from ray.util.scheduling_strategies import (
+                    PlacementGroupSchedulingStrategy
+                )
+                omp_thread_num = int(os.getenv("OMP_NUM_THREADS"))
+                placement_group_specs = (
+                    [{"CPU": omp_thread_num}] * parallel_config.world_size)
+                placement_group = ray.util.placement_group(
+                    placement_group_specs, strategy="STRICT_SPREAD")
+                ray.get(placement_group.ready(), timeout=1800)
+                parallel_config.placement_group = placement_group
+                scheduling_strategy = PlacementGroupSchedulingStrategy(
+                        placement_group=placement_group,
+                        placement_group_capture_child_tasks=True,
+                        placement_group_bundle_index=0,
+                    )
+                engine_class = ray.remote(num_cpus=omp_thread_num,                 scheduling_strategy=scheduling_strategy)(
+                    self._engine_class).remote 
             else:
-                num_gpus = 1
-            engine_class = ray.remote(num_gpus=num_gpus)(
-                self._engine_class).remote
+                if parallel_config.tensor_parallel_size == 1:
+                    num_gpus = cache_config.gpu_memory_utilization
+                else:
+                    num_gpus = 1
+                engine_class = ray.remote(num_gpus=num_gpus)(
+                    self._engine_class).remote
         return engine_class(*args, **kwargs)
 
     async def engine_step(self) -> bool:
