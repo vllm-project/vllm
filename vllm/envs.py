@@ -201,6 +201,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
+
+    # Disable strict_mode in reject sampler of speculative decoding
+    # for better performance.
+    "VLLM_DISABLE_REJECT_SAMPLING_STRICT_MODE":
+    lambda: os.getenv("VLLM_DISABLE_REJECT_SAMPLING_STRICT_MODE", False),
 }
 
 # end-env-vars-definition

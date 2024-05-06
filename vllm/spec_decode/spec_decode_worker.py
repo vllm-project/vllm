@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
@@ -81,7 +82,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             disable_at_queue_size=disable_at_queue_size,
             # TODO(cade) disable strict mode for speedup.
             rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens, strict_mode=True),
+                disable_bonus_tokens=disable_bonus_tokens,
+                strict_mode=not envs.VLLM_DISABLE_REJECT_SAMPLING_STRICT_MODE),
         )
 
     def __init__(
