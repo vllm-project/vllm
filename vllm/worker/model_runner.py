@@ -257,6 +257,7 @@ class ModelRunner:
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        get_cross_tensors: Optional[bool] = False
     ) -> PreparePromptMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -463,6 +464,7 @@ class ModelRunner:
     def _prepare_decode(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
+        get_cross_tensors: Optional[bool] = False
     ) -> PrepareDecodeMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
@@ -656,7 +658,7 @@ class ModelRunner:
                 else:
                     decode_reqs.append(seq_group_meta)
 
-            # Prepare input tensors.
+            # Prepare self-attention input tensors.
             (
                 input_tokens,
                 input_positions,
@@ -668,7 +670,7 @@ class ModelRunner:
                 lora_requests,
                 multi_modal_input,
                 slot_mapping,
-            ) = self._prepare_prompt(prefill_reqs)
+            ) = self._prepare_prompt(prefill_reqs, get_cross_tensors=False)
             (
                 decode_input_tokens,
                 decode_input_positions,
@@ -677,8 +679,31 @@ class ModelRunner:
                 decode_lora_prompt_mapping,
                 decode_lora_requests,
                 decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
+            ) = self._prepare_decode(decode_reqs, get_cross_tensors=False)
 
+            if self.is_encoder_decoder:
+                # Prepare cross-attention input tensor
+                (
+                    cross_input_tokens,
+                    cross_input_positions,
+                    cross_prefill_attn_metadata,
+                    cross_seq_lens,
+                    cross_query_lens,
+                    cross_lora_index_mapping,
+                    cross_lora_prompt_mapping,
+                    cross_lora_requests,
+                    cross_multi_modal_input,
+                    cross_slot_mapping,
+                ) = self._prepare_prompt(prefill_reqs, get_cross_tensors=True)
+                (
+                    cross_decode_input_tokens,
+                    cross_decode_input_positions,
+                    cross_decode_attn_metadata,
+                    cross_decode_lora_index_mapping,
+                    cross_decode_lora_prompt_mapping,
+                    cross_decode_lora_requests,
+                    cross_decode_slot_mapping,
+                ) = self._prepare_decode(decode_reqs, get_cross_tensors=True)
 
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
@@ -729,20 +754,49 @@ class ModelRunner:
             else:
                 batch_type = BatchType.DECODE
 
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-                "multi_modal_input": multi_modal_input,
-                "num_prefill_tokens": num_prefill_tokens,
-                "num_decode_tokens": num_decode_tokens,
-                "slot_mapping": slot_mapping,
-                "num_prefills": num_prefills,
-                "batch_type": batch_type,
-            }
+            if self.is_encoder_decoder:
+                metadata_dict = {
+                    "input_tokens": input_tokens,
+                    "input_positions": input_positions,
+                    "selected_token_indices":
+                    sampling_metadata.selected_token_indices,
+                    "lora_requests": lora_requests,
+                    "lora_mapping": lora_mapping,
+                    "multi_modal_input": multi_modal_input,
+                    "num_prefill_tokens": num_prefill_tokens,
+                    "num_decode_tokens": num_decode_tokens,
+                    "slot_mapping": slot_mapping,
+                    "num_prefills": num_prefills,
+                    "batch_type": batch_type,
+                    "cross_input_tokens": cross_input_tokens,
+                    "cross_input_positions": cross_input_positions,
+                    "cross_prefill_attn_metadata": cross_prefill_attn_metadata,
+                    "cross_seq_lens": cross_seq_lens,
+                    "cross_query_lens": cross_query_lens,
+                    "cross_multi_modal_input": cross_multi_modal_input,
+                    "cross_slot_mapping": cross_slot_mapping,
+                    "cross_decode_input_tokens": cross_decode_input_tokens,
+                    "cross_decode_input_positions": cross_decode_input_positions,
+                    "cross_decode_attn_metadata": cross_decode_attn_metadata,
+                    "cross_decode_slot_mapping": cross_decode_slot_mapping,
+                }
+
+            else:
+                metadata_dict = {
+                    "input_tokens": input_tokens,
+                    "input_positions": input_positions,
+                    "selected_token_indices":
+                    sampling_metadata.selected_token_indices,
+                    "lora_requests": lora_requests,
+                    "lora_mapping": lora_mapping,
+                    "multi_modal_input": multi_modal_input,
+                    "num_prefill_tokens": num_prefill_tokens,
+                    "num_decode_tokens": num_decode_tokens,
+                    "slot_mapping": slot_mapping,
+                    "num_prefills": num_prefills,
+                    "batch_type": batch_type,
+                }
+            
             if prefill_attn_metadata is not None:
                 metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
             else:
@@ -771,6 +825,19 @@ class ModelRunner:
             num_prefill_tokens = metadata_dict.pop("num_prefill_tokens")
             num_decode_tokens = metadata_dict.pop("num_decode_tokens")
             batch_type = metadata_dict.pop("batch_type")
+
+            if self.is_encoder_decoder:
+                cross_input_tokens = metadata_dict.pop("cross_input_tokens")
+                cross_input_positions = metadata_dict.pop("cross_input_positions")
+                #cross_prefill_attn_metadata = metadata_dict.pop("cross_prefill_attn_metadata")
+                cross_seq_lens = metadata_dict.pop("cross_seq_lens")
+                cross_query_lens = metadata_dict.pop("cross_query_lens")
+                cross_multi_modal_input = metadata_dict.pop("cross_multi_modal_input")
+                cross_slot_mapping = metadata_dict.pop("cross_slot_mapping")
+                cross_decode_input_tokens = metadata_dict.pop("cross_decode_input_tokens")
+                cross_decode_input_positions = metadata_dict.pop("cross_decode_input_positions")
+                #cross_decode_attn_metadata = metadata_dict.pop("cross_decode_attn_metadata")
+                cross_decode_slot_mapping = metadata_dict.pop("cross_decode_slot_mapping")               
 
             # Create an attention metadata.
             prefill_attn_metadata = None
