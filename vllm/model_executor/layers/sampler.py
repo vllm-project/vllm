@@ -778,7 +778,7 @@ def _get_logprobs(
 
     # Logprobs of topk tokens for a batch of sequence groups.
     # (num_query_tokens_across_batch).
-    if largest_num_logprobs > 1:
+    if largest_num_logprobs > 0:
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
@@ -829,13 +829,20 @@ def _get_prompt_logprob_if_needed(
         prompt_logprobs = []
         num_logprobs = sampling_params.prompt_logprobs
         next_prompt_tokens = _get_next_prompt_tokens(seq_group)
-        for token_id in next_prompt_tokens:
+        # Pre-select indexes and create a list. It is faster than calling .item
+        # repetitively.
+        selected_logprob_items = selected_logprobs[
+            selected_logprobs_idx:selected_logprobs_idx +
+            len(next_prompt_tokens)].tolist()
+        rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
+                           len(next_prompt_tokens)].tolist()
+
+        for idx, token_id in enumerate(next_prompt_tokens):
             # Calculate the prompt logprob of the real prompt tokens.
             # Use tuple here for performance (to use to_list()).
             # {token_id: (logprob, rank_from_vocab)}
             prompt_logprobs_dict: Dict[int, Tuple[float, int]] = {
-                token_id: (selected_logprobs[selected_logprobs_idx].item(),
-                           ranks[selected_logprobs_idx].item())
+                token_id: (selected_logprob_items[idx], rank_items[idx])
             }
 
             # Add top K prompt logprobs along with its rank.
@@ -877,7 +884,8 @@ def _get_sampled_logprob_if_needed(
 
     if seq_group.do_sample:
         assert len(next_token_ids) > 0
-        # Pre-fetch all required selected_logprobs and ranks
+        # Pre-select items from tensor. tolist() is faster than repetitive
+        # `.item()` calls.
         selected_logprob_items = selected_logprobs[
             selected_logprobs_idx:selected_logprobs_idx +
             len(next_token_ids)].tolist()
@@ -888,7 +896,7 @@ def _get_sampled_logprob_if_needed(
             sampled_logprobs_dict = {
                 next_token_id: (selected_logprob_items[idx], rank_items[idx])
             }
-            if num_logprobs > 1:
+            if num_logprobs > 0:
                 top_ids = top_token_ids[top_logprob_idx +
                                         parent_id, :num_logprobs].tolist()
                 top_probs = top_logprobs[top_logprob_idx +
