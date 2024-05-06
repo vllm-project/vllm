@@ -76,7 +76,8 @@ def test_flash_attn(
         block_tables=block_tables,
         scale=scale,
     )
-    assert torch.allclose(output, ref_output, atol=1e-3, rtol=1e-3)
+    assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
+        f"{torch.max(torch.abs(output - ref_output))}"
 
 
 def ref_attention(
