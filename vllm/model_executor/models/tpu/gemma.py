@@ -3,7 +3,6 @@ from typing import Any, List
 import torch
 import torch.nn.functional as F
 from torch import nn
-import torch_xla.experimental.custom_kernel  # Required to register flash_attention.
 from transformers import GemmaConfig, PreTrainedModel
 
 from vllm.attention import Attention, AttentionMetadata
