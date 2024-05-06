@@ -44,6 +44,10 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.PALLAS:
+        logger.info("Using Pallas backend.")
+        from vllm.attention.backends.pallas import PallasAttentionBackend
+        return PallasAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 
