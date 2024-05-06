@@ -62,12 +62,11 @@ class TPUModelRunner:
         self,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
-        return
         # Prefill
         logger.info("Compiling the model with different input shapes...")
         start = time.time()
         for batch_size in [1]:
-            for seq_len in [8192, 4096, 2048, 1024, 512, 256, 128, 64, 32, 16]:
+            for seq_len in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
                 if batch_size * seq_len > 8192:
                     continue
                 token_ids = torch.zeros((batch_size, seq_len),
@@ -98,9 +97,9 @@ class TPUModelRunner:
                 # Dummy run.
                 self.model(token_ids, position_ids, kv_caches, attn_metadata)
                 xm.mark_step()
+                xm.wait_device_ops()
                 logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
-        xm.wait_device_ops()
         end = time.time()
         logger.info(f"Compilation for prefill done in {(end - start):.2f} s.")
 
@@ -140,8 +139,8 @@ class TPUModelRunner:
             # Dummy run.
             self.model(token_ids, position_ids, kv_caches, attn_metadata)
             xm.mark_step()
+            xm.wait_device_ops()
 
-        xm.wait_device_ops()
         end = time.time()
         logger.info(f"Compilation for decode done in {(end - start):.2f} s.")
 
