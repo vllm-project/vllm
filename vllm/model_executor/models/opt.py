@@ -355,5 +355,5 @@ class OPTForCausalLM(nn.Module):
         # memory optimization: if lm_head quantization is not enabled lm_head
         # is same as embed_tokens. keep only one copy
         if (self.quant_config is None
-                or not self.quant_config.lm_head_quantized):
+                or not self.quant_config.is_lm_head_quantized()):
             self.lm_head = self.model.decoder.embed_tokens

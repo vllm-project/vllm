@@ -60,6 +60,9 @@ class SqueezeLLMConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def is_lm_head_quantized(self) -> bool:
+        return False
+
 
 class SqueezeLLMLinearMethod(QuantizableMethodBase):
     """Linear method for SqueezeLLM.

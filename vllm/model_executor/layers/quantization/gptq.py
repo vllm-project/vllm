@@ -83,6 +83,9 @@ class GPTQConfig(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def is_lm_head_quantized(self) -> bool:
+        return self.lm_head_quantized
+
 
 class ExllamaState(Enum):
 

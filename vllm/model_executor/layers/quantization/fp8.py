@@ -66,6 +66,9 @@ class Fp8Config(QuantizationConfig):
     def get_scaled_act_names(self) -> List[str]:
         return []
 
+    def is_lm_head_quantized(self) -> bool:
+        return False
+
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.

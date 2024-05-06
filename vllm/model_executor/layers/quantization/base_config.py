@@ -35,9 +35,6 @@ class QuantizableMethodBase(ABC):
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
 
-    # if lm_head is quantized
-    lm_head_quantized: bool = False
-
     @abstractmethod
     def get_name(self) -> str:
         """Name of the quantization method."""
@@ -107,4 +104,9 @@ class QuantizationConfig(ABC):
 
         For now, this is only used by AWQ.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def is_lm_head_quantized(self) -> bool:
+        """Returns if lm_head layer is quantized."""
         raise NotImplementedError
