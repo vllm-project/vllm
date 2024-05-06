@@ -29,8 +29,8 @@ def test_contexted_kv_attention_alibi(
     dtype: torch.dtype,
     device: str,
 ) -> None:
-    # NOTE(DefTruth): The random seed here can not been set as the 
-    # same one in test_prefix_prefill.py script to avoid illegal 
+    # NOTE(DefTruth): The random seed here can not been set as the
+    # same one in test_prefix_prefill.py script to avoid illegal
     # memory access error in CI.
     random.seed(1)
     torch.manual_seed(1)
