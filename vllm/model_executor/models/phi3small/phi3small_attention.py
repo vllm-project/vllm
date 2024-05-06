@@ -382,10 +382,10 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
+                    kv_scale,
                     self.local_blocks,
                     self.vert_stride,
                     self.sparse_block_size,
-                    kv_scale,
                 )
 
         # Reshape the output tensor.

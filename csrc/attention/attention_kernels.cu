@@ -93,6 +93,7 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS,
   bool IS_FP8_KV_CACHE,
+  bool IS_BLOCK_SPARSE,
   int PARTITION_SIZE = 0> // Zero means no partitioning.
 __device__ void paged_attention_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
@@ -110,10 +111,11 @@ __device__ void paged_attention_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const float kv_scale,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
-  const float kv_scale) {
+  const int blocksparse_head_sliding_step) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -124,10 +126,6 @@ __device__ void paged_attention_kernel(
     return;
   }
 
-  // const int blocksparse_local_blocks = 16;
-  // const int blocksparse_vert_stride = 8;
-  // const int blocksparse_block_size = 64;
-  const int blocksparse_head_sliding_step = 1;
   const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
   const int num_blocks_per_partition = USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_context_blocks;
 
@@ -207,12 +205,11 @@ __device__ void paged_attention_kernel(
   // dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
   const int num_blocksparse_blocks = DIVIDE_ROUND_UP(num_context_blocks, 4);
-  const bool is_sparse =  (blocksparse_vert_stride != 1);
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // For blocksparse attention: skip computation on blocks that are not attended
-    if (is_sparse) {
+    if constexpr (IS_BLOCK_SPARSE) {
       const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
       const bool is_remote = ((block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride == 0);
       const bool is_local = (block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks);
@@ -362,7 +359,7 @@ __device__ void paged_attention_kernel(
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // For blocksparse attention: skip computation on blocks that are not attended
-    if (is_sparse) {
+    if constexpr (IS_BLOCK_SPARSE) {
       int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
       if (!((block_seq_id + head_idx * blocksparse_head_sliding_step + 1) % blocksparse_vert_stride == 0) &&
           !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
@@ -483,7 +480,8 @@ template<
   int HEAD_SIZE,
   int BLOCK_SIZE,
   int NUM_THREADS,
-  bool IS_FP8_KV_CACHE>
+  bool IS_FP8_KV_CACHE,
+  bool IS_BLOCK_SPARSE>
 __global__ void paged_attention_v1_kernel(
   scalar_t* __restrict__ out,             // [num_seqs, num_heads, head_size]
   const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -498,15 +496,17 @@ __global__ void paged_attention_v1_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const float kv_scale,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
-  const float kv_scale) {
-  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE>(
+  const int blocksparse_head_sliding_step) {
+  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE>(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
     out, q, k_cache, v_cache, num_kv_heads, scale, block_tables, context_lens,
-    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, 
-    blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size, kv_scale);
+    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, kv_scale,
+    blocksparse_local_blocks, blocksparse_vert_stride,
+    blocksparse_block_size, blocksparse_head_sliding_step);
 }
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
@@ -517,6 +517,7 @@ template<
   int BLOCK_SIZE,
   int NUM_THREADS,
   bool IS_FP8_KV_CACHE,
+  bool IS_BLOCK_SPARSE,
   int PARTITION_SIZE>
 __global__ void paged_attention_v2_kernel(
   float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
@@ -534,15 +535,17 @@ __global__ void paged_attention_v2_kernel(
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
+  const float kv_scale,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
-  const float kv_scale) {
-  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, PARTITION_SIZE>(
+  const int blocksparse_head_sliding_step) {
+  paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
     exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
     block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
-    q_stride, kv_block_stride, kv_head_stride, blocksparse_local_blocks,
-    blocksparse_vert_stride, blocksparse_block_size,kv_scale);
+    q_stride, kv_block_stride, kv_head_stride, kv_scale,
+    blocksparse_local_blocks, blocksparse_vert_stride,
+    blocksparse_block_size, blocksparse_head_sliding_step);
 }
 
 // Grid: (num_heads, num_seqs).
@@ -649,9 +652,9 @@ __global__ void paged_attention_v2_reduce_kernel(
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                                  \
   VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(                                       \
     ((void*)vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,   \
-      IS_FP8_KV_CACHE>), shared_mem_size);                                                    \
+      IS_FP8_KV_CACHE, IS_BLOCK_SPARSE>), shared_mem_size);                                   \
   vllm::paged_attention_v1_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,             \
-  IS_FP8_KV_CACHE><<<grid, block, shared_mem_size, stream>>>(                                 \
+  IS_FP8_KV_CACHE, IS_BLOCK_SPARSE><<<grid, block, shared_mem_size, stream>>>(                \
     out_ptr,                                                                                  \
     query_ptr,                                                                                \
     key_cache_ptr,                                                                            \
@@ -665,10 +668,11 @@ __global__ void paged_attention_v2_reduce_kernel(
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
+    kv_scale,                                                                                 \
     blocksparse_local_blocks,                                                                 \
     blocksparse_vert_stride,                                                                  \
     blocksparse_block_size,                                                                   \
-    kv_scale);
+    blocksparse_head_sliding_step);
 
 // TODO(woosuk): Tune NUM_THREADS.
 template<
@@ -676,6 +680,7 @@ template<
   typename CACHE_T,
   int BLOCK_SIZE,
   bool IS_FP8_KV_CACHE,
+  bool IS_BLOCK_SPARSE,
   int NUM_THREADS = 128>
 void paged_attention_v1_launcher(
   torch::Tensor& out,
@@ -688,10 +693,11 @@ void paged_attention_v1_launcher(
   torch::Tensor& context_lens,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale) {
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -756,8 +762,10 @@ void paged_attention_v1_launcher(
   }
 }
 
-#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)            \
-  paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE>(      \
+#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,            \
+          IS_BLOCK_SPARSE)                                                   \
+  paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,       \
+          IS_BLOCK_SPARSE>(                                                  \
     out,                                                                     \
     query,                                                                   \
     key_cache,                                                               \
@@ -768,27 +776,38 @@ void paged_attention_v1_launcher(
     context_lens,                                                            \
     max_context_len,                                                         \
     alibi_slopes,                                                            \
+    kv_scale,                                                                \
     blocksparse_local_blocks,                                                \
     blocksparse_vert_stride,                                                 \
     blocksparse_block_size,                                                  \
-    kv_scale);
+    blocksparse_head_sliding_step);
+
+#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
+  switch (is_block_sparse) {                                                 \
+    case true:                                                               \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
+      break;                                                                 \
+    default:                                                                 \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+      break;                                                                 \
+  }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
-#define CALL_V1_LAUNCHER_BLOCK_SIZE(T, CACHE_T, IS_FP8_KV_CACHE)      \
-  switch (block_size) {                                               \
-    case 8:                                                           \
-      CALL_V1_LAUNCHER(T, CACHE_T, 8, IS_FP8_KV_CACHE);               \
-      break;                                                          \
-    case 16:                                                          \
-      CALL_V1_LAUNCHER(T, CACHE_T, 16, IS_FP8_KV_CACHE);              \
-      break;                                                          \
-    case 32:                                                          \
-      CALL_V1_LAUNCHER(T, CACHE_T, 32, IS_FP8_KV_CACHE);              \
-      break;                                                          \
-    default:                                                          \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);     \
-      break;                                                          \
+#define CALL_V1_LAUNCHER_BLOCK_SIZE(T, CACHE_T, IS_FP8_KV_CACHE)             \
+  switch (block_size) {                                                      \
+    case 8:                                                                  \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 8, IS_FP8_KV_CACHE);             \
+      break;                                                                 \
+    case 16:                                                                 \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 16, IS_FP8_KV_CACHE);            \
+      break;                                                                 \
+    case 32:                                                                 \
+      CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, 32, IS_FP8_KV_CACHE);            \
+      break;                                                                 \
+    default:                                                                 \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);            \
+      break;                                                                 \
   }
 
 void paged_attention_v1(
@@ -804,10 +823,12 @@ void paged_attention_v1(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale) {
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step) {
+  const bool is_block_sparse = (blocksparse_vert_stride > 1);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V1_LAUNCHER_BLOCK_SIZE(float, float, false);
@@ -835,7 +856,7 @@ void paged_attention_v1(
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                                  \
   vllm::paged_attention_v2_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,             \
-  IS_FP8_KV_CACHE, PARTITION_SIZE>                                                            \
+  IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, PARTITION_SIZE>                                           \
   <<<grid, block, shared_mem_size, stream>>>(                                                 \
     exp_sums_ptr,                                                                             \
     max_logits_ptr,                                                                           \
@@ -852,10 +873,11 @@ void paged_attention_v1(
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
+    kv_scale,                                                                                 \
     blocksparse_local_blocks,                                                                 \
     blocksparse_vert_stride,                                                                  \
     blocksparse_block_size,                                                                   \
-    kv_scale);                                                                                \
+    blocksparse_head_sliding_step);                                                           \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>           \
   <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                                   \
     out_ptr,                                                                                  \
@@ -870,6 +892,7 @@ template<
   typename CACHE_T,
   int BLOCK_SIZE,
   bool IS_FP8_KV_CACHE,
+  bool IS_BLOCK_SPARSE,
   int NUM_THREADS = 128,
   int PARTITION_SIZE = 512>
 void paged_attention_v2_launcher(
@@ -886,10 +909,11 @@ void paged_attention_v2_launcher(
   torch::Tensor& context_lens,
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale) {
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -959,8 +983,10 @@ void paged_attention_v2_launcher(
   }
 }
 
-#define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)                \
-  paged_attention_v2_launcher<T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE>(          \
+#define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,                \
+          IS_BLOCK_SPARSE)                                                       \
+  paged_attention_v2_launcher<T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,           \
+         IS_BLOCK_SPARSE>(                                                       \
     out,                                                                         \
     exp_sums,                                                                    \
     max_logits,                                                                  \
@@ -974,23 +1000,41 @@ void paged_attention_v2_launcher(
     context_lens,                                                                \
     max_context_len,                                                             \
     alibi_slopes,                                                                \
+    kv_scale,                                                                    \
     blocksparse_local_blocks,                                                    \
     blocksparse_vert_stride,                                                     \
     blocksparse_block_size,                                                      \
-    kv_scale);
+    blocksparse_head_sliding_step);
+
+// #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
+//   if (is_block_sparse)                                                       \
+//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
+//   else                                                                       \
+//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+
+#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
+  switch (is_block_sparse) {                                                 \
+    case true:                                                               \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
+      break;                                                                 \
+    default:                                                                 \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+      break;                                                                 \
+  }
+
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
 // 1, 2, 4, 64, 128, 256.
 #define CALL_V2_LAUNCHER_BLOCK_SIZE(T, CACHE_T, IS_FP8_KV_CACHE)            \
   switch (block_size) {                                                     \
     case 8:                                                                 \
-      CALL_V2_LAUNCHER(T, CACHE_T, 8, IS_FP8_KV_CACHE);                     \
+      CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, 8, IS_FP8_KV_CACHE);            \
       break;                                                                \
     case 16:                                                                \
-      CALL_V2_LAUNCHER(T, CACHE_T, 16, IS_FP8_KV_CACHE);                    \
+      CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, 16, IS_FP8_KV_CACHE);           \
       break;                                                                \
     case 32:                                                                \
-      CALL_V2_LAUNCHER(T, CACHE_T, 32, IS_FP8_KV_CACHE);                    \
+      CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, 32, IS_FP8_KV_CACHE);           \
       break;                                                                \
     default:                                                                \
       TORCH_CHECK(false, "Unsupported block size: ", block_size);           \
@@ -1013,10 +1057,12 @@ void paged_attention_v2(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale) {
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step) {
+  const bool is_block_sparse = (blocksparse_vert_stride > 1);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Float) {
       CALL_V2_LAUNCHER_BLOCK_SIZE(float, float, false);

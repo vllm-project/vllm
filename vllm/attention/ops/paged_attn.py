@@ -97,13 +97,20 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        blocksparse_local_blocks: int,
-        blocksparse_vert_stride: int,
-        blocksparse_block_size: int,
         kv_scale: float,
+        blocksparse_local_blocks: int = 16,
+        blocksparse_vert_stride: int = 1,
+        blocksparse_block_size: int = 64,
+        blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
-        output = torch.empty_like(query)
+        if blocksparse_vert_stride > 1:
+            # use blocksparse paged attention
+            assert blocksparse_block_size > 0 and \
+                blocksparse_block_size % block_size == 0 \
+                (f"{blocksparse_block_size=} needs to be a multiple of"
+                 f"{block_size=} used in block_tables.")
 
+        output = torch.empty_like(query)
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
@@ -117,6 +124,7 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_context_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
@@ -132,10 +140,11 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                kv_scale,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
                 blocksparse_block_size,
-                kv_scale,
+                blocksparse_head_sliding_step,
             )
         else:
             # Run PagedAttention V2.
@@ -167,10 +176,11 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
+                kv_scale,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
                 blocksparse_block_size,
-                kv_scale,
+                blocksparse_head_sliding_step,
             )
         return output
 

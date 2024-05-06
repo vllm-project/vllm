@@ -129,9 +129,6 @@ class FlashAttentionImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_local_blocks: int = 16,
-        blocksparse_vert_stride: int = 1,
-        blocksparse_block_size: int = 64,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -142,14 +139,9 @@ class FlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.blocksparse_local_blocks = blocksparse_local_blocks
-        self.blocksparse_vert_stride = blocksparse_vert_stride
-        self.blocksparse_block_size = blocksparse_block_size
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        # print(f'> {self.num_heads=}, {self.num_kv_heads=}, {self.head_size}')
 
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -246,9 +238,6 @@ class FlashAttentionImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                self.blocksparse_local_blocks,
-                self.blocksparse_vert_stride,
-                self.blocksparse_block_size,
                 kv_scale,
             )
 

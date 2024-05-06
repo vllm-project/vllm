@@ -147,9 +147,6 @@ class XFormersImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_local_blocks: int = 16,
-        blocksparse_vert_stride: int = 1,
-        blocksparse_block_size: int = 64,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -173,9 +170,6 @@ class XFormersImpl(AttentionImpl):
         # nor FlashAttention. As a temporary workaround, we use naive PyTorch
         # implementation of attention.
         self.use_naive_attention = _check_use_naive_attention()
-        self.blocksparse_local_blocks = blocksparse_local_blocks
-        self.blocksparse_vert_stride = blocksparse_vert_stride
-        self.blocksparse_block_size = blocksparse_block_size
 
     def forward(
         self,
@@ -296,9 +290,6 @@ class XFormersImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
-                self.blocksparse_local_blocks,
-                self.blocksparse_vert_stride,
-                self.blocksparse_block_size,
                 kv_scale,
             )
 
