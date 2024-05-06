@@ -334,7 +334,7 @@ class TPUModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> Tuple[Optional[SamplerOutput]]:
+    ) -> Optional[List[SamplerOutput]]:
         from vllm.sequence import SequenceOutput, SequenceGroupOutput, Logprob
 
         start = time.time()
