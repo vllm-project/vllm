@@ -1,7 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <cuda_fp8.h>
 
 #include <cmath>
 
