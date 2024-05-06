@@ -151,7 +151,7 @@ class ModelRunner:
         self.vision_language_config = vision_language_config
         self.seqlen_agnostic_cache: Optional[Tuple[torch.Tensor, torch.Tensor]]
         self.seqlen_agnostic_gc_cache_buffer: Optional[Tuple[torch.Tensor, torch.Tensor]]
-        self.contains_seqlen_agnostic_layers = self.model_config.contains_seqlen_agnostic_layers()
+        self.contains_seqlen_agnostic_layers = self.model_config.contains_seqlen_agnostic_layers(parallel_config)
         self.seqlen_agnostic_cache_indices_mapping: Dict[str, Dict[int, int]] = {}
 
         self.attn_backend = get_attn_backend(
@@ -162,7 +162,7 @@ class ModelRunner:
             return
         num_seqlen_agnostic_layers = self.model_config.get_num_seqlen_agnostic_layers(self.parallel_config)
         max_batch_size = _BATCH_SIZES_TO_CAPTURE[-1]
-        conv_state_shape, temporal_state_shape = self.model_config.get_num_seqlen_agnostic_cache_shape(self.parallel_config)
+        conv_state_shape, temporal_state_shape = self.model_config.get_seqlen_agnostic_cache_shape(self.parallel_config)
         assert conv_state_shape is not None and temporal_state_shape is not None
         for buffername in [
             "seqlen_agnostic_cache",
@@ -871,18 +871,6 @@ class ModelRunner:
             indices_for_current_run.append(index_for_current_run)
         return indices_for_current_run
 
-
-    # def _find_seq_len_agnostic_pad_index(self, indices_for_current_run, max_possible_bs) -> int:
-    #     occupied_indices = set([i for s_ids in 
-    #                 self.seqlen_agnostic_cache_indices_mapping.values() 
-    #                 for i in s_ids.values()]).union(indices_for_current_run)
-    #     pad_index = [ i not in  occupied_indices for i in range(
-    #         max_possible_bs
-    #     ) ].index(True)
-    #     return pad_index
-    #
-    #
-    #
     def _prepare_current_run_seqlen_agnostic_cache(
         self,
         requests_info: List[RequestInfo],

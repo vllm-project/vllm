@@ -275,8 +275,8 @@ class ModelConfig:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
 
-    def contains_seqlen_agnostic_layers(self) -> int:
-        return self.hf_config.model_type in ["jamba"]
+    def contains_seqlen_agnostic_layers(self, parallel_config: "ParallelConfig") -> bool:
+        return self.get_num_seqlen_agnostic_layers(parallel_config) > 0
 
     def get_layers_block_type(self,
         parallel_config: "ParallelConfig") -> List[str]:
@@ -301,7 +301,7 @@ class ModelConfig:
             parallel_config
         ) if t != "attention"])
 
-    def get_num_seqlen_agnostic_cache_shape(
+    def get_seqlen_agnostic_cache_shape(
         self,
         parallel_config
     ) -> Tuple[Optional[Tuple[int,int]],Optional[Tuple[int,int]]]:
