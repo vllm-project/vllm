@@ -1,5 +1,4 @@
 """Inference-only Snowflake Arctic model."""
-import os
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -14,8 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -116,16 +114,14 @@ class ArcticMoE(nn.Module):
                                          quant_config=quant_config)
             if self.is_quant:
                 self.ws = DeepSpeedFPParameter(
-                    torch.Size((self.num_experts,
-                                2 * self.intermediate_size,
+                    torch.Size((self.num_experts, 2 * self.intermediate_size,
                                 self.hidden_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
                 torch.cuda.empty_cache()
                 self.w2s = DeepSpeedFPParameter(
-                    torch.Size((self.num_experts,
-                                self.hidden_size,
+                    torch.Size((self.num_experts, self.hidden_size,
                                 self.intermediate_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
@@ -154,10 +150,7 @@ class ArcticMoE(nn.Module):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
-        if self.is_quant:
-            param_data = param.ds_dequantize()
-        else:
-            param_data = param.data
+        param_data = param.ds_dequantize() if self.is_quant else param.data
         shard_size = self.intermediate_size
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
@@ -220,10 +213,12 @@ class ArcticMoE(nn.Module):
 
 class ArcticAttention(nn.Module):
 
-    def __init__(self,
-                 config: ArcticConfig,
-                 layer_idx: Optional[int] = None,
-                 quant_config: Optional[QuantizationConfig] = None,):
+    def __init__(
+        self,
+        config: ArcticConfig,
+        layer_idx: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -454,38 +449,38 @@ class ArcticForCausalLM(nn.Module):
         num_layers = self.config.num_hidden_layers
 
         for layer in range(num_layers):
-            mlp_params_mapping.append((
-                f"layers.{layer}.residual_mlp.w13.weight",
-                f"layers.{layer}.residual_mlp.w1.weight", 0))
-            mlp_params_mapping.append((
-                f"layers.{layer}.residual_mlp.w13.weight",
-                f"layers.{layer}.residual_mlp.w3.weight", 1))
+            mlp_params_mapping.append(
+                (f"layers.{layer}.residual_mlp.w13.weight",
+                 f"layers.{layer}.residual_mlp.w1.weight", 0))
+            mlp_params_mapping.append(
+                (f"layers.{layer}.residual_mlp.w13.weight",
+                 f"layers.{layer}.residual_mlp.w3.weight", 1))
             if layer % 2 == 0:
                 # MLP layers
-                mlp_params_mapping.append((
-                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
-                    f"layers.{layer}.block_sparse_moe.mlp.w1.weight", 0))
-                mlp_params_mapping.append((
-                    f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
-                    f"layers.{layer}.block_sparse_moe.mlp.w3.weight", 1))
+                mlp_params_mapping.append(
+                    (f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                     f"layers.{layer}.block_sparse_moe.mlp.w1.weight", 0))
+                mlp_params_mapping.append(
+                    (f"layers.{layer}.block_sparse_moe.mlp.w13.weight",
+                     f"layers.{layer}.block_sparse_moe.mlp.w3.weight", 1))
             else:
                 # MoE layers
                 for expert_id in range(self.config.num_local_experts):
-                    expert_params_mapping.append((
-                        "ws", f"experts.{expert_id}.w1.weight", expert_id))
-                    expert_params_mapping.append((
-                        "w2s", f"experts.{expert_id}.w2.weight", expert_id))
-                    expert_params_mapping.append((
-                        "ws", f"experts.{expert_id}.w3.weight", expert_id))
+                    expert_params_mapping.append(
+                        ("ws", f"experts.{expert_id}.w1.weight", expert_id))
+                    expert_params_mapping.append(
+                        ("w2s", f"experts.{expert_id}.w2.weight", expert_id))
+                    expert_params_mapping.append(
+                        ("ws", f"experts.{expert_id}.w3.weight", expert_id))
 
         params_dict = dict(self.named_parameters())
 
         logger.info(
-            "It will take ~10 minutes if you are loading from the 16-bit weights. Please be patient."
-            "Alternatively, you can load much faster using the prequantized 8-bit weights of arctic.")
+            "It will take ~10 minutes loading from the 16-bit weights. "
+            "Alternatively, use the prequantized 8-bit weights of arctic "
+            "and set load-format to `state_dict` will accelerate loading.")
         for name, loaded_weight in weights:
-            for (param_name, weight_name,
-                    shard_id) in stacked_params_mapping:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -514,13 +509,12 @@ class ArcticForCausalLM(nn.Module):
                         param = params_dict[name]
                         weight_loader = param.weight_loader
                         weight_loader(param,
-                                        loaded_weight,
-                                        weight_name,
-                                        expert_id=shard_id)
+                                      loaded_weight,
+                                      weight_name,
+                                      expert_id=shard_id)
                         break
                     else:
-                        if name.endswith(
-                                ".bias") and name not in params_dict:
+                        if name.endswith(".bias") and name not in params_dict:
                             continue
                         param = params_dict[name]
 

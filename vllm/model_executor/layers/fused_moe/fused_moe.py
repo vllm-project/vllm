@@ -352,20 +352,18 @@ def fused_topk(
     return topk_weights, topk_ids
 
 
-def fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    inplace: bool = False,
-    override_config: Optional[Dict[str, Any]] = None,
-    use_fp8: bool = False,
-    w1_scale: Optional[torch.Tensor] = None,
-    w2_scale: Optional[torch.Tensor] = None,
-    a1_scale: Optional[torch.Tensor] = None,
-    a2_scale: Optional[torch.Tensor] = None
-):
+def fused_experts(hidden_states: torch.Tensor,
+                  w1: torch.Tensor,
+                  w2: torch.Tensor,
+                  topk_weights: torch.Tensor,
+                  topk_ids: torch.Tensor,
+                  inplace: bool = False,
+                  override_config: Optional[Dict[str, Any]] = None,
+                  use_fp8: bool = False,
+                  w1_scale: Optional[torch.Tensor] = None,
+                  w2_scale: Optional[torch.Tensor] = None,
+                  a1_scale: Optional[torch.Tensor] = None,
+                  a2_scale: Optional[torch.Tensor] = None):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
@@ -465,7 +463,7 @@ def fused_experts(
 
 
 def fused_moe(
-        hidden_states: torch.Tensor,
+    hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     gating_output: torch.Tensor,

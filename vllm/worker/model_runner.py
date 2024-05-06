@@ -214,6 +214,7 @@ class ModelRunner:
 
     def save_model(self, path: str) -> None:
         from safetensors.torch import save_model
+
         from vllm.distributed import get_tensor_model_parallel_rank
         rank = get_tensor_model_parallel_rank()
         save_model(self.model, f"{path}/model.{rank}.safetensors")

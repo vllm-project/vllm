@@ -362,6 +362,7 @@ class StateDictLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig) -> nn.Module:
         from safetensors.torch import load_model
+
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):

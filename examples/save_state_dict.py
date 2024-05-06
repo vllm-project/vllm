@@ -27,7 +27,11 @@ llm = LLM(
 
 parser = argparse.ArgumentParser()
 EngineArgs.add_cli_args(parser)
-parser.add_argument("--output", "-o", required=True, type=str, help="path to output checkpoint")
+parser.add_argument("--output",
+                    "-o",
+                    required=True,
+                    type=str,
+                    help="path to output checkpoint")
 
 
 def main(args):
@@ -44,8 +48,10 @@ def main(args):
     model_executor._run_workers("save_model", path=args.output)
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
-        if not any(file.endswith(ext) for ext in (".bin", ".pt", ".safetensors")):
+        if not any(
+                file.endswith(ext) for ext in (".bin", ".pt", ".safetensors")):
             shutil.copy(f"{model_path}/{file}", args.output)
+
 
 if __name__ == "__main__":
     args = parser.parse_args()
