@@ -105,7 +105,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value = value.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
 
         if kv_cache is not None:
-            slot_mapping = attn_metadata.slot_mapping.flatten()
+            slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
@@ -151,6 +151,7 @@ def write_to_kv_cache(
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
+    slot_mapping = slot_mapping.flatten()
     key_cache = key_cache.flatten(0, 1)
     key = key.flatten(0, 1)
     key_cache.index_copy_(0, slot_mapping, key)
