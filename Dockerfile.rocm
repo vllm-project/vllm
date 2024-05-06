@@ -58,12 +58,6 @@ ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
 ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
 
-RUN mkdir libs \
-    && git clone https://github.com/meta-llama/llama3.git \
-    && cd llama3 \
-    && pip install -e . \
-    && cd ..;
-
 # Install ROCm flash-attention
 RUN if [ "$BUILD_FA" = "1" ]; then \
     mkdir libs \
@@ -109,5 +103,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
+
+RUN mkdir -p libs \
+    && git clone https://github.com/meta-llama/llama3.git \
+    && cd llama3 \
+    && pip install -e . \
+    && cd ..;
 
 CMD ["/bin/bash"]
