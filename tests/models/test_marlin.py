@@ -19,7 +19,6 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-from compare_utils import check_logprobs_close
 
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS

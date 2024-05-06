@@ -14,6 +14,8 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
 #   Otherwise, we have duplicate ray.init() calls which fails.
 #   Rather than ruining .github/scripts/run-tests to pass via env
 #   variables, we just run llama which is sufficient for smoke test.
+import os
+
 import pytest
 import torch
 

@@ -54,4 +54,5 @@ class SparseW16A16Config(SparsityConfig):
         return cls()
 
     def get_linear_method(self) -> "SparseW16A16LinearMethod":
-        return SparseW16A16LinearMethod(self, self.get_storage_format_cls())
+        return SparseW16A16LinearMethod(
+            self, self.get_storage_format_cls())  # type: ignore

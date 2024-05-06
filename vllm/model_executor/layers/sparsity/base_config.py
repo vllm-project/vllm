@@ -1,13 +1,14 @@
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Any, Dict, List, Type
 
 import torch
 from magic_wand import CompressedStorageFormat
 
 from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
-class SparsityConfig(ABC):
+class SparsityConfig(QuantizationConfig):
     """Base class for sparsity configs."""
 
     @abstractmethod

@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import torch
 import torch.nn.functional as F
@@ -335,7 +335,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     ):
         self.output_sizes = output_sizes
         # UPSTREAM SYNC: needed for LazyCompressedParameter
-        self.loaded_shards = set()
+        self.loaded_shards: Set[int] = set()
         tp_size = get_tensor_model_parallel_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size, sum(output_sizes), bias, gather_output,
@@ -481,7 +481,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # UPSTREAM SYNC: needed for LazyCompressedParameter
-        self.loaded_shards = set()
+        self.loaded_shards: Set[str] = set()
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)

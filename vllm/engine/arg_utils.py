@@ -549,8 +549,10 @@ class EngineArgs:
             self.sparsity,
             self.enforce_eager,
             self.max_context_len_to_capture,
-            self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init, self.served_model_name)
+            self.max_seq_len_to_capture,
+            self.max_logprobs,
+            self.skip_tokenizer_init,
+            self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
