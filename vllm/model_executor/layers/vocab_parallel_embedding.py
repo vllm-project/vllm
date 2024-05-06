@@ -105,6 +105,8 @@ class ParallelVocabEmbedding(torch.nn.Module):
                       loaded_shard_id: Optional[int] = None):
         if self.linear_method.QUANTIZED:
             # loader code adapted from MergedColumnParallelLinear
+            # Reference code:
+            # vllm.model_executor.layers.linear.MergedColumnParallelLinear
             param_data = param.data
             output_dim = getattr(param, "output_dim", None)
             is_metadata = getattr(param, "is_metadata", False)
