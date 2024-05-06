@@ -1127,8 +1127,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = lm_head.linear_method.apply(lm_head,
-                                             hidden_states,
-                                             bias=embedding_bias)
+                                             hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
         logits = tensor_model_parallel_gather(logits)
