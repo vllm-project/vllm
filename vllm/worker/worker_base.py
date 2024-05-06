@@ -5,7 +5,7 @@ from typing import Dict, List, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (enable_trace_function_call_for_thread,
                         update_environment_variables)
 
@@ -48,10 +48,8 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            blocks_to_swap_in: Dict[int, int], blocks_to_swap_out: Dict[int,
-                                                                        int],
-            blocks_to_copy: Dict[int, List[int]]) -> List[SamplerOutput]:
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError

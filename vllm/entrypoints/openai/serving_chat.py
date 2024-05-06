@@ -1,3 +1,4 @@
+import asyncio
 import codecs
 import time
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
@@ -40,9 +41,11 @@ class OpenAIServingChat(OpenAIServing):
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         await_post_init=self._load_chat_template(
+                             chat_template=chat_template))
+
         self.response_role = response_role
-        self._load_chat_template(chat_template)
 
     def _parse_chat_message_content(
         self,
@@ -356,7 +359,10 @@ class OpenAIServingChat(OpenAIServing):
 
         return response
 
-    def _load_chat_template(self, chat_template: Optional[str]):
+    async def _load_chat_template(self, chat_template: Optional[str]):
+        while self.tokenizer is None:
+            # Give the parent class time to load the tokenizer
+            await asyncio.sleep(0.1)
         tokenizer = self.tokenizer
 
         if chat_template is not None:

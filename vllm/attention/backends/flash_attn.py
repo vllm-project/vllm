@@ -66,27 +66,24 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
-    # (batch_size,). The prompt length per sequence. None if it is a decoding.
-    prompt_lens: Optional[List[int]]
-    # prompt_lens stored as a tensor.
-    prompt_lens_tensor: Optional[torch.Tensor]
+    # (batch_size,). The sequence length per sequence. Sequence length means
+    # the computed tokens + new tokens None if it is a decoding.
+    seq_lens: Optional[List[int]]
+    # seq_lens stored as a tensor.
+    seq_lens_tensor: Optional[torch.Tensor]
 
-    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
+    # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
     # |---------- context_len ----------|
-    # |-------------------- seqlen ----------------------|
-    #                                   |- subquery_len -|
+    # |-------------------- seq_len ----------------------|
+    #                                   |-- query_len ---|
 
-    # WARNING(sang): context_len has different definition depending on if it is
-    # prefill vs decoding. When it is prefill, it doesn't include new tokens.
-    # When it is for decoding, it includes a new token.
-
-    # Maximum subquery length in the batch.
-    max_subquery_len: Optional[int]
-    # Maximum prompt length in the batch.
-    max_prompt_len: Optional[int]
+    # Maximum query length in the batch.
+    max_query_len: Optional[int]
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -95,6 +92,9 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor]
+    # (batch_size,) A tensor of context lengths (tokens that are computed
+    # so far).
+    context_lens_tensor: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -223,8 +223,8 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value,
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_prompt_len,
-                    max_seqlen_k=prefill_meta.max_prompt_len,
+                    max_seqlen_q=prefill_meta.max_seq_len,
+                    max_seqlen_k=prefill_meta.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -245,10 +245,11 @@ class FlashAttentionImpl(AttentionImpl):
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.subquery_start_loc,
-                    prefill_meta.prompt_lens_tensor,
-                    prefill_meta.context_lens,
-                    prefill_meta.max_subquery_len,
+                    prefill_meta.seq_lens_tensor,
+                    prefill_meta.context_lens_tensor,
+                    prefill_meta.max_query_len,
                     self.alibi_slopes,
+                    self.sliding_window[0],
                 )
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
@@ -257,8 +258,8 @@ class FlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.context_lens,
-                decode_meta.max_context_len,
+                decode_meta.seq_lens_tensor,
+                decode_meta.max_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
