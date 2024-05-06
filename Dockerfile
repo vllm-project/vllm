@@ -37,6 +37,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # see https://github.com/pytorch/pytorch/pull/123243
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# Manually install flashinfer
+pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
 #################### BASE BUILD IMAGE ####################
 
 
