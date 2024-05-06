@@ -1,5 +1,5 @@
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Protocol
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -7,7 +7,19 @@ BlockId = int
 RefCount = int
 
 
-class RefCounter:
+class RefCounterProtocol(Protocol):
+
+    def incr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def decr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def get(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+
+class RefCounter(RefCounterProtocol):
     """A class for managing reference counts for a set of block indices.
 
     The RefCounter class maintains a dictionary that maps block indices to their
@@ -54,7 +66,7 @@ class RefCounter:
         return ReadOnlyRefCounter(self)
 
 
-class ReadOnlyRefCounter:
+class ReadOnlyRefCounter(RefCounterProtocol):
     """A read-only view of the RefCounter class.
 
     The ReadOnlyRefCounter class provides a read-only interface to access the
@@ -96,10 +108,10 @@ class CopyOnWriteTracker:
 
     def __init__(
         self,
-        refcounter: RefCounter,
+        refcounter: RefCounterProtocol,
         allocator: BlockAllocator,
     ):
-        self._copy_on_writes = defaultdict(list)
+        self._copy_on_writes: Dict[BlockId, List[BlockId]] = defaultdict(list)
         self._refcounter = refcounter
         self._allocator = allocator
 
@@ -138,6 +150,8 @@ class CopyOnWriteTracker:
                 prev_block=block.prev_block).block_id
 
             # Track src/dst copy.
+            assert src_block_id is not None
+            assert block_id is not None
             self._copy_on_writes[src_block_id].append(block_id)
 
         return block_id
@@ -180,6 +194,6 @@ def get_all_blocks_recursively(last_block: Block) -> List[Block]:
             recurse(block.prev_block, lst)
         lst.append(block)
 
-    all_blocks = []
+    all_blocks: List[Block] = []
     recurse(last_block, all_blocks)
     return all_blocks

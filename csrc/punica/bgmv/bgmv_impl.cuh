@@ -199,7 +199,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   constexpr int tz = 4;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if constexpr (feat_in < feat_out) {
+  if constexpr (feat_in <= feat_out) {
     static_assert(feat_in % vec_size == 0);
     constexpr int tx = feat_in / vec_size;
 
@@ -288,6 +288,9 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
       const W_T *__restrict__ W, const int64_t *__restrict__ indicies,         \
       int64_t y_offset, int64_t full_y_size, int64_t batch_size,               \
       int64_t num_layers, int64_t layer_idx, float scale);
+
+#define INST_BGMV_ONESIDE(in_T, out_T, W_T, feat_in, feat_out)                 \
+  INST_BGMV(feat_in, feat_out, in_T, out_T, W_T)
 
 #define INST_BGMV_TWOSIDE(in_T, out_T, W_T, narrow, wide)                      \
   INST_BGMV(narrow, wide, in_T, out_T, W_T)                                    \
