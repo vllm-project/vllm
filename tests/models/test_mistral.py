@@ -13,26 +13,25 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     hf_runner,
     vllm_runner,
-    example_long_prompts,
+    example_prompts,
     model: str,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    # NOTE: example_long_prompts has 4096+ tokens which is bigger than
-    # mistral's sliding window size.
+    # TODO(sang): Sliding window should be tested separately.
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy_logprobs_limit(
-        example_long_prompts, max_tokens, num_logprobs)
+        example_prompts, max_tokens, num_logprobs)
     del hf_model
 
     vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy_logprobs(example_long_prompts,
+    vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
     del vllm_model
