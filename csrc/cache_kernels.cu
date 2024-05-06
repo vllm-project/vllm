@@ -250,7 +250,6 @@ __global__ void reshape_and_cache_flash_kernel(
     v_cache[tgt_value_idx] = value[src_value_idx];
   }
 }
-
 } // namespace vllm
 
 #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                                     \
@@ -319,6 +318,7 @@ void reshape_and_cache_flash(
   torch::Tensor& slot_mapping,  // [num_tokens]
   const std::string& kv_cache_dtype)
 {
+  // FIXME: only support auto datatype, does not support fp8
   if (kv_cache_dtype != "auto") {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
