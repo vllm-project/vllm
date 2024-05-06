@@ -58,6 +58,7 @@ class TPUExecutor(ExecutorBase):
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
         blocks_to_copy: Dict[int, List[int]],
+        num_lookahead_slots: int,
     ) -> SamplerOutput:
         output = self.driver_worker.execute_model(
             seq_group_metadata_list=seq_group_metadata_list,
