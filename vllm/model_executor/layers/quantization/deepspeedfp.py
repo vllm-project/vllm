@@ -1,14 +1,13 @@
-import copy
 from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.utils import set_weight_attrs
 
 
 class DeepSpeedFPConfig(QuantizationConfig):
@@ -74,6 +73,12 @@ class DeepSpeedFPConfig(QuantizationConfig):
             "quantize_config.json",
         ]
 
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional["DeepSpeedFPLinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return DeepSpeedFPLinearMethod(self)
+        return None
+
 
 class DeepSpeedFPLinearMethod(LinearMethodBase):
     """Linear method for DeepSpeedFP quantizer.
@@ -88,10 +93,12 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
+                       output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        weight_loader=None, **extra_weight_attrs):
         del output_size
+        del input_size
+        output_size_per_partition = sum(output_partition_sizes)
         weight = DeepSpeedFPParameter(
             torch.Size((output_size_per_partition,
                         input_size_per_partition)),
@@ -117,10 +124,10 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
         extra_weight_attrs["weight_loader"] = quant_weight_loader
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight
         y = weight.ds_dequantize()
         return F.linear(x, y, bias)
