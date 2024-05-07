@@ -280,8 +280,9 @@ class Sequence:
                 last_block = self.logical_token_blocks[-1]
 
             num_empty_slots = last_block.get_num_empty_slots()
+            num_tokens_to_place = min(num_empty_slots, len(token_ids) - cursor - 1)
             last_block.append_tokens(token_ids[cursor:cursor +
-                                               num_empty_slots])
+                                               num_tokens_to_place])
             cursor += num_empty_slots
 
     def append_token_id(
