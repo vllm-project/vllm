@@ -184,7 +184,7 @@ class Worker(WorkerBase):
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
-        if self.model_config.contains_seqlen_agnostic_layers():
+        if self.model_config.contains_seqlen_agnostic_layers(self.parallel_config):
             self.model_runner.prepare_seqlen_agnostic_cache(self.cache_engine.dtype)
 
     def _warm_up_model(self) -> None:
