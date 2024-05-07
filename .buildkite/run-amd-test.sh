@@ -40,5 +40,5 @@ docker run \
         -e HF_TOKEN \
         --name ${container_name} \
         ${container_name} \
-        /bin/bash -c ${@}
+        /bin/bash -c "${@}"
 
