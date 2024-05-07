@@ -2,7 +2,7 @@
 import copy
 import enum
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
@@ -745,8 +745,8 @@ class ExecuteModelRequest:
     blocks_to_swap_in: Dict[int, int] = field(default_factory=dict)
     # Blocks to swap out. Dict of GPU -> CPU block number.
     blocks_to_swap_out: Dict[int, int] = field(default_factory=dict)
-    # Blocks to copy. Source to a list of dest blocks.
-    blocks_to_copy: Dict[int, List[int]] = field(default_factory=dict)
+    # Blocks to copy. Source to dest block.
+    blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int = 0
     # The number of requests in the running queue.

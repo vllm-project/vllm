@@ -97,7 +97,7 @@ __global__ void copy_blocks_kernel(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  const std::map<int64_t, std::vector<int64_t>>& block_mapping) {
+  torch::Tensor& block_mapping) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
@@ -114,17 +114,9 @@ void copy_blocks(
     key_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(key_caches[layer_idx].data_ptr());
     value_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
   }
-  // Create block mapping array.
-  std::vector<int64_t> block_mapping_vec;
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    for (int64_t dst_block_number : pair.second) {
-      block_mapping_vec.push_back(src_block_number);
-      block_mapping_vec.push_back(dst_block_number);
-    }
-  }
-  int64_t* block_mapping_array = block_mapping_vec.data();
-  int num_pairs = block_mapping_vec.size() / 2;
+
+  // block_mapping is a 2D tensor with shape (num_pairs, 2).
+  int num_pairs = block_mapping.size(0);
 
   // Move the data structures to the GPU.
   // NOTE: This synchronizes the CPU and GPU.
@@ -132,8 +124,6 @@ void copy_blocks(
     key_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
   torch::Tensor value_cache_ptrs_tensor = torch::from_blob(
     value_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
-  torch::Tensor block_mapping_tensor = torch::from_blob(
-    block_mapping_array, {2 * num_pairs}, torch::kInt64).to(cache_device);
 
   // Launch the kernel.
   const int numel_per_block = key_caches[0][0].numel();
@@ -146,7 +136,7 @@ void copy_blocks(
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
         value_cache_ptrs_tensor.data_ptr<int64_t>(),
-        block_mapping_tensor.data_ptr<int64_t>(),
+        block_mapping.data_ptr<int64_t>(),
         numel_per_block);
     }));
 }
