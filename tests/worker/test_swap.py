@@ -54,10 +54,10 @@ def test_swap() -> None:
         a.cuda(), b.cuda(), rtol=0.0, atol=0.0)
 
     # Test swap out.
-    blocks_to_swap_out = {3: 72, 56: 35, 84: 34}
+    blocks_to_swap_out = [(3, 72), (56, 35), (84, 34)]
     execute_model_req = ExecuteModelRequest(
         seq_group_metadata_list=[],
-        blocks_to_swap_in={},
+        blocks_to_swap_in=[],
         blocks_to_swap_out=blocks_to_swap_out,
         blocks_to_copy=[],
     )
