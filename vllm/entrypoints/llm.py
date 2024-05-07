@@ -248,9 +248,8 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        total_toks += (
-                            sum(len(stp.token_ids) for stp in output.outputs)
-                        )
+                        total_toks += (sum(
+                            len(stp.token_ids) for stp in output.outputs))
                         spd = total_toks / pbar.format_dict["elapsed"]
                         pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
