@@ -141,9 +141,9 @@ class ModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.vision_language_config = vision_language_config
 
-        self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None,
-            self.kv_cache_dtype)
+        self.attn_backend = (get_attn_backend(self.model_config.dtype,
+                                              self.kv_cache_dtype)
+                             if self.model_config is not None else None)
 
         # Lazy initialization
         self.model: torch.nn.Module  # Set after load_model
