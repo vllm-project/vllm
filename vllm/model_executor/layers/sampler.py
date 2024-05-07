@@ -769,11 +769,12 @@ def _get_logprobs(
     selected_logprobs = logprobs[[
         query_indices_gpu,
         next_token_ids_gpu,
-    ]].to('cpu')
+    ]]
     ranks = _get_ranks(
         logprobs[query_indices_gpu],
         next_token_ids_gpu,
-    ).to('cpu')
+    )
+    assert selected_logprobs.shape[0] == ranks.shape[0]
 
     # Logprobs of topk tokens for a batch of sequence groups.
     # (num_query_tokens_across_batch).
@@ -796,9 +797,6 @@ def _get_logprobs(
     sample_logprobs_per_seq_group: List[SampleLogprobs] = []
     top_logprob_idx = 0
     selected_logprobs_idx = 0
-
-    # Make sure non-blocking .to("cpu", non_blocking=True) is finished
-    assert selected_logprobs.shape[0] == ranks.shape[0]
 
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
