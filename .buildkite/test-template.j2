@@ -14,6 +14,8 @@ steps:
       automatic:
         - exit_status: -1  # Agent was lost
           limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
   - wait
 
   - group: "AMD Tests"
@@ -24,7 +26,7 @@ steps:
       - label: "AMD: {{ step.label }}"
         agents:
           queue: amd
-        command: bash .buildkite/run-amd-test.sh "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'"
+        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
         env:
           DOCKER_BUILDKIT: "1"
     {% endif %}
@@ -52,6 +54,8 @@ steps:
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
           limit: 5
     plugins:
       - kubernetes:
