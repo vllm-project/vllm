@@ -95,7 +95,7 @@ def test_correct_output_format(which_tokens_accepted: str,
     )
 
     expected_bonus_token_ids = bonus_token_ids.clone()
-    # If bonus tokens are disabled. Verify they're set to -1.
+    # If bonus tokens disabled. Verify they are set to -1.
     # See https://github.com/vllm-project/vllm/issues/4212
     if disable_bonus_tokens:
         expected_bonus_token_ids = expected_bonus_token_ids * 0 - 1
