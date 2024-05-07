@@ -48,7 +48,7 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 

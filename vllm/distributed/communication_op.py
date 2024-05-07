@@ -203,6 +203,9 @@ def broadcast_tensor_dict(
                                                 group=metadata_group)
         async_handles = []
         for tensor in tensor_list:
+            if tensor.numel() == 0:
+                # Skip broadcasting empty tensors.
+                continue
             async_handles.append(
                 torch.distributed.broadcast(tensor,
                                             src=src,
@@ -224,6 +227,10 @@ def broadcast_tensor_dict(
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
                                      device="cuda")
+                if tensor.numel() == 0:
+                    # Skip broadcasting empty tensors.
+                    tensor_dict[key] = tensor
+                    continue
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,
