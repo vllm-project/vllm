@@ -6,6 +6,8 @@ from functools import lru_cache
 
 import torch
 import triton
+import warnings
+warnings.filterwarnings('ignore', '.*Sparse CSR tensor support is in beta state.*')
 
 
 def dense_to_crow_col(x):
