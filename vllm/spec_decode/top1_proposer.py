@@ -114,7 +114,7 @@ class Top1Proposer(SpeculativeProposer):
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
             # The speculative decoding for this request has been disabled
             # (e.g. due to high traffic).
-            if seq_group_metadata._num_speculative_tokens == 0:
+            if seq_group_metadata.num_speculative_tokens == 0:
                 proposal_lens.append(0)
                 continue
 
@@ -132,7 +132,7 @@ class Top1Proposer(SpeculativeProposer):
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
             proposal_lens.append(new_k)
-            seq_group_metadata._num_speculative_tokens = new_k
+            seq_group_metadata.num_speculative_tokens = new_k
 
         return (
             proposal_lens,

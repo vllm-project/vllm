@@ -215,7 +215,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                        self.disable_at_queue_size)
         if disable_all:
             for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-                seq_group_metadata._num_speculative_tokens = 0
+                # Once num_speculative_tokens is set to 0, the spec decode
+                # of this request will be disabled forever.
+                # TODO(comaniac): We currently store spec decoding specific
+                # state in the global data structure, but we should maintain
+                # this state within spec decode worker.
+                seq_group_metadata.num_speculative_tokens = 0
 
         # If no spec tokens, call the proposer and scorer workers normally.
         # This happens for prefill, or when the spec decode is disabled

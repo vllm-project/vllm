@@ -615,7 +615,8 @@ class SequenceGroupMetadata:
         # The number of speculative tokens adopted in this request.
         # None means specuative decoding is not used.
         # Zero means speculative decoding is disabled for some reasons.
-        self._num_speculative_tokens = None
+        # TODO: We should maintain this states out of the sequence group.
+        self.num_speculative_tokens = None
 
         if self._token_chunk_size is None:
             if is_prompt:

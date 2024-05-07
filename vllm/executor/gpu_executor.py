@@ -94,7 +94,7 @@ class GPUExecutor(ExecutorBase):
             scorer_worker=target_worker,
             draft_worker_kwargs=draft_worker_kwargs,
             disable_at_queue_size=self.speculative_config.
-            speculative_disable_queue_size,
+            speculative_disaable_by_enqueue_requests,
         )
 
         assert self.parallel_config.world_size == 1, (

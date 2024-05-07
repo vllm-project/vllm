@@ -14,13 +14,13 @@ from .utils import create_batch, mock_worker
 
 
 @pytest.mark.parametrize('queue_size', [2, 4])
+@pytest.mark.parametrize('batch_size', [1, 2, 3, 6])
+@pytest.mark.parametrize('k', [1, 2, 5, 7, 10])
 @torch.inference_mode()
-def test_disable_spec_tokens(queue_size: int):
+def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
     """Verify that speculative tokens are disabled when the queue size
     exceeds the threshold.
     """
-    batch_size = 1
-    k = 5
     disable_at_queue_size = 3
 
     draft_worker = mock_worker(cls=MultiStepWorker)
@@ -49,16 +49,26 @@ def test_disable_spec_tokens(queue_size: int):
     # we expect no speculative tokens (0).
     expected_num_spec_tokens = None if queue_size < disable_at_queue_size else 0
     assert seq_group_metadata_list[
-        0]._num_speculative_tokens == expected_num_spec_tokens
+        0].num_speculative_tokens == expected_num_spec_tokens
 
     proposer = Top1Proposer(
         worker=draft_worker,
         device='cpu',  # not used
         vocab_size=100,  # not used
-        max_proposal_len=2048,
+        max_proposal_len=10,
     )
 
-    # The request with spec token 0 should have proposal_len=0.
-    proposal_lens, _, _ = proposer._split_by_proposal_len(
-        seq_group_metadata_list, k)
-    assert proposal_lens[0] == (k if queue_size < disable_at_queue_size else 0)
+    if queue_size < disable_at_queue_size:
+        # Should raise exception when executing the mocked draft model.
+        with pytest.raises(ValueError, match=exception_secret):
+            proposer.get_proposals(execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list,
+                num_lookahead_slots=k), )
+    else:
+        # Should not execute the draft model because spec decode is disabled
+        # for all requests.
+        proposals = proposer.get_proposals(
+            execute_model_req=ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list,
+                num_lookahead_slots=k), )
+        assert proposals.proposal_lens.tolist() == [k] * batch_size
