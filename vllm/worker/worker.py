@@ -197,7 +197,7 @@ class Worker(WorkerBase):
         self,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
         # TODO(woosuk): Profile swapping overhead and optimize if needed.
@@ -205,7 +205,7 @@ class Worker(WorkerBase):
             self.cache_engine.swap_in(blocks_to_swap_in)
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
@@ -225,7 +225,9 @@ class Worker(WorkerBase):
             num_seq_groups = len(seq_group_metadata_list)
             blocks_to_swap_in = execute_model_req.blocks_to_swap_in
             blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-            blocks_to_copy = execute_model_req.blocks_to_copy
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device=self.device,
+                                          dtype=torch.int64).view(-1, 2)
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
