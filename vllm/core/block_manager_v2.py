@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from typing import Sequence as GenericSequence
 
 from vllm.core.block.block_table import BlockTable
@@ -166,7 +166,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
