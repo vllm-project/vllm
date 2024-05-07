@@ -23,7 +23,7 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  torch::Tensor& block_mapping) {
+  const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -47,7 +47,7 @@ void swap_blocks(
   const at::cuda::OptionalCUDAGuard device_guard(src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
-  int num_blocks = block_mapping.size(0);
+  const int64_t num_blocks = block_mapping.size(0);
   for (size_t i = 0; i < num_blocks; i++) {
     int64_t src_block_number = block_mapping[i][0].item<int64_t>();
     int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
@@ -98,7 +98,7 @@ __global__ void copy_blocks_kernel(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  torch::Tensor& block_mapping) {
+  const torch::Tensor& block_mapping) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {

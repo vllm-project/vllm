@@ -8,12 +8,12 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  torch::Tensor& block_mapping);
+  const torch::Tensor& block_mapping);
 
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  torch::Tensor& block_mapping);
+  const torch::Tensor& block_mapping);
 
 void reshape_and_cache(
   torch::Tensor& key,
