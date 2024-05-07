@@ -133,3 +133,33 @@ void dynamic_scaled_fp8_quant(
       });
 }
 
+void fp8_scaled_gemm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weights, torch::Tensor& workspace) {
+  Gemm gemm;
+
+  int m = input.size(0);
+  int n = weight.size(1);
+  int k = weight.size(0);
+  int l = 1;
+
+  StrideA stride_A = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(m, k, l));
+  StrideB stride_B = cutlass::make_cute_packed_stride(StrideB{}, cute::make_shape(n, k, l));
+  StrideC stride_C = cutlass::make_cute_packed_stride(StrideC{}, cute::make_shape(m, n, l));
+  StrideD stride_D = cutlass::make_cute_packed_stride(StrideD{}, cute::make_shape(m, n, l));
+
+  typename Gemm::Arguments arguments{
+    cutlass::gemm::GemmUniversalMode::kGemm,
+    {m, n, k, l},
+    {tensor_A.device_data(), stride_A, tensor_B.device_data(), stride_B},
+    {
+      {}, // epilogue.thread
+      tensor_C.device_data(), stride_C,
+      tensor_D.device_data(), stride_D
+    }
+  };
+
+  size_t workspace_size = Gemm::get_workspace_size(arguments);
+  CUTLASS_CHECK(gemm.can_implement(arguments));
+  CUTLASS_CHECK(gemm.initialize(arguments, workspace.get()));
+  CUTLASS_CHECK(gemm.run());
+}
+
