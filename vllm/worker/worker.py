@@ -286,6 +286,7 @@ def init_worker_distributed_environment(
     elif parallel_config.world_size > 1 and not is_hip():
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
+        # NOTE(mattwong): We do not use pynccl on ROCm.
         pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
             local_rank=local_rank,
