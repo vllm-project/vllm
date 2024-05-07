@@ -1,6 +1,5 @@
 import enum
-from functools import lru_cache
-from typing import Type
+from typing import Optional, Type
 
 import torch
 
@@ -11,6 +10,8 @@ from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
 
+_ATTN_BACKEND: Optional[Type[AttentionBackend]] = None
+
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
@@ -20,38 +21,52 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
 
 
-@lru_cache(maxsize=None)
-def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
-    backend = _which_attn_to_use(dtype)
+def get_attn_backend(
+    dtype: Optional[torch.dtype] = None,
+    kv_cache_dtype: Optional[str] = None,
+) -> Type[AttentionBackend]:
+    global _ATTN_BACKEND
+    if dtype is None:
+        assert kv_cache_dtype is None, "KV cache dtype should be None."
+        assert _ATTN_BACKEND is not None, "Attention backend is not set."
+        return _ATTN_BACKEND
+
+    assert kv_cache_dtype is not None, "KV cache dtype is not set."
+    assert _ATTN_BACKEND is None, "Attention backend is already set."
+    backend = _which_attn_to_use(dtype, kv_cache_dtype)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
-        return FlashAttentionBackend
+        _ATTN_BACKEND = FlashAttentionBackend
     elif backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
             XFormersBackend)
-        return XFormersBackend
+        _ATTN_BACKEND = XFormersBackend
     elif backend == _Backend.ROCM_FLASH:
         logger.info("Using ROCmFlashAttention backend.")
         from vllm.attention.backends.rocm_flash_attn import (  # noqa: F401
             ROCmFlashAttentionBackend)
-        return ROCmFlashAttentionBackend
+        _ATTN_BACKEND = ROCmFlashAttentionBackend
     elif backend == _Backend.TORCH_SDPA:
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
-        return TorchSDPABackend
+        _ATTN_BACKEND = TorchSDPABackend
     elif backend == _Backend.FLASHINFER:
         logger.info("Using Flashinfer backend.")
-        logger.warning("Eager mode is enforced for the Flashinfer backend. ")
+        logger.warning("Eager mode is enforced for the Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
-        return FlashInferBackend
+        _ATTN_BACKEND = FlashInferBackend
     else:
         raise ValueError("Invalid attention backend.")
+    return _ATTN_BACKEND
 
 
-def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
+def _which_attn_to_use(
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+) -> _Backend:
     """Returns which flash attention backend to use."""
     if is_cpu():
         return _Backend.TORCH_SDPA
@@ -73,6 +88,10 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
     if dtype not in (torch.float16, torch.bfloat16):
         logger.info("Cannot use FlashAttention-2 backend for dtype other than "
                     "torch.float16 or torch.bfloat16.")
+        return _Backend.XFORMERS
+
+    if kv_cache_dtype.startswith("fp8"):
+        logger.info("Cannot use FlashAttention-2 backend for FP8 KV cache.")
         return _Backend.XFORMERS
 
     try:

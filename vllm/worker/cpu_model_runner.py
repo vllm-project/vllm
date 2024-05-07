@@ -53,9 +53,9 @@ class CPUModelRunner:
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
-
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.dtype if model_config is not None else None,
+            self.kv_cache_dtype)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
