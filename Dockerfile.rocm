@@ -86,8 +86,6 @@ RUN if [ "$BUILD_PYTORCH" = "1" ]; then \
     && git submodule sync \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
-    && sed -i 's/class TuningContext/class TORCH_CUDA_CPP_API TuningContext/g' aten/src/ATen/cuda/tunable/Tunable.h \
-    && sed -i 's/TuningContext\* getTuningContext/TORCH_CUDA_CPP_API TuningContext\* getTuningContext/g' aten/src/ATen/cuda/tunable/Tunable.h \
     && python3 tools/amd_build/build_amd.py; \
     fi
 
@@ -184,6 +182,17 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     && rm -rf triton \
     && cd ..; \
     fi
+
+
+# Install gradlib
+RUN mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/gradlib \
+    && cd gradlib \
+    && pip install . \
+    && cd .. \
+    && rm -rf gradlib \
+    && cd ..
 
 
 COPY ./ /app/vllm

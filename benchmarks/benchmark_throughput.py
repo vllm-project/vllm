@@ -94,8 +94,7 @@ def run_vllm(
               device=device,
               enable_prefix_caching=enable_prefix_caching,
               worker_use_ray=worker_use_ray,
-              download_dir=download_dir,
-              tunable_op_config=args.tunable_op_config)
+              download_dir=download_dir)
 
     # Add the requests to the engine.
     for prompt, _, output_len in requests:
@@ -347,15 +346,6 @@ if __name__ == "__main__":
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
-    parser.add_argument('--tunable-op-config',
-        help='If specified, Tunable Op is enabled. A string can be '
-        'optionally specified which changes the default behavior of '
-        'Tunable Op. This string can either be a whitespace- or '
-        'comma-separated list of environment variables, or a path to '
-        'a file containing such a list. The list of recognized '
-        'environment variables can be found at '
-        'https://github.com/pytorch/pytorch/tree/main/aten/src/ATen/cuda/tunable'
-    )
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model

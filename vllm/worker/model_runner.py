@@ -789,71 +789,6 @@ class ModelRunner:
         return self.lora_manager.list_loras()
 
     @torch.inference_mode()
-    def tune_model(self, kv_caches: List[torch.Tensor]) -> None:
-        logger.info("Performing a dry run of the model for Tunable Op tuning.")
-        logger.info(
-            "Tunable Op tuning may run out of memory. Please attempt "
-            "tuning again as intermediate results may be saved, which "
-            "reduces the chance that subsequent runs will run out of "
-            "memory. If this issue persists, tuning may not be possible.")
-        start_time = time.perf_counter()
-
-        # Prepare dummy inputs. These will be reused for all batch sizes.
-        max_batch_size = max(_BATCH_SIZES_TO_CAPTURE)
-        input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping = torch.empty(max_batch_size, dtype=torch.long).cuda()
-        slot_mapping.fill_(_PAD_SLOT_ID)
-        context_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
-        block_tables = torch.from_numpy(self.graph_block_tables).cuda()
-
-        graph_batch_size = _get_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
-        batch_size_capture_list = [
-            bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
-        ]
-
-        # NOTE: Capturing the largest batch size first may help reduce the
-        # memory usage of CUDA graph.
-        for batch_size in reversed(batch_size_capture_list):
-            # Create dummy attn_metadata.
-            attn_metadata = self.attn_backend.make_metadata(
-                is_prompt=False,
-                slot_mapping=slot_mapping[:batch_size],
-                prompt_lens=None,
-                prompt_lens_tensor=None,
-                num_prompt_tokens=0,
-                num_generation_tokens=batch_size,
-                max_subquery_len=None,
-                max_context_len=self.max_context_len_to_capture,
-                max_prompt_len=None,
-                subquery_start_loc=None,
-                seq_start_loc=None,
-                context_lens=context_lens[:batch_size],
-                block_tables=block_tables[:batch_size],
-                use_cuda_graph=not self.model_config.enforce_eager,
-                kv_cache_dtype=self.kv_cache_dtype,
-            )
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    [0] * batch_size,
-                    [0] * batch_size,
-                )
-                self.set_active_loras(set(), lora_mapping)
-
-            self.model(
-                input_tokens[:batch_size],
-                input_positions[:batch_size],
-                kv_caches,
-                attn_metadata,
-            )
-
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        logger.info(f"Tuning finished in {elapsed_time:.0f} secs.")
-
-    @torch.inference_mode()
     def capture_model(self, kv_caches: List[torch.Tensor]) -> None:
         """Cuda graph capture a model.
 
@@ -951,7 +886,6 @@ class ModelRunner:
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs.")
 
     def __del__(self) -> None:
-        self.parallel_config.tunable_op_config.cleanup(self.is_driver_worker)
         # Delete the CUDA graphs before deleting the pynccl communicator.
         # NOTE(woosuk): This is necessary because otherwise deadlocks can
         # happen.

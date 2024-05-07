@@ -178,10 +178,6 @@ class Worker(WorkerBase):
         self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
-        tunable_config = self.parallel_config.tunable_op_config
-        if tunable_config.to_be_enabled and tunable_config.apply() and not self.model_config.enforce_eager:
-            self.model_runner.tune_model(self.gpu_cache)
-
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.gpu_cache)
         # Reset the seed to ensure that the random state is not affected by

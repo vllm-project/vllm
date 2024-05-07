@@ -47,7 +47,6 @@ class EngineArgs:
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
     tokenizer_pool_extra_config: Optional[dict] = None
-    tunable_op_config: Optional[str] = None
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
@@ -317,16 +316,6 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary. Ignored if '
                             'tokenizer_pool_size is 0.')
-        # Tunable Op related configs
-        parser.add_argument('--tunable-op-config',
-            help='If specified, Tunable Op is enabled. A string can be '
-            'optionally specified which changes the default behavior of '
-            'Tunable Op. This string can either be a whitespace- or '
-            'comma-separated list of environment variables, or a path to '
-            'a file containing such a list. The list of recognized '
-            'environment variables can be found at '
-            'https://github.com/pytorch/pytorch/tree/main/aten/src/ATen/cuda/tunable'
-        )
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
@@ -443,8 +432,8 @@ class EngineArgs:
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(
             self.pipeline_parallel_size, self.tensor_parallel_size,
-            self.worker_use_ray, self.tunable_op_config,
-            self.max_parallel_loading_workers, self.disable_custom_all_reduce,
+            self.worker_use_ray, self.max_parallel_loading_workers,
+            self.disable_custom_all_reduce,
             TokenizerPoolConfig.create_config(
                 self.tokenizer_pool_size,
                 self.tokenizer_pool_type,
