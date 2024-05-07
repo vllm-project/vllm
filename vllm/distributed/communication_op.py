@@ -152,8 +152,13 @@ def _split_tensor_dict(
     tensor_list = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
+            # Note: we cannot use `value.device` here,
+            # because it contains not only the device type but also the device
+            # index (e.g. "cuda:0"). We only need the device type.
+            # receiving side will set the device index.
+            device = "cpu" if value.is_cpu else "cuda"
             metadata_list.append(
-                (key, TensorMetadata(value.device, value.dtype, value.size())))
+                (key, TensorMetadata(device, value.dtype, value.size())))
             tensor_list.append(value)
         else:
             metadata_list.append((key, value))
