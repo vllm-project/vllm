@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
@@ -36,7 +36,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
         return None  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
