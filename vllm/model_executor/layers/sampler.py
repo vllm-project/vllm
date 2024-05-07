@@ -769,11 +769,11 @@ def _get_logprobs(
     selected_logprobs = logprobs[[
         query_indices_gpu,
         next_token_ids_gpu,
-    ]].to('cpu', non_blocking=True)
+    ]].to('cpu')
     ranks = _get_ranks(
         logprobs[query_indices_gpu],
         next_token_ids_gpu,
-    ).to('cpu', non_blocking=True)
+    ).to('cpu')
 
     # Logprobs of topk tokens for a batch of sequence groups.
     # (num_query_tokens_across_batch).
@@ -781,10 +781,15 @@ def _get_logprobs(
         top_logprobs, top_token_ids = torch.topk(logprobs,
                                                  largest_num_logprobs,
                                                  dim=-1)
-        top_logprobs = top_logprobs.to('cpu', non_blocking=True)
-        top_token_ids = top_token_ids.to('cpu', non_blocking=True)
     else:
         top_logprobs, top_token_ids = None, None
+
+    # Overlap cpu transfer with gpu kernels.
+    selected_logprobs = selected_logprobs.to('cpu')
+    ranks = ranks.to('cpu')
+    if top_logprobs is not None and top_token_ids is not None:
+        top_logprobs = top_logprobs.to('cpu')
+        top_token_ids = top_token_ids.to('cpu')
 
     # Find prompt/sample logprobs.
     prompt_logprobs_per_seq_group: List[Optional[PromptLogprobs]] = []
@@ -793,7 +798,6 @@ def _get_logprobs(
     selected_logprobs_idx = 0
 
     # Make sure non-blocking .to("cpu", non_blocking=True) is finished
-    torch.cuda.current_stream().synchronize()
     assert selected_logprobs.shape[0] == ranks.shape[0]
 
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
