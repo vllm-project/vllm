@@ -536,8 +536,9 @@ if triton.__version__ >= "2.1.0":
                 offs_d[None, :] * stride_v_cache_d +
                 (start_n + offs_n[:, None]) % block_size * stride_v_cache_bl)
             k = tl.load(K_cache + off_k,
-                        mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
-                        other=0.0)
+                        mask=dim_mask[:, None] &
+                        ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
+                        other=0.0)  # [D,N]
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -605,8 +606,9 @@ if triton.__version__ >= "2.1.0":
             # -- compute qk ----
             k = tl.load(k_ptrs +
                         (cur_batch_in_all_start_index + start_n) * stride_kbs,
-                        mask=(start_n + offs_n[None, :]) <
-                        cur_batch_seq_len - cur_batch_ctx_len,
+                        mask=dim_mask[:, None] &
+                        ((start_n + offs_n[None, :]) <
+                         cur_batch_seq_len - cur_batch_ctx_len),
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
