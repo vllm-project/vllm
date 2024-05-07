@@ -88,6 +88,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/performance
 
 .. toctree::
    :maxdepth: 1
