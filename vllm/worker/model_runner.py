@@ -440,7 +440,7 @@ class ModelRunner:
                 workspace_buffer=self.flashinfer_prefill_workspace_buffer,
                 is_prompt=True,
                 use_cuda_graph=False,
-                seq_start_loc=seq_start_loc,
+                seq_start_loc=subquery_start_loc,
                 paged_kv_indices=paged_kv_indices,
                 paged_kv_indptr=paged_kv_indptr,
                 paged_kv_last_page_len=paged_kv_last_page_len,
