@@ -636,7 +636,7 @@ def test_schedule_decode_blocks_to_copy_update():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_running, output = scheduler._schedule_running(
@@ -845,7 +845,7 @@ def test_schedule_swapped_blocks_to_copy():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
