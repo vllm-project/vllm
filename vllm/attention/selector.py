@@ -25,6 +25,12 @@ def get_attn_backend(
     dtype: Optional[torch.dtype] = None,
     kv_cache_dtype: Optional[str] = None,
 ) -> Type[AttentionBackend]:
+    """Returns the attention backend to use.
+
+    For the first call, the backend is selected based on the dtype and
+    kv_cache_dtype. For subsequent calls, the dtype and kv_cache_dtype should
+    be None, and the cached backend is returned.
+    """
     global _ATTN_BACKEND
     if dtype is None:
         assert kv_cache_dtype is None, "KV cache dtype should be None."
