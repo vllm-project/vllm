@@ -186,7 +186,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     def add_dummy_lora(self, lora_request: LoRARequest, rank: int) -> bool:
         if lora_request.lora_int_id in self.list_loras():
             return False
-        if self._cached_dummy_lora not in (False, None):
+        if isinstance(self._cached_dummy_lora, LoRAModel):
             dummy_lora = self._cached_dummy_lora.clone(
                 lora_request.lora_int_id)
         else:
