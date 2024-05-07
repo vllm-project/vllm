@@ -7,6 +7,8 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
+#include "fp8_gemm_kernels.h"
+
 namespace vllm {
 
 __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
