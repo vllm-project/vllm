@@ -825,7 +825,7 @@ def _get_prompt_logprob_if_needed(
 
     # Find prompt logprobs
     prompt_logprobs: Optional[PromptLogprobs] = None
-    if (is_prompt and sampling_params.prompt_logprobs is not None):
+    if is_prompt and sampling_params.prompt_logprobs is not None:
         prompt_logprobs = []
         num_logprobs = sampling_params.prompt_logprobs
         next_prompt_tokens = _get_next_prompt_tokens(seq_group)
@@ -839,7 +839,6 @@ def _get_prompt_logprob_if_needed(
 
         for idx, token_id in enumerate(next_prompt_tokens):
             # Calculate the prompt logprob of the real prompt tokens.
-            # Use tuple here for performance (to use to_list()).
             # {token_id: (logprob, rank_from_vocab)}
             prompt_logprobs_dict: Dict[int, Tuple[float, int]] = {
                 token_id: (selected_logprob_items[idx], rank_items[idx])
@@ -847,22 +846,27 @@ def _get_prompt_logprob_if_needed(
 
             # Add top K prompt logprobs along with its rank.
             if num_logprobs > 0:
-                prompt_logprobs_dict.update(
-                    zip(
-                        top_token_ids[top_logprob_idx, :num_logprobs].tolist(),
-                        zip(
-                            top_logprobs[
-                                top_logprob_idx, :num_logprobs].tolist(),
-                            # This is ranks. Since top_logprob is sorted,
-                            # we can just use a range here.
-                            range(1, num_logprobs + 1))))
+                top_ids = top_token_ids[
+                    top_logprob_idx, :num_logprobs].tolist()  # noqa
+                top_probs = top_logprobs[
+                    top_logprob_idx, :num_logprobs].tolist()  # noqa
+                # Top K is already sorted by rank, so we can use 1 ~
+                # num_logprobs + 1 for rank.
+                top_ranks = range(1, num_logprobs + 1)
+                prompt_logprobs_dict.update({
+                    top_id: (top_prob, rank)
+                    for top_id, top_prob, rank in zip(top_ids, top_probs,
+                                                      top_ranks)  # noqa
+                })
             prompt_logprobs.append({
                 token_id: Logprob(*logprob_and_rank)
                 for token_id, logprob_and_rank in prompt_logprobs_dict.items()
             })
             # + 1 to go to the next prompt token.
             top_logprob_idx += 1
-            selected_logprobs_idx += 1
+
+        # + len(next_prompt_tokens) to go to the next prompt.
+        selected_logprobs_idx += len(next_prompt_tokens)
     return prompt_logprobs, top_logprob_idx, selected_logprobs_idx
 
 
@@ -891,21 +895,28 @@ def _get_sampled_logprob_if_needed(
             len(next_token_ids)].tolist()
         rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
                            len(next_token_ids)].tolist()
+
         for idx, (next_token_id,
                   parent_id) in enumerate(zip(next_token_ids, parent_seq_ids)):
+            # Get the logprob of a sampled token.
             sampled_logprobs_dict = {
                 next_token_id: (selected_logprob_items[idx], rank_items[idx])
             }
+            # Get top K logprobs.
             if num_logprobs > 0:
                 top_ids = top_token_ids[top_logprob_idx +
                                         parent_id, :num_logprobs].tolist()
                 top_probs = top_logprobs[top_logprob_idx +
                                          parent_id, :num_logprobs].tolist()
+                # Top K is already sorted by rank, so we can use 1 ~
+                # num_logprobs + 1 for rank.
+                top_ranks = range(1, num_logprobs + 1)
                 sampled_logprobs_dict.update({
-                    int(top_id): (float(top_prob), rank)
-                    for rank, (top_id, top_prob
-                               ) in enumerate(zip(top_ids, top_probs), start=1)
+                    top_id: (top_prob, rank)
+                    for top_id, top_prob, rank in zip(top_ids, top_probs,
+                                                      top_ranks)  # noqa
                 })
+
             sampled_logprobs.append({
                 token_id: Logprob(*logprob_and_rank)
                 for token_id, logprob_and_rank in
