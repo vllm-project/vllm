@@ -106,7 +106,6 @@ def test_contexted_kv_attention_alibi(
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.long)
-    values = values[torch.randperm(cache_size)]
     block_table = values[:BS * max_block_per_request].view(
         BS, max_block_per_request)
     b_seq_len = torch.tensor(seq_lens, dtype=torch.long)
