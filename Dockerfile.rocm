@@ -104,10 +104,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN python3 -m pip install --upgrade pip
 RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
-RUN mkdir -p libs \
-    && git clone https://github.com/meta-llama/llama3.git \
-    && cd llama3 \
-    && pip install -e . \
-    && cd ..;
 
 CMD ["/bin/bash"]
