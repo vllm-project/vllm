@@ -25,7 +25,7 @@ WORKDIR ${APP_MOUNT}
 
 
 ARG BUILD_HIPBLASLT="0"
-ARG HIPBLASLT_BRANCH="c8c3cac"
+ARG HIPBLASLT_BRANCH="develop"
 
 RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
     echo "HIPBLASLT_BRANCH is $HIPBLASLT_BRANCH"; \
@@ -50,7 +50,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
 
 ARG BUILD_RCCL="1"
-ARG RCCL_BRANCH="549a863"
+ARG RCCL_BRANCH="4ee96dd"
 
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     echo "RCCL_BRANCH is $RCCL_BRANCH"; \
@@ -59,48 +59,21 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && git clone https://github.com/akolliasAMD/rccl \
+    && git clone https://github.com/mberenjk/rccl.git \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
-    && ./install.sh -i --amdgpu_targets ${PYTORCH_ROCM_ARCH} \
-    && cd .. \
+    && mkdir build && cd build \
+    && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ \
+	   -DCMAKE_BUILD_TYPE=Release -DAMDGPU_TARGETS=${PYTORCH_ROCM_ARCH} .. \
+    && SCCACHE_IDLE_TIMEOUT=1800 make -j 32 \
+    && make package \
+    && dpkg -i *.deb \
+    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+    && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+    && cd ../.. \
     && rm -r rccl \
     && cd ..; \
     fi
-
-
-# We always build Pytorch for now because source code needs fixing for Tunable Op for now
-# This will not be necessary once https://github.com/pytorch/pytorch/pull/124362 merges
-ARG BUILD_PYTORCH="1"
-ARG PYTORCH_BRANCH="a6feb59" #scaled_mm_tunable is "648fe2c7"
-RUN echo "PYTORCH_BRANCH is ${PYTORCH_BRANCH}"
-
-# Install PyTorch
-RUN if [ "$BUILD_PYTORCH" = "1" ]; then \
-    pip uninstall -y torch \
-    && mkdir -p libs \
-    && cd libs \
-    && git clone --recursive https://github.com/ROCm/pytorch \
-    && cd pytorch \
-    && git checkout ${PYTORCH_BRANCH} \
-    && git submodule sync \
-    && git submodule update --init --recursive \
-    && pip install -r requirements.txt \
-    && python3 tools/amd_build/build_amd.py; \
-    fi
-
-# Install PyTorch pt. 2: splitting it here to have a checkpoint
-ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV BUILD_ENVIRONMENT=rocm
-RUN if [ "$BUILD_PYTORCH" = "1" ]; then \
-    cd libs/pytorch \
-    && CMAKE_PREFIX_PATH=/opt/conda/envs/py_3.9 python3 setup.py install \
-    && cd .. \
-    && rm -rf pytorch \
-    && cd ..; \
-    fi
-
-RUN python3 -c "import torch; print(torch.__version__); print(torch.cuda.nccl.version())"
 
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
@@ -163,7 +136,7 @@ RUN if [ "$BUILD_CUPY" = "1" ]; then \
 
 # whether to build triton on rocm
 ARG BUILD_TRITON="1"
-ARG TRITON_BRANCH="triton-mlir"
+ARG TRITON_BRANCH="main"
 
 RUN if [ "$BUILD_TRITON" = "1" ]; then \
     echo "TRITON_BRANCH is $TRITON_BRANCH"; \
@@ -173,26 +146,15 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
     && pip uninstall -y triton \
-    && git clone https://github.com/ROCm/triton.git \
+    && git clone https://github.com/OpenAI/triton.git \
     && cd triton \
     && git checkout ${TRITON_BRANCH} \
     && cd python \
-    && pip3 install . \
+    && pip install . \
     && cd ../.. \
     && rm -rf triton \
     && cd ..; \
     fi
-
-
-# Install gradlib
-RUN mkdir -p libs \
-    && cd libs \
-    && git clone https://github.com/ROCm/gradlib \
-    && cd gradlib \
-    && pip install . \
-    && cd .. \
-    && rm -rf gradlib \
-    && cd ..
 
 
 COPY ./ /app/vllm
@@ -209,7 +171,7 @@ RUN cd /app \
     && pip install -U -r requirements-rocm.txt \
     && if [ "$BUILD_FA" = "1" ]; then \
     bash patch_xformers.rocm.sh; fi \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_staging_base" ]; then \
+    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
     && python3 setup.py clean --all && python3 setup.py develop \
     && cd ..
@@ -222,7 +184,11 @@ RUN cd /app/vllm/gradlib \
 
 
 # Update Ray to latest version + set environment variable to ensure it works on TP > 1
-RUN python3 -m pip install --no-cache-dir ray[all]==2.10.0
+RUN python3 -m pip install --no-cache-dir 'ray[all]>=2.10.0'
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+
+# HIPgraph performance environment variables.
+ENV HIP_FORCE_DEV_KERNARG=1
+ENV DEBUG_CLR_GRAPH_PACKET_CAPTURE=1
 
 CMD ["/bin/bash"]
