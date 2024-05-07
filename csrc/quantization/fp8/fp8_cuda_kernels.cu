@@ -17,6 +17,15 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
     return old;
 }
 
+#define FP8_E4M3_MAX std::numeric_limits<c10::Float8_e4m3fn>::max()
+
+template<typename scalar_t>
+__device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(const scalar_t val, const float scale) {
+  float x = static_cast<float>(val) / scale;
+  float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
+  return static_cast<c10::Float8_e4m3fn>(r);
+}
+
 // Compute the absolute maximum m of the input tensor and store
 // m / float8_e4m3::max() in *scale. Each thread block performs a
 // reduction tree and the memory in scale is atomically updated.
@@ -67,7 +76,7 @@ __global__ void scaled_fp8_quant_kernel(
   int64_t num_elems) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   while (i < num_elems) {
-    out[i] = static_cast<c10::Float8_e4m3fn>(input[i] / *scale);
+    out[i] = scaled_fp8_conversion(input[i], *scale);
     i += blockDim.x * gridDim.x;
   }
 }
