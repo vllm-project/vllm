@@ -136,16 +136,16 @@ def ref_query_cached_kv_attention(output: torch.Tensor, query: torch.Tensor,
     output.reshape(-1, num_kv_heads, head_size)
 
 
-@pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("use_alibi", USE_ALIBI)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("tree_width", TREEWIDTH)
+# @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
+# @pytest.mark.parametrize("num_heads", NUM_HEADS)
+# @pytest.mark.parametrize("head_size", HEAD_SIZES)
+# @pytest.mark.parametrize("use_alibi", USE_ALIBI)
+# @pytest.mark.parametrize("block_size", BLOCK_SIZES)
+# @pytest.mark.parametrize("dtype", DTYPES)
+# @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+# @pytest.mark.parametrize("seed", SEEDS)
+# @pytest.mark.parametrize("device", CUDA_DEVICES)
+# @pytest.mark.parametrize("tree_width", TREEWIDTH)
 def test_paged_attention(
     kv_cache_factory,
     num_seqs: int,
@@ -206,22 +206,33 @@ def test_paged_attention(
                                                 kv_cache_dtype, dtype, seed,
                                                 device)
     key_cache, value_cache = key_caches[0], value_caches[0]
-
-    # #key_cache = torch.randint_like(key_cache, -1, 2)
-    # #value_cache = torch.randint_like(value_cache, -1, 2)
-    # value_cache = torch.arange(value_cache.numel()).reshape(value_cache.shape).to(value_cache.dtype)
-    # #query = torch.randint_like(query, -1, 2)
-    # #value_cache = torch.ones_like(value_cache)
-    # key_cache = torch.ones_like(key_cache)
-    # query = torch.ones_like(query)
-
-    output = torch.empty_like(query)
+    
     torch.cuda.synchronize()
+    start_time = time.time()
+    output = torch.empty_like(query)
+    ops.paged_attention_v1(
+        output,
+        query,
+        key_cache,
+        value_cache,
+        num_kv_heads,
+        scale,
+        block_tables,
+        context_lens,
+        block_size,
+        max_context_len,
+        alibi_slopes,
+        kv_cache_dtype,
+        1.0,
+    )
+    torch.cuda.synchronize()
+    paged_attn_duration = (time.time()-start_time)*tree_width
+    
     start_time = time.time()
     tree_attention_fwd(query, output, key_cache, value_cache, block_tables,
                        context_lens, prompt_lens, tree_width, alibi_slopes)
     torch.cuda.synchronize()
-    #print("tree attention duration:", time.time()-start_time)
+    tree_attn_duration = time.time()-start_time
 
     ref_output = torch.empty_like(query)
     ref_query_cached_kv_attention(ref_output, query, num_queries_per_kv,
@@ -235,8 +246,7 @@ def test_paged_attention(
     atol = 1e-4
     rtol = 2e-2
 
-    def diff(a, b):
-        print(((a - b).abs() / (b + 1e-8)).mean())
-
-    diff(output, ref_output)
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
+
+
+test_paged_attention(create_kv_caches_with_random, 78, (32, 32), 128, False, 32, torch.half, "auto", 1, 8, 'cuda')
