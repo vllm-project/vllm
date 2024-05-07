@@ -774,7 +774,6 @@ def _get_logprobs(
         logprobs[query_indices_gpu],
         next_token_ids_gpu,
     ).to('cpu', non_blocking=True)
-    assert selected_logprobs.shape[0] == ranks.shape[0]
 
     # Logprobs of topk tokens for a batch of sequence groups.
     # (num_query_tokens_across_batch).
@@ -792,6 +791,10 @@ def _get_logprobs(
     sample_logprobs_per_seq_group: List[SampleLogprobs] = []
     top_logprob_idx = 0
     selected_logprobs_idx = 0
+
+    # Make sure non-blocking .to("cpu", non_blocking=True) is finished
+    torch.cuda.current_stream().synchronize()
+    assert selected_logprobs.shape[0] == ranks.shape[0]
 
     for seq_group, sample_result in zip(sampling_metadata.seq_groups,
                                         sample_results):
@@ -895,7 +898,6 @@ def _get_sampled_logprob_if_needed(
             len(next_token_ids)].tolist()
         rank_items = ranks[selected_logprobs_idx:selected_logprobs_idx +
                            len(next_token_ids)].tolist()
-
         for idx, (next_token_id,
                   parent_id) in enumerate(zip(next_token_ids, parent_seq_ids)):
             # Get the logprob of a sampled token.
