@@ -160,6 +160,9 @@ class ModelConfig:
             is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
                                 or quant_cfg.get("is_marlin_format", False))
 
+            is_format_marlin_24 = (
+                quant_cfg.get("checkpoint_format") == "marlin_24")
+
             # Check which LinearMethod the GPTQ model should use.
             if quant_method == "gptq":
                 # If serialized in Marlin format, use MarlinLinearMethod.
@@ -168,6 +171,13 @@ class ModelConfig:
                     logger.info("The model is serialized in Marlin format. "
                                 "Using Marlin kernel.")
                     quant_method = "marlin"
+                    if self.quantization == "gptq":
+                        self.quantization = quant_method
+
+                if is_format_marlin_24:
+                    logger.info("The model is serialized in Marlin_24 format. "
+                                "Using Marlin_24 kernel.")
+                    quant_method = "gptq_marlin_24"
                     if self.quantization == "gptq":
                         self.quantization = quant_method
 
@@ -207,7 +217,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization not in ["marlin", "gptq_marlin"]):
+            if (self.quantization
+                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
