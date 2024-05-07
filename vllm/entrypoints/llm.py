@@ -237,20 +237,22 @@ class LLM:
                 total=num_requests,
                 desc="Processed prompts",
                 dynamic_ncols=True,
-                postfix=f"{0:.2f} toks/s",
+                postfix=f"Generation Speed: {0:.2f} toks/s",
             )
         # Run the engine.
         outputs: List[RequestOutput] = []
-        total_tokens = 0
+        total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        total_tokens += len(output.outputs[0].token_ids)
-                        speed = total_tokens / pbar.format_dict["elapsed"]
-                        pbar.postfix = f"{speed:.2f} toks/s"
+                        total_toks += (
+                            sum(len(stp.token_ids) for stp in output.outputs)
+                        )
+                        spd = total_toks / pbar.format_dict["elapsed"]
+                        pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
