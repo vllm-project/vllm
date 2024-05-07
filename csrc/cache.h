@@ -13,7 +13,7 @@ void swap_blocks(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  const std::map<int64_t, std::vector<int64_t>>& block_mapping);
+  torch::Tensor& block_mapping);
 
 void reshape_and_cache(
   torch::Tensor& key,

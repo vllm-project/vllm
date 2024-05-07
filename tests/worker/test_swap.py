@@ -59,7 +59,7 @@ def test_swap() -> None:
         seq_group_metadata_list=[],
         blocks_to_swap_in={},
         blocks_to_swap_out=blocks_to_swap_out,
-        blocks_to_copy={},
+        blocks_to_copy=[],
     )
     worker.execute_model(execute_model_req=execute_model_req)
 
