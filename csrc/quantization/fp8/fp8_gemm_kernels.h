@@ -1,4 +1,13 @@
 #include "cutlass/cutlass.h"
+#include "cutlass/numeric_types.h"
+
+#include "cute/tensor.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
+#include "cutlass/gemm/device/gemm_universal_adapter.h"
+#include "cutlass/gemm/kernel/gemm_universal.hpp"
+#include "cutlass/epilogue/collective/collective_builder.hpp"
+
+using namespace cute;
 
 // A matrix configuration
 using         ElementA    = cutlass::float_e4m3_t;                          // Element type for A matrix operand
