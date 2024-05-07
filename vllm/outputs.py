@@ -1,5 +1,4 @@
 import time
-from abc import ABC, abstractmethod
 from typing import List, Optional, Union
 
 from vllm.lora.request import LoRARequest
@@ -77,32 +76,7 @@ class EmbeddingOutput:
                 f"embedding={len(self.embedding)}")
 
 
-class RequestOutput(ABC):
-    """
-    An abstract base class representing the output of a request to the LLM.
-    The request could be a completion request or an embedding request.
-    """
-
-    def __init__(self, request_id: str, prompt_token_ids: List[int],
-                 finished: bool):
-        self.request_id = request_id
-        self.prompt_token_ids = prompt_token_ids
-        self.finished = finished
-
-    @abstractmethod
-    def from_seq_group(cls, seq_group: 'SequenceGroup') -> "RequestOutput":
-        """
-        A class method to initialize a RequestOutput (or its subclasses)
-        instance from a SequenceGroup.
-        """
-        pass
-
-    @abstractmethod
-    def __repr__(self) -> str:
-        pass
-
-
-class CompletionRequestOutput(RequestOutput):
+class RequestOutput:
     """The output data of a completion request to the LLM.
 
     Args:
@@ -127,7 +101,9 @@ class CompletionRequestOutput(RequestOutput):
         metrics: Optional[RequestMetrics] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
-        super().__init__(request_id, prompt_token_ids, finished)
+        self.request_id = request_id
+        self.prompt_token_ids = prompt_token_ids
+        self.finished = finished
         self.prompt = prompt
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
@@ -135,8 +111,7 @@ class CompletionRequestOutput(RequestOutput):
         self.lora_request = lora_request
 
     @classmethod
-    def from_seq_group(cls,
-                       seq_group: SequenceGroup) -> "CompletionRequestOutput":
+    def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
         if seq_group.sampling_params is None:
             raise ValueError("Sampling parameters are missing in seq_group.")
         seqs = seq_group.get_seqs()
@@ -186,7 +161,7 @@ class CompletionRequestOutput(RequestOutput):
                    lora_request=seq_group.lora_request)
 
     def __repr__(self) -> str:
-        return (f"CompletionRequestOutput(request_id={self.request_id}, "
+        return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
@@ -196,7 +171,7 @@ class CompletionRequestOutput(RequestOutput):
                 f"lora_request={self.lora_request})")
 
 
-class EmbeddingRequestOutput(RequestOutput):
+class EmbeddingRequestOutput:
     """
     The output data of an embedding request to the LLM.
 
@@ -209,7 +184,9 @@ class EmbeddingRequestOutput(RequestOutput):
 
     def __init__(self, request_id: str, outputs: 'EmbeddingOutput',
                  prompt_token_ids: List[int], finished: bool):
-        super().__init__(request_id, prompt_token_ids, finished)
+        self.request_id = request_id
+        self.prompt_token_ids = prompt_token_ids
+        self.finished = finished
         self.outputs = outputs
 
     @classmethod
@@ -248,4 +225,4 @@ class RequestOutputFactory:
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return CompletionRequestOutput.from_seq_group(seq_group)
+            return RequestOutput.from_seq_group(seq_group)

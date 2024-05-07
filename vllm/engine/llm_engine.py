@@ -20,7 +20,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
+from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -568,7 +568,7 @@ class LLMEngine:
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -600,7 +600,7 @@ class LLMEngine:
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[Union[CompletionRequestOutput,
+        request_outputs: List[Union[RequestOutput,
                                     EmbeddingRequestOutput]] = []
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
@@ -612,9 +612,7 @@ class LLMEngine:
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(
-            self
-    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
+    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png

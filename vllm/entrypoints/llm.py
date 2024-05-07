@@ -8,8 +8,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import (CompletionRequestOutput, EmbeddingRequestOutput,
-                          RequestOutput)
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
@@ -324,8 +323,8 @@ class LLM:
                                     multi_modal_data=multi_modal_data)
 
     def _run_engine(
-        self, use_tqdm: bool
-    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
+            self, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -336,8 +335,7 @@ class LLM:
                 postfix=f"Generation Speed: {0:.2f} toks/s",
             )
         # Run the engine.
-        outputs: List[Union[CompletionRequestOutput,
-                            EmbeddingRequestOutput]] = []
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()

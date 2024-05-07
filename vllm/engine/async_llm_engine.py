@@ -14,7 +14,7 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionRequestOutput, EmbeddingRequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, MultiModalData, SamplerOutput
@@ -56,10 +56,8 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(
-        self, item: Union[CompletionRequestOutput, EmbeddingRequestOutput,
-                          Exception]
-    ) -> None:
+    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
+                              Exception]) -> None:
         if self._finished:
             return
         self._queue.put_nowait(item)
@@ -75,8 +73,7 @@ class AsyncStream:
     def __aiter__(self):
         return self
 
-    async def __anext__(
-            self) -> Union[CompletionRequestOutput, EmbeddingRequestOutput]:
+    async def __anext__(self) -> Union[RequestOutput, EmbeddingRequestOutput]:
         result = await self._queue.get()
         if isinstance(result, Exception):
             raise result
@@ -113,7 +110,7 @@ class RequestTracker:
                 self.abort_request(rid)
 
     def process_request_output(self,
-                               request_output: Union[CompletionRequestOutput,
+                               request_output: Union[RequestOutput,
                                                      EmbeddingRequestOutput],
                                *,
                                verbose: bool = False) -> None:
@@ -203,8 +200,7 @@ class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
     async def step_async(
-            self
-    ) -> List[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
+            self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -587,7 +583,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None
-    ) -> AsyncIterator[CompletionRequestOutput]:
+    ) -> AsyncIterator[RequestOutput]:
         """Generate outputs for a request.
 
         Generate outputs for a request. This method is a coroutine. It adds the
@@ -605,7 +601,7 @@ class AsyncLLMEngine:
             multi_modal_data: Multi modal data per request.
 
         Yields:
-            The output `CompletionRequestOutput` objects from the LLMEngine
+            The output `RequestOutput` objects from the LLMEngine
             for the request.
 
         Details:
@@ -749,7 +745,7 @@ class AsyncLLMEngine:
         prompt_token_ids: Optional[List[int]] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
-    ) -> AsyncIterator[Union[CompletionRequestOutput, EmbeddingRequestOutput]]:
+    ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
         arrival_time = time.time()
