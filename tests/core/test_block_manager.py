@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from typing import List
 
 import pytest
@@ -155,7 +156,10 @@ def test_append_slot_cow():
 
     cows = block_manager.append_slots(child)
     assert cows
-    for src_block, dst_blocks in cows.items():
+    dict_cows = defaultdict(list)
+    for src_block, dst_block in cows:
+        dict_cows[src_block].append(dst_block)
+    for src_block, dst_blocks in dict_cows.items():
         assert src_block not in dst_blocks
 
     after_blocks = block_manager.get_num_free_gpu_blocks()
