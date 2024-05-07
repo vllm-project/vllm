@@ -38,16 +38,10 @@ def get_attn_backend(
         return _ATTN_BACKEND
     else:
         assert kv_cache_dtype is not None, "KV cache dtype is not set."
-        attn_backend = select_attn_backend(dtype, kv_cache_dtype)
-        if _ATTN_BACKEND is None:
-            _ATTN_BACKEND = attn_backend
-        else:
-            assert attn_backend == _ATTN_BACKEND, (
-                "Cannot change the attention backend after it is set.")
+        _ATTN_BACKEND = select_attn_backend(dtype, kv_cache_dtype)
         return _ATTN_BACKEND
 
 
-@lru_cache(maxsize=None)
 def select_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: str,
@@ -81,6 +75,7 @@ def select_attn_backend(
         raise ValueError("Invalid attention backend.")
 
 
+@lru_cache(maxsize=None)
 def _which_attn_to_use(
     dtype: torch.dtype,
     kv_cache_dtype: str,
