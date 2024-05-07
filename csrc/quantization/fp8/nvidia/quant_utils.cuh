@@ -12,6 +12,7 @@ namespace vllm {
 namespace fp8 {
 #ifdef ENABLE_FP8
 
+#if 0 // Disable the following code to reduce the binary size.
 template <typename Tout, typename Tin>
 __inline__ __device__ Tout
 vec_conversion(const Tin &x, const __nv_fp8_interpretation_t fp8_type) {
@@ -275,6 +276,7 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(
   from_float(b, a);
   return b;
 }
+#endif
 
 /* Scaled and vectorized conversions, for data exchange between high and low
    precision domains Convention of the scale in API, e.g: FP8_data =
@@ -406,7 +408,9 @@ __inline__ __device__ float scaled_vec_conversion<float, uint8_t>(
     const __nv_fp8_interpretation_t fp8_type) {
 
   // fp8 -> half
-  uint16_t tmp = vec_conversion<uint16_t, uint8_t>(a, fp8_type);
+  __half_raw res = __nv_cvt_fp8_to_halfraw(a, fp8_type);
+  uint16_t tmp = res.x;
+
   // half -> float
   return half_to_float(tmp) * scale;
 }
@@ -497,7 +501,7 @@ __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(
 
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout convert(const Tin &x) {
-#ifdef ENABLE_FP8
+#if 0 // Disable the following code to reduce the binary size.
   if constexpr (kv_dt == Fp8KVCacheDataType::kAuto ||
                 kv_dt == Fp8KVCacheDataType::kFp8E4m3) {
     return vec_conversion<Tout, Tin>(x, __NV_E4M3);
