@@ -17,10 +17,10 @@ from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import is_hip
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
-from vllm.utils import is_hip
 
 
 class Worker(WorkerBase):

@@ -220,7 +220,7 @@ class NCCLCommunicator:
         pg_options=None,
         local_rank: int = -1,
     ):
-        assert not is_hip() # We do not use pynccl on ROCm
+        assert not is_hip()  # We do not use pynccl on ROCm
         if not dist.is_initialized():
             backend = backend or "nccl"
             assert backend == 'nccl', (

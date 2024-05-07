@@ -54,7 +54,7 @@ exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
 
 [tool.codespell]
 ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts,./benchmarks/sonnet.txt"
+skip = "./tests/prompts,./benchmarks/sonnet.txt,./gradlib"
 
 [tool.isort]
 use_parentheses = true
