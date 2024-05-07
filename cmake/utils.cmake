@@ -207,8 +207,10 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
         "CMAKE_CUDA_FLAGS. (${CMAKE_CUDA_FLAGS})")
     endif()
 
-    message(DEBUG "final CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
-    message(DEBUG "arch flags: ${_CUDA_ARCH_FLAGS}")
+    message(STATUS "final CMAKE_CUDA_FLAGS: ${CMAKE_CUDA_FLAGS}")
+    message(STATUS "arch flags: ${_CUDA_ARCH_FLAGS}")
+    set(_CUDA_ARCH_FLAGS "-gencode arch=compute_90a,code=sm_90a")
+    message(STATUS "arch flags: ${_CUDA_ARCH_FLAGS}")
 
     # Initialize the architecture lists to empty.
     set(${GPU_ARCHES})

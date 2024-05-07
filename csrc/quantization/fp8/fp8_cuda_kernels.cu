@@ -154,8 +154,8 @@ void fp8_scaled_gemm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& we
     {reinterpret_cast<cutlass::float_e4m3_t*>(input.data_ptr<c10::Float8_e4m3fn>()), stride_A,
      reinterpret_cast<cutlass::float_e4m3_t*>(weights.data_ptr<c10::Float8_e4m3fn>()), stride_B},
     {
-      {}, // epilogue.thread
-      // tensor_C.device_data(), stride_C,
+      {1.0f, 0.0f}, // epilogue.thread
+      reinterpret_cast<cutlass::half_t*>(out.data_ptr<c10::Half>()), stride_C,
       reinterpret_cast<cutlass::half_t*>(out.data_ptr<c10::Half>()), stride_D
     }
   };

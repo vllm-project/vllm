@@ -46,7 +46,7 @@ using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBui
     TileShape, ClusterShape,
     EpilogueTileType,
     ElementAccumulator, ElementCompute,
-    ElementC, LayoutC, AlignmentC,
+    void, LayoutC, AlignmentC,
     ElementD, LayoutD, AlignmentD,
     EpilogueSchedule
   >::CollectiveOp;
