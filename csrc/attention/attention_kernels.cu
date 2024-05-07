@@ -787,8 +787,8 @@ void paged_attention_v1_launcher(
     case true:                                                               \
       CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
       break;                                                                 \
-    default:                                                                 \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+    case false:                                                               \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);       \
       break;                                                                 \
   }
 
@@ -1010,14 +1010,14 @@ void paged_attention_v2_launcher(
 //   if (is_block_sparse)                                                       \
 //       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
 //   else                                                                       \
-//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
+//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
   switch (is_block_sparse) {                                                 \
     case true:                                                               \
       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
       break;                                                                 \
-    default:                                                                 \
+    case false:                                                              \
       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
       break;                                                                 \
   }

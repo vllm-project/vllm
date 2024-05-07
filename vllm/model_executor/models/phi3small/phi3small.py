@@ -24,7 +24,6 @@ from vllm.model_executor.weight_utils import (default_weight_loader,
                                               hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
-
 def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
     tp = get_tensor_model_parallel_world_size()
@@ -362,8 +361,7 @@ class Phi3SmallForCausalLM(nn.Module):
         # tokens in tiktoken but not used
         if hasattr(config, 'dummy_token_indices'):
             device = self.lm_head.weight.device
-            self.register_buffer(
-                'dummy_token_indices',
+            self.register_buffer('dummy_token_indices',
                 torch.LongTensor(config.dummy_token_indices).to(device),
                 persistent=False)
         else:
@@ -391,7 +389,7 @@ class Phi3SmallForCausalLM(nn.Module):
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         logits = self.logits_processor(self.lm_head.weight, hidden_states,
                                        sampling_metadata)
-        if self.dummy_token_indices is not None:
+        if self.dummy_token_indices is not None and logits is not None:
             logits.index_fill_(-1, self.dummy_token_indices, -torch.inf)
         return logits
 
@@ -416,6 +414,7 @@ class Phi3SmallForCausalLM(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
+
         next_tokens = self.sampler(logits / self.mup_width_multiplier,
                                    sampling_metadata)
         return next_tokens

@@ -15,10 +15,11 @@ void paged_attention_v1(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale);
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step);
 
 void paged_attention_v2(
   torch::Tensor& out,
@@ -36,10 +37,11 @@ void paged_attention_v2(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
-  int blocksparse_local_blocks,
-  int blocksparse_vert_stride,
-  int blocksparse_block_size,
-  float kv_scale);
+  float kv_scale,
+  const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride,
+  const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step);
 
 void rms_norm(
   torch::Tensor& out,
