@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod, abstractproperty
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Set, Union, Type
+from typing import Any, Dict, List, Literal, Set, Type, Union
 
 import torch
 
