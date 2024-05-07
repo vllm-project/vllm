@@ -219,12 +219,21 @@ class Worker(WorkerBase):
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
+        blocks_to_swap_in: torch.Tensor
+        blocks_to_swap_out: torch.Tensor
+        blocks_to_copy: torch.Tensor
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert execute_model_req is not None
             num_seq_groups = len(seq_group_metadata_list)
-            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
+            blocks_to_swap_in = torch.tensor(
+                execute_model_req.blocks_to_swap_in,
+                device=self.device,
+                dtype=torch.int64).view(-1, 2)
+            blocks_to_swap_out = torch.tensor(
+                execute_model_req.blocks_to_swap_out,
+                device=self.device,
+                dtype=torch.int64).view(-1, 2)
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)
