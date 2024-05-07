@@ -29,9 +29,6 @@ def test_contexted_kv_attention_alibi(
     dtype: torch.dtype,
     device: str,
 ) -> None:
-    # NOTE(DefTruth): The random seed here can not been set as the
-    # same one in test_prefix_prefill.py script to avoid illegal
-    # memory access error in CI.
     random.seed(0)
     torch.manual_seed(0)
     if torch.cuda.is_available():
@@ -186,7 +183,7 @@ def test_contexted_kv_attention_alibi(
     scale = float(1.0 / (head_size**0.5))
 
     # NOTE: In order to reuse _make_alibi_bias function,
-    # We have to pad query tensor before MQA/GQA expanding,
+    # We have to pad query tensor before MQA/GQA expanding.
     if query.shape[0] != key.shape[0]:
         query_pad = torch.empty(sum(seq_lens),
                                 num_heads,
