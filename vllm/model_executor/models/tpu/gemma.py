@@ -312,7 +312,8 @@ if __name__ == "__main__":
     from transformers import AutoConfig, AutoTokenizer
 
     torch.set_grad_enabled(False)
-    xr.initialize_cache(os.path.expanduser("~/.vllm/torch_xla_cache"), readonly=False)
+    xr.initialize_cache(os.path.expanduser("~/.vllm/torch_xla_cache"),
+                        readonly=False)
 
     MODEL_NAME = "google/gemma-7b"
     SEED = 0
@@ -352,27 +353,39 @@ if __name__ == "__main__":
                                       dtype=torch.long,
                                       device=device)
     dummy_position_ids = dummy_position_ids.view(bs, seq_len)
-    kv_cache_shape = backend.get_kv_cache_shape(num_blocks, 16, config.num_key_value_heads, config.head_dim)
-    kv_caches = [
-        (torch.empty(kv_cache_shape, dtype=torch.bfloat16, device=device),
-         torch.empty(kv_cache_shape, dtype=torch.bfloat16, device=device))
-        for _ in range(config.num_hidden_layers)
-    ]
-    slot_mapping = torch.randint(0, num_blocks, (bs * seq_len,), dtype=torch.int64, device=device)
-    context_lens = torch.full((bs,), context_len, dtype=torch.int32, device=device)
-    block_tables = torch.randint(0, num_blocks, (bs, max_num_blocks_per_seq), dtype=torch.int32, device=device)
+    kv_cache_shape = backend.get_kv_cache_shape(num_blocks, 16,
+                                                config.num_key_value_heads,
+                                                config.head_dim)
+    kv_caches = [(torch.empty(kv_cache_shape,
+                              dtype=torch.bfloat16,
+                              device=device),
+                  torch.empty(kv_cache_shape,
+                              dtype=torch.bfloat16,
+                              device=device))
+                 for _ in range(config.num_hidden_layers)]
+    slot_mapping = torch.randint(0,
+                                 num_blocks, (bs * seq_len, ),
+                                 dtype=torch.int64,
+                                 device=device)
+    context_lens = torch.full((bs, ),
+                              context_len,
+                              dtype=torch.int32,
+                              device=device)
+    block_tables = torch.randint(0,
+                                 num_blocks, (bs, max_num_blocks_per_seq),
+                                 dtype=torch.int32,
+                                 device=device)
 
-    attn_metadata = backend.make_metadata(
-        num_prefills=0,
-        num_prefill_tokens=0,
-        num_decode_tokens=0,
-        prefill_metadata=None,
-        decode_metadata=None,
-        kv_cache_dtype=None,
-        slot_mapping=slot_mapping,
-        block_tables=block_tables,
-        context_lens=context_lens,
-        is_prompt=seq_len > 1)
+    attn_metadata = backend.make_metadata(num_prefills=0,
+                                          num_prefill_tokens=0,
+                                          num_decode_tokens=0,
+                                          prefill_metadata=None,
+                                          decode_metadata=None,
+                                          kv_cache_dtype=None,
+                                          slot_mapping=slot_mapping,
+                                          block_tables=block_tables,
+                                          context_lens=context_lens,
+                                          is_prompt=seq_len > 1)
     xm.mark_step()
 
     hidden_states = compiled_model(dummy_input_ids, dummy_position_ids,

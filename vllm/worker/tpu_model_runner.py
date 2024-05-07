@@ -54,14 +54,15 @@ class TPUModelRunner:
         model = GemmaForCausalLM.from_pretrained(
             self.model_config.model, config=self.model_config.hf_config)
         self.model = model.eval().to(self.device)
-        # self.model = torch.compile(self.model,
-        #                             backend="openxla_eval",
-        #                             fullgraph=True)
+        self.model = torch.compile(self.model,
+                                   backend="openxla",
+                                   fullgraph=True)
 
     def warmup_model(
         self,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
+        torch._dynamo.config.cache_size_limit = 128
         # Prefill
         logger.info("Compiling the model with different input shapes...")
         start = time.time()
@@ -140,6 +141,7 @@ class TPUModelRunner:
             self.model(token_ids, position_ids, kv_caches, attn_metadata)
             xm.mark_step()
             xm.wait_device_ops()
+            logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
         end = time.time()
         logger.info(f"Compilation for decode done in {(end - start):.2f} s.")

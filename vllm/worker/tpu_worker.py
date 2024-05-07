@@ -71,7 +71,7 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        num_tpu_blocks = 1000
+        num_tpu_blocks = 2000  # FIXME
         return num_tpu_blocks, 0
 
     def initialize_cache(
@@ -138,6 +138,6 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         if num_seq_groups == 0:
             return {}
 
-        output = self.model_runner.execute_model(
-            seq_group_metadata_list, self.tpu_cache)
+        output = self.model_runner.execute_model(seq_group_metadata_list,
+                                                 self.tpu_cache)
         return output

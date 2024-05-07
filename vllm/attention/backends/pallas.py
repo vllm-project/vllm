@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch_xla.experimental.custom_kernel  # Required to register custom ops.
@@ -47,7 +47,7 @@ class PallasAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class PallasMetadata(AttentionMetadata, AttentionMetadataPerStage):
+class PallasMetadata(AttentionMetadata):
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
     is_prompt: bool
@@ -83,8 +83,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[Tuple[torch.Tensor, torch.Tensor]],
-        attn_metadata: PallasMetadata,  # type: ignore
+        kv_cache: Any,
+        attn_metadata: AttentionMetadata[PallasMetadata],  # type: ignore
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
@@ -102,7 +102,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
-        value = value.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
+        value = value.view(batch_size, seq_len, self.num_kv_heads,
+                           self.head_size)
 
         if kv_cache is not None:
             slot_mapping = attn_metadata.slot_mapping
@@ -117,8 +118,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Handle GQA/MQA.
             if self.num_kv_heads != self.num_heads:
                 key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-                value = value.repeat_interleave(self.num_queries_per_kv,
-                                                dim=1)
+                value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
             output = torch.ops.xla.flash_attention(
                 query.permute(0, 2, 1, 3),
                 key.permute(0, 2, 1, 3),
@@ -135,7 +135,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 value_cache.permute(2, 0, 1, 3),
                 attn_metadata.context_lens,
                 attn_metadata.block_tables,
-                1,  # pages_per_compute_block
+                16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
             )
 
         # Reshape the output tensor.
