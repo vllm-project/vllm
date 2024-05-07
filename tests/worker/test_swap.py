@@ -66,7 +66,7 @@ def test_swap() -> None:
     for i in range(num_layers):
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
-        for src, dst in blocks_to_swap_out.items():
+        for src, dst in blocks_to_swap_out:
             assert allclose(gpu_key_cache[src], cpu_key_cache[dst])
             assert allclose(gpu_value_cache[src], cpu_value_cache[dst])
 
