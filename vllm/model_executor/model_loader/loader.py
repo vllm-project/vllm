@@ -361,15 +361,22 @@ class StateDictLoader(BaseModelLoader):
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig) -> nn.Module:
-        from safetensors.torch import load_model
-
+        from safetensors.torch import load_file
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
             rank = get_tensor_model_parallel_rank()
-            load_model(model, f"{model_config.model}/model.{rank}.safetensors")
+            paths = glob.glob(
+                f"{model_config.model}/model-{rank}-*.safetensors")
+            params = dict(model.named_parameters())
+            for file in paths:
+                for key, val in load_file(file).items():
+                    with torch.no_grad():
+                        params[key].copy_(val)
+                    params.pop(key)
+            assert not params
         return model.eval()
 
 
