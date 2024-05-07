@@ -847,16 +847,16 @@ def _get_prompt_logprob_if_needed(
             # Add top K prompt logprobs along with its rank.
             if num_logprobs > 0:
                 top_ids = top_token_ids[
-                    top_logprob_idx, :num_logprobs].tolist()  # noqa
+                    top_logprob_idx, :num_logprobs].tolist()
                 top_probs = top_logprobs[
-                    top_logprob_idx, :num_logprobs].tolist()  # noqa
+                    top_logprob_idx, :num_logprobs].tolist()
                 # Top K is already sorted by rank, so we can use 1 ~
                 # num_logprobs + 1 for rank.
                 top_ranks = range(1, num_logprobs + 1)
                 prompt_logprobs_dict.update({
                     top_id: (top_prob, rank)
                     for top_id, top_prob, rank in zip(top_ids, top_probs,
-                                                      top_ranks)  # noqa
+                                                      top_ranks)
                 })
             prompt_logprobs.append({
                 token_id: Logprob(*logprob_and_rank)
@@ -914,7 +914,7 @@ def _get_sampled_logprob_if_needed(
                 sampled_logprobs_dict.update({
                     top_id: (top_prob, rank)
                     for top_id, top_prob, rank in zip(top_ids, top_probs,
-                                                      top_ranks)  # noqa
+                                                      top_ranks)
                 })
 
             sampled_logprobs.append({
@@ -922,7 +922,15 @@ def _get_sampled_logprob_if_needed(
                 for token_id, logprob_and_rank in
                 sampled_logprobs_dict.items()
             })
+
+        # NOTE: This part of code is not intuitive. `selected_logprobs` include
+        # logprobs for the current step, which has len(next_token_ids) tokens
+        # per sequence group. `logprobs` includes logprobs from the previous
+        # steps, which has len(seq_ids) tokens per sequence group.
+
+        # Iterate to the next sequence group in a batch.
         selected_logprobs_idx += len(next_token_ids)
+        # Iterate to the next sequence group in a batch.
         top_logprob_idx += len(seq_ids)
     return sampled_logprobs, top_logprob_idx, selected_logprobs_idx
 
