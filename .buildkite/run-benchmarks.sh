@@ -17,6 +17,7 @@ bench_throughput_exit_code=$?
 
 # run python-based benchmark minimal measure perplexity on Llama-2-7B model
 python3 examples/measure_ppl2_llama2_MC.py --model=meta-llama/Llama-2-7b-hf --data=tests/prompts/wiki.test.raw --context-size=1024 --sample-size=512 --patch-size=1 2>&1 | tee benchmark_measure_pplv2.txt
+bench_ppl_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
 python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-2-7b-chat-hf &
@@ -71,6 +72,10 @@ fi
 
 if [ $bench_throughput_exit_code -ne 0 ]; then
     exit $bench_throughput_exit_code
+fi
+
+if [ $bench_ppl_exit_code -ne 0 ]; then
+    exit $bench_ppl_exit_code
 fi
 
 if [ $bench_serving_exit_code -ne 0 ]; then
