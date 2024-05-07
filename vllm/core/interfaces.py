@@ -1,7 +1,8 @@
 import enum
 from abc import ABC, abstractmethod
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm.sequence import Sequence, SequenceGroup
 

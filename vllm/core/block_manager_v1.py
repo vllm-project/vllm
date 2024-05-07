@@ -3,9 +3,9 @@ import math
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Set
+from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor

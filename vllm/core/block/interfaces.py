@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, List, Optional, Protocol, Tuple
+from typing import FrozenSet, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
