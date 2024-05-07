@@ -25,7 +25,6 @@ requests
 ray
 peft
 awscli
-sentence-transformers # required for embedding test
 
 # Benchmarking
 aiohttp
