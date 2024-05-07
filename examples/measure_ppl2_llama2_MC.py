@@ -95,8 +95,9 @@ def vllm_predict(CONT, llm, sampl_par):
 
 def main(args: argparse.Namespace):
 
-    MESSAGE=f"Initialising @ {datetime.datetime.now()}"
+    MESSAGE = f"Initialising @ {datetime.datetime.now()}"
     logger.info(MESSAGE)
+    print(MESSAGE)
     my_ppl = 0.0
 
     my_tokenizer = LlamaTokenizer.from_pretrained(args.model)
@@ -119,11 +120,13 @@ def main(args: argparse.Namespace):
 
     num_tokens_generated = 0
     starting_time = datetime.datetime.now()
-    MESSAGE=f"Starting generation @ {starting_time} \
+    MESSAGE = f"Starting generation @ {starting_time} \
 will try to process {my_n_patches} patche(s), \
 generating {my_n_samples} tokens in each patch \
 from the initial context of {args.context_size} tokens."
+
     logger.info(MESSAGE)
+    print(MESSAGE)
     for c in range(my_n_patches):
         CONTEXT = []
         my_sampl_par.future_context = []
@@ -136,22 +139,29 @@ from the initial context of {args.context_size} tokens."
             my_test_enc['input_ids'][c * my_n_samples +
                                      args.context_size:upper_boundary])
         my_sampl_par.max_tokens = len(my_sampl_par.future_context[0])
+        my_sampl_par.cntr = c
         LOGPROBS = vllm_predict(CONTEXT, my_llm, my_sampl_par)
         num_tokens_generated += len(LOGPROBS[0].outputs[0].token_ids)
         my_ppl -= LOGPROBS[0].outputs[0].cumulative_logprob
-        MESSAGE=f"Iteration {c+1} of {my_n_patches} Intermediate \
+        MESSAGE = f"Iteration {c+1} of {my_n_patches} Intermediate \
 Estimates:\n\
 \tCross-entropy_intermediate={my_ppl/num_tokens_generated}\n\
 \tPerplexity_intermediate={math.exp(my_ppl/num_tokens_generated)}"
+
         logger.info(MESSAGE)
+        print(MESSAGE)
     ending_time = datetime.datetime.now()
-    MESSAGE=f"Done @ {ending_time} after processing for \
+    MESSAGE = f"Done @ {ending_time} after processing for \
 {ending_time-starting_time} generated {num_tokens_generated} tokens."
+
     logger.info(MESSAGE)
 
-    MESSAGE=f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
+    MESSAGE = f"Integral Cross-Entropy={my_ppl} Average Cross-Entropy=\
 {my_ppl/num_tokens_generated} PPL={math.exp(my_ppl/num_tokens_generated)}"
+
     logger.info(MESSAGE)
+    print(MESSAGE)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

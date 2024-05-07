@@ -13,6 +13,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import (Logprob, PromptLogprobs, SampleLogprobs,
                            SamplerOutput, SequenceGroupOutput, SequenceOutput)
 
+#import pdb
+
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
 
@@ -506,13 +508,15 @@ def _sample_with_torch(
         seq_group_id = categorized_seq_group_ids[sampling_type]
         seq_groups = [sampling_metadata.seq_groups[i] for i in seq_group_id]
         is_prompts = [i < sampling_metadata.num_prompts for i in seq_group_id]
-        sample_metadata[sampling_type] = (seq_group_id, seq_groups,
-                                         is_prompts, sample_indices)
+        sample_metadata[sampling_type] = (seq_group_id, seq_groups, is_prompts,
+                                          sample_indices)
         long_sample_indices = sample_indices.long()
         if sampling_type == SamplingType.FORCED:
+            #pdb.set_trace()
             forced_samples = torch.tensor([
                 seq_groups[0].sampling_params.future_context[0][len(
-                sampling_metadata.seq_groups[0].seq_data[0].output_token_ids)]
+                    sampling_metadata.seq_groups[0].seq_data[
+                        sampling_params.cntr].output_token_ids)]
             ],
                                           device='cuda:0')  #
         elif sampling_type == SamplingType.GREEDY:
@@ -522,8 +526,7 @@ def _sample_with_torch(
             if include_gpu_probs_tensor:
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[
-                  long_sample_indices
-                ] = greedy_samples.unsqueeze(-1)
+                    long_sample_indices] = greedy_samples.unsqueeze(-1)
 
             if modify_greedy_probs:
                 # If required, modify the probabilities such that sampling from
