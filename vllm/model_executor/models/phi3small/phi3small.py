@@ -1,28 +1,30 @@
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Iterable
 
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               MergedColumnParallelLinear,
+from vllm.config import LoRAConfig
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.phi3small.phi3small_attention import (
     BlockSparseFlashAttention)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
+
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
                                 loaded_weight: torch.Tensor):
@@ -75,7 +77,7 @@ class Phi3SmallMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -89,13 +91,13 @@ class Phi3SmallMLP(nn.Module):
             self.hidden_size,
             2 * [self.intermediate_size],
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.down_proj = RowParallelLinear(
             self.intermediate_size,
             self.hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
     def forward(self, x):
@@ -109,7 +111,9 @@ class Phi3SmallSelfAttention(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
-                 layer_idx: Optional[int] = None) -> None:
+                 layer_idx: int,
+                 quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -154,13 +158,13 @@ class Phi3SmallSelfAttention(nn.Module):
             self.num_heads,
             self.num_key_value_heads,
             bias=True,
-            linear_method=None,
+            quant_config=quant_config,
         )
 
         self.dense = RowParallelLinear(self.hidden_size,
                                        self.hidden_size,
                                        bias=True,
-                                       linear_method=None)
+                                       quant_config=quant_config)
 
         if getattr(self.config, "rope_scaling", None) is not None:
             rope_scaling = self.config.rope_scaling
@@ -247,12 +251,12 @@ class Phi3SmallDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx: int,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Phi3SmallSelfAttention(config, layer_idx)
-        self.mlp = Phi3SmallMLP(config)
+        self.self_attn = Phi3SmallSelfAttention(config, layer_idx, quant_config)
+        self.mlp = Phi3SmallMLP(config, quant_config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_epsilon)
@@ -289,18 +293,15 @@ class Phi3SmallModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
-
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
-
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
-
         self.layers = nn.ModuleList([
-            Phi3SmallDecoderLayer(config, layer_idx)
+            Phi3SmallDecoderLayer(config, layer_idx, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -342,11 +343,13 @@ class Phi3SmallForCausalLM(nn.Module):
     def __init__(
         self,
         config,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.model = Phi3SmallModel(config)
+        self.quant_config = quant_config
+        self.model = Phi3SmallModel(config, quant_config)
         self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
         self.lm_head = ParallelLMHead(
@@ -419,16 +422,10 @@ class Phi3SmallForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(
-        self,
-        model_name_or_path: str,
-        cache_dir: Optional[str] = None,
-        load_format: str = "auto",
-        revision: Optional[str] = None,
-    ):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             if name.endswith(".bias") and name not in params_dict:

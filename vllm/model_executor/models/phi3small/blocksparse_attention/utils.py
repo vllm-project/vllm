@@ -128,6 +128,13 @@ def binary_mask_to_bias(mask_dense):
     return mask_dense
 
 
+def get_head_sliding_step(n_heads, vert_stride, homo_head=False):
+    # if vert_stride <= n_heads, rotating the heads
+    if homo_head:
+        return 0
+    return max(1, int(vert_stride / n_heads))
+
+
 @lru_cache
 def get_sparse_attn_mask(
     n_heads,
@@ -179,9 +186,7 @@ def get_sparse_attn_mask(
         num_blocks = triton.cdiv(max_seqlen, block_size)
         q_pos = torch.arange(num_blocks)[None, :, None]
         k_pos = torch.arange(num_blocks)[None, None]
-        head_sliding_step = max(
-            1, int(vert_stride /
-                   n_heads))  # if vert_stride <= n_heads, rotating the heads
+        head_sliding_step = get_head_sliding_step(n_heads, vert_stride)
         mask_vert_strided = [
             (torch.arange(num_blocks) + h * head_sliding_step + 1) %
             vert_stride == 0 for h in range(n_heads)

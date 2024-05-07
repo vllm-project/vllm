@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import List
+from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
@@ -52,7 +52,7 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config = {}
+    did_config: Dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
@@ -63,7 +63,7 @@ class cmake_build_ext(build_ext):
         num_jobs = os.environ.get("MAX_JOBS", None)
         if num_jobs is not None:
             num_jobs = int(num_jobs)
-            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
+            logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
             try:
                 # os.sched_getaffinity() isn't universally available, so fall
@@ -81,8 +81,9 @@ class cmake_build_ext(build_ext):
             nvcc_threads = os.getenv("NVCC_THREADS", None)
             if nvcc_threads is not None:
                 nvcc_threads = int(nvcc_threads)
-                logger.info(f"Using NVCC_THREADS={nvcc_threads} as the number"
-                            " of nvcc threads.")
+                logger.info(
+                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                    nvcc_threads)
             else:
                 nvcc_threads = 1
             num_jobs = max(1, num_jobs // nvcc_threads)
@@ -204,7 +205,8 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed
+    return torch_neuronx_installed or os.environ.get("VLLM_BUILD_WITH_NEURON",
+                                                     False)
 
 
 def _is_cpu() -> bool:
@@ -261,6 +263,7 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
+    assert CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
@@ -375,6 +378,7 @@ package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
 if os.environ.get("VLLM_USE_PRECOMPILED"):
+    ext_modules = []
     package_data["vllm"].append("*.so")
 
 setup(
@@ -404,6 +408,9 @@ setup(
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
+    extras_require={
+        "tensorizer": ["tensorizer==2.9.0"],
+    },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
 )

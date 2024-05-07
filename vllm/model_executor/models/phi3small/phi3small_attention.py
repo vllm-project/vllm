@@ -10,8 +10,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 
 from .blocksparse_attention.interface import (LocalStridedBlockSparseAttn,
                                               LocalStridedBlockSparsePagedAttn)
@@ -60,6 +60,7 @@ class BlockSparseFlashAttention(nn.Module):
         where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
                 `block_idx = position_id // sparse_block_size`.
         See `.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
+    head_sliding_step: see info on `homo_head`.
     **kwargs: not used, only for API compatibility.
     """
 
@@ -157,7 +158,8 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 @dataclass
 class BlocksparseFlashAttentionMetadata(AttentionMetadata,
                                         PagedAttentionMetadata):
-    """Metadata for FlashAttentionBackend.
+    """A Ccopy of Metadata for FlashAttentionBackend,
+    to avoid having to install flash_attn.
 
     NOTE: Any python object stored here is not updated when it is
     cuda-graph replayed. If you have values that need to be changed
@@ -285,6 +287,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             homo_head=self.homo_head,
             active_head_range=active_head_range,
         )
+        self.head_sliding_step = self.bs_attn.head_sliding_step
 
         if self.use_triton_paged_attn:
             self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
@@ -303,7 +306,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: BlocksparseFlashAttentionMetadata,
+        attn_metadata: AttentionMetadata[BlocksparseFlashAttentionMetadata],
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -341,31 +344,34 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 kv_scale,
             )
 
-        if attn_metadata.is_prompt:
+        if prefill_meta := attn_metadata.prefill_metadata:
 
             # Prompt run.
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
+            assert kv_cache is None or prefill_meta.block_tables.numel() == 0,\
+                "Does not support prefix-enabled attention."
+
             output = self.bs_attn(
                 q=query,
                 k=key,
                 v=value,
-                cu_seqlens_q=attn_metadata.seq_start_loc,
-                cu_seqlens_k=attn_metadata.seq_start_loc,
+                cu_seqlens_q=prefill_meta.seq_start_loc,
+                cu_seqlens_k=prefill_meta.seq_start_loc,
                 sm_scale=self.scale,
             )
 
-        else:
+        if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             if self.use_triton_paged_attn:
                 output = self.bs_paged_attn(
                     query,
                     key_cache,
                     value_cache,
-                    attn_metadata.block_tables,
-                    attn_metadata.context_lens,
+                    decode_meta.block_tables,
+                    decode_meta.context_lens,
                     sm_scale=self.scale,
                     kv_scale=kv_scale,
                 )
@@ -375,17 +381,18 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     query,
                     key_cache,
                     value_cache,
-                    attn_metadata.block_tables,
-                    attn_metadata.context_lens,
-                    attn_metadata.max_context_len,
+                    decode_meta.block_tables,
+                    decode_meta.context_lens,
+                    decode_meta.max_context_len,
                     attn_metadata.kv_cache_dtype,
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,
                     kv_scale,
-                    self.local_blocks,
-                    self.vert_stride,
-                    self.sparse_block_size,
+                    blocksparse_local_blocks=self.local_blocks,
+                    blocksparse_vert_stride=self.vert_stride,
+                    blocksparse_block_size=self.sparse_block_size,
+                    blocksparse_head_sliding_step=self.head_sliding_step,
                 )
 
         # Reshape the output tensor.

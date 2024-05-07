@@ -63,11 +63,14 @@ def create_execute_model_data(
 def mock_worker(cls=None,
                 vocab_size: int = 30_000,
                 max_model_len: int = 2048,
-                rank: int = 0) -> MagicMock:
+                rank: int = 0,
+                use_spec: bool = True) -> MagicMock:
     if cls is None:
         cls = Worker
 
-    worker = MagicMock(spec=cls)
+    spec = cls if use_spec else None
+
+    worker = MagicMock(spec=spec)
     worker.vocab_size = vocab_size
     worker.max_model_len = max_model_len
     worker.rank = rank
@@ -117,6 +120,8 @@ def create_worker(cls: type,
         parallel_config=engine_config.parallel_config,
         scheduler_config=engine_config.scheduler_config,
         device_config=engine_config.device_config,
+        cache_config=engine_config.cache_config,
+        load_config=engine_config.load_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
@@ -128,8 +133,9 @@ def create_worker(cls: type,
 
     engine_config.cache_config.num_gpu_blocks = num_gpu_blocks
     engine_config.cache_config.num_cpu_blocks = 0
-    worker.init_cache_engine(engine_config.cache_config)
-    worker.warm_up_model()
+    worker.initialize_cache(
+        num_gpu_blocks=engine_config.cache_config.num_gpu_blocks,
+        num_cpu_blocks=engine_config.cache_config.num_cpu_blocks)
 
     return worker
 
@@ -209,7 +215,7 @@ def create_sampler_output_list(
                     SequenceOutput(
                         output_token=token_id,
                         parent_seq_id=seq_ids[seq_index],
-                        logprobs={token_id: 0},
+                        logprobs={token_id: Logprob(0)},
                     )
                 ],
                 prompt_logprobs=None,

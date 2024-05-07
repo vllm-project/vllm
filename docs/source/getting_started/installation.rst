@@ -53,6 +53,7 @@ You can also build and install vLLM from source:
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
+    $ # export VLLM_INSTALL_PUNICA_KERNELS=1 # optionally build for multi-LoRA capability
     $ pip install -e .  # This may take 5-10 minutes.
 
 .. tip::
@@ -85,13 +86,3 @@ You can also build and install vLLM from source:
 
         $ nvcc --version # verify that nvcc is in your PATH
         $ ${CUDA_HOME}/bin/nvcc --version # verify that nvcc is in your CUDA_HOME
-
-.. note::
-    If you are developing the C++ backend of vLLM, consider building vLLM with
-
-    .. code-block:: console
-
-        $ python setup.py develop
-
-    since it will give you incremental builds. The downside is that this method
-    is `deprecated by setuptools <https://github.com/pypa/setuptools/issues/917>`_.
