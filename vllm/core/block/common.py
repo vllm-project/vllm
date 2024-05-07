@@ -156,17 +156,17 @@ class CopyOnWriteTracker:
 
         return block_id
 
-    def clear_cows(self) -> Dict[BlockId, List[BlockId]]:
+    def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
 
-        This method returns a dictionary mapping source block indices to lists
-        of destination block indices for the current copy-on-write operations.
+        This method returns a list mapping source block indices to
+         destination block indices for the current copy-on-write operations.
         It then clears the internal tracking information.
 
         Returns:
-            Dict[BlockId, List[BlockId]]: A dictionary mapping source
-                block indices to lists of destination block indices for the
+            List[Tuple[BlockId, BlockId]]: A list mapping source
+                block indices to destination block indices for the
                 current copy-on-write operations.
         """
         cows = dict(self._copy_on_writes)
