@@ -553,7 +553,7 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
     {
         "speculative_model": "JackFram/llama-68m",
         "num_speculative_tokens": 5,
-        "speculative_disaable_by_enqueue_requests": 1,
+        "speculative_disable_by_batch_size": 1,
     },
 ])
 @pytest.mark.parametrize("batch_size", [8])

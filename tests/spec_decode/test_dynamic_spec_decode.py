@@ -18,10 +18,10 @@ from .utils import create_batch, mock_worker
 @pytest.mark.parametrize('k', [1, 2, 5, 7, 10])
 @torch.inference_mode()
 def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
-    """Verify that speculative tokens are disabled when the queue size
+    """Verify that speculative tokens are disabled when the batch size
     exceeds the threshold.
     """
-    disable_at_queue_size = 3
+    disable_by_batch_size = 3
 
     draft_worker = mock_worker(cls=MultiStepWorker)
     target_worker = mock_worker()
@@ -31,7 +31,7 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
                               scorer_worker=target_worker,
                               rejection_sampler=rejection_sampler,
                               metrics_collector=metrics_collector,
-                              disable_at_queue_size=disable_at_queue_size)
+                              disable_by_batch_size=disable_by_batch_size)
 
     exception_secret = 'artificial stop'
     draft_worker.get_spec_proposals.side_effect = ValueError(exception_secret)
@@ -45,9 +45,9 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
     with pytest.raises(ValueError, match=exception_secret):
         worker.execute_model(execute_model_req=execute_model_req)
 
-    # When the queue size is larger than the threshold,
+    # When the batch size is larger than the threshold,
     # we expect no speculative tokens (0).
-    expected_num_spec_tokens = None if queue_size < disable_at_queue_size else 0
+    expected_num_spec_tokens = None if queue_size < disable_by_batch_size else 0
     assert seq_group_metadata_list[
         0].num_speculative_tokens == expected_num_spec_tokens
 
@@ -61,7 +61,7 @@ def test_disable_spec_tokens(queue_size: int, batch_size: int, k: int):
         max_proposal_len=1024,
     )
 
-    if queue_size < disable_at_queue_size:
+    if queue_size < disable_by_batch_size:
         # Should raise exception when executing the mocked draft model.
         with pytest.raises(ValueError, match=exception_secret):
             proposer.get_proposals(execute_model_req=ExecuteModelRequest(

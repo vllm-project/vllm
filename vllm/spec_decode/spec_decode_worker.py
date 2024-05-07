@@ -55,7 +55,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         cls,
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
-        disable_at_queue_size: Optional[int],
+        disable_by_batch_size: Optional[int],
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -78,7 +78,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
-            disable_at_queue_size=disable_at_queue_size,
+            disable_by_batch_size=disable_by_batch_size,
             rejection_sampler=RejectionSampler(
                 disable_bonus_tokens=disable_bonus_tokens, ))
 
@@ -88,7 +88,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
-        disable_at_queue_size: Optional[int] = None,
+        disable_by_batch_size: Optional[int] = None,
     ):
         """
         Create a SpecDecodeWorker.
@@ -101,14 +101,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 Worker.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
-            disable_at_queue_size: If the queue size is larger than this,
+            disable_by_batch_size: If the batch size is larger than this,
                 disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
                 for testing purposes.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
-        self.disable_at_queue_size = disable_at_queue_size or float("inf")
+        self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.rejection_sampler = rejection_sampler
 
         self._metrics = AsyncMetricsCollector(
@@ -206,10 +206,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        # When the queue size is too large, disable speculative decoding
+        # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
         disable_all = (execute_model_req.running_queue_size >=
-                       self.disable_at_queue_size)
+                       self.disable_by_batch_size)
         if disable_all:
             for seq_group_metadata in execute_model_req.seq_group_metadata_list:
                 # Once num_speculative_tokens is set to 0, the spec decode
