@@ -16,6 +16,10 @@ _SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
 class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "flash-attn"
+
+    @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
         return FlashAttentionImpl
 
@@ -105,12 +109,6 @@ class FlashAttentionMetadata(AttentionMetadataPerStage):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
-    # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. WARNING: When it is a prefill request, it doesn't include new
-    # tokens. When it is for decoding, it includes a new token.
-    context_lens: Optional[torch.Tensor]
-    # Maximum context length in the batch.
-    max_context_len: Optional[int]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -235,7 +233,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if (kv_cache is None or prefill_meta.block_tables is None
+                    or prefill_meta.block_tables.numel() == 0):
                 # normal attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
@@ -262,9 +261,9 @@ class FlashAttentionImpl(AttentionImpl):
                     k=key_cache,
                     v=value_cache,
                     cu_seqlens_q=prefill_meta.subquery_start_loc,
-                    max_seqlen_q=prefill_meta.max_subquery_len,
+                    max_seqlen_q=prefill_meta.max_query_len,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_k=prefill_meta.max_prompt_len,
+                    max_seqlen_k=prefill_meta.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -279,7 +278,7 @@ class FlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 block_table=decode_meta.block_tables,
-                cache_seqlens=decode_meta.context_lens,
+                cache_seqlens=decode_meta.seq_lens_tensor,
                 softmax_scale=self.scale,
                 causal=True,
                 alibi_slopes=self.alibi_slopes,

@@ -11,6 +11,11 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_name() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
     def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 

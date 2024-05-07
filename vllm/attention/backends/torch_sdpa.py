@@ -16,6 +16,10 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "torch-sdpa"
+
+    @staticmethod
     def get_impl_cls() -> Type["TorchSDPABackendImpl"]:
         return TorchSDPABackendImpl
 

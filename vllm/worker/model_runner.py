@@ -9,7 +9,6 @@ import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
-from vllm.attention.backends.flashinfer import FlashInferBackend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
@@ -273,20 +272,23 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                prefix_block_tables.append(computed_block_nums)
+                if self.attn_backend.get_name() == "flash-attn":
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                else:
+                    block_table = computed_block_nums
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
                 else:
                     # The first prefill.
-                    prefix_block_tables.append([])
+                    block_table = []
             else:
-                prefix_block_tables.append([])
+                block_table = []
                 # Right now, prefill start is always 0. However, this
                 # assumption can be changed once chunked prefill is introduced.
                 assert context_len == 0
+            prefix_block_tables.append(block_table)
 
             # actual prompt lens
             context_lens.append(context_len)
@@ -395,7 +397,7 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        if self.attn_backend is FlashInferBackend:
+        if self.attn_backend.get_name() == "flashinfer":
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=True,
                 use_cuda_graph=False,
@@ -556,7 +558,7 @@ class ModelRunner:
                 device=self.device,
             )
 
-        if self.attn_backend is FlashInferBackend:
+        if self.attn_backend.get_name() == "flashinfer":
             if not hasattr(self, "flashinfer_workspace_buffer"):
                 # Allocate 16MB workspace buffer
                 # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
