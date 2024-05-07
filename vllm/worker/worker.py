@@ -195,15 +195,14 @@ class Worker(WorkerBase):
 
     def cache_swap(
         self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
+        blocks_to_swap_in: torch.Tensor,
+        blocks_to_swap_out: torch.Tensor,
         blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if blocks_to_swap_in:
+        if blocks_to_swap_in.numel() > 0:
             self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out:
+        if blocks_to_swap_out.numel() > 0:
             self.cache_engine.swap_out(blocks_to_swap_out)
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
