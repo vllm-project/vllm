@@ -84,6 +84,6 @@ def test_swap() -> None:
     for i in range(num_layers):
         gpu_key_cache, gpu_value_cache = gpu_cache[i]
         cpu_key_cache, cpu_value_cache = cpu_cache[i]
-        for src, dst in execute_model_req.blocks_to_swap_in.items():
+        for src, dst in execute_model_req.blocks_to_swap_in:
             assert allclose(gpu_key_cache[dst], cpu_key_cache[src])
             assert allclose(gpu_value_cache[dst], cpu_value_cache[src])
