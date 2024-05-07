@@ -32,10 +32,10 @@ def test_contexted_kv_attention_alibi(
     # NOTE(DefTruth): The random seed here can not been set as the
     # same one in test_prefix_prefill.py script to avoid illegal
     # memory access error in CI.
-    random.seed(1)
-    torch.manual_seed(1)
+    random.seed(0)
+    torch.manual_seed(0)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(1)
+        torch.cuda.manual_seed(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process
