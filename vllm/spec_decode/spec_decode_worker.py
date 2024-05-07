@@ -79,11 +79,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker,
             scorer_worker,
             disable_at_queue_size=disable_at_queue_size,
-            # TODO(cade) disable strict mode for speedup.
             rejection_sampler=RejectionSampler(
-                disable_bonus_tokens=disable_bonus_tokens,
-                strict_mode=not envs.VLLM_DISABLE_REJECT_SAMPLING_STRICT_MODE),
-        )
+                disable_bonus_tokens=disable_bonus_tokens, ))
 
     def __init__(
         self,
