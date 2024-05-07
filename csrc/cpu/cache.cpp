@@ -128,6 +128,6 @@ void reshape_and_cache(torch::Tensor &key, torch::Tensor &value,
 }
 
 void swap_blocks(torch::Tensor &src, torch::Tensor &dst,
-                 const torch::Tensor&block_mapping) {
+                 torch::Tensor&block_mapping) {
   TORCH_CHECK(false, "swap_blocks is unsupported on CPU.")
 }

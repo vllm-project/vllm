@@ -23,7 +23,7 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  const std::map<int64_t, int64_t>& block_mapping) {
+  torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -47,9 +47,10 @@ void swap_blocks(
   const at::cuda::OptionalCUDAGuard device_guard(src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    int64_t dst_block_number = pair.second;
+  int num_blocks = block_mapping.size(0);
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
     int64_t src_offset = src_block_number * block_size_in_bytes;
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(
