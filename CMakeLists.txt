@@ -191,6 +191,8 @@ define_gpu_extension_target(
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   WITH_SOABI)
 
+target_include_directories(_C PRIVATE "third_party/cutlass/include")
+
 #
 # _moe_C extension
 #
