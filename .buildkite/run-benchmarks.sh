@@ -57,6 +57,10 @@ echo '```' >> benchmark_results.md
 tail -n 20 benchmark_serving.txt >> benchmark_results.md # last 20 lines
 echo '```' >> benchmark_results.md
 
+echo "### Perplexity Measurement " >> benchmark_results.md
+sed -n '$p' benchmark_measure_pplv2.txt >> benchmark_results.md # last line
+echo '```' >> benchmark_results.md
+
 # if the agent binary is not found, skip uploading the results, exit 0
 if [ ! -f /workspace/buildkite-agent ]; then
     exit 0
