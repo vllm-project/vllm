@@ -488,7 +488,7 @@ def get_rope(
     else:
         scaling_type = rope_scaling["type"]
 
-        if scaling_type != "longrope":
+        if scaling_type not in {"longrope", "su"}:
             scaling_factor = rope_scaling["factor"]
         if scaling_type == "linear":
             rotary_emb = LinearScalingRotaryEmbedding(head_size, rotary_dim,
@@ -513,7 +513,7 @@ def get_rope(
                                                     base, is_neox_style,
                                                     scaling_factor,
                                                     **extra_kwargs)
-        elif scaling_type == 'longrope':
+        elif scaling_type in ("longrope", "su"):
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
             original_max_position = rope_scaling[
