@@ -13,6 +13,7 @@ import pytest
 # and debugging.
 import ray
 import requests
+import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
 from openai import BadRequestError
@@ -149,7 +150,7 @@ def server(zephyr_lora_files):
     ray.shutdown()
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def client():
     client = openai.AsyncOpenAI(
         base_url="http://localhost:8000/v1",
@@ -870,6 +871,25 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
         assert (len(logprobs.top_logprobs) > 5
                 and logprobs.top_logprobs[0] is None)
         assert len(logprobs.tokens) > 5
+
+
+async def test_long_seed(server, client: openai.AsyncOpenAI):
+    for seed in [
+            torch.iinfo(torch.long).min - 1,
+            torch.iinfo(torch.long).max + 1
+    ]:
+        with pytest.raises(BadRequestError) as exc_info:
+            await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[{
+                    "role": "system",
+                    "content": "You are a helpful assistant.",
+                }],
+                temperature=0,
+                seed=seed)
+
+        assert ("greater_than_equal" in exc_info.value.message
+                or "less_than_equal" in exc_info.value.message)
 
 
 if __name__ == "__main__":

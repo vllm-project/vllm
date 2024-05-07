@@ -34,7 +34,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if out is not None:
         return out
     if is_pynccl_enabled_for_all_reduce():
-        # TODO: support multiple parallel groups.
         pynccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
@@ -204,6 +203,9 @@ def broadcast_tensor_dict(
                                                 group=metadata_group)
         async_handles = []
         for tensor in tensor_list:
+            if tensor.numel() == 0:
+                # Skip broadcasting empty tensors.
+                continue
             async_handles.append(
                 torch.distributed.broadcast(tensor,
                                             src=src,
@@ -225,6 +227,10 @@ def broadcast_tensor_dict(
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
                                      device="cuda")
+                if tensor.numel() == 0:
+                    # Skip broadcasting empty tensors.
+                    tensor_dict[key] = tensor
+                    continue
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,
