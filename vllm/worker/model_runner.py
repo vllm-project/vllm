@@ -845,7 +845,7 @@ class ModelRunner:
                         lora_local_path="/not/a/real/path",
                     )
                     self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                    rank=LORA_WARMUP_RANK)
+                                                     rank=LORA_WARMUP_RANK)
                     dummy_lora_requests.append(dummy_lora_request)
                 dummy_lora_requests_per_seq = [
                     dummy_lora_requests[idx % len(dummy_lora_requests)]
