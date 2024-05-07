@@ -1,8 +1,8 @@
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
-#from compressed_tensors.quantization.lifecycle.apply import (
-#    find_first_name_or_class_match) # TODO: needed
+from compressed_tensors.quantization.lifecycle.apply import (
+    find_first_name_or_class_match)
 from compressed_tensors.quantization.quant_args import (QuantizationArgs,
                                                         QuantizationStrategy)
 from pydantic import BaseModel
@@ -29,7 +29,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             "up_proj": "gate_up_proj"
         }
 
-        # Update the ignore list: layer with q_proj are replaced to be qkv_proj
+        # Update the ignore list: e.g layers with q_proj are replaced
+        # to be qkv_proj to be compatible with vllm
         for layer in self.ignore:
             for k in llama_mapping:
                 if k in layer:
@@ -84,7 +85,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return []
 
     def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
-                               input_quant: BaseModel):
+                               input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         is_tensor = (weight_quant.strategy == input_quant.strategy ==
                      QuantizationStrategy.TENSOR.value)
@@ -96,12 +97,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         return False
 
     def _is_dynamic_token_w8a8(self, weight_quant: BaseModel,
-                               input_quant: BaseModel):
+                               input_quant: BaseModel) -> bool:
         is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
         is_token_tensor = (weight_quant.strategy
                            == QuantizationStrategy.TENSOR.value) and (
-                               input_quant.strategy == "token"
-                           )  # TODO: QuantizationStrategy should have token
+                               input_quant.strategy
+                               == QuantizationStrategy.TOKEN.value)
         is_symmetric = weight_quant.symmetric and input_quant.symmetric
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
@@ -109,7 +110,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             return True
         return False
 
-    def _get_schema(self, weight_quant: BaseModel, input_quant: BaseModel):
+    def _get_schema(self, weight_quant: BaseModel,
+                    input_quant: BaseModel) -> "CompressedTensorsScheme":
         if self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor(
                 fake_quant=self.fake_quant)
@@ -124,7 +126,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # TODO: update/map layer_name for llama models before
         # using find_first_name_or_class_match?
-        layer_type_name = self.find_first_name_or_class_match(
+        layer_type_name = find_first_name_or_class_match(
             name=layer_name,
             module=layer,
             targets=self.layer_quant_details.keys(),
@@ -155,7 +157,8 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
                        **extra_weight_attrs):
         """
         Use the CompressedTensorsScheme associated with each layer to create 
-        the necessary parameters for the layer.
+        the necessary parameters for the layer. See LinearMethodBase for param
+        details
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -177,7 +180,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         """
         Use the output of create_weights and the CompressedTensorsScheme 
         associated with the layer to apply the forward pass with the 
-        layer input.
+        layer input.  See LinearMethodBase for param details
         """
 
         if bias is not None:
