@@ -216,8 +216,8 @@ class ModelRunner:
     def save_sharded_state(
         self,
         path: str,
-        pattern: str,
-        max_size: int,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
     ) -> None:
         from vllm.model_executor.model_loader.loader import ShardedStateLoader
         ShardedStateLoader.save_model(
