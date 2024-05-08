@@ -568,7 +568,7 @@ def test_decode_schedule_preempted():
     # Both should be preempted, not swapped.
     assert output.blocks_to_swap_out == {}
     # Nothing is copied.
-    assert output.blocks_to_copy == {}
+    assert output.blocks_to_copy == []
 
 
 def test_decode_swap_beam_search():
@@ -618,7 +618,7 @@ def test_decode_swap_beam_search():
     # Both should be preempted, not swapped.
     assert output.blocks_to_swap_out == expected_swap_mapping
     # Nothing is copied.
-    assert output.blocks_to_copy == {}
+    assert output.blocks_to_copy == []
 
 
 def test_schedule_decode_blocks_to_copy_update():
@@ -636,7 +636,7 @@ def test_schedule_decode_blocks_to_copy_update():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_running, output = scheduler._schedule_running(
@@ -650,7 +650,7 @@ def test_schedule_decode_blocks_to_copy_update():
     assert output.blocks_to_swap_out == {}
     # Since append_slot returns the source -> dist mapping, it should
     # applied.
-    assert output.blocks_to_copy == {2: [3]}
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_schedule_swapped_simple():
@@ -845,7 +845,7 @@ def test_schedule_swapped_blocks_to_copy():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = {2: [3]}
+    scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
     remaining_swapped, output = scheduler._schedule_swapped(
@@ -853,7 +853,7 @@ def test_schedule_swapped_blocks_to_copy():
     assert len(remaining_swapped) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
-    assert output.blocks_to_copy == {2: [3]}
+    assert output.blocks_to_copy == [(2, 3)]
 
 
 def test_scheduling_budget():
