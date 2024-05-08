@@ -64,8 +64,8 @@ def test_load_chat_template():
     # Testing chatml template
     tokenizer = MockTokenizer()
     mock_serving_chat = MockServingChat(tokenizer)
-    OpenAIServingChat._load_chat_template(
-        mock_serving_chat, chat_template=chatml_jinja_path)
+    OpenAIServingChat._load_chat_template(mock_serving_chat,
+                                          chat_template=chatml_jinja_path)
 
     template_content = tokenizer.chat_template
 
@@ -105,7 +105,7 @@ def test_no_load_chat_template_literallike():
     "model,template,add_generation_prompt,expected_output",
     MODEL_TEMPLATE_GENERATON_OUTPUT)
 def test_get_gen_prompt(model, template, add_generation_prompt,
-                              expected_output):
+                        expected_output):
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     mock_serving_chat = MockServingChat(tokenizer)
