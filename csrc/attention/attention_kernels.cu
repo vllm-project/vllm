@@ -808,8 +808,8 @@ void paged_attention_v1_launcher(
     case true:                                                               \
       CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
       break;                                                                 \
-    case false:                                                               \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);       \
+    case false:                                                              \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);      \
       break;                                                                 \
   }
 
