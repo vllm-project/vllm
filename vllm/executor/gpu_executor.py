@@ -93,6 +93,8 @@ class GPUExecutor(ExecutorBase):
         spec_decode_worker = SpecDecodeWorker.create_worker(
             scorer_worker=target_worker,
             draft_worker_kwargs=draft_worker_kwargs,
+            disable_by_batch_size=self.speculative_config.
+            speculative_disable_by_batch_size,
         )
 
         assert self.parallel_config.world_size == 1, (
