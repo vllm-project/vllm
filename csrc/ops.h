@@ -145,26 +145,13 @@ torch::Tensor gptq_marlin_repack(
   int64_t size_n,
   int64_t num_bits);
 
-int cutlass_scaled_mm_dq_sm80(
+int cutlass_scaled_mm_dq(
     torch::Tensor& out, 
     torch::Tensor const &a, 
     torch::Tensor const &b,
     torch::Tensor const &a_scales,
     torch::Tensor const &b_scales);
 
-int cutlass_scaled_mm_dq_sm89(
-    torch::Tensor& out, 
-    torch::Tensor const &a, 
-    torch::Tensor const &b,
-    torch::Tensor const &a_scales,
-    torch::Tensor const &b_scales);
-
-int cutlass_scaled_mm_dq_sm90(
-    torch::Tensor& out, 
-    torch::Tensor const &a, 
-    torch::Tensor const &b,
-    torch::Tensor const &a_scales,
-    torch::Tensor const &b_scales);
 #endif
 
 void squeezellm_gemm(

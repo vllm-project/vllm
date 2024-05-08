@@ -70,10 +70,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gptq_marlin_gemm", &gptq_marlin_gemm, "gptq_marlin Optimized Quantized GEMM for GPTQ");
   ops.def("gptq_marlin_repack", &gptq_marlin_repack, "gptq_marlin repack from GPTQ");
   ops.def("awq_dequantize", &awq_dequantize, "Dequantization for AWQ");
+  ops.def("cutlass_scaled_mm_dq", &cutlass_scaled_mm_dq, "CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column quantization.");
 #endif
-  ops.def("cutlass_scaled_mm_dq_sm80", &cutlass_scaled_mm_dq_sm80, "CUTLASS quantized w8a8 GEMM, supporting symmetric quantized per-channel or per-tensor weights and symmetric quantized per-token or per-tensor activations. Inputs are either int8, int8 or fp8_e4m3fn, fp8_e4m3fn. Output must be bfloat16");
-  ops.def("cutlass_scaled_mm_dq_sm89", &cutlass_scaled_mm_dq_sm89, "CUTLASS quantized w8a8 GEMM, supporting symmetric quantized per-channel or per-tensor weights and symmetric quantized per-token or per-tensor activations. Inputs are either int8, int8 or fp8_e4m3fn, fp8_e4m3fn. Output must be bfloat16");
-  ops.def("cutlass_scaled_mm_dq_sm90", &cutlass_scaled_mm_dq_sm90, "CUTLASS quantized w8a8 GEMM, supporting symmetric quantized per-channel or per-tensor weights and symmetric quantized per-token or per-tensor activations. Inputs are either int8, int8 or fp8_e4m3fn, fp8_e4m3fn. Output must be bfloat16");
  
   ops.def("gptq_gemm", &gptq_gemm, "Quantized GEMM for GPTQ");
   ops.def("gptq_shuffle", &gptq_shuffle, "Post processing for GPTQ");

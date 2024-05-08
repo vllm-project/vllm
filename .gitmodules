@@ -1,3 +1,0 @@
-[submodule "csrc/third_party/cutlass"]
-	path = csrc/third_party/cutlass
-	url = https://github.com/nvidia/cutlass
