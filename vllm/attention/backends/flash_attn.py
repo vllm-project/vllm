@@ -87,7 +87,7 @@ class FlashAttentionMetadata(AttentionMetadataPerStage,
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
-    subquery_start_loc: Optional[torch.Tensor]
+    query_start_loc: Optional[torch.Tensor]
     # (batch_size + 1,). The cumulative sequence lengths of the sequences in
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
@@ -244,7 +244,7 @@ class FlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     prefill_meta.block_tables,
-                    prefill_meta.subquery_start_loc,
+                    prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
                     prefill_meta.context_lens_tensor,
                     prefill_meta.max_query_len,

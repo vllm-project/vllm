@@ -68,11 +68,11 @@ def test_prepare_prompt(batch_size):
         start_idx += seq_len
         start_loc.append(start_idx)
     assert torch.allclose(
-        attn_metadata.subquery_start_loc,
+        attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
     # Test seq start locs. Note that for normal prefill it is
-    # equivalent to subquery_start_loc.
+    # equivalent to query_start_loc.
     start_idx = 0
     seq_start_loc = [start_idx]
     for seq_len in seq_lens:
@@ -172,7 +172,7 @@ def test_prepare_decode_cuda_graph(batch_size):
     device = model_runner.device
     assert attn_metadata.is_prompt is False
     assert attn_metadata.seq_lens is None
-    assert attn_metadata.subquery_start_loc is None
+    assert attn_metadata.query_start_loc is None
     assert attn_metadata.seq_start_loc is None
     assert attn_metadata.max_seq_len == max(seq_lens)
     assert torch.allclose(

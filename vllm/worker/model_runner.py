@@ -227,6 +227,26 @@ class ModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> PreparePromptMetadata:
+        """
+        Prefill-only metadata (including prefix forward)
+            is_prompt=True,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_query_len=max_query_len,
+            max_seq_len=max_seq_len,
+            query_start_loc=query_start_loc,
+            seq_start_loc=seq_start_loc,
+            context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=False,
+
+        Decode-only metadata
+            is_prompt=False,
+            seq_lens_tensor=seq_lens_tensor,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            use_cuda_graph=use_captured_graph,
+        """
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -424,12 +444,10 @@ class ModelRunner:
         #     device=self.device,
         # )
 
-        # Query length can be shorter than key (i.e., prompt) when prefill
-        # is chunked or prefix cached.
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
-        subquery_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
+        query_start_loc = torch.zeros(query_lens_tensor.shape[0] + 1,
                                          dtype=torch.int32,
                                          device=self.device)
 
@@ -442,8 +460,8 @@ class ModelRunner:
 
         torch.cumsum(query_lens_tensor,
                      dim=0,
-                     dtype=subquery_start_loc.dtype,
-                     out=subquery_start_loc[1:])
+                     dtype=query_start_loc.dtype,
+                     out=query_start_loc[1:])
 
         torch.cumsum(seq_lens_tensor,
                      dim=0,
@@ -464,7 +482,7 @@ class ModelRunner:
                 seq_lens_tensor=seq_lens_tensor,
                 max_query_len=max_query_len,
                 max_seq_len=max_seq_len,
-                subquery_start_loc=subquery_start_loc,
+                query_start_loc=query_start_loc,
                 seq_start_loc=seq_start_loc,
                 context_lens_tensor=context_lens_tensor,
                 block_tables=block_tables,
@@ -650,7 +668,7 @@ class ModelRunner:
                 seq_lens_tensor=seq_lens_tensor,
                 max_query_len=None,
                 max_seq_len=max_seq_len,
-                subquery_start_loc=None,
+                query_start_loc=None,
                 seq_start_loc=None,
                 context_lens_tensor=None,
                 block_tables=block_tables,
@@ -1035,7 +1053,7 @@ class ModelRunner:
                     seq_lens_tensor=seq_lens[:batch_size],
                     max_query_len=None,
                     max_seq_len=self.max_seq_len_to_capture,
-                    subquery_start_loc=None,
+                    query_start_loc=None,
                     seq_start_loc=None,
                     context_lens_tensor=None,
                     block_tables=block_tables[:batch_size],
