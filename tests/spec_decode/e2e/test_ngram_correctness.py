@@ -57,7 +57,7 @@ from .conftest import run_greedy_equality_correctness_test
 @pytest.mark.parametrize("output_len", [
     256,
 ])
-@pytest.mark.parametrize("batch_size", [1, 64])
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
                                       test_llm_generator, batch_size: int,

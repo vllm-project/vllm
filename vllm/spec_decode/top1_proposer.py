@@ -56,7 +56,7 @@ class Top1Proposer(SpeculativeProposer):
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
-        ) = self._split_by_max_model_len(seq_group_metadata_list, proposal_len)
+        ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
 
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -97,17 +97,27 @@ class Top1Proposer(SpeculativeProposer):
 
         return proposals
 
-    def _split_by_max_model_len(
+    def _split_by_proposal_len(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         proposal_len: int,
     ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
-        """Determine which sequences would exceed the max model length."""
+        """Split sequences by two groups:
+        1. Sequences with non-zero proposal length.
+        2. Sequences with zero proposal length (due to disabled speculation
+        or exceed the maximum model length).
+        """
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            # The speculative decoding for this request has been disabled
+            # (e.g. due to high traffic).
+            if seq_group_metadata.num_speculative_tokens == 0:
+                proposal_lens.append(0)
+                continue
+
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
             seq_len = seq_data.get_len()
 
@@ -115,13 +125,14 @@ class Top1Proposer(SpeculativeProposer):
             # are supported.
             # If max_proposal_len is defined, then we shall no exccess this
             # quota for nonzero_proposal
+            new_k = 0
             if (self.max_proposal_len is None
                     or seq_len + proposal_len < self.max_proposal_len):
-                proposal_lens.append(proposal_len)
+                new_k = proposal_len
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
-            else:
-                proposal_lens.append(0)
+            proposal_lens.append(new_k)
+            seq_group_metadata.num_speculative_tokens = new_k
 
         return (
             proposal_lens,
