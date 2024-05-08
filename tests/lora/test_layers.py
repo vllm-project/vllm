@@ -8,12 +8,20 @@ import torch
 import torch.nn.functional as F
 
 from vllm.config import LoRAConfig
+from vllm.lora.fully_sharded_layers import (
+    ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearWithShardedLoRA,
+    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
+                              MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
+# yapf: enable
 from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
                               convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -93,8 +101,7 @@ def populate_loras(
     lora_dict: Dict[int, LoRALayerWeights] = dict()
 
     # Dictionary that maps the lora ID to the
-    # corresponding subloras. Only useful when
-    # repeats > 1.
+    # corresponding subloras.
     sublora_dict: Dict[int, List[LoRALayerWeights]] = dict()
 
     for slot_idx, lora_id in enumerate(id_to_index):
@@ -167,7 +174,8 @@ def create_random_inputs(
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_embeddings(dist_init, num_loras, device) -> None:
+@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
+def test_embeddings(dist_init, num_loras, device, vocab_size) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -176,9 +184,9 @@ def test_embeddings(dist_init, num_loras, device) -> None:
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(512, 256)
+        embedding = VocabParallelEmbedding(vocab_size, 256)
         embedding.weight.data = torch.rand_like(embedding.weight.data)
-        embedding.weight.data[512:, :] = 0
+        embedding.weight.data[vocab_size:, :] = 0
         lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
         lora_embedding.create_lora_weights(max_loras, lora_config)
 
@@ -200,12 +208,13 @@ def test_embeddings(dist_init, num_loras, device) -> None:
             active_lora_ids=list(lora_dict.keys()),
             num_inputs=num_loras * 3,
             input_size=(200, ),
-            input_range=(1, 512),
+            input_range=(1, vocab_size),
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+                                       vocab_size,
+                                       lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info)
 
         lora_result = lora_embedding(torch.cat(inputs))
@@ -237,12 +246,13 @@ def test_embeddings(dist_init, num_loras, device) -> None:
             active_lora_ids=[0],
             num_inputs=num_loras * 3,
             input_size=(200, ),
-            input_range=(1, 512),
+            input_range=(1, vocab_size),
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+                                       vocab_size,
+                                       lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
         lora_result = lora_embedding(torch.cat(inputs))
@@ -260,7 +270,9 @@ def test_embeddings(dist_init, num_loras, device) -> None:
 #     reason="Fails when loras are in any slot other than the first.")
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
+@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
+def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
+                                        vocab_size) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -269,15 +281,15 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
                              lora_dtype=torch.float16)
 
     def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(512, 256)
+        embedding = VocabParallelEmbedding(vocab_size, 256)
         embedding_data = torch.rand_like(embedding.weight.data)
         embedding.weight.data = embedding_data
-        embedding.weight.data[512:, :] = 0
+        embedding.weight.data[vocab_size:, :] = 0
         expanded_embedding = VocabParallelEmbedding(
-            512 + lora_config.lora_extra_vocab_size * max_loras,
+            vocab_size + lora_config.lora_extra_vocab_size * max_loras,
             256,
-            org_num_embeddings=512)
-        expanded_embedding.weight.data[:512, :] = embedding_data
+            org_num_embeddings=vocab_size)
+        expanded_embedding.weight.data[:vocab_size, :] = embedding_data
         # We need to deepcopy the embedding as it will be modified
         # in place
         lora_embedding = VocabParallelEmbeddingWithLoRA(
@@ -295,7 +307,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
             id_to_index,
             layer=lora_embedding,
             layer_weights=torch.zeros(
-                (256, 512 + lora_config.lora_extra_vocab_size)),
+                (256, vocab_size + lora_config.lora_extra_vocab_size)),
             generate_embeddings_tensor=256,
         )
 
@@ -313,7 +325,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
             active_lora_ids=list(lora_dict.keys()),
             num_inputs=num_loras * 3,
             input_size=(200, ),
-            input_range=(1, 512),
+            input_range=(1, vocab_size),
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
@@ -324,16 +336,18 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
         for input_, original_input_, lora_id in zip(inputs, original_inputs,
                                                     prompt_mapping):
             embedding_id = lora_id - 1
-            input_[-1] = 512 + (embedding_id * embeddings_tensor_len)
-            original_input_[-1] = 512
-            input_[-2] = 512 + ((embedding_id + 1) * embeddings_tensor_len - 1)
-            original_input_[-2] = 512 + embeddings_tensor_len - 1
+            input_[-1] = vocab_size + (embedding_id * embeddings_tensor_len)
+            original_input_[-1] = vocab_size
+            input_[-2] = vocab_size + (
+                (embedding_id + 1) * embeddings_tensor_len - 1)
+            original_input_[-2] = vocab_size + embeddings_tensor_len - 1
 
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+                                       vocab_size,
+                                       lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
-        expanded_embedding.weight[512:512 +
+        expanded_embedding.weight[vocab_size:vocab_size +
                                   (embeddings_tensor_len *
                                    max_loras)] = torch.cat(embeddings_tensors)
 
@@ -367,14 +381,15 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
             active_lora_ids=[0],
             num_inputs=num_loras * 3,
             input_size=(200, ),
-            input_range=(1, 512),
+            input_range=(1, vocab_size),
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
         original_inputs = deepcopy(inputs)
 
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       512, lora_config.lora_extra_vocab_size)
+                                       vocab_size,
+                                       lora_config.lora_extra_vocab_size)
         lora_embedding.set_mapping(*mapping_info, )
 
         lora_result = lora_embedding(torch.cat(original_inputs))
@@ -390,7 +405,9 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
+@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
+def test_lm_head_logits_processor(dist_init, num_loras, device,
+                                  vocab_size) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
@@ -399,12 +416,14 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
                              lora_dtype=torch.float16)
 
     def _pretest():
-        linear = ParallelLMHead(32000 + lora_config.lora_extra_vocab_size,
-                                1024, 32000)
+        linear = ParallelLMHead(vocab_size + lora_config.lora_extra_vocab_size,
+                                1024,
+                                vocab_size,
+                                params_dtype=torch.float16)
         linear.weight.data = torch.rand_like(linear.weight.data)
-        linear.weight.data[:, 32000:] = 0
+        linear.weight.data[:, vocab_size:] = 0
         logits_processor = LogitsProcessor(
-            32000 + lora_config.lora_extra_vocab_size, 32000)
+            vocab_size + lora_config.lora_extra_vocab_size, vocab_size)
         lora_logits_processor = LogitsProcessorWithLoRA(
             logits_processor, 1024, linear.weight.dtype, linear.weight.device)
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
@@ -432,7 +451,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
             num_inputs=8 * num_loras,  # * 3,
             input_size=(1, 1024),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
@@ -441,7 +460,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
             lora_mapping,
             id_to_index,
             max_loras,
-            32000,
+            vocab_size,
             lora_config.lora_extra_vocab_size,
         )
         lora_logits_processor.set_mapping(*mapping_info, )
@@ -457,7 +476,7 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
                       org_vocab_size:logits_processor.org_vocab_size +
                       embeddings_tensor_len] = embeddings_tensor
 
-        logits_processor.org_vocab_size = (32000 +
+        logits_processor.org_vocab_size = (vocab_size +
                                            lora_config.lora_extra_vocab_size)
         expected_results = []
         for input_, lora_id in zip(inputs, prompt_mapping):
@@ -465,11 +484,11 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
             result = logits_processor._get_logits(hidden_states=input_,
                                                   embedding=linear.weight,
                                                   embedding_bias=None)
-            result[:, 32000 + embeddings_tensor_len:] = float("-inf")
+            result[:, vocab_size + embeddings_tensor_len:] = float("-inf")
             result += input_ @ lora.lora_a @ lora.lora_b * lora.scaling
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
-        logits_processor.org_vocab_size = 32000
+        logits_processor.org_vocab_size = vocab_size
 
         # Check that resetting the lora weights succeeds
 
@@ -481,19 +500,19 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
             num_inputs=8 * num_loras * 3,
             input_size=(1, 1024),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
         mapping_info = convert_mapping(lora_mapping, id_to_index, max_loras,
-                                       32000,
+                                       vocab_size,
                                        lora_config.lora_extra_vocab_size)
         lora_logits_processor.set_mapping(*mapping_info, )
 
         lora_result = lora_logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
             embedding=original_weight,
-            embedding_bias=None)[:, :32000]
+            embedding_bias=None)[:, :vocab_size]
         expected_result = logits_processor._get_logits(
             hidden_states=torch.cat(inputs),
             embedding=original_weight,
@@ -509,24 +528,36 @@ def test_lm_head_logits_processor(dist_init, num_loras, device) -> None:
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
 @pytest.mark.parametrize("orientation", ["row", "column"])
+@pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
+def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
+                         device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
+                             fully_sharded_loras=fully_shard,
                              lora_dtype=torch.float16)
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
-            linear = RowParallelLinear(4096, 4096, bias=False)
+            linear = RowParallelLinear(4096,
+                                       4096,
+                                       bias=False,
+                                       params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = RowParallelLinearWithLoRA(linear)
+            lora_linear = (RowParallelLinearWithLoRA(linear) if not fully_shard
+                           else RowParallelLinearWithShardedLoRA(linear))
         else:
-            linear = ColumnParallelLinear(4096, 4096, bias=False)
+            linear = ColumnParallelLinear(4096,
+                                          4096,
+                                          bias=False,
+                                          params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = ColumnParallelLinearWithLoRA(linear)
+            lora_linear = (ColumnParallelLinearWithLoRA(linear)
+                           if not fully_shard else
+                           ColumnParallelLinearWithShardedLoRA(linear))
         lora_linear.create_lora_weights(max_loras, lora_config)
 
         return linear, lora_linear
@@ -548,7 +579,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
             num_inputs=32 * num_loras,
             input_size=(1, 4096),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
@@ -587,7 +618,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
             num_inputs=32 * num_loras,
             input_size=(1, 4096),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
@@ -607,24 +638,44 @@ def test_linear_parallel(dist_init, num_loras, orientation, device) -> None:
 
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
-@pytest.mark.parametrize("repeats", [2, 3])
+@pytest.mark.parametrize("repeats", [1, 2, 3])
+@pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
+def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
+                                device) -> None:
 
     torch.set_default_device(device)
     max_loras = 8
     lora_config = LoRAConfig(max_loras=max_loras,
                              max_lora_rank=8,
+                             fully_sharded_loras=fully_shard,
                              lora_dtype=torch.float16)
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
             linear = MergedColumnParallelLinear(4096, [4096] * repeats,
-                                                bias=False)
+                                                bias=False,
+                                                params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
-            lora_linear = MergedColumnParallelLinearWithLoRA(linear)
+            lora_linear = (MergedColumnParallelLinearWithLoRA(linear)
+                           if not fully_shard else
+                           MergedColumnParallelLinearWithShardedLoRA(linear))
+        elif repeats == 3:
+            linear = QKVParallelLinear(4096,
+                                       64,
+                                       32,
+                                       bias=False,
+                                       params_dtype=torch.float16)
+            linear.weight.data = torch.rand_like(linear.weight.data)
+            lora_linear = (MergedQKVParallelLinearWithLora(linear)
+                           if not fully_shard else
+                           MergedQKVParallelLinearWithShardedLora(linear))
         else:
-            linear = QKVParallelLinear(4096, 64, 32, bias=False)
+            linear = QKVParallelLinear(4096,
+                                       64,
+                                       32,
+                                       bias=False,
+                                       params_dtype=torch.float16)
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = QKVParallelLinearWithLora(linear)
 
@@ -659,7 +710,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
             num_inputs=32 * num_loras,
             input_size=(1, 4096),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 
@@ -699,7 +750,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, device) -> None:
             num_inputs=32 * num_loras,
             input_size=(1, 4096),
             input_range=(0, 1),
-            input_type=torch.float32,
+            input_type=torch.float16,
         )
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping)
 

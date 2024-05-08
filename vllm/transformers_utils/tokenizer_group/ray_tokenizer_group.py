@@ -6,7 +6,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from transformers import PreTrainedTokenizer
 
 from vllm.config import TokenizerPoolConfig
-from vllm.engine.ray_utils import ray
+from vllm.executor.ray_utils import ray
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
     BaseTokenizerGroup)
@@ -51,6 +51,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
             enable_lora=enable_lora,
             max_num_seqs=max_num_seqs,
             max_input_length=max_input_length,
+            **tokenizer_config,
         )
 
         ray_tokenizer_group_cls = ray.remote(
@@ -88,6 +89,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         This is blocking.
         """
         self._ensure_queue_initialized()
+        assert self._idle_actors is not None
 
         if self._idle_actors.empty():
             raise RuntimeError("No idle actors available.")
@@ -119,6 +121,7 @@ class RayTokenizerGroupPool(BaseTokenizerGroup):
         This is non-blocking.
         """
         self._ensure_queue_initialized()
+        assert self._idle_actors is not None
 
         actor = await self._idle_actors.get()
         try:

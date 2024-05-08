@@ -23,8 +23,9 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
 python3 benchmarks/benchmark_serving.py \
-    --backend openai \
-    --dataset ./ShareGPT_V3_unfiltered_cleaned_split.json \
+    --backend vllm \
+    --dataset-name sharegpt \
+    --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
     --model meta-llama/Llama-2-7b-chat-hf \
     --num-prompts 20 \
     --endpoint /v1/completions \
@@ -48,7 +49,14 @@ sed -n '$p' benchmark_throughput.txt >> benchmark_results.md # last line
 echo "### Serving Benchmarks" >> benchmark_results.md
 sed -n '1p' benchmark_serving.txt >> benchmark_results.md # first line
 echo "" >> benchmark_results.md
-tail -n 13 benchmark_serving.txt >> benchmark_results.md # last 13 lines
+echo '```' >> benchmark_results.md
+tail -n 20 benchmark_serving.txt >> benchmark_results.md # last 20 lines
+echo '```' >> benchmark_results.md
+
+# if the agent binary is not found, skip uploading the results, exit 0
+if [ ! -f /workspace/buildkite-agent ]; then
+    exit 0
+fi
 
 # upload the results to buildkite
 /workspace/buildkite-agent annotate --style "info" --context "benchmark-results" < benchmark_results.md
