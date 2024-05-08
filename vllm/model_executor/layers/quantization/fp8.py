@@ -235,8 +235,9 @@ class Fp8LinearMethod(LinearMethodBase):
                                                layer.act_scale,
                                                batch_dim_padding=32)
 
-        # Fused GEMM_DQ -- note we padded the input above because torch._scaled_mm
-        # is more performant for matrices with batch dimension at least 32.
+        # Fused GEMM_DQ -- note we padded the input above because
+        # torch._scaled_mm is more performant for matrices with
+        # batch dimension at least 32.
         output, _ = torch._scaled_mm(
             qinput,
             layer.weight,
