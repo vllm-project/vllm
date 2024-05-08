@@ -107,17 +107,29 @@ class BlockTable:
 
         Args:
             token_ids (List[int]): The sequence of token IDs to be appended.
+            num_computed_slots (Optional[int]): The number of KV cache slots
+                that are already filled (computed).
+                When sliding window is enabled, this is used to compute how many
+                blocks to drop at the front of the sequence.
+                Without chunked prefill, it will be the same as _num_full_slots
+                (which it defaults to).
+                Thus, it's only relevent when both chunked prefill and sliding
+                window are enabled.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
 
+        # Drop blocks that are no longer needed due to sliding window
         if self._block_sliding_window is not None:
             null_block = self._allocator.null_block
+            # When chunked prefill is not enabled, num_computed_slots
+            # should be equal to self._num_full_slots.
+            # The tests rely on that and just pass None.
             if num_computed_slots is None:
                 num_computed_slots = self._num_full_slots
-            end_idx = (num_computed_slots //
-                       self._block_size) - self._block_sliding_window
-            for idx in range(0, end_idx):
+            end_block_idx = (num_computed_slots //
+                             self._block_size) - self._block_sliding_window
+            for idx in range(0, end_block_idx):
                 b = self._blocks[idx]
                 if b is not null_block:
                     self._allocator.free(b)
