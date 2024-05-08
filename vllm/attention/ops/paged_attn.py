@@ -214,11 +214,3 @@ class PagedAttention:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
-
-    @staticmethod
-    def zero_block(
-        kv_caches: List[torch.Tensor],
-        block_id: int,
-    ) -> None:
-        for kv_cache in kv_caches:
-            kv_cache[:, block_id, :].zero_()
