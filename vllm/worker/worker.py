@@ -225,14 +225,19 @@ class Worker(WorkerBase):
             assert seq_group_metadata_list is not None
             assert execute_model_req is not None
             num_seq_groups = len(seq_group_metadata_list)
+            # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+            # they contain parameters to launch cudamemcpyasync.
             blocks_to_swap_in = torch.tensor(
                 execute_model_req.blocks_to_swap_in,
-                device=self.device,
+                device="cpu",
                 dtype=torch.int64).view(-1, 2)
             blocks_to_swap_out = torch.tensor(
                 execute_model_req.blocks_to_swap_out,
-                device=self.device,
+                device="cpu",
                 dtype=torch.int64).view(-1, 2)
+            # `blocks_to_copy` is a gpu tensor. The src and tgt of
+            # blocks to copy are in the same device, and `blocks_to_copy`
+            # can be used directly within cuda kernels.
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)

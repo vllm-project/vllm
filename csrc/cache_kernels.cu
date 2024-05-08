@@ -40,6 +40,11 @@ void swap_blocks(
     TORCH_CHECK(false, "Invalid device combination");
   }
 
+  // NOTE(youkaichao): keep in mind that `block_mapping` should be 
+  // a cpu tensor, otherwise every `item` call will require a gpu-cpu
+  // synchronization.
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
   char *src_ptr = static_cast<char*>(src.data_ptr());
   char *dst_ptr = static_cast<char*>(dst.data_ptr());
 
