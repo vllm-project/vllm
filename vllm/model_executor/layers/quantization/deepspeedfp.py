@@ -11,21 +11,20 @@ from vllm.model_executor.utils import set_weight_attrs
 
 
 class DeepSpeedFPConfig(QuantizationConfig):
-    """Config for DeepSpeed FP quantizer. It supports fp6 and fp8."""
+    """Config for DeepSpeed FP quantizer. It supports fp6 and fp8.
+    
+    Args: 
+        weight_bits: the target quantization bits, 6 or 8.
+        group_size: group size for quantizaiton, default to 128.
+    """
 
     def __init__(
         self,
         weight_bits: int = 8,
-        rounding: str = "nearest",
-        mantissa_bits: int = 3,
-        q_range=480.0,
         group_size: int = 512,
     ) -> None:
         self.weight_bits = weight_bits
         self.group_size = group_size
-        self.rounding = rounding
-        self.mantissa_bits = mantissa_bits
-        self.q_range = q_range
         self.valid_types = [torch.bfloat16, torch.float16]
 
         if self.weight_bits not in [6, 8]:
@@ -36,10 +35,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return (f"DeepSpeedFPConfig(weight_bits={self.weight_bits}), "
-                f"group_size={self.group_size}, "
-                f"rounding={self.rounding}, "
-                f"mantissa_bits={self.mantissa_bits}, "
-                f"")
+                f"group_size={self.group_size}")
 
     @classmethod
     def get_name(cls) -> str:
