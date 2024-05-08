@@ -212,20 +212,6 @@ class ModelRunner:
                            "but the KV cache data type is not FP8. "
                            "KV cache scaling factors will not be used.")
 
-    def save_sharded_state(
-        self,
-        path: str,
-        pattern: Optional[str] = None,
-        max_size: Optional[int] = None,
-    ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
-        ShardedStateLoader.save_model(
-            self.model,
-            path,
-            pattern=pattern,
-            max_size=max_size,
-        )
-
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size
 
