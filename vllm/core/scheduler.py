@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -305,7 +306,6 @@ class Scheduler:
         self.artificial_preempt_cnt = (ARTIFICIAL_PREEMPTION_MAX_CNT
                                        if self.enable_artificial_preemption
                                        else 0)
-        self.preemption_warning_printed: bool = False
 
     @property
     def lora_enabled(self) -> bool:
@@ -1052,14 +1052,12 @@ class Scheduler:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
-        if not self.preemption_warning_printed:
-            logger.warning(
-                "Sequence group %s is preempted by %s mode because there is "
-                "not enough KV cache space. This can affect the end-to-end "
-                "performance. Increase gpu_memory_utilization or "
-                "tensor_parallel_size to provide more KV cache memory.",
-                seq_group, preemption_mode)
-            self.preemption_warning_printed = True
+        print_warning_once(
+            "Sequence group %s is preempted by %s mode because there is "
+            "not enough KV cache space. This can affect the end-to-end "
+            "performance. Increase gpu_memory_utilization or "
+            "tensor_parallel_size to provide more KV cache memory.", seq_group,
+            preemption_mode)
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
