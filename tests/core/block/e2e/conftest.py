@@ -3,6 +3,7 @@ import pytest
 from tests.conftest import cleanup
 from vllm import LLM
 from vllm.model_executor.utils import set_random_seed
+from typing import Iterable
 
 
 @pytest.fixture
@@ -39,3 +40,22 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
     for llm in generator_inner():
         yield llm
         del llm
+
+
+def get_text_from_llm_generator(llm_generator: Iterable[LLM], prompts,
+                                sampling_params):
+    for llm in llm_generator:
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+        text = [output.outputs[0].text for output in outputs]
+        del llm
+
+    return text
+
+
+def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
+    for llm in llm_generator:
+        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
+        token_ids = [output.outputs[0].token_ids for output in outputs]
+        del llm
+
+    return token_ids
