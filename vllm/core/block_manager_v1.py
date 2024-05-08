@@ -5,7 +5,7 @@ from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Set
+from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
@@ -386,7 +386,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int = 0,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -405,7 +405,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-                return {}
+                return []
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
@@ -418,7 +418,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 maybe_new_block = self._maybe_promote_last_block(
                     seq, last_block)
                 block_table[-1] = maybe_new_block
-            return {}
+            return []
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
@@ -426,7 +426,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
-            return {last_block.block_number: [new_block.block_number]}
+            return [(last_block.block_number, new_block.block_number)]
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
