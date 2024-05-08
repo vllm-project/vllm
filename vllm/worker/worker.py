@@ -120,8 +120,8 @@ class Worker(WorkerBase):
     def save_sharded_state(
         self,
         path: str,
-        pattern: str,
-        max_size: int,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
     ) -> None:
         self.model_runner.save_sharded_state(
             path,

@@ -54,10 +54,9 @@ def main(args):
     Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory
     model_executor = llm.llm_engine.model_executor
-    model_executor._run_workers("save_sharded_state",
-                                path=args.output,
-                                pattern=args.pattern,
-                                max_size=5 * 1024**3)
+    model_executor.save_sharded_state(path=args.output,
+                                      pattern=args.pattern,
+                                      max_size=5 * 1024**3)
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
         if not any(
