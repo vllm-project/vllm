@@ -3,7 +3,8 @@ from functools import lru_cache
 
 import torch
 
-from .utils import dense_to_crow_col, get_sparse_attn_mask, get_head_sliding_step
+from .utils import (dense_to_crow_col, get_head_sliding_step,
+                    get_sparse_attn_mask)
 
 IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
                          and torch.cuda.get_device_capability()[0] >= 8)
@@ -51,8 +52,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         self.q_block_size = q_block_size
         self.homo_head = homo_head
         self.active_head_range = active_head_range
-        self.head_sliding_step = get_head_sliding_step(
-            n_heads, vert_stride, homo_head)
+        self.head_sliding_step = get_head_sliding_step(n_heads, vert_stride,
+                                                       homo_head)
 
         sparse_layout, sparse_pattern, self.dense_attn_mask = (
             self.get_attn_pattern(dtype, device))

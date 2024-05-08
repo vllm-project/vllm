@@ -1,6 +1,6 @@
 # from vllm.attention import Attention, AttentionMetadata
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
@@ -15,6 +15,54 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 
 from .blocksparse_attention.interface import (LocalStridedBlockSparseAttn,
                                               LocalStridedBlockSparsePagedAttn)
+from .blocksparse_attention.utils import get_head_sliding_step
+
+
+@dataclass
+class BlocksparseParams(object):
+    max_seqlen: int
+    num_heads: int  # per TP partition
+    num_kv_heads: int  # per TP partition
+    block_size: int
+    local_blocks: int
+    vert_stride: int
+    homo_head: bool = False
+    homo_head_group: bool = False
+    use_triton_paged_attn: Optional[bool] = None
+    head_sliding_step: bool = field(init=False)
+    # range of q heads to for a TP rank
+    active_head_range: Tuple = field(init=False)
+
+    def __post_init__(self):
+        assert self.block_size > 0
+        assert self.local_blocks >= 0
+        assert self.vert_stride >= 1
+        assert self.num_heads % self.num_kv_heads == 0
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        total_heads = tp_size * self.num_heads
+        total_kv_heads = tp_size * self.num_kv_heads
+
+        if self.homo_head:
+            self.head_sliding_step = 0
+        elif self.homo_head_group:
+            head_sliding_step = get_head_sliding_step(total_kv_heads,
+                                                      self.vert_stride)
+            # negative indicates sliding along kv heads, i.e., homo q group
+            self.head_sliding_step = -head_sliding_step
+        else:
+            self.head_sliding_step = get_head_sliding_step(
+                total_heads, self.vert_stride)
+
+        if self.use_triton_paged_attn is None:
+            self.use_triton_paged_attn = bool(
+                int(os.environ.get("PHI3SMALL_USE_TRITON_PAGED_ATTN", "0")))
+
+        self.active_head_range = (
+            tp_rank * self.num_heads,
+            (tp_rank + 1) * self.num_heads,
+        )
 
 
 class BlockSparseFlashAttention(nn.Module):
@@ -74,37 +122,20 @@ class BlockSparseFlashAttention(nn.Module):
         num_kv_heads: Optional[int] = None,
         max_seqlen: int = 8192,
         sparse_block_size: int = 64,
-        layer_idx: int = 0,
-        use_triton_paged_attn: Optional[bool] = None,
         homo_head: bool = False,
-        **kwargs,
     ) -> None:
         super().__init__()
-        self.layer_idx = layer_idx
-        self.local_blocks = local_blocks
-        self.vert_stride = vert_stride
-        self.homo_head = homo_head
-
-        if use_triton_paged_attn is None:
-            use_triton_paged_attn = bool(
-                int(os.environ.get("PHI3SMALL_USE_TRITON_PAGED_ATTN", "0")))
-
-        self.use_triton_paged_attn = use_triton_paged_attn
         self.backend = BlocksparseFlashAttentionBackend
+
+        bs_params = BlocksparseParams(max_seqlen, num_heads, num_kv_heads,
+                                      sparse_block_size, local_blocks,
+                                      vert_stride, homo_head)
         impl_cls = self.backend.get_impl_cls()
-        self.impl = impl_cls(
-            local_blocks,
-            vert_stride,
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            homo_head=homo_head,
-            max_seqlen=max_seqlen,
-            sparse_block_size=sparse_block_size,
-            layer_idx=layer_idx,
-            use_triton_paged_attn=use_triton_paged_attn,
-        )
+        self.impl = impl_cls(num_heads,
+                             head_size,
+                             scale,
+                             num_kv_heads,
+                             blocksparse_params=bs_params)
 
     def forward(
         self,
@@ -229,40 +260,35 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
     """
 
     def __init__(
-            self,
-            local_blocks: int,
-            vert_stride: int,
-            num_heads: int,
-            head_size: int,
-            scale: float,
-            num_kv_heads: Optional[int] = None,
-            max_seqlen: int = 8192,
-            sparse_block_size: int = 64,
-            alibi_slopes: Optional[List[float]] = None,
-            layer_idx: int = 0,
-            use_triton_paged_attn: bool = False,
-            homo_head: bool = False,
-            **kwargs,  # for compatibility
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: Optional[int] = None,
+        alibi_slopes: Optional[List[float]] = None,
+        sliding_window: Optional[int] = None,
+        blocksparse_params: Optional[BlocksparseParams] = None,
     ) -> None:
-        self.layer_idx = layer_idx
+        assert blocksparse_params is not None
+        assert alibi_slopes is None, ValueError(
+            "Alibi not support for blocksparse flash attention.")
+        assert sliding_window is None, ValueError(
+            "sliding_window is invalid for blocksparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.local_blocks = local_blocks
-        self.vert_stride = vert_stride
-        self.sparse_block_size = sparse_block_size
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.homo_head = homo_head
-
-        self.use_triton_paged_attn = use_triton_paged_attn
-
-        if alibi_slopes is not None:
-            assert ValueError(
-                "Alibi not support for blocksparse flash attention.")
         self.alibi_slopes = alibi_slopes
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
+        self.blocksparse_params = blocksparse_params
+        self.local_blocks = blocksparse_params.local_blocks
+        self.vert_stride = blocksparse_params.vert_stride
+        self.sparse_block_size = blocksparse_params.block_size
+        self.head_sliding_step = blocksparse_params.head_sliding_step
+        self.use_triton_paged_attn = blocksparse_params.use_triton_paged_attn
 
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -270,34 +296,29 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        active_head_range = (
-            tp_rank * self.num_heads,
-            (tp_rank + 1) * self.num_heads,
-        )
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
-        total_num_heads = num_heads * tp_size
+        total_num_heads = num_heads * self.tp_size
         self.bs_attn = LocalStridedBlockSparseAttn(
             total_num_heads,
-            max_seqlen,
-            local_blocks,
-            vert_stride,
-            sparse_block_size,
-            homo_head=self.homo_head,
-            active_head_range=active_head_range,
+            blocksparse_params.max_seqlen,
+            blocksparse_params.local_blocks,
+            blocksparse_params.vert_stride,
+            blocksparse_params.block_size,
+            homo_head=blocksparse_params.homo_head,
+            active_head_range=blocksparse_params.active_head_range,
         )
-        self.head_sliding_step = self.bs_attn.head_sliding_step
 
-        if self.use_triton_paged_attn:
+        if blocksparse_params.use_triton_paged_attn:
             self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
                 total_num_heads,
-                max_seqlen,
-                local_blocks,
-                vert_stride,
-                sparse_block_size,
-                homo_head=self.homo_head,
-                active_head_range=active_head_range,
+                blocksparse_params.max_seqlen,
+                blocksparse_params.local_blocks,
+                blocksparse_params.vert_stride,
+                blocksparse_params.block_size,
+                homo_head=blocksparse_params.homo_head,
+                active_head_range=blocksparse_params.active_head_range,
             )
 
     def forward(
@@ -389,6 +410,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     self.scale,
                     self.alibi_slopes,
                     kv_scale,
+                    tp_rank=self.tp_rank,
                     blocksparse_local_blocks=self.local_blocks,
                     blocksparse_vert_stride=self.vert_stride,
                     blocksparse_block_size=self.sparse_block_size,

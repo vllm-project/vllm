@@ -106,9 +106,7 @@ class AttentionImpl(ABC):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_local_blocks: int = 16,
-        blocksparse_vert_stride: int = 8,
-        blocksparse_block_size: int = 64,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -120,9 +118,6 @@ class AttentionImpl(ABC):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        blocksparse_local_blocks: int,
-        blocksparse_vert_stride: int,
-        blocksparse_block_size: int,
         kv_scale: float,
     ) -> torch.Tensor:
         raise NotImplementedError

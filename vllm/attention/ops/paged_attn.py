@@ -92,12 +92,13 @@ class PagedAttention:
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
         kv_scale: float,
-        blocksparse_local_blocks: int = 16,
+        tp_rank: int = 0,
+        blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 1,
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
-        if blocksparse_vert_stride > 1:
+        if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
             assert (blocksparse_block_size > 0 and
@@ -136,6 +137,7 @@ class PagedAttention:
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
+                tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
                 blocksparse_block_size,
@@ -172,6 +174,7 @@ class PagedAttention:
                 alibi_slopes,
                 kv_cache_dtype,
                 kv_scale,
+                tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
                 blocksparse_block_size,

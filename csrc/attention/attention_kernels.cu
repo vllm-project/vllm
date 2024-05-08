@@ -112,6 +112,7 @@ __device__ void paged_attention_kernel(
   const int kv_block_stride,
   const int kv_head_stride,
   const float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -204,14 +205,29 @@ __device__ void paged_attention_kernel(
   // Each thread group in a warp fetches a key from the block, and computes
   // dot product with the query.
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
-  const int num_blocksparse_blocks = DIVIDE_ROUND_UP(num_context_blocks, 4);
+
+  // blocksparse specific vars
+  int bs_block_offset = 0;
+  const int num_blocksparse_blocks = DIVIDE_ROUND_UP(context_len, blocksparse_block_size);
+  if constexpr (IS_BLOCK_SPARSE) {
+    int bs_block_offset;
+    if (blocksparse_head_sliding_step > 0)
+      // sliding on q heads
+      bs_block_offset = (tp_rank * num_heads + head_idx) * blocksparse_head_sliding_step + 1;
+    else if (blocksparse_head_sliding_step == 0)
+      bs_block_offset = 0;
+    else
+      // sliding on kv heads
+      bs_block_offset = (tp_rank * num_kv_heads + kv_head_idx) * blocksparse_head_sliding_step + 1;
+  }
+
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
       const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      const bool is_remote = ((block_seq_id + head_idx * blocksparse_head_sliding_step  + 1) % blocksparse_vert_stride == 0);
+      const bool is_remote = ((block_seq_id + bs_block_offset) % blocksparse_vert_stride == 0);
       const bool is_local = (block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks);
       if (!is_remote && !is_local) {
         for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
@@ -361,7 +377,7 @@ __device__ void paged_attention_kernel(
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
       int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      if (!((block_seq_id + head_idx * blocksparse_head_sliding_step + 1) % blocksparse_vert_stride == 0) &&
+      if (!((block_seq_id + bs_block_offset) % blocksparse_vert_stride == 0) &&
           !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
         continue;
       }
@@ -497,6 +513,7 @@ __global__ void paged_attention_v1_kernel(
   const int kv_block_stride,
   const int kv_head_stride,
   const float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -504,7 +521,7 @@ __global__ void paged_attention_v1_kernel(
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE>(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
     out, q, k_cache, v_cache, num_kv_heads, scale, block_tables, context_lens,
-    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, kv_scale,
+    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, kv_scale, tp_rank,
     blocksparse_local_blocks, blocksparse_vert_stride,
     blocksparse_block_size, blocksparse_head_sliding_step);
 }
@@ -536,6 +553,7 @@ __global__ void paged_attention_v2_kernel(
   const int kv_block_stride,
   const int kv_head_stride,
   const float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -543,7 +561,7 @@ __global__ void paged_attention_v2_kernel(
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
     exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
     block_tables, context_lens, max_num_blocks_per_seq, alibi_slopes,
-    q_stride, kv_block_stride, kv_head_stride, kv_scale,
+    q_stride, kv_block_stride, kv_head_stride, kv_scale, tp_rank,
     blocksparse_local_blocks, blocksparse_vert_stride,
     blocksparse_block_size, blocksparse_head_sliding_step);
 }
@@ -669,6 +687,7 @@ __global__ void paged_attention_v2_reduce_kernel(
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
     kv_scale,                                                                                 \
+    tp_rank,                                                                                  \
     blocksparse_local_blocks,                                                                 \
     blocksparse_vert_stride,                                                                  \
     blocksparse_block_size,                                                                   \
@@ -694,6 +713,7 @@ void paged_attention_v1_launcher(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -777,6 +797,7 @@ void paged_attention_v1_launcher(
     max_context_len,                                                         \
     alibi_slopes,                                                            \
     kv_scale,                                                                \
+    tp_rank,                                                                 \
     blocksparse_local_blocks,                                                \
     blocksparse_vert_stride,                                                 \
     blocksparse_block_size,                                                  \
@@ -824,6 +845,7 @@ void paged_attention_v1(
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -874,6 +896,7 @@ void paged_attention_v1(
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
     kv_scale,                                                                                 \
+    tp_rank,                                                                                  \
     blocksparse_local_blocks,                                                                 \
     blocksparse_vert_stride,                                                                  \
     blocksparse_block_size,                                                                   \
@@ -910,6 +933,7 @@ void paged_attention_v2_launcher(
   int max_context_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
   float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
@@ -1001,16 +1025,12 @@ void paged_attention_v2_launcher(
     max_context_len,                                                             \
     alibi_slopes,                                                                \
     kv_scale,                                                                    \
+    tp_rank,                                                                     \
     blocksparse_local_blocks,                                                    \
     blocksparse_vert_stride,                                                     \
     blocksparse_block_size,                                                      \
     blocksparse_head_sliding_step);
 
-// #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
-//   if (is_block_sparse)                                                       \
-//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);       \
-//   else                                                                       \
-//       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)   \
   switch (is_block_sparse) {                                                 \
@@ -1058,6 +1078,7 @@ void paged_attention_v2(
   const c10::optional<torch::Tensor>& alibi_slopes,
   const std::string& kv_cache_dtype,
   float kv_scale,
+  const int tp_rank,
   const int blocksparse_local_blocks,
   const int blocksparse_vert_stride,
   const int blocksparse_block_size,
