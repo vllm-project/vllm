@@ -359,11 +359,10 @@ class ShardedStateLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-        self.pattern = load_config.model_loader_extra_config.pop(
-            "pattern",
-            ShardedStateLoader.DEFAULT_PATTERN,
-        )
-        if load_config.model_loader_extra_config:
+        extra_config = ({} if load_config.model_loader_extra_config is None
+                        else load_config.model_loader_extra_config.copy())
+        self.pattern = extra_config.pop("pattern", self.DEFAULT_PATTERN)
+        if extra_config:
             raise ValueError(f"Unexpected extra config keys for load format "
                              f"{load_config.load_format}: "
                              f"{load_config.model_loader_extra_config.keys()}")
@@ -402,7 +401,6 @@ class ShardedStateLoader(BaseModelLoader):
 
     @staticmethod
     def save_model(
-        self,
         model: torch.nn.Module,
         path: str,
         pattern: str = None,
@@ -416,7 +414,7 @@ class ShardedStateLoader(BaseModelLoader):
         part = 0
         total_size = 0
         state_dict: Dict[str, torch.Tensor] = {}
-        for name, tensor in model.state_dict():
+        for name, tensor in model.state_dict().items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
                 save_file(
