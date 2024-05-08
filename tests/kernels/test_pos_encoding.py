@@ -1,5 +1,5 @@
 from itertools import accumulate
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 import torch
@@ -18,6 +18,18 @@ SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
+ROPE_SCALING = [{
+    "type": "linear",
+    "factor": (1, )
+}, {
+    "type": "dynamic",
+    "factor": 1
+}, {
+    "type": "yarn",
+    "original_max_position_embeddings": 8192,
+    "factor": 1,
+    "attn_factor": 1
+}]
 
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
@@ -85,6 +97,7 @@ def test_rotary_embedding(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("rope_scaling", ROPE_SCALING)
 @torch.inference_mode()
 def test_batched_rotary_embedding(
     is_neox_style: bool,
@@ -96,6 +109,7 @@ def test_batched_rotary_embedding(
     dtype: torch.dtype,
     seed: int,
     device: str,
+    rope_scaling: Optional[Dict[str, Any]],
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
@@ -105,10 +119,8 @@ def test_batched_rotary_embedding(
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
-        "type": "linear",
-        "factor": (1, )
-    })
+    rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
+                    rope_scaling)
     rope = rope.to(dtype=dtype)
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
