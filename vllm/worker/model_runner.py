@@ -212,25 +212,25 @@ class ModelRunner:
                            "but the KV cache data type is not FP8. "
                            "KV cache scaling factors will not be used.")
 
-    def save_model(self, path: str, max_size: int) -> None:
+    def save_sharded_state_dicts(self, path: str, max_size: int) -> None:
         from safetensors.torch import save_file
-
         from vllm.distributed import get_tensor_model_parallel_rank
+
         rank = get_tensor_model_parallel_rank()
-        idx = 0
-        size = 0
-        params: Dict[str, torch.Tensor] = {}
-        for name, param in self.model.named_parameters():
-            param_size = param.nelement() * param.element_size()
-            if max_size and size + param_size > max_size:
-                save_file(params, f"{path}/model-{rank}-{idx}.safetensors")
-                idx += 1
-                size = 0
-                params = {}
-            params[name] = param
-            size += param_size
-        if len(params) > 0:
-            save_file(params, f"{path}/model-{rank}-{idx}.safetensors")
+        part = 0
+        total_size = 0
+        state_dict: Dict[str, torch.Tensor] = {}
+        for name, tensor in self.model.named_parameters():
+            param_size = tensor.nelement() * tensor.element_size()
+            if max_size and total_size + param_size > max_size:
+                save_file(state_dict, f"{path}/model-{rank}-{part}.safetensors")
+                part += 1
+                total_size = 0
+                state_dict = {}
+            state_dict[name] = tensor
+            total_size += param_size
+        if len(state_dict) > 0:
+            save_file(state_dict, f"{path}/model-{rank}-{part}.safetensors")
 
     def set_block_size(self, block_size: int) -> None:
         self.block_size = block_size

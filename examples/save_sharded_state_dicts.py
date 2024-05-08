@@ -45,7 +45,7 @@ def main(args):
     Path(args.output).mkdir(exist_ok=True)
     # Dump worker states to output directory
     model_executor = llm.llm_engine.model_executor
-    model_executor._run_workers("save_model",
+    model_executor._run_workers("save_sharded_state_dicts",
                                 path=args.output,
                                 max_size=5 * 1024**3)
     # Copy metadata files to output directory

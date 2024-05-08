@@ -347,7 +347,13 @@ class TensorizerLoader(BaseModelLoader):
                                              vision_language_config)
 
 
-class StateDictLoader(BaseModelLoader):
+class ShardedStateDictLoader(BaseModelLoader):
+    """
+    Model loader that directly loads each worker's model state dict, which
+    enables a fast load path for large tensor-parallel models where each worker
+    only needs to read its own shard rather than the entire checkpoint. See
+    `examples/save_sharded_state_dict.py` for creating a sharded checkpoint.
+    """
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
@@ -369,15 +375,13 @@ class StateDictLoader(BaseModelLoader):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
             rank = get_tensor_model_parallel_rank()
-            paths = glob.glob(
-                f"{model_config.model}/model-{rank}-*.safetensors")
-            params = dict(model.named_parameters())
-            for file in paths:
+            pattern = f"{model_config.model}/model-{rank}-*.safetensors"
+            state_dict = dict(model.state_dict())
+            for file in glob.glob(pattern):
                 for key, val in load_file(file).items():
-                    with torch.no_grad():
-                        params[key].copy_(val)
-                    params.pop(key)
-            assert not params
+                    state_dict[key].copy_(val)
+                    state_dict.pop(key)
+            assert not state_dict
         return model.eval()
 
 
@@ -394,6 +398,6 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
         return TensorizerLoader(load_config)
 
     if load_config.load_format == LoadFormat.STATE_DICT:
-        return StateDictLoader(load_config)
+        return ShardedStateDictLoader(load_config)
 
     return DefaultModelLoader(load_config)

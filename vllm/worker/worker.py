@@ -117,8 +117,8 @@ class Worker(WorkerBase):
     def load_model(self):
         self.model_runner.load_model()
 
-    def save_model(self, path: str, max_size: int) -> None:
-        self.model_runner.save_model(path, max_size=max_size)
+    def save_sharded_state_dicts(self, path: str, max_size: int) -> None:
+        self.model_runner.save_sharded_state_dicts(path, max_size=max_size)
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
