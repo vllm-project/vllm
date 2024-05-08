@@ -4,6 +4,8 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
+from tests.models.utils import check_logprobs_close
+
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
 ]
@@ -11,30 +13,31 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [128])
-@pytest.mark.skip(
-    "Two problems: 1. Failing correctness tests. 2. RuntimeError: expected "
-    "scalar type BFloat16 but found Half (only in CI).")
+@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     hf_runner,
     vllm_runner,
-    example_long_prompts,
+    example_prompts,
     model: str,
     dtype: str,
     max_tokens: int,
+    num_logprobs: int,
 ) -> None:
+    # TODO(sang): Sliding window should be tested separately.
     hf_model = hf_runner(model, dtype=dtype)
-    hf_outputs = hf_model.generate_greedy(example_long_prompts, max_tokens)
+    hf_outputs = hf_model.generate_greedy_logprobs_limit(
+        example_prompts, max_tokens, num_logprobs)
     del hf_model
 
     vllm_model = vllm_runner(model, dtype=dtype)
-    vllm_outputs = vllm_model.generate_greedy(example_long_prompts, max_tokens)
+    vllm_outputs = vllm_model.generate_greedy_logprobs(example_prompts,
+                                                       max_tokens,
+                                                       num_logprobs)
     del vllm_model
-
-    for i in range(len(example_long_prompts)):
-        hf_output_ids, hf_output_str = hf_outputs[i]
-        vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert hf_output_str == vllm_output_str, (
-            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
-        assert hf_output_ids == vllm_output_ids, (
-            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    check_logprobs_close(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )
