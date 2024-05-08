@@ -109,7 +109,7 @@ class RotaryEmbedding(nn.Module):
             key_pass = key[..., self.rotary_dim:]
 
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
-            positions.device)
+            positions.device, dtype=query.dtype)
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
