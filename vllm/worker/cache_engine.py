@@ -48,9 +48,6 @@ class CacheEngine:
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
-        # Zero out the first block in the cache, in case it gets used as
-        # 'null_block' in the CpuGpuBlockAllocator
-        self.attn_backend.zero_block(self.gpu_cache, 0)
 
     def _allocate_kv_cache(
         self,
@@ -63,8 +60,11 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
+            # CpuGpuBlockAllocator.null_block requires at least that
+            # block to be zeroed-out.
+            # We zero-out everything for simplicity.
             kv_cache.append(
-                torch.empty(kv_cache_shape,
+                torch.zeros(kv_cache_shape,
                             dtype=self.dtype,
                             pin_memory=pin_memory,
                             device=device))

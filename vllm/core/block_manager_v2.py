@@ -87,9 +87,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=block_size,
         )
         if self.sliding_window is not None:
-            # Allocate the null_block first, so it gets ID of 0.
-            # CacheEngine makes sure the first block is always zeroed-out
-            # so we don't get some nasty NaNs in there.
+            # Allocate the null_block first, so it gets ID of 0 for
+            # ease of debugging.
             null_block = self.block_allocator.null_block
             assert null_block.block_id == 0
 
