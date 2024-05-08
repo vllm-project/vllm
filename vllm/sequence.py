@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Tuple, Dict, List, Optional, Union
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
-import numpy as np
 
 if TYPE_CHECKING:
     import torch
@@ -139,11 +138,14 @@ class SequenceData:
 
     def get_output_len(self) -> int:
         return len(self.output_token_ids)
-    
+
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
-    
-    def get_prefix_token_ids(self, num_tokens: int) -> Tuple[List[int], Optional[List[int]]]:
+
+    def get_prefix_token_ids(
+            self, num_tokens: int
+    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+        """Get prefix tokens, and make the return value hashable"""
         prompt_length = len(self.prompt_token_ids_tuple)
         if num_tokens > prompt_length:
             return (self.prompt_token_ids_tuple,
@@ -253,11 +255,11 @@ class Sequence:
         truncate = buffer_length and not self.is_finished()
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
-    
+
     def hash_of_block(self, logical_idx: int) -> int:
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        hashed_tokens = self.data.get_token_ids()[:num_tokens]
-        return hash((tuple(hashed_tokens), self.lora_int_id))
+        hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
+        return hash((hashed_tokens, self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size

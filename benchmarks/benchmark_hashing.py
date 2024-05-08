@@ -5,7 +5,8 @@ import pstats
 from vllm import LLM, SamplingParams
 
 # A very long prompt, total number of tokens is about 15k.
-LONG_PROMPT = ["You are an expert in large language models, aren't you?"]*1000
+LONG_PROMPT = ["You are an expert in large language models, aren't you?"
+               ] * 1000
 LONG_PROMPT = ' '.join(LONG_PROMPT)
 
 
@@ -42,7 +43,8 @@ def main(args):
             total_calls = stats.stats[func][0]
     percentage = (total_time / stats.total_tt) * 100
     print(
-        f"Hashing took {total_time:.2f} seconds, {percentage:.2f}% of the total runtime."
+        f"Hashing took {total_time:.2f} seconds,"
+        f"{percentage:.2f}% of the total runtime."
     )
 
 
@@ -50,9 +52,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Benchmark the performance of hashing function in'
         'automatic prefix caching.')
-    parser.add_argument('--model',
-                        type=str,
-                        default='lmsys/longchat-7b-16k')
+    parser.add_argument('--model', type=str, default='lmsys/longchat-7b-16k')
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--output-len', type=int, default=10)
     parser.add_argument('--enable-prefix-caching',
