@@ -2,11 +2,12 @@
 import copy
 import enum
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Tuple, Dict, List, Optional, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+import numpy as np
 
 if TYPE_CHECKING:
     import torch
@@ -119,6 +120,7 @@ class SequenceData:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_token_ids_tuple = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -137,9 +139,17 @@ class SequenceData:
 
     def get_output_len(self) -> int:
         return len(self.output_token_ids)
-
+    
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
+    
+    def get_prefix_token_ids(self, num_tokens: int) -> Tuple[List[int], Optional[List[int]]]:
+        prompt_length = len(self.prompt_token_ids_tuple)
+        if num_tokens > prompt_length:
+            return (self.prompt_token_ids_tuple,
+                    tuple(self.output_token_ids[:num_tokens - prompt_length]))
+        else:
+            return (self.prompt_token_ids_tuple[:num_tokens], None)
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -243,16 +253,11 @@ class Sequence:
         truncate = buffer_length and not self.is_finished()
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
-
+    
     def hash_of_block(self, logical_idx: int) -> int:
-        # TODO This can produce incorrect hash when block size > prompt size
-
-        # Compute the number of tokens in the sequence
-        # TODO: The current hashing function is O(L^2). We should optimize
-        # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        return hash(
-            (tuple(self.data.get_token_ids()[0:num_tokens]), self.lora_int_id))
+        hashed_tokens = self.data.get_token_ids()[:num_tokens]
+        return hash((tuple(hashed_tokens), self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
