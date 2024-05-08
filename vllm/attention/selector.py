@@ -4,7 +4,7 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_hpu
 
 logger = init_logger(__name__)
 
@@ -16,6 +16,11 @@ def get_attn_backend(dtype: torch.dtype) -> AttentionBackend:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
+    elif is_hpu():
+        logger.info("Using HabanaAttention backend.")
+        from vllm.attention.backends.habana_attn import (  # noqa: F401
+            HabanaAttentionBackend)
+        return HabanaAttentionBackend        
     else:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -27,6 +32,9 @@ def _can_use_flash_attn(dtype: torch.dtype) -> bool:
     if is_hip():
         # AMD GPUs.
         logger.info("Cannot use FlashAttention backend for AMD GPUs.")
+        return False
+    if is_hpu():
+        logger.info("Cannot use FlashAttention backend for HPUs.")
         return False
     if torch.cuda.get_device_capability()[0] < 8:
         # Volta and Turing NVIDIA GPUs.

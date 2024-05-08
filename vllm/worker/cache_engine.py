@@ -6,7 +6,10 @@ import torch
 from vllm.attention import get_attn_backend
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_pin_memory_available, is_hpu
+
+if is_hpu():
+    import habana_frameworks.torch as htorch
 
 logger = init_logger(__name__)
 
@@ -46,7 +49,7 @@ class CacheEngine:
         self.attn_backend = get_attn_backend(model_config.dtype)
 
         # Initialize the cache.
-        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "cuda")
+        self.gpu_cache = self._allocate_kv_cache(self.num_gpu_blocks, "hpu" if is_hpu() else "cuda")
         self.cpu_cache = self._allocate_kv_cache(self.num_cpu_blocks, "cpu")
 
     def _allocate_kv_cache(
@@ -60,11 +63,21 @@ class CacheEngine:
         pin_memory = is_pin_memory_available() if device == "cpu" else False
         kv_cache: List[torch.Tensor] = []
         for _ in range(self.num_layers):
-            kv_cache.append(
-                torch.empty(kv_cache_shape,
-                            dtype=self.dtype,
-                            pin_memory=pin_memory,
-                            device=device))
+            if device == 'hpu':
+                key_cache = torch.zeros(kv_cache_shape,
+                        dtype=self.dtype,
+                        device=device)
+                value_cache = torch.zeros(kv_cache_shape,
+                        dtype=self.dtype,
+                        device=device)
+                kv_layer = (key_cache, value_cache)
+                kv_cache.append(kv_layer)
+            else:
+                kv_layer = torch.empty(kv_cache_shape,
+                                        dtype=self.dtype,
+                                        pin_memory=pin_memory,
+                                        device=device)
+                kv_cache.append(kv_layer)
         return kv_cache
 
     def swap_in(self, src_to_dst: Dict[int, int]) -> None:

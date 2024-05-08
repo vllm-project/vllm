@@ -1,9 +1,9 @@
 import pickle
 from typing import List, Optional, Tuple
-
+import os
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import get_ip, is_hip, set_cuda_visible_devices
+from vllm.utils import get_ip, is_hip, is_hpu, set_cuda_visible_devices
 
 logger = init_logger(__name__)
 
@@ -100,8 +100,10 @@ def initialize_ray_cluster(
                  ignore_reinit_error=True,
                  num_gpus=parallel_config.world_size)
     else:
-        ray.init(address=ray_address, ignore_reinit_error=True)
-
+        ray.init(address=ray_address, ignore_reinit_error=True,
+                 log_to_driver=not os.environ.get('VLLM_RAY_DISABLE_LOG_TO_DRIVER', '0') != '0')
+    ray_accel_name = "HPU" if is_hpu() else "GPU"
+    
     if parallel_config.placement_group:
         # Placement group is already set.
         return
@@ -114,24 +116,24 @@ def initialize_ray_cluster(
         # Verify that we can use the placement group.
         gpu_bundles = 0
         for bundle in bundles:
-            bundle_gpus = bundle.get("GPU", 0)
+            bundle_gpus = bundle.get(ray_accel_name, 0)
             if bundle_gpus > 1:
                 raise ValueError(
-                    "Placement group bundle cannot have more than 1 GPU.")
+                    f"Placement group bundle cannot have more than 1 {ray_accel_name}.")
             if bundle_gpus:
                 gpu_bundles += 1
         if parallel_config.world_size > gpu_bundles:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the placement group.")
+                f"The number of required {ray_accel_name}s exceeds the total number of "
+                f"available {ray_accel_name}s in the placement group.")
     else:
-        num_gpus_in_cluster = ray.cluster_resources().get("GPU", 0)
+        num_gpus_in_cluster = ray.cluster_resources().get(ray_accel_name, 0)
         if parallel_config.world_size > num_gpus_in_cluster:
             raise ValueError(
-                "The number of required GPUs exceeds the total number of "
-                "available GPUs in the cluster.")
+                f"The number of required {ray_accel_name}s exceeds the total number of "
+                f"available {ray_accel_name}s in the cluster.")
         # Create a new placement group
-        placement_group_specs = ([{"GPU": 1}] * parallel_config.world_size)
+        placement_group_specs = ([{ray_accel_name: 1}] * parallel_config.world_size)
         current_placement_group = ray.util.placement_group(
             placement_group_specs)
         # Wait until PG is ready - this will block until all

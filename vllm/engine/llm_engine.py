@@ -66,7 +66,7 @@ class LLMEngine:
         log_stats: bool,
     ) -> None:
         logger.info(
-            f"Initializing an LLM engine (v{vllm.__version__}) with config: "
+            f"Initializing an LLM engine with config: "
             f"model={model_config.model!r}, "
             f"tokenizer={model_config.tokenizer!r}, "
             f"tokenizer_mode={model_config.tokenizer_mode}, "
@@ -132,6 +132,14 @@ class LLMEngine:
         if device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutor
             executor_class = NeuronExecutor
+        elif device_config.device_type == "hpu":
+            if parallel_config.worker_use_ray:
+                initialize_ray_cluster(parallel_config)
+                from vllm.executor.ray_habana_executor import RayHabanaExecutor
+                executor_class = RayHabanaExecutor
+            else:
+                from vllm.executor.habana_executor import HabanaExecutor
+                executor_class = HabanaExecutor
         elif parallel_config.worker_use_ray:
             initialize_ray_cluster(parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutor
@@ -141,7 +149,6 @@ class LLMEngine:
                 "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutor
             executor_class = GPUExecutor
-
         # Create the LLM engine.
         engine = cls(*engine_configs,
                      executor_class=executor_class,
@@ -419,7 +426,9 @@ class LLMEngine:
             self.detokenizer.decode_sequence_inplace(seq,
                                                      seq_group.sampling_params)
             self._check_stop(seq, seq_group.sampling_params)
-
+            #emitted_token = seq.tokens[seq.prefix_offset:] if not seq.status == SequenceStatus.FINISHED_STOPPED else '<EOS>'
+            #print(f'[{seq.status}] Emitted token: {emitted_token} ({seq.get_token_ids()[-1]}) ({seq.output_text!r})')
+ 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:
             # For newly created child sequences, add them to the sequence group

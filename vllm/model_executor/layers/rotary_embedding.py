@@ -27,7 +27,12 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm._C import ops
+from vllm.utils import is_hpu
+if is_hpu():
+    from vllm.hpu import ops
+    from vllm.hpu.rotary_embed import HpuRotaryEmbedding
+else:
+    from vllm._C import ops
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -353,8 +358,12 @@ def get_rope(
         return _ROPE_DICT[key]
 
     if rope_scaling is None:
-        rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                                     is_neox_style)
+        if is_hpu():
+            rotary_emb = HpuRotaryEmbedding(head_size, rotary_dim, max_position, base,
+                                            is_neox_style)
+        else:
+            rotary_emb = RotaryEmbedding(head_size, rotary_dim, max_position, base,
+                                            is_neox_style)
     else:
         scaling_type = rope_scaling["type"]
         scaling_factor = rope_scaling["factor"]

@@ -10,7 +10,7 @@ from vllm.model_executor.parallel_utils.custom_all_reduce import (
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_group, get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size, is_cupy_nccl_enabled_for_all_reduce)
-
+from vllm.utils import is_hpu
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
@@ -161,9 +161,10 @@ def broadcast_tensor_dict(
         metadata_list = []
         for key, value in tensor_dict.items():
             if isinstance(value, torch.Tensor):
-                assert value.is_cuda, (
-                    f"Tensor {key}: {value} is not on cuda. Currently we only "
-                    f"support broadcasting tensors on cuda.")
+                if not is_hpu():
+                    assert value.is_cuda, (
+                        f"Tensor {key}: {value} is not on cuda or HPU. Currently we only "
+                        f"support broadcasting tensors on cuda or HPU.")
                 metadata_list.append(
                     (key, TensorMetadata(value.dtype, value.size())))
             else:
@@ -187,7 +188,7 @@ def broadcast_tensor_dict(
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device="cuda")
+                                     device="hpu" if is_hpu() else "cuda")
                 async_handle = torch.distributed.broadcast(tensor,
                                                            src=src,
                                                            async_op=True,

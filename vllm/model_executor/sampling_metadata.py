@@ -7,7 +7,7 @@ import torch
 from vllm.model_executor.layers.ops.sample import get_num_triton_sampler_splits
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.sequence import SequenceData
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, is_hpu
 
 _SAMPLING_EPS = 1e-5
 _SEED_0_REPLACEMENT = 3403598558
@@ -269,19 +269,19 @@ class SamplingTensors:
         sample_indices_t = torch.tensor(
             sample_indices,
             device="cpu",
-            dtype=torch.long,
+            dtype=torch.int,
             pin_memory=pin_memory,
         )
         prompt_tensor = torch.tensor(
             prompt_padded_tokens,
             device="cpu",
-            dtype=torch.long,
+            dtype=torch.int,
             pin_memory=pin_memory,
         )
         output_tensor = torch.tensor(
             output_padded_tokens,
             device="cpu",
-            dtype=torch.long,
+            dtype=torch.int,
             pin_memory=pin_memory,
         )
         # need to transpose and make contiguous to
@@ -290,7 +290,7 @@ class SamplingTensors:
         sampling_seeds_t = torch.tensor(
             sampling_seeds,
             device="cpu",
-            dtype=torch.long,
+            dtype=torch.int,
             pin_memory=pin_memory,
         ).T.contiguous()
 
@@ -339,7 +339,7 @@ class SamplingTensors:
             else:
                 generator = random.Random(str((seed, ) + extra_entropy))
                 randint_fn = generator.randint
-            lo, hi = torch.iinfo(torch.long).min, torch.iinfo(torch.long).max
+            lo, hi = torch.iinfo(torch.int).min, torch.iinfo(torch.int).max
             # If the user/random sets seed = 0 but request should
             # have sampling, we need to change it to something
             # else. We use a constant in that case.

@@ -303,7 +303,7 @@ class EngineArgs:
         parser.add_argument("--device",
                             type=str,
                             default=EngineArgs.device,
-                            choices=["auto", "cuda", "neuron"],
+                            choices=["auto", "cuda", "neuron", 'hpu'],
                             help='Device type for vLLM execution.')
         parser.add_argument(
             '--scheduler-delay-factor',
