@@ -3,8 +3,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import flashinfer
 import torch
-from flash_attn import flash_attn_varlen_func
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
