@@ -18,7 +18,7 @@ from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
@@ -197,7 +197,7 @@ class Worker(WorkerBase):
         self,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
         # TODO(woosuk): Profile swapping overhead and optimize if needed.
@@ -205,25 +205,29 @@ class Worker(WorkerBase):
             self.cache_engine.swap_in(blocks_to_swap_in)
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
-        blocks_to_swap_in: Optional[Dict[int, int]] = None,
-        blocks_to_swap_out: Optional[Dict[int, int]] = None,
-        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-        num_lookahead_slots: int = 0,
+        execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+
+        if execute_model_req is None:
+            seq_group_metadata_list = None
+        else:
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
+            assert execute_model_req is not None
             num_seq_groups = len(seq_group_metadata_list)
-            assert blocks_to_swap_in is not None
-            assert blocks_to_swap_out is not None
-            assert blocks_to_copy is not None
+            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
+            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device=self.device,
+                                          dtype=torch.int64).view(-1, 2)
             data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
@@ -238,9 +242,6 @@ class Worker(WorkerBase):
             blocks_to_swap_out = data["blocks_to_swap_out"]
             blocks_to_copy = data["blocks_to_copy"]
 
-        assert blocks_to_swap_in is not None
-        assert blocks_to_swap_out is not None
-        assert blocks_to_copy is not None
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
         # If there is no input, we don't need to execute the model.
