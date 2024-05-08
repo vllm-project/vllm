@@ -193,10 +193,7 @@ class ArcticConfig(PretrainedConfig):
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any], **kwargs) -> "ArcticConfig":
         result = super().from_dict(config_dict, **kwargs)
-        if isinstance(result, tuple):
-            config = result[0]
-        else:
-            config = result
+        config = result[0] if isinstance(result, tuple) else result
         if isinstance(config.quantization, dict):
             config.quantization = ArcticQuantizationConfig(**config.quantization)
         return result
