@@ -347,19 +347,26 @@ class TensorizerLoader(BaseModelLoader):
                                              vision_language_config)
 
 
-class ShardedStateDictLoader(BaseModelLoader):
+class ShardedStateLoader(BaseModelLoader):
     """
     Model loader that directly loads each worker's model state dict, which
     enables a fast load path for large tensor-parallel models where each worker
     only needs to read its own shard rather than the entire checkpoint. See
-    `examples/save_sharded_state_dict.py` for creating a sharded checkpoint.
+    `examples/save_sharded_states.py` for creating a sharded checkpoint.
     """
+
+    DEFAULT_PATTERN = "model-rank-{rank}-part-{part}.safetensors"
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self.pattern = load_config.model_loader_extra_config.pop(
+            "pattern",
+            ShardedStateLoader.DEFAULT_PATTERN,
+        )
         if load_config.model_loader_extra_config:
-            raise ValueError(f"Model loader extra config is not supported for "
-                             f"load format {load_config.load_format}")
+            raise ValueError(f"Unexpected extra config keys for load format "
+                             f"{load_config.load_format}: "
+                             f"{load_config.model_loader_extra_config.keys()}")
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -368,21 +375,64 @@ class ShardedStateDictLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig) -> nn.Module:
         from safetensors.torch import load_file
-
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
                                           lora_config, vision_language_config)
             rank = get_tensor_model_parallel_rank()
-            pattern = f"{model_config.model}/model-{rank}-*.safetensors"
+            pattern = os.path.join(
+                model_config.model,
+                self.pattern.format(rank=rank, part="*"),
+            )
+            filepaths = glob.glob(pattern)
+            if not filepaths:
+                # TODO: support un-sharded checkpoints too
+                raise ValueError(
+                    f"Could not find checkpoint files '{pattern}', only "
+                    f"pre-sharded checkpoints are currently supported!"
+                )
             state_dict = dict(model.state_dict())
-            for file in glob.glob(pattern):
-                for key, val in load_file(file).items():
+            for path in filepaths:
+                for key, val in load_file(path).items():
                     state_dict[key].copy_(val)
                     state_dict.pop(key)
             assert not state_dict
         return model.eval()
+
+    @staticmethod
+    def save_model(
+        self,
+        model: torch.nn.Module,
+        path: str,
+        pattern: str = None,
+        max_size: int = None,
+    ) -> None:
+        from safetensors.torch import save_file
+        from vllm.distributed import get_tensor_model_parallel_rank
+        if pattern is None:
+            pattern = ShardedStateLoader.DEFAULT_PATTERN
+        rank = get_tensor_model_parallel_rank()
+        part = 0
+        total_size = 0
+        state_dict: Dict[str, torch.Tensor] = {}
+        for name, tensor in model.state_dict():
+            param_size = tensor.nelement() * tensor.element_size()
+            if max_size is not None and total_size + param_size > max_size:
+                save_file(
+                    state_dict,
+                    os.path.join(path, pattern.format(rank=rank, part=part)),
+                )
+                part += 1
+                total_size = 0
+                state_dict = {}
+            state_dict[name] = tensor
+            total_size += param_size
+        if len(state_dict) > 0:
+            save_file(
+                state_dict,
+                os.path.join(path, pattern.format(rank=rank, part=part)),
+            )
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
@@ -397,7 +447,7 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     if load_config.load_format == LoadFormat.TENSORIZER:
         return TensorizerLoader(load_config)
 
-    if load_config.load_format == LoadFormat.STATE_DICT:
-        return ShardedStateDictLoader(load_config)
+    if load_config.load_format == LoadFormat.SHARDED_STATE:
+        return ShardedStateLoader(load_config)
 
     return DefaultModelLoader(load_config)
