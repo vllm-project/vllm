@@ -62,15 +62,8 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
     && git clone https://github.com/mberenjk/rccl.git \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
-    && mkdir build && cd build \
-    && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ \
-	   -DCMAKE_BUILD_TYPE=Release -DAMDGPU_TARGETS=${PYTORCH_ROCM_ARCH} .. \
-    && SCCACHE_IDLE_TIMEOUT=1800 make -j 32 \
-    && make package \
-    && dpkg -i *.deb \
-    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
-    && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
-    && cd ../.. \
+    && ./install.sh -i --amdgpu_targets ${PYTORCH_ROCM_ARCH} \
+    && cd .. \
     && rm -r rccl \
     && cd ..; \
     fi
