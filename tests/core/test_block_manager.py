@@ -286,10 +286,12 @@ def test_swap_encoder_decoder():
     # tokens will be written in the next forward pass.
     token_id = 0
     decoder_prompt.status = SequenceStatus.RUNNING
-    prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
+    decoder_prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
-    # Swap seq group from GPU -> CPU.
-    gpu_blocks = block_manager.get_block_table(prompt)
+    # Swap encoder/decoder seq group from GPU -> CPU.
+    decoder_gpu_blocks = block_manager.get_block_table(decoder_prompt)
+    encoder_gpu_blocks = block_manager.get_block_table(encoder_prompt)
+    gpu_blocks = decoder_gpu_blocks + encoder_gpu_blocks
     assert block_manager.can_swap_out(seq_group)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -301,7 +303,7 @@ def test_swap_encoder_decoder():
     assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
     prompt.status = SequenceStatus.SWAPPED
 
-    # Swap seq group from CPU -> GPU.
+    # Swap decoder seq group from CPU -> GPU.
     cpu_blocks = block_manager.get_block_table(prompt)
     assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
