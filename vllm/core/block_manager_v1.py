@@ -322,27 +322,30 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         seq = seq_group.get_encoder_seq()
 
         # Allocate new physical token blocks that will store the prompt tokens.
-        num_prompt_blocks = 0 if seq is None else len(seq.logical_token_blocks)
+        block_table: BlockTable = []        
+        if seq is None:
+            # Assign empty encoder block table for the SequenceGroup
+            self.encoder_block_tables[seq_group.request_id] = block_table
+        else: 
+            num_prompt_blocks = len(seq.logical_token_blocks)
+            for logical_idx in range(num_prompt_blocks):
+                if (self.block_sliding_window is not None
+                        and logical_idx >= self.block_sliding_window):
+                    block = block_table[logical_idx % self.block_sliding_window]
+                    # Set the reference counts of the token blocks.
+                    block.ref_count = seq_group.num_seqs()
+                elif self.enable_caching:
+                    block = self.gpu_allocator.allocate(
+                        seq.hash_of_block(logical_idx),
+                        seq.num_hashed_tokens_of_block(logical_idx))
+                else:
+                    block = self.gpu_allocator.allocate()
+                    # Set the reference counts of the token blocks.
+                    block.ref_count = seq_group.num_seqs()
+                block_table.append(block)
 
-        block_table: BlockTable = []
-        for logical_idx in range(num_prompt_blocks):
-            if (self.block_sliding_window is not None
-                    and logical_idx >= self.block_sliding_window):
-                block = block_table[logical_idx % self.block_sliding_window]
-                # Set the reference counts of the token blocks.
-                block.ref_count = seq_group.num_seqs()
-            elif self.enable_caching:
-                block = self.gpu_allocator.allocate(
-                    seq.hash_of_block(logical_idx),
-                    seq.num_hashed_tokens_of_block(logical_idx))
-            else:
-                block = self.gpu_allocator.allocate()
-                # Set the reference counts of the token blocks.
-                block.ref_count = seq_group.num_seqs()
-            block_table.append(block)
-
-        # Assign the encoder block table for the SequenceGroup.
-        self.encoder_block_tables[seq_group.request_id] = block_table
+            # Assign the encoder block table for the SequenceGroup.
+            self.encoder_block_tables[seq_group.request_id] = block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         self.allocate_decoder(seq_group)
