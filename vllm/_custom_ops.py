@@ -192,7 +192,7 @@ def scaled_fp8_quant(
     batch_dim_padding: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Quantize the input tensor to FP8 and return the scale.
+    Quantize input tensor to FP8 and return quantized tensor and scale.
 
     This function supports both static and dynamic quantization: If you
     provide the scale, it will use static scaling and if you omit it,
