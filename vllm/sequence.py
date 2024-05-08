@@ -741,10 +741,10 @@ class ExecuteModelRequest:
     """The model execution request."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
-    # Blocks to swap in. Dict of CPU -> GPU block number.
-    blocks_to_swap_in: Dict[int, int] = field(default_factory=dict)
-    # Blocks to swap out. Dict of GPU -> CPU block number.
-    blocks_to_swap_out: Dict[int, int] = field(default_factory=dict)
+    # Blocks to swap in. List of CPU -> GPU block number.
+    blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to swap out. List of GPU -> CPU block number.
+    blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
     # The number of slots for lookahead decoding.

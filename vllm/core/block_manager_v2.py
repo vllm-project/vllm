@@ -243,13 +243,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return AllocStatus.LATER
 
     def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
+                num_lookahead_slots: int) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return False
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def get_num_free_gpu_blocks(self) -> int:
