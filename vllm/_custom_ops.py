@@ -86,10 +86,6 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    print(f"SANG-TODO {query.dtype=}")
-    print(f"SANG-TODO {positions.dtype=}")
-    print(f"SANG-TODO {key.dtype=}")
-    print(f"SANG-TODO {cos_sin_cache.dtype=}")
     vllm_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
                               is_neox)
 
