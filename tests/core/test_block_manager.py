@@ -301,10 +301,12 @@ def test_swap_encoder_decoder():
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
     assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
-    prompt.status = SequenceStatus.SWAPPED
+    decoder_prompt.status = SequenceStatus.SWAPPED
 
     # Swap decoder seq group from CPU -> GPU.
-    cpu_blocks = block_manager.get_block_table(prompt)
+    decoder_cpu_blocks = block_manager.get_block_table(decoder_prompt)
+    encoder_cpu_blocks = block_manager.get_block_table(encoder_prompt)
+    cpu_blocks = decoder_cpu_blocks + encoder_cpu_blocks
     assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -347,19 +349,25 @@ def test_free_encoder_decoder():
                                         num_gpu_blocks,
                                         watermark=0)
 
-    prompt, seq_group = create_dummy_prompt("1", block_size)
+    decoder_prompt, encoder_prompt, seq_group = create_dummy_prompt_encoder_decoder("1", 
+                                                                                    decoder_prompt_length=block_size//2, 
+                                                                                    encoder_prompt_length=block_size//2)
     block_manager.allocate(seq_group)
 
     # Free allocated seq.
-    prompt_blocks = len(block_manager.get_block_table(prompt))
+    decoder_prompt_blocks = len(block_manager.get_block_table(decoder_prompt))
+    encoder_prompt_blocks = len(block_manager.get_block_table(encoder_prompt))
+    prompt_blocks = decoder_prompt_blocks + encoder_prompt_blocks
     before_blocks = block_manager.get_num_free_gpu_blocks()
-    block_manager.free(prompt)
+    block_manager.free(decoder_prompt)
+    block_manager.free(encoder_prompt)
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert after_blocks == before_blocks + prompt_blocks
 
-    # Block table for freed seq is deleted.
+    # Block table for freed encoder & decoder seq's are deleted.
     with pytest.raises(KeyError):
-        block_manager.get_block_table(prompt)
+        block_manager.get_block_table(decoder_prompt)
+        block_manager.get_block_table(encoder_prompt)
 
 def test_reset():
     block_size = 4
@@ -393,7 +401,9 @@ def test_reset_encoder_decoder():
     # Allocate same seq group on all available gpu blocks.
     original_blocks = block_manager.get_num_free_gpu_blocks()
     for i in range(num_gpu_blocks):
-        _, seq_group = create_dummy_prompt(str(i), block_size)
+        _, _, seq_group = create_dummy_prompt_encoder_decoder("1", 
+                                                              decoder_prompt_length=block_size//2, 
+                                                              encoder_prompt_length=block_size//2)
         block_manager.allocate(seq_group)
     assert block_manager.get_num_free_gpu_blocks() == 0
 
