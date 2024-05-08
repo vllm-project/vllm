@@ -38,14 +38,13 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 
 
-class PreparePromptMetadata(NamedTuple):
+class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
     attn_metadata: Optional[AttentionMetadata]
     seq_lens: List[int]
     query_lens: List[int]
-    lora_index_mapping: List[int]
-    lora_prompt_mapping: List[int]
+    lora_mapping: Optional[LoRAMapping]
     lora_requests: Set[LoRARequest]
     multi_modal_input: Optional[torch.Tensor]
     slot_mapping: torch.Tensor
@@ -55,14 +54,13 @@ class PreparePromptMetadata(NamedTuple):
 
     @classmethod
     def empty(cls):
-        return PreparePromptMetadata(
+        return ModelInput(
             input_tokens=torch.empty(),
             input_positions=torch.empty(),
             attn_metadata=None,
             seq_lens=[],
             query_lens=[],
-            lora_index_mapping=[],
-            lora_prompt_mapping=[],
+            lora_mapping=None,
             lora_requests=set(),
             multi_modal_input=None,
             slot_mapping=torch.empty(),
@@ -196,10 +194,23 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
-    def _prepare_hybrid_batch(
+    def _prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> PreparePromptMetadata:
+    ) -> ModelInput:
+        """Prepare the model input based on a given sequence group.
+
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+        If this assumption is wrong, assertion error will be raised.
+
+        The result tensors and data structure also batches input in prefill
+        -> decode orders. For example,
+
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+
+        If cuda graph is required, this API automatically pads inputs.
+        """
         input_tokens: List[int] = []
         input_positions: List[int] = []
         slot_mapping: List[int] = []
@@ -220,7 +231,7 @@ class ModelRunner:
         num_decode_tokens = 0
 
         if len(seq_group_metadata_list) == 0:
-            return PreparePromptMetadata.empty()
+            return ModelInput.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -278,13 +289,9 @@ class ModelRunner:
                     block_tables.append([])
                     assert context_len == 0
 
-                # actual prompt lens
                 context_lens.append(context_len)
                 query_lens.append(seq_len - context_len)
-
                 input_tokens.extend(tokens)
-                # NOTE(woosuk): Here we assume that the first token in the prompt
-                # is always the first token in the sequence.
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
 
@@ -331,13 +338,14 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
-        # vLLM uses cuda graph only for decoding requests.
-        # See `capture_model` API for more details.
-        # For decoding requests, batch_size == input_tokens.
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
+
+        # If cuda graph can be used, pad tensors accordingly.
+        # See `capture_model` API for more details.
+        # vLLM uses cuda graph only for decoding requests.
         use_captured_graph = (
             decode_only and not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
@@ -463,14 +471,21 @@ class ModelRunner:
                 use_cuda_graph=False,
             )
 
-        return PreparePromptMetadata(
+        if self.lora_config:
+            lora_mapping = LoRAMapping(
+                lora_index_mapping,
+                lora_prompt_mapping,
+            )
+        else:
+            lora_mapping = None
+
+        return ModelInput(
             input_tokens=input_tokens,
             input_positions=input_positions,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,
-            lora_index_mapping=lora_index_mapping,
-            lora_prompt_mapping=lora_prompt_mapping,
+            lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_input=multi_modal_input,
             slot_mapping=slot_mapping,
@@ -492,26 +507,17 @@ class ModelRunner:
                 attn_metadata,
                 seq_lens,
                 query_lens,
-                lora_index_mapping,
-                lora_prompt_mapping,
+                lora_mapping,
                 lora_requests,
                 multi_modal_input,
                 slot_mapping,
                 num_prefill_tokens,
                 num_decode_tokens,
                 num_prefills,
-            ) = self._prepare_hybrid_batch(seq_group_metadata_list)
+            ) = self._prepare_model_input(seq_group_metadata_list)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
-            else:
-                lora_mapping = None
 
             metadata_dict = {
                 "input_tokens": input_tokens,

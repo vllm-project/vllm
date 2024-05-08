@@ -75,13 +75,6 @@ class AttentionMetadata:
     def decode_metadata(self) -> Optional["AttentionMetadata"]:
         pass
 
-    # def __post_init__(self):
-    #     if self.num_prefill_tokens > 0:
-    #         assert self.num_prefills > 0
-    #         assert self.prefill_metadata is not None
-    #     if self.num_decode_tokens > 0:
-    #         assert self.decode_metadata is not None
-
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
                         ) -> Dict[str, Any]:
