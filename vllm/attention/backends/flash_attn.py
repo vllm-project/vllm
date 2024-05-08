@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func
+from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,

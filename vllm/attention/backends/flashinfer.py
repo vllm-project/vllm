@@ -3,8 +3,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
     import flashinfer
-    from flash_attn import flash_attn_varlen_func
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+    from vllm_flash_attn import flash_attn_varlen_func
 except ImportError:
     flashinfer = None
     flash_attn_varlen_func = None
