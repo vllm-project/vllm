@@ -1,16 +1,10 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
-try:
-    import flashinfer
-    from flash_attn import flash_attn_varlen_func
-    from flashinfer import BatchDecodeWithPagedKVCacheWrapper
-except ImportError:
-    flashinfer = None
-    flash_attn_varlen_func = None
-    BatchDecodeWithPagedKVCacheWrapper = None
-
+import flashinfer
 import torch
+from flash_attn import flash_attn_varlen_func
+from flashinfer import BatchDecodeWithPagedKVCacheWrapper
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -19,6 +13,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 
 
 class FlashInferBackend(AttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "flashinfer"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashInferImpl"]:
