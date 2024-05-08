@@ -112,7 +112,8 @@ class BlockTable:
                 When sliding window is enabled, this is used to compute how many
                 blocks to drop at the front of the sequence.
                 Without sliding window, None can be passed.
-                Without chunked prefill, it should be the same as _num_full_slots.
+                Without chunked prefill, it should be the same as
+                _num_full_slots.
         """
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0

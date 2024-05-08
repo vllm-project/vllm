@@ -1,10 +1,10 @@
 import random
-from typing import Iterable, List
+from typing import List
 
 import pytest
-
-from vllm import LLM, SamplingParams
 from conftest import get_text_from_llm_generator
+
+from vllm import SamplingParams
 
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
@@ -101,7 +101,6 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed):
     test_texts = get_text_from_llm_generator(test_llm_generator, prompts,
                                              sampling_params)
     check_answers(indices, answer, test_texts)
-
 
 
 def prep_prompts(batch_size: int):

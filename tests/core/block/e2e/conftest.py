@@ -1,9 +1,10 @@
+from typing import Iterable
+
 import pytest
 
 from tests.conftest import cleanup
 from vllm import LLM
 from vllm.model_executor.utils import set_random_seed
-from typing import Iterable
 
 
 @pytest.fixture

@@ -1,9 +1,10 @@
 from itertools import cycle
 
 import pytest
+from conftest import get_token_ids_from_llm_generator
 
 from vllm import SamplingParams
-from conftest import get_token_ids_from_llm_generator
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -444,4 +445,3 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
-
