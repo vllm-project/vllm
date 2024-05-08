@@ -2,7 +2,7 @@
 import copy
 import enum
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Tuple, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest

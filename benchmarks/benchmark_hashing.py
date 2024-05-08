@@ -42,10 +42,8 @@ def main(args):
             total_time = stats.stats[func][3]
             total_calls = stats.stats[func][0]
     percentage = (total_time / stats.total_tt) * 100
-    print(
-        f"Hashing took {total_time:.2f} seconds,"
-        f"{percentage:.2f}% of the total runtime."
-    )
+    print(f"Hashing took {total_time:.2f} seconds,"
+          f"{percentage:.2f}% of the total runtime.")
 
 
 if __name__ == "__main__":
