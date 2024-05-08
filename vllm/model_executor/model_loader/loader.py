@@ -403,8 +403,8 @@ class ShardedStateLoader(BaseModelLoader):
     def save_model(
         model: torch.nn.Module,
         path: str,
-        pattern: str = None,
-        max_size: int = None,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
     ) -> None:
         from safetensors.torch import save_file
         from vllm.distributed import get_tensor_model_parallel_rank
