@@ -702,7 +702,7 @@ class ModelRunner:
             (
                 input_tokens,
                 input_positions,
-                prefill_attn_metadata,
+                attn_metadata,
                 seq_lens,
                 query_lens,
                 lora_index_mapping,
@@ -710,19 +710,19 @@ class ModelRunner:
                 lora_requests,
                 multi_modal_input,
                 slot_mapping,
-            ) = self._prepare_hybrid_batch(prefill_reqs)
-            (
-                decode_input_tokens,
-                decode_input_positions,
-                decode_attn_metadata,
-                _,
-                _,
-                decode_lora_index_mapping,
-                decode_lora_prompt_mapping,
-                decode_lora_requests,
-                _,
-                decode_slot_mapping,
-            ) = self._prepare_hybrid_batch(decode_reqs)
+            ) = self._prepare_hybrid_batch(seq_group_metadata_list)
+            # (
+            #     decode_input_tokens,
+            #     decode_input_positions,
+            #     decode_attn_metadata,
+            #     _,
+            #     _,
+            #     decode_lora_index_mapping,
+            #     decode_lora_prompt_mapping,
+            #     decode_lora_requests,
+            #     _,
+            #     decode_slot_mapping,
+            # ) = self._prepare_hybrid_batch(decode_reqs)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)
@@ -732,16 +732,16 @@ class ModelRunner:
 
             num_prefills = len(seq_lens)
             num_prefill_tokens = len(input_tokens)
-            num_decode_tokens = len(decode_input_tokens)
+            num_decode_tokens = len(decode_reqs)
 
             # Coalesce tensors. Note that attn_metadata is currently not
             # coalesced for simplicity.
-            input_tokens.extend(decode_input_tokens)
-            input_positions.extend(decode_input_positions)
-            slot_mapping.extend(decode_slot_mapping)
-            lora_index_mapping.extend(decode_lora_index_mapping)
-            lora_prompt_mapping.extend(decode_lora_prompt_mapping)
-            lora_requests.update(decode_lora_requests)
+            # input_tokens.extend(decode_input_tokens)
+            # input_positions.extend(decode_input_positions)
+            # slot_mapping.extend(decode_slot_mapping)
+            # lora_index_mapping.extend(decode_lora_index_mapping)
+            # lora_prompt_mapping.extend(decode_lora_prompt_mapping)
+            # lora_requests.update(decode_lora_requests)
 
             input_tokens = torch.tensor(input_tokens,
                                         dtype=torch.long,
@@ -843,8 +843,9 @@ class ModelRunner:
             slot_mapping=slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
-            prefill_metadata=prefill_attn_metadata,
-            decode_metadata=decode_attn_metadata,
+            # prefill_metadata=prefill_attn_metadata,
+            # decode_metadata=decode_attn_metadata,
+            attn_metadata=attn_metadata,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 

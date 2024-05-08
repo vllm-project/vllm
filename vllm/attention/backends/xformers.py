@@ -9,10 +9,8 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+                                              AttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -60,7 +58,7 @@ class XFormersBackend(AttentionBackend):
 
 
 @dataclass
-class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
+class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for XFormersbackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -68,9 +66,6 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
@@ -101,11 +96,20 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
+    # captured.
+    block_tables: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
+    _cached_decode_metadata: Optional["XFormersMetadata"] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -114,6 +118,74 @@ class XFormersMetadata(AttentionMetadataPerStage, PagedAttentionMetadata):
         # from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[AttentionBias]] = None
+
+    @property
+    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
+        if self.num_prefills == 0:
+            return None
+
+        if self._cached_prefill_metadata is not None:
+            return self._cached_prefill_metadata
+
+        assert self.seq_lens is not None
+        assert self.seq_lens_tensor is not None
+        assert self.query_start_loc is not None
+        assert self.seq_start_loc is not None
+        assert self.context_lens_tensor is not None
+        assert self.block_tables is not None
+
+        prefill_seqlens = self.seq_lens[:self.num_prefills]
+        self._cached_prefill_metadata = XFormersMetadata(
+            num_prefills=self.num_prefills,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=0,
+            slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            kv_cache_dtype=self.kv_cache_dtype,
+            seq_lens=prefill_seqlens,
+            seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            max_query_len=self.max_query_len,
+            max_seq_len=max(prefill_seqlens),
+            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+            block_tables=self.block_tables[:self.num_prefills],
+            use_cuda_graph=False,
+        )
+        return self._cached_prefill_metadata
+    
+    @property
+    def decode_metadata(self) -> Optional["AttentionMetadata"]:
+        if self.num_decode_tokens == 0:
+            return None
+
+        if self._cached_decode_metadata is not None:
+            return self._cached_decode_metadata
+
+        assert self.seq_lens is not None
+        assert self.seq_lens_tensor is not None
+        assert self.query_start_loc is not None
+        assert self.seq_start_loc is not None
+        assert self.context_lens_tensor is not None
+        assert self.block_tables is not None
+
+        decode_seqlens = self.seq_lens[self.num_prefills:]
+        self._cached_decode_metadata = XFormersMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=self.num_decode_tokens,
+            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            kv_cache_dtype=self.kv_cache_dtype,
+            seq_lens=decode_seqlens,
+            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            max_query_len=None,
+            max_seq_len=max(decode_seqlens),
+            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+            block_tables=self.block_tables[:self.num_prefills],
+            use_cuda_graph=False,
+        )
+        return self._cached_decode_metadata
 
 
 class XFormersImpl(AttentionImpl):
