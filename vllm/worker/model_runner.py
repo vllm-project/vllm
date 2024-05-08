@@ -223,7 +223,7 @@ class ModelRunner:
         block_size = self.block_size
         return (self.max_seq_len_to_capture + block_size - 1) // block_size
 
-    def _prepare_prompt(
+    def _prepare_hybrid_batch(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> PreparePromptMetadata:
@@ -237,14 +237,17 @@ class ModelRunner:
         seq_lens: List[int] = []
         context_lens: List[int] = []
         query_lens: List[int] = []
-        prefix_block_tables: List[List[int]] = []
+        block_tables: List[List[int]] = []
         multi_modal_input_list: List[torch.Tensor] = []
+        decode_only = True
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
-            assert seq_group_metadata.is_prompt
+            if seq_group_metadata.is_prompt:
+                decode_only = False
+
             seq_ids = list(seq_group_metadata.seq_data.keys())
             assert len(seq_ids) == 1
             seq_id = seq_ids[0]
@@ -273,20 +276,21 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                prefix_block_tables.append(computed_block_nums)
-            elif self.scheduler_config.chunked_prefill_enabled:
+                block_tables.append(computed_block_nums)
+            # elif self.scheduler_config.chunked_prefill_enabled:
+            else:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
+                    block_tables.append(block_table)
                 else:
                     # The first prefill.
-                    prefix_block_tables.append([])
-            else:
-                prefix_block_tables.append([])
-                # Right now, prefill start is always 0. However, this
-                # assumption can be changed once chunked prefill is introduced.
-                assert context_len == 0
+                    block_tables.append([])
+            # else:
+            #     prefix_block_tables.append([])
+            #     # Right now, prefill start is always 0. However, this
+            #     # assumption can be changed once chunked prefill is introduced.
+            #     assert context_len == 0
 
             # actual prompt lens
             context_lens.append(context_len)
@@ -342,8 +346,59 @@ class ModelRunner:
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
 
+        # max_query_len = max(query_lens)
+        # max_seq_len = max(seq_lens)
+
+        # vLLM uses cuda graph only for decoding requests.
+        # See `capture_model` API for more details.
+        # For decoding requests, batch_size == input_tokens.
+        batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_seq_len = max(seq_lens)
+        use_captured_graph = (decode_only
+                              and not self.model_config.enforce_eager
+                              and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+                              and max_seq_len <= self.max_seq_len_to_capture)
+        if use_captured_graph:
+            graph_batch_size = _get_graph_batch_size(batch_size)
+            assert graph_batch_size >= batch_size
+            for _ in range(graph_batch_size - batch_size):
+                input_tokens.append(0)
+                input_positions.append(0)
+                slot_mapping.append(_PAD_SLOT_ID)
+                seq_lens.append(1)
+                block_tables.append([])
+                lora_index_mapping.append(0)
+            batch_size = graph_batch_size
+
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.int,
+                                       device=self.device)
+
+        if use_captured_graph:
+            # When using cuda-graph all these tensors should be
+            # padded.
+            assert seq_lens_tensor.shape[0] == len(input_tokens)
+            assert seq_lens_tensor.shape[0] == len(input_positions)
+            assert seq_lens_tensor.shape[0] == len(slot_mapping)
+
+            # The shape of graph_block_tables is
+            # [max batch size, max context len // block size].
+            input_block_tables = self.graph_block_tables[:batch_size]
+            for i, block_table in enumerate(block_tables):
+                if block_table:
+                    input_block_tables[i, :len(block_table)] = block_table
+            block_tables = torch.tensor(input_block_tables, device=self.device)
+        else:
+            max_block_table_len = max(
+                len(block_table) for block_table in block_tables)
+            block_tables = make_tensor_with_pad(
+                block_tables,
+                max_len=max_block_table_len,
+                pad=0,
+                dtype=torch.int,
+                device=self.device,
+            )
         assert max_query_len > 0
 
         context_lens_tensor = torch.tensor(context_lens,
@@ -360,14 +415,14 @@ class ModelRunner:
             multi_modal_input = None
 
         # Prepare prefix block tables
-        max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
-        block_tables = make_tensor_with_pad(
-            prefix_block_tables,
-            max_len=max_prompt_block_table_len,
-            pad=0,
-            dtype=torch.int,
-            device=self.device,
-        )
+        # max_prompt_block_table_len = max(len(t) for t in prefix_block_tables)
+        # block_tables = make_tensor_with_pad(
+        #     prefix_block_tables,
+        #     max_len=max_prompt_block_table_len,
+        #     pad=0,
+        #     dtype=torch.int,
+        #     device=self.device,
+        # )
 
         # Query length can be shorter than key (i.e., prompt) when prefill
         # is chunked or prefix cached.
@@ -637,16 +692,19 @@ class ModelRunner:
                 lora_requests,
                 multi_modal_input,
                 slot_mapping,
-            ) = self._prepare_prompt(prefill_reqs)
+            ) = self._prepare_hybrid_batch(prefill_reqs)
             (
                 decode_input_tokens,
                 decode_input_positions,
                 decode_attn_metadata,
+                _,
+                _,
                 decode_lora_index_mapping,
                 decode_lora_prompt_mapping,
                 decode_lora_requests,
+                _,
                 decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
+            ) = self._prepare_hybrid_batch(decode_reqs)
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list, seq_lens, query_lens, self.device,
                 self.pin_memory)

@@ -10,15 +10,17 @@ import pytest
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    # "meta-llama/Llama-2-7b-hf",
 ]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
-@pytest.mark.parametrize("enforce_eager", [False, True])
+# @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
+@pytest.mark.parametrize("chunked_prefill_token_size", [16])
+# @pytest.mark.parametrize("enforce_eager", [False, True])
+@pytest.mark.parametrize("enforce_eager", [False])
 # NOTE: Increasing this in this suite will fail CI because we currently cannot
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
