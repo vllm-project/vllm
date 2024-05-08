@@ -89,6 +89,33 @@ def test_allocate():
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
+def test_allocate_encoder_decoder():
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
+
+    # Allocate same sequence group to all available gpu blocks.
+    for i in range(num_gpu_blocks):
+        _, seq_group = create_dummy_prompt(str(i), block_size)
+        assert block_manager.can_allocate(seq_group)
+        block_manager.allocate(seq_group)
+    assert block_manager.can_allocate(seq_group) != AllocStatus.OK
+
+    # Allocate same sequence group to all available gpu blocks.
+    # Use watermark to reserve one gpu block.
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=1 / num_gpu_blocks)
+    for i in range(num_gpu_blocks - 1):
+        _, seq_group = create_dummy_prompt(str(i), block_size)
+        assert block_manager.can_allocate(seq_group)
+        block_manager.allocate(seq_group)
+    assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
 def test_append_slot_single_seq():
     block_size = 4
@@ -238,6 +265,50 @@ def test_swap():
     assert before_cpu_blocks + len(cpu_blocks) == after_cpu_blocks
     assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
 
+def test_swap_encoder_decoder():
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
+
+    prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
+    prompt.status = SequenceStatus.WAITING
+    block_manager.allocate(seq_group)
+
+    # Emulate a forward pass by appending a single token.
+    # The block manager then knows how many unprocessed
+    # tokens will be written in the next forward pass.
+    token_id = 0
+    prompt.status = SequenceStatus.RUNNING
+    prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
+
+    # Swap seq group from GPU -> CPU.
+    gpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_out(seq_group)
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_out(seq_group)
+    assert list(mapping.keys()) == gpu_blocks
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
+    assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
+    prompt.status = SequenceStatus.SWAPPED
+
+    # Swap seq group from CPU -> GPU.
+    cpu_blocks = block_manager.get_block_table(prompt)
+    assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
+    before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    mapping = block_manager.swap_in(seq_group)
+    assert list(mapping.keys()) == cpu_blocks
+    after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
+    after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
+    assert before_cpu_blocks + len(cpu_blocks) == after_cpu_blocks
+    assert before_gpu_blocks == after_gpu_blocks + len(cpu_blocks)
 
 def test_free():
     block_size = 4
@@ -262,6 +333,28 @@ def test_free():
     with pytest.raises(KeyError):
         block_manager.get_block_table(prompt)
 
+def test_free_encoder_decoder():
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
+
+    prompt, seq_group = create_dummy_prompt("1", block_size)
+    block_manager.allocate(seq_group)
+
+    # Free allocated seq.
+    prompt_blocks = len(block_manager.get_block_table(prompt))
+    before_blocks = block_manager.get_num_free_gpu_blocks()
+    block_manager.free(prompt)
+    after_blocks = block_manager.get_num_free_gpu_blocks()
+    assert after_blocks == before_blocks + prompt_blocks
+
+    # Block table for freed seq is deleted.
+    with pytest.raises(KeyError):
+        block_manager.get_block_table(prompt)
 
 def test_reset():
     block_size = 4
@@ -283,6 +376,25 @@ def test_reset():
     block_manager.reset()
     assert block_manager.get_num_free_gpu_blocks() == original_blocks
 
+def test_reset_encoder_decoder():
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0)
+
+    # Allocate same seq group on all available gpu blocks.
+    original_blocks = block_manager.get_num_free_gpu_blocks()
+    for i in range(num_gpu_blocks):
+        _, seq_group = create_dummy_prompt(str(i), block_size)
+        block_manager.allocate(seq_group)
+    assert block_manager.get_num_free_gpu_blocks() == 0
+
+    # Resetting block manager frees all allocated blocks.
+    block_manager.reset()
+    assert block_manager.get_num_free_gpu_blocks() == original_blocks
 
 def test_sliding_window_multi_seq():
     """
