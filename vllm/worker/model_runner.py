@@ -835,20 +835,21 @@ class ModelRunner:
         dummy_lora_requests = []
         dummy_lora_requests_per_seq = []
         if self.lora_config:
-            for idx in range(self.lora_config.max_loras):
-                lora_id = idx + 1
-                dummy_lora_request = LoRARequest(
-                    lora_name=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_local_path="/not/a/real/path",
-                )
-                self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                 rank=LORA_WARMUP_RANK)
-                dummy_lora_requests.append(dummy_lora_request)
-            dummy_lora_requests_per_seq = [
-                dummy_lora_requests[idx % len(dummy_lora_requests)]
-                for idx in range(max_num_seqs)
-            ]
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_local_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
