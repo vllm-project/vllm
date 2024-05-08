@@ -18,6 +18,10 @@ logger = init_logger(__name__)
 class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "rocm-flash-attn"
+
+    @staticmethod
     def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
         return ROCmFlashAttentionImpl
 
