@@ -1,5 +1,6 @@
 import random
 import time
+import math
 
 import pytest
 import torch
@@ -7,10 +8,12 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.attention.backends.xformers import _make_alibi_bias
+
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
-HEAD_SIZES = [128, 96]
+HEAD_SIZES = [128, 96, 80, 24]
 DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -235,8 +238,6 @@ def test_contexted_kv_attention_alibi(
     torch.cuda.set_device(device)
 
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
-        import math
-
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
         closest_power_of_2 = 2**math.floor(math.log2(total_num_heads))
         base = torch.tensor(
@@ -416,7 +417,6 @@ def test_contexted_kv_attention_alibi(
     key = key.unsqueeze(0)
     value = value.unsqueeze(0)
 
-    from vllm.attention.backends.xformers import _make_alibi_bias
     attn_bias = _make_alibi_bias(alibi_slopes, num_kv_heads, dtype, seq_lens)
     output_ref = torch.empty_like(output)
     seq_start = 0
