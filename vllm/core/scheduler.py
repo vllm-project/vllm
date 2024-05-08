@@ -1027,10 +1027,7 @@ class Scheduler:
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             cows = self.block_manager.append_slots(seq, num_lookahead_slots)
-
-            for src, dests in cows.items():
-                for dest in dests:
-                    blocks_to_copy.append((src, dest))
+            blocks_to_copy.extend(cows)
 
     def _preempt(
         self,
