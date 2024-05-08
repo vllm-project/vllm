@@ -190,5 +190,7 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 # HIPgraph performance environment variables.
 ENV HIP_FORCE_DEV_KERNARG=1
 ENV DEBUG_CLR_GRAPH_PACKET_CAPTURE=1
+# Might help if one is running into RCCL issues
+#ENV RCCL_MSCCL_ENABLE=0
 
 CMD ["/bin/bash"]
