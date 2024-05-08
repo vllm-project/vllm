@@ -146,7 +146,16 @@ class DeepSpeedFPParameter(nn.Parameter):
 
     def __new__(cls, orig_shape: torch.Size, params_dtype: torch.dtype,
                 quant_config: DeepSpeedFPConfig):
-        from deepspeed.ops.fp_quantizer import FP_Quantize
+        try:
+            import deepspeed
+            if deepspeed.__version__ < "0.14.2":
+                raise ImportError("deepspeed version is wrong. Please "
+                                  "install deepspeed>=0.14.2.")
+            from deepspeed.ops.fp_quantizer import FP_Quantize
+        except ImportError as err:
+            raise ImportError("Please install deepspeed>=0.14.2 via "
+                              "`pip install deepspeed>=0.14.2` to use "
+                              "deepspeedfp quantizer.") from err
         data = torch.empty((
             orig_shape.numel() // quant_config.group_size,
             quant_config.group_size * quant_config.weight_bits // 8 + 4,
