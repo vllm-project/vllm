@@ -14,8 +14,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 
 
 class FlashInferBackend(AttentionBackend):
@@ -58,7 +57,7 @@ class FlashInferBackend(AttentionBackend):
 
 
 @dataclass
-class FlashInferMetadata(AttentionMetadataPerStage):
+class FlashInferMetadata(AttentionMetadata):
 
     is_prompt: bool
 
@@ -163,8 +162,7 @@ class FlashInferImpl(AttentionImpl):
 
     def forward(self, query: torch.Tensor, key: torch.Tensor,
                 value: torch.Tensor, kv_cache: Optional[torch.Tensor],
-                attn_metadata: AttentionMetadata[FlashInferMetadata],
-                kv_scale: float):
+                attn_metadata: FlashInferMetadata, kv_scale: float):
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)

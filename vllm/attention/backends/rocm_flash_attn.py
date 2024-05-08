@@ -6,8 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -52,8 +51,7 @@ class ROCmFlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
-class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,
-                                 PagedAttentionMetadata):
+class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for FlashAttentionBackend.
 
     NOTE: Any python object stored here is not updated when it is
@@ -192,7 +190,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata[ROCmFlashAttentionMetadata],
+        attn_metadata: ROCmFlashAttentionMetadata,
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.

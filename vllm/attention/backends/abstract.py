@@ -16,7 +16,7 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadataPerStage":
+    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
 
     @staticmethod
@@ -47,24 +47,6 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
 
-# @dataclass
-# class AttentionMetadataPerStage:
-#     """Attention metadata for a specific stage. I.e., prefill or decode."""
-
-#     def asdict_zerocopy(self,
-#                         skip_fields: Optional[Set[str]] = None
-#                         ) -> Dict[str, Any]:
-#         """Similar to dataclasses.asdict, but avoids deepcopying."""
-#         if skip_fields is None:
-#             skip_fields = set()
-#         # Note that if we add dataclasses as fields, they will need
-#         # similar handling.
-#         return {
-#             field.name: getattr(self, field.name)
-#             for field in fields(self) if field.name not in skip_fields
-#         }
-
-
 @dataclass
 class AttentionMetadata:
     """Attention metadata for prefill and decode batched together."""
@@ -87,7 +69,7 @@ class AttentionMetadata:
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
         pass
-    
+
     @property
     @abstractmethod
     def decode_metadata(self) -> Optional["AttentionMetadata"]:

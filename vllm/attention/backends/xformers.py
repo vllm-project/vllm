@@ -53,8 +53,8 @@ class XFormersBackend(AttentionBackend):
 
 
 # class XFormerMetadataBuilder:
-    # def __init__(self):
-        # self.
+# def __init__(self):
+# self.
 
 
 @dataclass
@@ -82,8 +82,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch.
     max_query_len: Optional[int]
     # FIXME: It is for flash attn.
-    # Maximum sequence length in the batch.
-    max_seq_len: Optional[int]
+    # Maximum sequence length among prefill batch.
+    max_prefill_seq_len: Optional[int]
+    # Maximum sequence length among decode batch.
+    max_decode_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -130,29 +132,28 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         assert self.seq_lens is not None
         assert self.seq_lens_tensor is not None
         assert self.query_start_loc is not None
-        assert self.seq_start_loc is not None
         assert self.context_lens_tensor is not None
         assert self.block_tables is not None
 
-        prefill_seqlens = self.seq_lens[:self.num_prefills]
         self._cached_prefill_metadata = XFormersMetadata(
             num_prefills=self.num_prefills,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
-            seq_lens=prefill_seqlens,
+            seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
-            max_seq_len=max(prefill_seqlens),
+            max_prefill_seq_len=None,
+            max_decode_seq_len=None,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
-            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            seq_start_loc=None,
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
         )
         return self._cached_prefill_metadata
-    
+
     @property
     def decode_metadata(self) -> Optional["AttentionMetadata"]:
         if self.num_decode_tokens == 0:
@@ -160,30 +161,25 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
         if self._cached_decode_metadata is not None:
             return self._cached_decode_metadata
-
-        assert self.seq_lens is not None
-        assert self.seq_lens_tensor is not None
-        assert self.query_start_loc is not None
-        assert self.seq_start_loc is not None
-        assert self.context_lens_tensor is not None
         assert self.block_tables is not None
+        assert self.seq_lens_tensor is not None
 
-        decode_seqlens = self.seq_lens[self.num_prefills:]
         self._cached_decode_metadata = XFormersMetadata(
             num_prefills=0,
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
             kv_cache_dtype=self.kv_cache_dtype,
-            seq_lens=decode_seqlens,
+            seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
-            max_seq_len=max(decode_seqlens),
-            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
-            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
-            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
-            block_tables=self.block_tables[:self.num_prefills],
-            use_cuda_graph=False,
+            max_prefill_seq_len=None,
+            max_decode_seq_len=self.max_decode_seq_len,
+            query_start_loc=None,
+            seq_start_loc=None,
+            context_lens_tensor=None,
+            block_tables=self.block_tables[self.num_prefills:],
+            use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
 
@@ -247,7 +243,7 @@ class XFormersImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata[XFormersMetadata],
+        attn_metadata: XFormersMetadata,
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -273,6 +269,7 @@ class XFormersImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
+            # breakpoint()
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,
@@ -334,7 +331,7 @@ class XFormersImpl(AttentionImpl):
                 value_cache,
                 decode_meta.block_tables,
                 decode_meta.seq_lens_tensor,
-                decode_meta.max_seq_len,
+                decode_meta.max_decode_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
