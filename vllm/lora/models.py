@@ -119,6 +119,16 @@ class LoRAModel:
         self.rank = rank
         self.loras: Dict[str, LoRALayerWeights] = loras
 
+    def clone(self, lora_model_id: int) -> "LoRAModel":
+        """Return a copy of the object with different ids.
+
+        Will share the underlying tensors."""
+        return self.__class__(
+            lora_model_id,
+            rank=self.rank,
+            loras=self.loras.copy(),
+        )
+
     @property
     def extra_vocab_size(self) -> int:
         return max(lora.extra_vocab_size
