@@ -1,17 +1,15 @@
 import enum
-import os
 from functools import lru_cache
 from typing import Type
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
-
-VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 class _Backend(enum.Enum):
@@ -19,6 +17,7 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    FLASHINFER = enum.auto()
 
 
 @lru_cache(maxsize=None)
@@ -43,6 +42,11 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.FLASHINFER:
+        logger.info("Using Flashinfer backend.")
+        logger.warning("Eager mode is enforced for the Flashinfer backend. ")
+        from vllm.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend
     else:
         raise ValueError("Invalid attention backend.")
 
@@ -79,7 +83,7 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
             "package is not found. Please install it for better performance.")
         return _Backend.XFORMERS
 
-    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    backend_by_env_var = envs.VLLM_ATTENTION_BACKEND
     if backend_by_env_var is not None:
         return _Backend[backend_by_env_var]
 

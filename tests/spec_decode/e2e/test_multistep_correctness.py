@@ -35,7 +35,8 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 
-from .conftest import get_output_from_llm_generator
+from .conftest import (get_output_from_llm_generator,
+                       run_greedy_equality_correctness_test)
 
 
 @pytest.mark.parametrize(
@@ -49,7 +50,7 @@ from .conftest import get_output_from_llm_generator
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True
+        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -107,6 +108,44 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         expected_tokens = tok.decode(actual_token_ids)
         print(f"{actual_token_ids=}")
         assert actual_tokens.strip() == expected_tokens.strip()
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Use a small model for a fast test.
+        # Note this is repeated in the test body; to initialize a tokenizer.
+        "model": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
+        # Use AsyncLLM engine
+        "use_async": True,
+    }])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+    },
+])
+@pytest.mark.parametrize("test_llm_kwargs", [{}])
+@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("seed", [1])
+def test_spec_decode_e2e_with_async_engine(test_llm_generator,
+                                           baseline_llm_generator,
+                                           batch_size: int):
+    """Verify spec decode works well with async LLM engine.
+    """
+    run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=32,
+                                         force_output_len=True)
 
 
 @pytest.mark.parametrize(
@@ -538,60 +577,3 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
-
-
-def run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len,
-                                         force_output_len: bool,
-                                         print_tokens: bool = False):
-    """Helper method that compares the outputs of both the baseline LLM and
-    the test LLM. It asserts greedy equality, e.g. that the outputs are exactly
-    the same when temperature is zero.
-    """
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-        "San Francisco is know for its",
-        "Facebook was created in 2004 by",
-        "Curious George is a",
-        "Python 3.11 brings improvements to its",
-    ]
-
-    prompts = [prompt for prompt, _ in zip(cycle(prompts), range(batch_size))]
-
-    # If the test requires that we generated max_output_len tokens, then set the
-    # sampling params to ignore eos token.
-    ignore_eos = force_output_len
-
-    sampling_params = SamplingParams(
-        max_tokens=max_output_len,
-        ignore_eos=ignore_eos,
-        temperature=temperature,
-    )
-
-    spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
-        test_llm_generator, prompts, sampling_params)
-
-    (baseline_batch_tokens,
-     baseline_batch_token_ids) = get_output_from_llm_generator(
-         baseline_llm_generator, prompts, sampling_params)
-
-    assert len(baseline_batch_token_ids) == len(prompts)
-    assert len(spec_batch_token_ids) == len(prompts)
-
-    for i, (baseline_token_ids, baseline_tokens, spec_token_ids,
-            spec_tokens) in enumerate(
-                zip(baseline_batch_token_ids, baseline_batch_tokens,
-                    spec_batch_token_ids, spec_batch_tokens)):
-        if print_tokens:
-            print(f'{i=} {baseline_tokens=}')
-            print(f'{i=}     {spec_tokens=}')
-        print(f'{i=} {baseline_token_ids=}')
-        print(f'{i=}     {spec_token_ids=}')
-        assert baseline_token_ids == spec_token_ids
