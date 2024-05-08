@@ -272,10 +272,7 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                if self.attn_backend.get_name() == "flash-attn":
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                else:
-                    block_table = computed_block_nums
+                prefix_block_tables.append(computed_block_nums)
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
