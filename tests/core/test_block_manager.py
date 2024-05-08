@@ -274,15 +274,18 @@ def test_swap_encoder_decoder():
                                         num_gpu_blocks,
                                         watermark=0)
 
-    prompt, seq_group = create_dummy_prompt("1", prompt_length=block_size - 1)
-    prompt.status = SequenceStatus.WAITING
+    decoder_prompt, encoder_prompt, seq_group = create_dummy_prompt_encoder_decoder("1", 
+                                                                                    decoder_prompt_length=block_size//2, 
+                                                                                    encoder_prompt_length=block_size//2)
+    decoder_prompt.status = SequenceStatus.WAITING
+    encoder_prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
 
     # Emulate a forward pass by appending a single token.
     # The block manager then knows how many unprocessed
     # tokens will be written in the next forward pass.
     token_id = 0
-    prompt.status = SequenceStatus.RUNNING
+    decoder_prompt.status = SequenceStatus.RUNNING
     prompt.append_token_id(token_id, {token_id: Logprob(0.0)})
 
     # Swap seq group from GPU -> CPU.
