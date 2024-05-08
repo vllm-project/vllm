@@ -27,7 +27,7 @@ class DeepSpeedFPConfig(QuantizationConfig):
         self.group_size = group_size
         self.valid_types = [torch.bfloat16, torch.float16]
 
-        if self.weight_bits not in [6, 8]:
+        if self.weight_bits not in (6, 8):
             raise ValueError(
                 "Currently, only 6-bit or 8-bit weight quantization are "
                 f"supported for DeepSpeed FP quantizaiton, but got "
