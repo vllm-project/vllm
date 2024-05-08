@@ -71,14 +71,14 @@ def test_swap() -> None:
             assert allclose(gpu_value_cache[src], cpu_value_cache[dst])
 
     # Test swap in.
-    execute_model_req.blocks_to_swap_out = {}
-    execute_model_req.blocks_to_swap_in = {
-        19: 45,
-        67: 23,
-        12: 78,
-        40: 99,
-        1: 71
-    }
+    execute_model_req.blocks_to_swap_out = []
+    execute_model_req.blocks_to_swap_in = [
+        (19, 45),
+        (67, 23),
+        (12, 78),
+        (40, 99),
+        (1, 71),
+    ]
     worker.execute_model(execute_model_req=execute_model_req)
 
     for i in range(num_layers):
