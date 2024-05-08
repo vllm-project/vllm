@@ -4,6 +4,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_gather)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -62,7 +63,7 @@ class LogitsProcessor(nn.Module):
     def _get_logits(self, hidden_states: torch.Tensor, embedding: torch.Tensor,
                     embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
         # Get the logits for the next tokens.
-        logits = torch.matmul(hidden_states, embedding.t())
+        logits = tgemm.mm(hidden_states, embedding)
         if embedding_bias is not None:
             logits += embedding_bias
         logits = tensor_model_parallel_gather(logits)

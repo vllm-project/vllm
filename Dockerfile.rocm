@@ -1,36 +1,21 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 FROM $BASE_IMAGE
+USER root
 
+# Import BASE_IMAGE arg from pre-FROM
+ARG BASE_IMAGE
 RUN echo "Base image is $BASE_IMAGE"
 
-# BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
-# BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
-
-ARG FA_GFX_ARCHS="gfx90a;gfx942"
-RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
-
-ARG FA_BRANCH="3d2b6f5"
-RUN echo "FA_BRANCH is $FA_BRANCH"
-
-# whether to build flash-attention
-# if 0, will not build flash attention
-# this is useful for gfx target where flash-attention is not supported
-# In that case, we need to use the python reference attention implementation in vllm
-ARG BUILD_FA="1"
-
-# whether to build triton on rocm
-ARG BUILD_TRITON="1"
-
-# whether to build hipBLASLt
-ARG BUILD_HIPBLASLT="1"
+# Used as ARCHes for all components
+ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+RUN echo "PYTORCH_ROCM_ARCH is $PYTORCH_ROCM_ARCH"
 
 # Install some basic utilities
+RUN apt-get update && apt-get install python3 python3-pip -
 RUN apt-get update && apt-get install -y \
-    sqlite3 libsqlite3-dev libfmt-dev \
- && rm -rf /var/lib/apt/lists/*
+    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
 
 ### Mount Point ###
 # When launching the container, mount the code directory to /app
@@ -38,60 +23,149 @@ ARG APP_MOUNT=/app
 VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir fastapi ninja tokenizers pandas
+
+ARG BUILD_HIPBLASLT="0"
+ARG HIPBLASLT_BRANCH="develop"
+
+RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
+    echo "HIPBLASLT_BRANCH is $HIPBLASLT_BRANCH"; \
+    fi
+# Build HipblasLt
+RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
+    apt-get purge -y hipblaslt \
+    && mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/hipBLASLt \
+    && cd hipBLASLt \
+    && git checkout ${HIPBLASLT_BRANCH} \
+    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh -i --architecture ${PYTORCH_ROCM_ARCH} \
+    && cd .. && rm -rf hipBLASLt \
+    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status \
+    && cd ..; \
+    fi 
+
+
+RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
+
+
+ARG BUILD_RCCL="1"
+ARG RCCL_BRANCH="4ee96dd"
+
+RUN if [ "$BUILD_RCCL" = "1" ]; then \
+    echo "RCCL_BRANCH is $RCCL_BRANCH"; \
+    fi
+# Install RCCL
+RUN if [ "$BUILD_RCCL" = "1" ]; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/mberenjk/rccl.git \
+    && cd rccl \
+    && git checkout ${RCCL_BRANCH} \
+    && mkdir build && cd build \
+    && CXX=/opt/rocm/bin/hipcc cmake -DCMAKE_PREFIX_PATH=/opt/rocm/ \
+	   -DCMAKE_BUILD_TYPE=Release -DAMDGPU_TARGETS=${PYTORCH_ROCM_ARCH} .. \
+    && SCCACHE_IDLE_TIMEOUT=1800 make -j 32 \
+    && make package \
+    && dpkg -i *.deb \
+    && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+    && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+    && cd ../.. \
+    && rm -r rccl \
+    && cd ..; \
+    fi
+
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
-ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/libtorch/lib:
-ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include/:/opt/rocm/include/:
+ENV PATH=$PATH:/opt/rocm/bin:/opt/conda/envs/py_3.9/lib/python3.9/site-packages/torch/bin:
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/rocm/lib/:/opt/conda/envs/py_3.9/lib/python3.9/site-packages/torch/lib:
+ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/opt/conda/envs/py_3.9/lib/python3.9/site-packages/torch/include:/opt/conda/envs/py_3.9/lib/python3.9/site-packages/torch/include/torch/csrc/api/include/:/opt/rocm/include/:
 
+
+# whether to build flash-attention
+# if 0, will not build flash attention
+# this is useful for gfx target where flash-attention is not supported
+# In that case, we need to use the python reference attention implementation in vllm
+ARG BUILD_FA="1"
+ARG FA_BRANCH="ae7928c"
+
+RUN if [ "$BUILD_FA" = "1" ]; then \
+    echo "FA_BRANCH is $FA_BRANCH"; \
+    fi
 # Install ROCm flash-attention
 RUN if [ "$BUILD_FA" = "1" ]; then \
-    mkdir libs \
+    mkdir -p libs \
     && cd libs \
     && git clone https://github.com/ROCm/flash-attention.git \
     && cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && export GPU_ARCHS=${FA_GFX_ARCHS} \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1" ]; then \
-        patch /opt/conda/envs/py_3.10/lib/python3.10/site-packages/torch/utils/hipify/hipify_python.py hipify_patch.patch; fi \
-    && python3 setup.py install \
+    && GPU_ARCHS=${PYTORCH_ROCM_ARCH} python3 setup.py install \
+    && cd .. \
+    && rm -rf flash-attention \
     && cd ..; \
     fi
 
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
+RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
-RUN if [ "$BUILD_HIPBLASLT" = "1" ] ; then \
-    git clone -b develop https://github.com/ROCm/hipBLASLt \
-    && export GTest_DIR="/usr/local/lib/cmake/GTest/" \
-    && cd hipBLASLt \
-    && ./install.sh -idc --architecture 'gfx90a;gfx942' \
-    && cd ../ && rm -rf hipBLASLt \
-    && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
-    && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status; \
+
+# Whether to build CuPy. 0.3.3 <= vLLM < 0.4.0 might need it for HIPgraph.
+ARG BUILD_CUPY="0"
+ARG CUPY_BRANCH="hipgraph_enablement"
+
+RUN  if [ "$BUILD_CUPY" = "1" ]; then \
+    echo "CUPY_BRANCH is $CUPY_BRANCH"; \
+    fi
+# Build cupy
+RUN if [ "$BUILD_CUPY" = "1" ]; then \
+    mkdir -p libs \
+    && cd libs \
+    && git clone $CUPY_BRANCH --recursive https://github.com/ROCm/cupy.git \
+    && cd cupy \
+    && pip install mpi4py-mpich scipy==1.9.3 cython==0.29.* \
+    && CC=$MPI_HOME/bin/mpicc python -m pip install mpi4py \
+    && CUPY_INSTALL_USE_HIP=1 ROCM_HOME=/opt/rocm HCC_AMDGPU_TARGET=${PYTORCH_ROCM_ARCH} pip install . \
+    && cd .. \
+    && rm -rf cupy \
+    && cd ..; \
     fi
 
+
+# whether to build triton on rocm
+ARG BUILD_TRITON="1"
+ARG TRITON_BRANCH="main"
+
+RUN if [ "$BUILD_TRITON" = "1" ]; then \
+    echo "TRITON_BRANCH is $TRITON_BRANCH"; \
+    fi
 # build triton
 RUN if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
     && pip uninstall -y triton \
-    && git clone https://github.com/ROCm/triton.git \
-    && cd triton/python \
-    && pip3 install . \
-    && cd ../..; \
+    && git clone https://github.com/OpenAI/triton.git \
+    && cd triton \
+    && git checkout ${TRITON_BRANCH} \
+    && cd python \
+    && pip install . \
+    && cd ../.. \
+    && rm -rf triton \
+    && cd ..; \
     fi
 
+
 COPY ./ /app/vllm
+# Fix HIP runtime on ROCm 6.1
+RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
+    cp /app/vllm/rocm_patch/libamdhip64.so.6 /opt/rocm-6.1.0/lib/libamdhip64.so.6; fi
 
 RUN python3 -m pip install --upgrade pip numba
 RUN python3 -m pip install xformers==0.0.23 --no-deps
 
+# Install vLLM
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
@@ -99,10 +173,22 @@ RUN cd /app \
     bash patch_xformers.rocm.sh; fi \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
-    && python3 setup.py install \
+    && python3 setup.py clean --all && python3 setup.py develop \
     && cd ..
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
+
+# Install gradlib
+RUN cd /app/vllm/gradlib \
+    && pip install . \
+    && cd ../..
+
+
+# Update Ray to latest version + set environment variable to ensure it works on TP > 1
+RUN python3 -m pip install --no-cache-dir 'ray[all]>=2.10.0'
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+
+# HIPgraph performance environment variables.
+ENV HIP_FORCE_DEV_KERNARG=1
+ENV DEBUG_CLR_GRAPH_PACKET_CAPTURE=1
 
 CMD ["/bin/bash"]

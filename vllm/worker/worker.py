@@ -17,6 +17,7 @@ from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
 from vllm.model_executor.parallel_utils.parallel_state import (
     ensure_model_parallel_initialized, init_distributed_environment)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.utils import is_hip
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
@@ -282,9 +283,10 @@ def init_worker_distributed_environment(
                 "pynccl is already initialized but the pynccl world "
                 "size does not match parallel_config.world_size "
                 f"({pynccl_world_size} vs. {parallel_config.world_size}).")
-    elif parallel_config.world_size > 1:
+    elif parallel_config.world_size > 1 and not is_hip():
         # NOTE(woosuk): We don't initialize pynccl process group when world size
         # is 1.
+        # NOTE(mattwong): We do not use pynccl on ROCm.
         pynccl_utils.init_process_group(
             world_size=parallel_config.world_size,
             local_rank=local_rank,

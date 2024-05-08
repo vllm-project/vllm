@@ -30,6 +30,7 @@ import torch.distributed as dist
 from torch.distributed import ReduceOp
 
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -219,6 +220,7 @@ class NCCLCommunicator:
         pg_options=None,
         local_rank: int = -1,
     ):
+        assert not is_hip()  # We do not use pynccl on ROCm
         if not dist.is_initialized():
             backend = backend or "nccl"
             assert backend == 'nccl', (

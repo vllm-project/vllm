@@ -7,6 +7,7 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_C
 from vllm.logger import init_logger
+from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_gather, tensor_model_parallel_all_reduce)
 from vllm.model_executor.parallel_utils.parallel_state import (
@@ -102,7 +103,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             if bias is not None:
                 return F.linear(x, weight) + bias
             return F.linear(x, weight)
-        return F.linear(x, weight, bias)
+        return tgemm.mm(x, weight)
 
 
 class ReplicatedLinear(torch.nn.Module):
