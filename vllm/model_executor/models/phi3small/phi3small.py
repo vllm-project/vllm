@@ -1,5 +1,5 @@
 import math
-from typing import List, Optional, Tuple, Iterable
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -7,6 +7,8 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -17,12 +19,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.phi3small.phi3small_attention import (
     BlockSparseFlashAttention)
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import SamplerOutput
 
 
@@ -109,10 +109,11 @@ class Phi3SmallMLP(nn.Module):
 
 class Phi3SmallSelfAttention(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 layer_idx: int,
-                 quant_config: Optional[QuantizationConfig] = None,
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_idx: int,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -215,7 +216,6 @@ class Phi3SmallSelfAttention(nn.Module):
                 max_seqlen=self.max_position_embeddings,
                 sparse_block_size=self.sparse_block_size,
                 num_kv_heads=self.num_kv_heads_per_partion,
-                layer_idx=layer_idx,
             )
 
     def forward(
@@ -255,7 +255,8 @@ class Phi3SmallDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Phi3SmallSelfAttention(config, layer_idx, quant_config)
+        self.self_attn = Phi3SmallSelfAttention(config, layer_idx,
+                                                quant_config)
         self.mlp = Phi3SmallMLP(config, quant_config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
@@ -365,8 +366,9 @@ class Phi3SmallForCausalLM(nn.Module):
         if hasattr(config, 'dummy_token_indices'):
             device = self.lm_head.weight.device
             self.register_buffer('dummy_token_indices',
-                torch.LongTensor(config.dummy_token_indices).to(device),
-                persistent=False)
+                                 torch.LongTensor(
+                                     config.dummy_token_indices).to(device),
+                                 persistent=False)
         else:
             self.dummy_token_indices = None
 
