@@ -1,15 +1,14 @@
+import math
 import random
 import time
-import math
 
 import pytest
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
-from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.attention.backends.xformers import _make_alibi_bias
-
+from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
