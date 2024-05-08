@@ -12,15 +12,21 @@ class RejectionSampler(nn.Module):
         https://arxiv.org/pdf/2302.01318.pdf.
     """
 
-    def __init__(self, strict_mode: bool = False):
+    def __init__(self,
+                 disable_bonus_tokens: bool = True,
+                 strict_mode: bool = False):
         """Create a rejection sampler.
 
         Args:
+            disable_bonus_tokens: Whether or not to disable the bonus token.
+            Require when bonus tokens will cause corrupt KV cache for
+            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
                 during sampling. This catches correctness issues but adds
                 nontrivial latency.
         """
         super().__init__()
+        self._disable_bonus_tokens = disable_bonus_tokens
         self._strict_mode = strict_mode
 
         # NOTE: A "bonus token" is accepted iff all proposal tokens are
@@ -312,7 +318,8 @@ class RejectionSampler(nn.Module):
         # proposal methods that require KV cache. We can fix it by "prefilling"
         # the bonus token in the proposer. The following issue tracks the fix.
         # https://github.com/vllm-project/vllm/issues/4212
-        output_with_bonus_tokens[:, -1] = -1
+        if self._disable_bonus_tokens:
+            output_with_bonus_tokens[:, -1] = -1
 
         # Fill the recovered token ids.
         output.mul_(~after_false_mask).add_(
