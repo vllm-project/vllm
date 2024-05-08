@@ -231,8 +231,9 @@ class Fp8LinearMethod(LinearMethodBase):
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
-        qinput, x_scale = ops.scaled_fp8_quant(
-            x, layer.act_scale, batch_dim_padding=32)
+        qinput, x_scale = ops.scaled_fp8_quant(x,
+                                               layer.act_scale,
+                                               batch_dim_padding=32)
 
         # Fused GEMM_DQ
         output, _ = torch._scaled_mm(
