@@ -478,7 +478,7 @@ class ArcticForCausalLM(nn.Module):
         logger.info(
             "It will take ~10 minutes loading from the 16-bit weights. "
             "Alternatively, use the prequantized 8-bit weights of arctic "
-            "and set load-format to `state_dict` will accelerate loading.")
+            "and set load-format to `sharded_state` will accelerate loading.")
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
