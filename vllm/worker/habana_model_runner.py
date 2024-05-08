@@ -52,9 +52,9 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4, 8] + [
 ]
 
 # Capture graphs for token size 1, 32, 64, 128, 256, 512, 768 ... 2048
-_MAX_CONTEXT_LEN_ALIGNMENT = 256
-_MAX_CONTEXT_LENS_TO_CAPTURE = [1, 32, 64, 128] + [
-    _MAX_CONTEXT_LEN_ALIGNMENT * i for i in range(1, 9)
+_MAX_SEQ_LEN_ALIGNMENT = 256
+_MAX_SEQ_LENS_TO_CAPTURE = [1, 32, 64, 128] + [
+    _MAX_SEQ_LEN_ALIGNMENT * i for i in range(1, 9)
 ]
 
 
@@ -531,7 +531,7 @@ class HabanaModelRunner:
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
-            graph_max_seq_len  = _get_graph_max_context_len(max_seq_len)
+            graph_max_seq_len  = _get_graph_max_seq_len(max_seq_len)
             assert graph_max_seq_len >= max_seq_len
             graph_block_count = math.ceil(graph_max_seq_len / self.block_size)
             input_block_tables = self.graph_block_tables[:batch_size, :graph_block_count]
@@ -571,104 +571,6 @@ class HabanaModelRunner:
             slot_mapping=slot_mapping,
         )
 
-
-    def _prepare_sample(
-        self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        prompt_lens: List[int],
-        subquery_lens: Optional[List[int]],
-    ) -> SamplingMetadata:
-        seq_groups: List[Tuple[List[int], SamplingParams]] = []
-        selected_token_indices: List[int] = []
-        generators: List[torch.Generator] = []
-        selected_token_start_idx = 0
-        categorized_sample_indices = {t: [] for t in SamplingType}
-        categorized_sample_indices_start_idx = 0
-        categorized_sampled_token_indices_start_idx = 0
-        max_subquery_len = max(subquery_lens) if subquery_lens else 1
-        for i, seq_group_metadata in enumerate(seq_group_metadata_list):
-            seq_ids = list(seq_group_metadata.seq_data.keys())
-            sampling_params = seq_group_metadata.sampling_params
-            seq_groups.append((seq_ids, sampling_params))
-
-            if seq_group_metadata.is_prompt:
-                assert len(seq_ids) == 1
-                assert subquery_lens is not None
-                subquery_len = subquery_lens[i]
-                if sampling_params.prompt_logprobs is not None:
-                    # NOTE: prompt token positions do not need sample, skip
-                    categorized_sample_indices_start_idx += subquery_len - 1
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].append([
-                        categorized_sample_indices_start_idx,
-                        categorized_sampled_token_indices_start_idx
-                    ])
-                categorized_sample_indices_start_idx += 1
-                categorized_sampled_token_indices_start_idx += 1
-
-                if sampling_params.prompt_logprobs is not None:
-                    selected_token_indices.extend(
-                        range(selected_token_start_idx,
-                              selected_token_start_idx + subquery_len - 1))
-                selected_token_indices.append(selected_token_start_idx +
-                                              subquery_len - 1)
-                selected_token_start_idx += max_subquery_len
-
-                if sampling_params.seed is not None:
-                    seq_group_metadata.state.generator = torch.Generator(
-                        device=self.device).manual_seed(sampling_params.seed)
-            else:
-                num_seqs = len(seq_ids)
-                selected_token_indices.extend(
-                    range(selected_token_start_idx,
-                          selected_token_start_idx + num_seqs))
-                selected_token_start_idx += num_seqs
-
-                categorized_sample_indices[
-                    sampling_params.sampling_type].extend(
-                        zip(
-                            range(
-                                categorized_sample_indices_start_idx,
-                                categorized_sample_indices_start_idx +
-                                num_seqs),
-                            range(
-                                categorized_sampled_token_indices_start_idx,
-                                categorized_sampled_token_indices_start_idx +
-                                num_seqs)))
-                categorized_sample_indices_start_idx += num_seqs
-                categorized_sampled_token_indices_start_idx += num_seqs
-
-            if sampling_params.seed is not None:
-                generators.append(seq_group_metadata.state.generator)
-
-        selected_token_indices = async_tensor_h2d(selected_token_indices,
-                                                  dtype=torch.long,
-                                                  target_device=self.device,
-                                                  pin_memory=self.pin_memory)
-
-        categorized_sample_indices = {
-            t: maybe_expand_dim(
-                async_tensor_h2d(seq_ids,
-                                 dtype=torch.int,
-                                 target_device=self.device,
-                                 pin_memory=self.pin_memory), 2, 2)
-            for t, seq_ids in categorized_sample_indices.items()
-        }
-
-        seq_data: Dict[int, SequenceData] = {}
-        for seq_group_metadata in seq_group_metadata_list:
-            seq_data.update(seq_group_metadata.seq_data)
-
-        sampling_metadata = SamplingMetadata(
-            seq_groups=seq_groups,
-            seq_data=seq_data,
-            prompt_lens=prompt_lens,
-            selected_token_indices=selected_token_indices,
-            categorized_sample_indices=categorized_sample_indices,
-            generators=generators,
-        )
-        return sampling_metadata
 
     def prepare_input_tensors(
         self,
@@ -828,71 +730,6 @@ class HabanaModelRunner:
                 multi_modal_input)
 
 
-    def _old_prepare_input_tensors(
-        self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
-               Set[int], LoRAMapping]:
-        if self.is_driver_worker:
-            # NOTE: We assume that all sequences in the group are all prompts or
-            # all decodes.
-            is_prompt = seq_group_metadata_list[0].is_prompt
-            # Prepare input tensors.
-            if is_prompt:
-                (input_tokens, input_positions, attn_metadata, prompt_lens,
-                 subquery_lens, lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_prompt(seq_group_metadata_list)
-            else:
-                (input_tokens, input_positions, attn_metadata,
-                 lora_index_mapping, lora_prompt_mapping,
-                 lora_requests) = self._prepare_decode(seq_group_metadata_list)
-                prompt_lens = []
-                subquery_lens = None
-            sampling_metadata = self._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens)
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
-            else:
-                lora_mapping = None
-
-            # Broadcast the metadata.
-            metadata_dict = {
-                "input_tokens": input_tokens,
-                "input_positions": input_positions,
-                "selected_token_indices":
-                sampling_metadata.selected_token_indices,
-                "lora_requests": lora_requests,
-                "lora_mapping": lora_mapping,
-            }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
-        else:
-            metadata_dict = broadcast_tensor_dict(src=0)
-            input_tokens = metadata_dict.pop("input_tokens")
-            input_positions = metadata_dict.pop("input_positions")
-            selected_token_indices = metadata_dict.pop(
-                "selected_token_indices")
-            lora_mapping = metadata_dict.pop("lora_mapping")
-            lora_requests = metadata_dict.pop("lora_requests")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
-            sampling_metadata = SamplingMetadata(
-                seq_groups=None,
-                seq_data=None,
-                prompt_lens=None,
-                selected_token_indices=selected_token_indices,
-                categorized_sample_indices=None,
-                generators=None,
-                perform_sampling=False,
-            )
-
-        return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, lora_requests, lora_mapping)
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -911,10 +748,10 @@ class HabanaModelRunner:
         decode_meta = attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
-            graph_block_count = attn_metadata.block_tables.shape[1] 
+            graph_block_count = decode_meta.block_tables.shape[1] 
             graph_runner_key = (graph_batch_size, graph_block_count)
             model_executable = self.graph_runners[graph_runner_key]
-            logger.info(f"Executing {self.graph_runner_class.__name__} with batch {graph_batch_size}, block_count {graph_block_count} (context_len up to {graph_block_count*self.block_size}, currently {torch.max(attn_metadata.context_lens).item()})")
+            logger.info(f"Executing {self.graph_runner_class.__name__} with batch {graph_batch_size}, block_count {graph_block_count} (context_len up to {graph_block_count*self.block_size}, currently {torch.max(decode_meta.seq_lens_tensor).item()})")
         else:
             model_executable = self.model
         execute_model_kwargs = {
@@ -1088,33 +925,33 @@ class HabanaModelRunner:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             valid_combinations = []
-            total_combinations = len(_BATCH_SIZES_TO_CAPTURE)*len(_MAX_CONTEXT_LENS_TO_CAPTURE)
+            total_combinations = len(_BATCH_SIZES_TO_CAPTURE)*len(_MAX_SEQ_LENS_TO_CAPTURE)
             import pandas as pd
-            df = pd.DataFrame(index=_BATCH_SIZES_TO_CAPTURE, columns=_MAX_CONTEXT_LENS_TO_CAPTURE)
-            for idx, (batch_size, max_context_len) in enumerate(itertools.product(reversed(_BATCH_SIZES_TO_CAPTURE), reversed(_MAX_CONTEXT_LENS_TO_CAPTURE))): 
-                block_count = math.ceil(max_context_len / self.block_size)
+            df = pd.DataFrame(index=_BATCH_SIZES_TO_CAPTURE, columns=_MAX_SEQ_LENS_TO_CAPTURE)
+            for idx, (batch_size, max_seq_len) in enumerate(itertools.product(reversed(_BATCH_SIZES_TO_CAPTURE), reversed(_MAX_SEQ_LENS_TO_CAPTURE))): 
+                block_count = math.ceil(max_seq_len / self.block_size)
                 # Skip capture of "out-of-bound" batch sizes and context lengths
                 if batch_size > self.scheduler_config.max_num_seqs:
-                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}. Reason: Batch out of bound.")
-                    df[max_context_len][batch_size] = 'batch OoB'
+                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}. Reason: Batch out of bound.")
+                    df[max_seq_len][batch_size] = 'batch OoB'
                     continue 
-                if max_context_len > self.max_context_len_to_capture:
-                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}. Reason: Nax context length out of bound.")
-                    df[max_context_len][batch_size] = 'ctx OoB'
+                if max_seq_len > self.max_seq_len_to_capture:
+                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}. Reason: Nax context length out of bound.")
+                    df[max_seq_len][batch_size] = 'ctx OoB'
                     continue
-                block_count = math.ceil(max_context_len / self.block_size)
+                block_count = math.ceil(max_seq_len / self.block_size)
                 captured_block_counts = [math.ceil(cl / self.block_size) for (n, cl) in valid_combinations if n == batch_size]
                 if block_count in captured_block_counts:
-                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}. Reason: Block size already captured.")
-                    df[max_context_len][batch_size] = 'redundant'
+                    logger.debug(f"[{idx}/{total_combinations}] Skipping capture for batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}. Reason: Block size already captured.")
+                    df[max_seq_len][batch_size] = 'redundant'
                     continue
-                logger.debug(f"[{idx}/{total_combinations}] Will capture for batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}. Constraints met.")
-                df[max_context_len][batch_size] = 'VALID'
-                valid_combinations.append((batch_size, max_context_len))
+                logger.debug(f"[{idx}/{total_combinations}] Will capture for batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}. Constraints met.")
+                df[max_seq_len][batch_size] = 'VALID'
+                valid_combinations.append((batch_size, max_seq_len))
 
             total_valid_hpugraphs = len(valid_combinations)
             logger.info(f"Starting capture {total_valid_hpugraphs} valid HPUGraphs. Skipping capture of {total_combinations-total_valid_hpugraphs}/{total_combinations} graphs due to batch/context constraints.")
-            logger.debug(f"Capture summary (row: batch_size; col: max_context_len):")
+            logger.debug(f"Capture summary (row: batch_size; col: max_seq_len):")
             logger.debug(tabulate.tabulate(df, tablefmt='mixed_outline', headers='keys', showindex="always"))
 
             graph_runner_name = self.graph_runner_class.__name__
@@ -1124,23 +961,28 @@ class HabanaModelRunner:
             log_graph_compilation_all = os.environ.get('VLLM_HPU_LOG_STEP_GRAPH_COMPILATION_ALL', '0') != '0'
             log_graph_compilation = os.environ.get('VLLM_HPU_LOG_STEP_GRAPH_COMPILATION', '0') != '0' or log_graph_compilation_all
         
-            for idx, (batch_size, max_context_len) in enumerate(pbar): 
-                block_count = math.ceil(max_context_len / self.block_size)
+            for idx, (batch_size, max_seq_len) in enumerate(pbar): 
+                block_count = math.ceil(max_seq_len / self.block_size)
                 # Create dummy attn_metadata.
-                attn_metadata = self.attn_backend.make_metadata(
+                decode_metadata = self.attn_backend.make_metadata(
                     is_prompt=False,
-                    prompt_lens=None,
-                    prompt_lens_tensor=None,
-                    num_prefill_tokens=0,
-                    num_generation_tokens=batch_size,
-                    max_subquery_len=None,
-                    max_context_len=block_count*self.block_size,
-                    max_prompt_len=None,
+                    seq_lens=None,
+                    seq_lens_tensor=context_lens[:batch_size],
+                    max_query_len=None,
+                    max_seq_len=block_count*self.block_size,
                     subquery_start_loc=None,
                     seq_start_loc=None,
-                    context_lens=context_lens[:batch_size],
+                    context_lens_tensor=None, # NOTE(kzawora): this seems sus, shoudn't we have seq_lens tensor here?
                     block_tables=block_tables[:batch_size, :block_count],
                     use_cuda_graph=True,
+                )
+                attn_metadata = AttentionMetadata(
+                    num_prefills=0,
+                    num_prefill_tokens=0,
+                    num_decode_tokens=batch_size,
+                    slot_mapping=slot_mapping[:batch_size],
+                    prefill_metadata=None,
+                    decode_metadata=decode_metadata,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
 
@@ -1153,7 +995,7 @@ class HabanaModelRunner:
                 graph_runner = self.graph_runner_class(self.model)
                 local_start_mem = HabanaMemoryProfiler.current_memory_usage()
                 capture_start = time.time()
-                desc = f'Capturing {graph_runner_name} for batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}, allocated {format_bytes(local_start_mem - start_mem)} device memory in total ({format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)'
+                desc = f'Capturing {graph_runner_name} for batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}, allocated {format_bytes(local_start_mem - start_mem)} device memory in total ({format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)'
                 pbar.set_description(desc)
                 logger.debug(f"[{idx}/{total_valid_hpugraphs}] {desc}...")
                 profiling_ctx = contextlib.nullcontext() if not (log_graph_compilation_all or log_graph_compilation) else metric_localcontext("graph_compilation")
@@ -1165,12 +1007,12 @@ class HabanaModelRunner:
                         attn_metadata,
                     )
                 if (log_graph_compilation and gc_local_metric.stats()[0][1] > 0) or log_graph_compilation_all:
-                    logger.info(f"VLLM_HPU_STEP_GRAPH_COMPILATION: {gc_local_metric.stats()}, {graph_runner_name}; batch {batch_size}, max_context_len {max_context_len}, block_count {block_count}")
+                    logger.info(f"VLLM_HPU_STEP_GRAPH_COMPILATION: {gc_local_metric.stats()}, {graph_runner_name}; batch {batch_size}, max_seq_len {max_seq_len}, block_count {block_count}")
                 self.graph_runners[(batch_size, block_count)] = graph_runner
                 capture_end = time.time()
                 local_end_mem = HabanaMemoryProfiler.current_memory_usage()
                 mem_usage_str = format_bytes(local_end_mem - local_start_mem)
-                graph_mem_usage_df[max_context_len][batch_size] = mem_usage_str
+                graph_mem_usage_df[max_seq_len][batch_size] = mem_usage_str
                 logger.debug(f"[{idx}/{total_valid_hpugraphs}] {desc}... done in {capture_end-capture_start:.2f} seconds! Took {mem_usage_str} of device memory ({format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)")
 
         end_time = time.perf_counter()
@@ -1178,7 +1020,7 @@ class HabanaModelRunner:
         # This usually takes < 10 seconds.
         end_mem = HabanaMemoryProfiler.current_memory_usage()
         logger.info(f"Graph capturing finished in {elapsed_time:.0f} secs, allocated {format_bytes(end_mem - start_mem)} of device memory ({format_bytes(HabanaMemoryProfiler.current_memory_usage())}/{format_bytes(HabanaMemoryProfiler.total_memory())} used)")
-        logger.info(f"Graph memory allocation summary (row: batch_size; col: max_context_len):")
+        logger.info(f"Graph memory allocation summary (row: batch_size; col: max_seq_len):")
         logger.info(tabulate.tabulate(graph_mem_usage_df, tablefmt='mixed_outline', headers='keys', showindex="always"))
 
     def __del__(self) -> None:
@@ -1312,8 +1154,8 @@ class HPUGraphRunner:
             "positions": positions,
             "kv_caches": kv_caches,
             "slot_mapping": attn_metadata.slot_mapping,
-            "context_lens": attn_metadata.context_lens,
-            "block_tables": attn_metadata.block_tables,
+            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
+            "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         self.output_buffers = {"hidden_states": hidden_states}
         return
@@ -1324,6 +1166,7 @@ class HPUGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        **kwargs,
     ) -> torch.Tensor:
         # KV caches are fixed tensors, so we don't need to copy them.
         del kv_caches
@@ -1333,10 +1176,10 @@ class HPUGraphRunner:
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
         self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
-        self.input_buffers["context_lens"].copy_(attn_metadata.context_lens,
-                                                 non_blocking=True)
-        self.input_buffers["block_tables"].copy_(attn_metadata.block_tables,
-                                                 non_blocking=True)
+        self.input_buffers["seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
+        self.input_buffers["block_tables"].copy_(
+            attn_metadata.decode_metadata.block_tables, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
@@ -1370,7 +1213,7 @@ class ExperimentalHPUGraphRunner:
                     num_prefill_tokens=0,
                     num_generation_tokens=attn_metadata.num_generation_tokens,
                     max_subquery_len=None,
-                    max_context_len=attn_metadata.max_context_len,
+                    max_seq_len=attn_metadata.max_seq_len,
                     max_prompt_len=None,
                     subquery_start_loc=None,
                     seq_start_loc=None,
@@ -1436,18 +1279,18 @@ def _get_graph_batch_size(batch_size: int) -> int:
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
-def _get_graph_max_context_len(max_context_len: int) -> int:
+def _get_graph_max_seq_len(max_seq_len: int) -> int:
     """Returns the padded batch size given actual batch size.
 
     Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
     2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
     """
-    if max_context_len <= 32:
+    if max_seq_len <= 32:
         return 32
-    elif max_context_len <= 64:
+    elif max_seq_len <= 64:
         return 64
-    elif max_context_len <= 128:
+    elif max_seq_len <= 128:
         return 128
     else:
-        return ((max_context_len + _MAX_CONTEXT_LEN_ALIGNMENT - 1) //
-                _MAX_CONTEXT_LEN_ALIGNMENT * _MAX_CONTEXT_LEN_ALIGNMENT)
+        return ((max_seq_len + _MAX_SEQ_LEN_ALIGNMENT - 1) //
+                _MAX_SEQ_LEN_ALIGNMENT * _MAX_SEQ_LEN_ALIGNMENT)
