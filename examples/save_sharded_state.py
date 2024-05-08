@@ -5,7 +5,6 @@ import shutil
 from pathlib import Path
 
 from vllm import LLM, EngineArgs
-from vllm.model_executor.model_loader.loader import ShardedStateLoader
 
 """
 Saves each worker's model state dict directly to a checkpoint, which enables a
@@ -39,7 +38,6 @@ parser.add_argument("--output",
                     help="path to output checkpoint")
 parser.add_argument("--pattern",
                     type=str,
-                    default=ShardedStateLoader.DEFAULT_PATTERN,
                     help="string pattern of saved filenames")
 
 
