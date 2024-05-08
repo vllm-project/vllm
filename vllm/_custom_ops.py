@@ -192,7 +192,7 @@ def scaled_fp8_quant(
     batch_dim_padding: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     if batch_dim_padding:
-        shape = (max(batch_dim_padding, input.shape[0]), **input.shape[1:])
+        shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
         output = torch.empty(shape, device=input.device, dtype=torch.float8_e4m3fn)
     else:
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
