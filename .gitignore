@@ -190,3 +190,5 @@ hip_compat.h
 
 # Benchmark dataset
 *.json
+
+/vllm/_version.py
