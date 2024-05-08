@@ -394,17 +394,17 @@ void convert_fp8(
     }
   } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
     if (src_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4M3);
     } else if (src_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
     } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kFp8E4M3);
     } else if (dst_cache.dtype() == at::ScalarType::Float) {
-      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
     } else if (dst_cache.dtype() == at::ScalarType::Half) {
-      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
     } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);
+      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
     }
   } else {
     TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);

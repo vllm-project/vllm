@@ -11,6 +11,8 @@
 
 namespace vllm
 {
+#ifdef USE_ROCM
+
 namespace fp8 {
 #ifdef ENABLE_FP8
 
@@ -521,7 +523,7 @@ template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout convert(const Tin &x) {
 #ifdef ENABLE_FP8
   if constexpr (kv_dt == Fp8KVCacheDataType::kAuto ||
-                kv_dt == Fp8KVCacheDataType::kFp8E4m3) {
+                kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
     return vec_conversion<Tout, Tin>(x);
   }
 #endif
@@ -532,7 +534,7 @@ template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout scaled_convert(const Tin &x, const float scale) {
 #ifdef ENABLE_FP8
   if constexpr (kv_dt == Fp8KVCacheDataType::kAuto ||
-                kv_dt == Fp8KVCacheDataType::kFp8E4m3) {
+                kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
     return scaled_vec_conversion<Tout, Tin>(x, scale);
   }
 #endif
@@ -556,11 +558,11 @@ __inline__ __device__ Tout scaled_convert(const Tin &x, const float scale) {
   } else {                                                                     \
     if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") {                         \
       if (SRC_DTYPE == at::ScalarType::Float) {                                \
-        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);                \
+        FN(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);                \
       } else if (SRC_DTYPE == at::ScalarType::Half) {                          \
-        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);             \
+        FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);             \
       } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                      \
-        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4m3);        \
+        FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);        \
       } else {                                                                 \
         TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
       }                                                                        \
@@ -570,4 +572,5 @@ __inline__ __device__ Tout scaled_convert(const Tin &x, const float scale) {
   }
 
 } // fp8
+#endif // USE_ROCM
 } // namespace vllm
