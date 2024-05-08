@@ -785,7 +785,6 @@ def _get_logprobs(
     else:
         top_logprobs, top_token_ids = None, None
 
-    # Overlap cpu transfer with gpu kernels.
     selected_logprobs = selected_logprobs.to('cpu')
     ranks = ranks.to('cpu')
     if top_logprobs is not None and top_token_ids is not None:
