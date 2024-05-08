@@ -50,7 +50,7 @@ class LogitsProcessor(nn.Module):
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
-        if logits is not None and sampling_metadata.perform_sampling:
+        if logits is not None: # and sampling_metadata.perform_sampling: FIXME: this is needed for 8xHPU
             logits *= self.scale
 
             # Apply logits processors (if any).

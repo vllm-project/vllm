@@ -4,27 +4,28 @@
 
 import gc
 import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import habana_frameworks.torch as htorch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
+from vllm.distributed import (broadcast_tensor_dict,
+                              ensure_model_parallel_initialized,
+                              get_tensor_model_parallel_cpu_group,
+                              init_distributed_environment)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_tensor_dict)
-from vllm.model_executor.parallel_utils.custom_all_reduce import init_custom_ar
-from vllm.model_executor.parallel_utils.parallel_state import (
-    ensure_model_parallel_initialized)
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.habana_model_runner import HabanaModelRunner
+from vllm.worker.worker_base import WorkerBase
 
 
-class HabanaWorker:
+class HabanaWorker(WorkerBase):
     """A worker class that executes (a partition of) the model on a HPU.
 
     Each worker is associated with a single HPU. The worker is responsible for
@@ -38,37 +39,51 @@ class HabanaWorker:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        kv_cache_dtype: Optional[str] = "auto",
+        vision_language_config: Optional[VisionLanguageConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
+        self.load_config = load_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
+
+        if self.model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils import init_cached_hf_modules
+            init_cached_hf_modules()
+        self.vision_language_config = vision_language_config
+        if self.vision_language_config:
+            assert not self.lora_config, (
+                "To be tested: vision language model with LoRA settings.")
+            assert False, "To be tested: vision language model on HPU"
 
         self.model_runner = HabanaModelRunner(model_config,
                                         parallel_config,
                                         scheduler_config,
                                         device_config,
+                                        load_config=load_config,
                                         lora_config=self.lora_config,
-                                        kv_cache_dtype=kv_cache_dtype,
+                                        kv_cache_dtype=self.cache_config.cache_dtype,
                                         is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
-        # self.init_cache_engine().
-        self.cache_config = None
-        self.cache_engine = None
-        self.hpu_cache = None
+        # initialize_cache.
+        self.cache_engine: CacheEngine
+        self.hpu_cache: List[torch.Tensor]
 
     def init_device(self) -> None:
         if self.device_config.device.type == "hpu":
@@ -79,8 +94,9 @@ class HabanaWorker:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_distributed_environment(self.parallel_config, self.rank,
-                                     self.distributed_init_method)
+        init_worker_distributed_environment(self.parallel_config, self.rank,
+                                            self.distributed_init_method,
+                                            self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -88,20 +104,17 @@ class HabanaWorker:
         self.model_runner.load_model()
 
     @torch.inference_mode()
-    def profile_num_available_blocks(
-        self,
-        block_size: int,
-        hpu_memory_utilization: float,
-        cpu_swap_space: int,
-        cache_dtype: str,
-    ) -> Tuple[int, int]:
-        """Profiles the peak memory usage of the model and returns the maximum
-        number of HPU and CPU cache blocks that can be allocated.
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        """Profiles the peak memory usage of the model to determine how many
+        KV blocks may be allocated without OOMs.
 
-        Args:
-            block_size: The size of the cache block.
-            hpu_memory_utilization: The fraction of the total HPU memory to use.
-            cpu_swap_space: The size of the CPU swap space in bytes.
+        The engine will first conduct a profiling of the existing memory usage.
+        Then, it calculate the maximum possible number of GPU and CPU blocks
+        that can be allocated with the remaining free memory.
+
+        .. tip::
+            You may limit the usage of GPU memory
+            by adjusting the `gpu_memory_utilization` parameter.
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
@@ -118,15 +131,15 @@ class HabanaWorker:
         # HPU did not change their memory usage during the profiling.
         peak_memory = self.init_hpu_memory - free_hpu_memory
         assert peak_memory > 0, (
-            "Error in memory profiling. This happens when the hpu memory was "
+            "Error in memory profiling. This happens when the HPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        cache_block_size = self.get_cache_block_size_bytes(
-            block_size, cache_dtype)
+        cache_block_size = self.get_cache_block_size_bytes()
         num_hpu_blocks = int(
-            (total_hpu_memory * hpu_memory_utilization - peak_memory) //
-            cache_block_size)
-        num_cpu_blocks = int(cpu_swap_space // cache_block_size)
+            (total_hpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory) // cache_block_size)
+        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                             cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.model_runner.lora_manager:
@@ -134,15 +147,31 @@ class HabanaWorker:
         gc.collect()
         return num_hpu_blocks, num_cpu_blocks
 
-    def init_cache_engine(self, cache_config: CacheConfig) -> None:
-        self.cache_config = cache_config
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        """Allocate GPU and CPU KV cache with the specified number of blocks.
+
+        This also warms up the model, which may record CUDA graphs.
+        """
+        raise_if_cache_size_invalid(num_gpu_blocks,
+                                    self.cache_config.block_size,
+                                    self.model_config.max_model_len)
+
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self._init_cache_engine()
+        self._warm_up_model()
+
+    def _init_cache_engine(self) -> None:
+        assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.hpu_cache = self.cache_engine.gpu_cache
         self.model_runner.set_block_size(self.cache_engine.block_size)
         htorch.hpu.synchronize() # we want to materialize cache tensors before we proceed with graph capture/execution
 
-    def warm_up_model(self) -> None:
+    def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model(self.hpu_cache)
         # Reset the seed to ensure that the random state is not affected by
@@ -153,7 +182,7 @@ class HabanaWorker:
         self,
         blocks_to_swap_in: Dict[int, int],
         blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
         # TODO(woosuk): Profile swapping overhead and optimize if needed.
@@ -161,24 +190,29 @@ class HabanaWorker:
             self.cache_engine.swap_in(blocks_to_swap_in)
         if blocks_to_swap_out:
             self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy:
+        if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
 
     @torch.inference_mode()
     def execute_model(
         self,
-        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None,
-        blocks_to_swap_in: Optional[Dict[int, int]] = None,
-        blocks_to_swap_out: Optional[Dict[int, int]] = None,
-        blocks_to_copy: Optional[Dict[int, List[int]]] = None,
-    ) -> Optional[SamplerOutput]:
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        if execute_model_req is None:
+            seq_group_metadata_list = None
+        else:
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
+            assert execute_model_req is not None
             num_seq_groups = len(seq_group_metadata_list)
-            assert blocks_to_swap_in is not None
-            assert blocks_to_swap_out is not None
-            assert blocks_to_copy is not None
-            data = {
+            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
+            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
+            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                          device=self.device,
+                                          dtype=torch.int64).view(-1, 2)
+            data: Dict[str, Any] = {
                 "num_seq_groups": num_seq_groups,
                 "blocks_to_swap_in": blocks_to_swap_in,
                 "blocks_to_swap_out": blocks_to_swap_out,
@@ -196,11 +230,11 @@ class HabanaWorker:
 
         # If there is no input, we don't need to execute the model.
         if num_seq_groups == 0:
-            return {}
+            return []
 
         output = self.model_runner.execute_model(seq_group_metadata_list,
                                                  self.hpu_cache)
-        return output
+        return [output]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError("LoRA is not implemented for HPU backend.")
@@ -219,21 +253,27 @@ class HabanaWorker:
     def vocab_size(self) -> int:
         return self.model_runner.vocab_size
 
-    def get_cache_block_size_bytes(self, block_size: int,
-                                   cache_dtype: str) -> int:
+    def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(block_size, cache_dtype,
+        return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
 
 
-def init_distributed_environment(
+def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
+    local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    init_distributed_environment(parallel_config.world_size, rank,
+                                 distributed_init_method, local_rank, backend='hccl')
+
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                      parallel_config.pipeline_parallel_size)
+
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
         if torch_world_size != parallel_config.world_size:
@@ -257,7 +297,17 @@ def init_distributed_environment(
     torch.distributed.all_reduce(torch.zeros(1).to('hpu'))
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-
-    # Initialize a custom fast all-reduce implementation.
-    if not parallel_config.disable_custom_all_reduce:
-        init_custom_ar()
+def raise_if_cache_size_invalid(num_gpu_blocks, block_size,
+                                max_model_len) -> None:
+    if num_gpu_blocks <= 0:
+        raise ValueError("No available memory for the cache blocks. "
+                         "Try increasing `gpu_memory_utilization` when "
+                         "initializing the engine.")
+    max_seq_len = block_size * num_gpu_blocks
+    if max_model_len > max_seq_len:
+        raise ValueError(
+            f"The model's max seq len ({max_model_len}) "
+            "is larger than the maximum number of tokens that can be "
+            f"stored in KV cache ({max_seq_len}). Try increasing "
+            "`gpu_memory_utilization` or decreasing `max_model_len` when "
+            "initializing the engine.")
