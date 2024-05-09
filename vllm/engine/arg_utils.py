@@ -516,7 +516,7 @@ class EngineArgs:
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
+    def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
