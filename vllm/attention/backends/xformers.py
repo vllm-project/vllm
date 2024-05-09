@@ -262,6 +262,7 @@ class XFormersImpl(AttentionImpl):
                 self.num_kv_heads,
                 self.scale,
                 self.alibi_slopes,
+                self.sliding_window,
                 kv_scale,
             )
 
