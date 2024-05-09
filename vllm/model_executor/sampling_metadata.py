@@ -1,6 +1,6 @@
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -436,7 +436,8 @@ class SamplingTensors:
                    frequency_penalties: List[float],
                    repetition_penalties: List[float],
                    sampling_seeds: List[int], sample_indices: List[int],
-                   prompt_tokens: List[List[int]],
+                   prompt_tokens: Union[List[List[int]], List[Tuple[int,
+                                                                    ...]]],
                    output_tokens: List[List[int]], vocab_size: int,
                    extra_seeds_to_generate: int, device: torch.device,
                    dtype: torch.dtype) -> "SamplingTensors":
@@ -446,7 +447,7 @@ class SamplingTensors:
         prompt_max_len = max([len(tokens) for tokens in prompt_tokens],
                              default=0)
         prompt_padded_tokens = [
-            tokens + [vocab_size] * (prompt_max_len - len(tokens))
+            list(tokens) + [vocab_size] * (prompt_max_len - len(tokens))
             for tokens in prompt_tokens
         ]
         output_max_len = max([len(tokens) for tokens in output_tokens],

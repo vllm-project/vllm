@@ -112,14 +112,13 @@ class SequenceData:
 
     def __init__(
         self,
-        prompt_token_ids: List[int],
+        prompt_token_ids: Union[List[int], Tuple[int, ...]],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
         if output_token_ids is None:
             output_token_ids = []
 
-        self.prompt_token_ids = prompt_token_ids
-        self.prompt_token_ids_tuple = tuple(prompt_token_ids)
+        self.prompt_token_ids: Tuple[int, ...] = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -140,18 +139,18 @@ class SequenceData:
         return len(self.output_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+        return list(self.prompt_token_ids) + self.output_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
     ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
         """Get prefix tokens, and make the return value hashable"""
-        prompt_length = len(self.prompt_token_ids_tuple)
+        prompt_length = len(self.prompt_token_ids)
         if num_tokens > prompt_length:
-            return (self.prompt_token_ids_tuple,
+            return (self.prompt_token_ids,
                     tuple(self.output_token_ids[:num_tokens - prompt_length]))
         else:
-            return (self.prompt_token_ids_tuple[:num_tokens], None)
+            return (self.prompt_token_ids[:num_tokens], None)
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -186,7 +185,7 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.prompt_token_ids
 
     def get_output_token_ids(self) -> List[int]:
@@ -313,7 +312,7 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> List[int]:
+    def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
@@ -440,7 +439,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt
 
     @property
-    def prompt_token_ids(self) -> List[int]:
+    def prompt_token_ids(self) -> Tuple[int, ...]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
