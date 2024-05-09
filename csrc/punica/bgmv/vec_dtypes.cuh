@@ -1,14 +1,15 @@
 #ifndef VEC_DTYPES_CUH_
 #define VEC_DTYPES_CUH_
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #ifdef FLASHINFER_USE_FP8
 #include <cuda_fp8.h>
 #endif
 #include <cuda_runtime.h>
 
 #include <type_traits>
+
+#include "../type_convert.h"
+#include "../../cuda_compat.h"
 
 #define FLASHINFER_INLINE \
   inline __attribute__((always_inline)) __device__ __host__
