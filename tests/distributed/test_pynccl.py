@@ -4,8 +4,8 @@ import os
 import pytest
 import torch
 
-from vllm.distributed.communication_op import graph_capture_mode
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
+from vllm.distributed.communication_op import (  # noqa
+    graph_capture_mode, tensor_model_parallel_all_reduce)
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
