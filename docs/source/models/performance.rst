@@ -41,4 +41,4 @@ We recommend you set ``max_num_batched_tokens > 2048`` for throughput.
 
 See related papers for more details (https://arxiv.org/pdf/2401.08671 or https://arxiv.org/pdf/2308.16369).
 
-Plese try out this feature and let us know your feedback via GitHub issues!
+Please try out this feature and let us know your feedback via GitHub issues!
