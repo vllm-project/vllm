@@ -1,4 +1,4 @@
-API Client
+LLM Class
 ==========
 
 .. autoclass:: vllm.LLM
