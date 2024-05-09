@@ -11,7 +11,7 @@ from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import use_pynccl_allreduce
+from vllm.distributed.communication_op import graph_capture_mode
 from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -982,7 +982,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with use_pynccl_allreduce():
+        with graph_capture_mode():
             self.model(
                 input_ids,
                 positions,
@@ -997,7 +997,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with use_pynccl_allreduce():
+            with graph_capture_mode():
                 hidden_states = self.model(
                     input_ids,
                     positions,

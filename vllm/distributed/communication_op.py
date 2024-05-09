@@ -12,7 +12,17 @@ from .parallel_state import (get_cpu_world_group,
 
 
 @contextmanager
-def use_pynccl_allreduce():
+def graph_capture_mode():
+    # In graph capture, we have to be very careful about the collective
+    # operations. The current status is:
+    #     allreduce \ Mode   |  Eager  |  Graph  |
+    # --------------------------------------------
+    # custom allreduce       | enabled | enabled |
+    # PyNccl                 | disabled| enabled |
+    # torch.distributed      | enabled | disabled|
+    #
+    # Note that custom allreduce will have a runtime check, if the tensor size
+    # is too large, it will fallback to the next available option.
     from vllm.distributed.device_communicators import custom_all_reduce
     if not custom_all_reduce.is_initialized():
         from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
