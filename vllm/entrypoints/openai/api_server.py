@@ -4,7 +4,7 @@ import inspect
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Set
+from typing import Optional, Set
 
 import fastapi
 import uvicorn
@@ -164,15 +164,32 @@ if __name__ == "__main__":
         served_model_names = args.served_model_name
     else:
         served_model_names = [args.model]
+
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-    openai_serving_chat = OpenAIServingChat(engine, served_model_names,
+
+    event_loop: Optional[asyncio.AbstractEventLoop]
+    try:
+        event_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        event_loop = None
+
+    if event_loop is not None and event_loop.is_running():
+        # If the current is instanced by Ray Serve,
+        # there is already a running event loop
+        model_config = event_loop.run_until_complete(engine.get_model_config())
+    else:
+        # When using single vLLM without engine_use_ray
+        model_config = asyncio.run(engine.get_model_config())
+
+    openai_serving_chat = OpenAIServingChat(engine, model_config,
+                                            served_model_names,
                                             args.response_role,
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, served_model_names, args.lora_modules)
+        engine, model_config, served_model_names, args.lora_modules)
 
     app.root_path = args.root_path
     uvicorn.run(app,
