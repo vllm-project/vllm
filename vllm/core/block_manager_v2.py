@@ -68,10 +68,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.sliding_window = sliding_window
         # block_sliding_window is the max number of blocks that need to be
         # allocated
-        # We generally need up 1 block more due to the way BlockTable works
         self.block_sliding_window = None
         if sliding_window is not None:
-            self.block_sliding_window = sliding_window // block_size + 2
+            # +1 here because // rounds down
+            num_blocks = sliding_window // block_size + 1
+            # +1 here because the last block may not be full,
+            # and so the sequence stretches one more block at the beginning
+            # For example, if sliding_window is 3 and block_size is 4,
+            # we may need 2 blocks when the second block only holds 1 token.
+            self.block_sliding_window = num_blocks + 1
 
         self.watermark = watermark
         assert watermark >= 0.0
