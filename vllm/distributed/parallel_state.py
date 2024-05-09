@@ -18,7 +18,7 @@ _TP_DEVICE_GROUP: Optional[ProcessGroup] = None
 _TP_CPU_GROUP: Optional[ProcessGroup] = None
 _TP_PYNCCL_COMMUNICATOR = None
 # Pipeline model parallel group that the current rank belongs to.
-_PIPELINE_MODEL_PARALLEL_GROUP: Optional[ProcessGroup] = None
+_PP_DEVICE_GROUP: Optional[ProcessGroup] = None
 
 # when people blindly call `torch.distributed.all_reduce` etc,
 # it will use this group. It is initialized with the `backend`
@@ -164,15 +164,15 @@ def initialize_model_parallel(
     )
 
     # Build the pipeline model-parallel groups.
-    global _PIPELINE_MODEL_PARALLEL_GROUP
+    global _PP_DEVICE_GROUP
     global _PIPELINE_GLOBAL_RANKS
-    assert _PIPELINE_MODEL_PARALLEL_GROUP is None, (
+    assert _PP_DEVICE_GROUP is None, (
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
-            _PIPELINE_MODEL_PARALLEL_GROUP = group
+            _PP_DEVICE_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
 
 
@@ -207,7 +207,7 @@ def ensure_model_parallel_initialized(
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
     return (_TP_DEVICE_GROUP is not None
-            and _PIPELINE_MODEL_PARALLEL_GROUP is not None)
+            and _PP_DEVICE_GROUP is not None)
 
 
 def get_cpu_world_group():
@@ -232,9 +232,9 @@ def get_tensor_model_parallel_cpu_group():
 
 def get_pipeline_model_parallel_group():
     """Get the pipeline model parallel group the caller rank belongs to."""
-    assert _PIPELINE_MODEL_PARALLEL_GROUP is not None, (
+    assert _PP_DEVICE_GROUP is not None, (
         "pipeline model parallel group is not initialized")
-    return _PIPELINE_MODEL_PARALLEL_GROUP
+    return _PP_DEVICE_GROUP
 
 
 def get_tensor_model_parallel_world_size():
@@ -316,9 +316,9 @@ def destroy_model_parallel():
     global _TP_PYNCCL_COMMUNICATOR
     _TP_PYNCCL_COMMUNICATOR = None
 
-    global _PIPELINE_MODEL_PARALLEL_GROUP
-    if _PIPELINE_MODEL_PARALLEL_GROUP:
-        torch.distributed.destroy_process_group(_PIPELINE_MODEL_PARALLEL_GROUP)
-    _PIPELINE_MODEL_PARALLEL_GROUP = None
+    global _PP_DEVICE_GROUP
+    if _PP_DEVICE_GROUP:
+        torch.distributed.destroy_process_group(_PP_DEVICE_GROUP)
+    _PP_DEVICE_GROUP = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = None
