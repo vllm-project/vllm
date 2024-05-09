@@ -219,7 +219,8 @@ set(VLLM_PUNICA_EXT_SRC
   "csrc/punica/bgmv/bgmv_fp16_fp32_fp16.cu"
   "csrc/punica/bgmv/bgmv_fp32_bf16_bf16.cu"
   "csrc/punica/bgmv/bgmv_fp32_fp16_fp16.cu"
-  "csrc/punica/punica_ops.cc")
+  "csrc/punica/punica_ops.cu"
+  "csrc/punica/punica_pybind.cpp")
 
 #
 # Copy GPU compilation flags+update for punica
@@ -242,6 +243,9 @@ if (${VLLM_GPU_LANG} STREQUAL "CUDA")
       list(APPEND VLLM_PUNICA_GPU_ARCHES ${ARCH})
     endif()
   endforeach()
+  message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
+elseif(${VLLM_GPU_LANG} STREQUAL "HIP")
+  set(VLLM_PUNICA_GPU_ARCHES ${VLLM_GPU_ARCHES})
   message(STATUS "Punica target arches: ${VLLM_PUNICA_GPU_ARCHES}")
 endif()
 
@@ -277,11 +281,6 @@ add_custom_target(default)
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
-endif()
-
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
 
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
@@ -291,4 +290,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Enabling punica extension.")
     add_dependencies(default _punica_C)
   endif()
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  message(STATUS "Enabling moe extension.")
+  add_dependencies(default _moe_C)
 endif()
