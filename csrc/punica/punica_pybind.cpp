@@ -1,6 +1,6 @@
-#include <torch/extension.h>
-
 #include "punica_ops.h"
+
+#include <torch/extension.h>
 
 //====== pybind ======
 
@@ -8,6 +8,5 @@
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
-  m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level,
-        "dispatch_bgmv_low_level");
+  m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level, "dispatch_bgmv_low_level");
 }

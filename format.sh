@@ -26,6 +26,7 @@ RUFF_VERSION=$(ruff --version | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
 CODESPELL_VERSION=$(codespell --version)
 ISORT_VERSION=$(isort --vn)
+CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
 
 # # params: tool name, tool version, required version
 tool_version_check() {
@@ -40,6 +41,7 @@ tool_version_check "ruff" $RUFF_VERSION "$(grep "ruff==" requirements-dev.txt | 
 tool_version_check "mypy" "$MYPY_VERSION" "$(grep mypy requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "isort" "$ISORT_VERSION" "$(grep isort requirements-dev.txt | cut -d'=' -f3)"
 tool_version_check "codespell" "$CODESPELL_VERSION" "$(grep codespell requirements-dev.txt | cut -d'=' -f3)"
+tool_version_check "clang-format" "$CLANGFORMAT_VERSION" "$(grep clang-format requirements-dev.txt | cut -d'=' -f3)"
 
 YAPF_FLAGS=(
     '--recursive'
@@ -180,7 +182,6 @@ lint_changed() {
 }
 
 # Run Ruff
-echo 'vLLM ruff:'
 ### This flag lints individual files. --files *must* be the first command line
 ### arg to use this option.
 if [[ "$1" == '--files' ]]; then
@@ -193,6 +194,7 @@ else
    # Format only the files that changed in last commit.
    lint_changed
 fi
+echo 'vLLM ruff: Done'
 
 # check spelling of specified files
 isort_check() {
@@ -233,6 +235,47 @@ else
    isort_check_changed
 fi
 echo 'vLLM isort: Done'
+
+# Clang-format section
+CLANG_FORMAT_EXTENSION_TARGETS=('*.h' '*.cpp' '*.cu' '*.cuh')
+
+# Format specified files with clang-format
+clang_format() {
+    clang-format --style=file -i "$@"
+}
+
+# Format files that differ from main branch with clang-format.
+clang_format_changed() {
+    # The `if` guard ensures that the list of filenames is not empty, which
+    # could cause clang-format to receive 0 positional arguments, making it hang
+    # waiting for STDIN.
+    #
+    # `diff-filter=ACM` and $MERGEBASE is to ensure we only format files that
+    # exist on both branches.
+    MERGEBASE="$(git merge-base origin/main HEAD)"
+
+    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" &>/dev/null; then
+        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" | xargs -P 5 \
+             clang-format --style=file -i
+    fi
+}
+
+# Format all files with clang-format
+clang_format_all() {
+    find . \( "${CLANG_FORMAT_EXTENSION_TARGETS[@]/#/-name }" \) -print0 | xargs -0 -P 5 \
+         clang-format --style=file -i
+}
+
+# Run clang-format
+if [[ "$1" == '--files' ]]; then
+   clang_format "${@:2}"
+elif [[ "$1" == '--all' ]]; then
+   clang_format_all
+else
+   clang_format_changed
+fi
+echo 'vLLM clang-format: Done'
+
 
 if ! git diff --quiet &>/dev/null; then
     echo 'Reformatted files. Please review and stage the changes.'
