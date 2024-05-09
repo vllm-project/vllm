@@ -112,15 +112,10 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             for block_id in allocator.all_block_ids:
                 self._block_ids_to_allocator[block_id] = allocator
 
-    @property
-    def null_block(self) -> Block:
+    def allocate_or_get_null_block(self) -> Block:
         if self._null_block is None:
-            self._null_block = self.allocate_mutable(None, Device.GPU)
-
-            def fail(token_ids: List[int]):
-                raise ValueError("null_block should not be modified")
-
-            self._null_block.append_token_ids = fail  # type: ignore
+            self._null_block = NullBlock(
+                self.allocate_mutable(None, Device.GPU))
         return self._null_block
 
     def allocate_mutable(self, prev_block: Optional[Block],
@@ -162,7 +157,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             block (Block): The block to be freed.
         """
-        if block is self._null_block:
+        # Null block should never be freed
+        if isinstance(block, NullBlock):
             return
         block_id = block.block_id
         assert block_id is not None
@@ -180,7 +176,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: A new list of blocks that shares the same memory as the
                 original sequence.
         """
-        assert last_block is not self._null_block
+        # do not attempt to fork the null block
+        assert not isinstance(last_block, NullBlock)
         block_id = last_block.block_id
         assert block_id is not None
         allocator = self._block_ids_to_allocator[block_id]
@@ -242,3 +239,61 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         raise NotImplementedError
+
+
+class NullBlock(Block):
+    """
+    Used as a placeholders for KV cache blocks that have been dropped
+    due to sliding window.
+    """
+
+    def __init__(self, proxy: Block):
+        super().__init__()
+        self._proxy = proxy
+
+    def append_token_ids(self, token_ids: List[BlockId]):
+        raise ValueError("null block should not be modified")
+
+    @property
+    def block_id(self):
+        return self._proxy.block_id
+
+    @block_id.setter
+    def block_id(self, value: Optional[BlockId]):
+        raise NotImplementedError
+
+    @property
+    def token_ids(self) -> List[BlockId]:
+        return self._proxy.token_ids
+
+    @property
+    def num_empty_slots(self) -> BlockId:
+        return self._proxy.num_empty_slots
+
+    @property
+    def is_full(self):
+        return self._proxy.is_full
+
+    @property
+    def prev_block(self):
+        return self._proxy.prev_block
+
+    @property
+    def computed(self):
+        return self._proxy.computed
+
+    @computed.setter
+    def computed(self, value):
+        self._proxy.computed = value
+
+    @property
+    def last_accessed(self) -> float:
+        return self._proxy.last_accessed
+
+    @last_accessed.setter
+    def last_accessed(self, last_accessed_ts: float):
+        self._proxy.last_accessed = last_accessed_ts
+
+    @property
+    def content_hash(self):
+        return self._proxy.content_hash

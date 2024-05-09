@@ -86,11 +86,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             num_cpu_blocks=num_cpu_blocks,
             block_size=block_size,
         )
-        if self.sliding_window is not None:
-            # Allocate the null_block first, so it gets ID of 0 for
-            # ease of debugging.
-            null_block = self.block_allocator.null_block
-            assert null_block.block_id == 0
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
 

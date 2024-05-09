@@ -120,7 +120,7 @@ class BlockTable:
 
         # Drop blocks that are no longer needed due to sliding window
         if self._block_sliding_window is not None:
-            null_block = self._allocator.null_block
+            null_block = self._allocator.allocate_or_get_null_block()
             assert num_computed_slots is not None
             end_block_idx = (num_computed_slots //
                              self._block_size) - self._block_sliding_window
