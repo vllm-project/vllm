@@ -1,6 +1,5 @@
 import contextlib
 import time
-from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import numpy as np
