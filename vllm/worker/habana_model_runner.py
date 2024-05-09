@@ -496,6 +496,7 @@ class HabanaModelRunner:
         use_captured_graph = (
             not self.model_config.enforce_eager
             and batch_size <= _BATCH_SIZES_TO_CAPTURE[-1]
+            and max_seq_len <= _MAX_SEQ_LENS_TO_CAPTURE[-1]
             and max_seq_len <= self.max_seq_len_to_capture)
         if use_captured_graph:
             graph_batch_size = _get_graph_batch_size(batch_size)
