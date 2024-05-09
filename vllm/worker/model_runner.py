@@ -228,6 +228,24 @@ class ModelRunner:
         num_prefill_tokens = 0
         num_decode_tokens = 0
 
+        # The following fields are only for flashinfer
+        # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
+        # for the precise definition of the following fields.
+        # An example:
+        # request 1, page indices [0, 5, 8]
+        # request 2, page indices [1, 6, 7]
+        # request 3, page indices [3, 4]
+        # paged_kv_indices is a concatenation of page indices of all requests:
+        # [0, 5, 8, 1, 6, 7, 3, 4]
+        # paged_kv_indptr is used to index into paged_kv_indices:
+        # [0, 3, 6, 8]
+        paged_kv_indices: List[int] = []
+        # 0 at the beginning of paged_kv_indptr indicates the start of the
+        # first request’s page indices in the paged_kv_indices list.
+        paged_kv_indptr: List[int] = [0]
+        # paged_kv_last_page_len is the length of the last page of each request
+        paged_kv_last_page_len: List[int] = []
+
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty()
 
@@ -277,13 +295,24 @@ class ModelRunner:
                     # For cases where it needs to lookup kv caches (decode or
                     # chunked prefill)
                     if seq_group_metadata.block_tables is not None:
-                        # Prefill has chunked before.
+                        # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
                         block_tables.append(block_table)
+                        if self.attn_backend.get_name() == "flashinfer":
+                            paged_kv_indices.extend(block_table)
+                            paged_kv_indptr.append(paged_kv_indptr[-1] +
+                                                   len(block_table))
+                            last_page_len = seq_data.get_len(
+                            ) % self.block_size
+                            if last_page_len == 0:
+                                last_page_len = self.block_size
+                            paged_kv_last_page_len.append(last_page_len)
                     else:
-                        # The first prefill.
+                        # It is profiling only.
                         block_tables.append([])
                 else:
+                    # If chunked prefill is not enabled and batch only
+                    # contains prefills.
                     block_tables.append([])
                     assert context_len == 0
 
@@ -336,6 +365,7 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
+        # Consolidate inputs.
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
@@ -361,17 +391,7 @@ class ModelRunner:
             batch_size = graph_batch_size
             num_decode_tokens = batch_size
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
-
         if use_captured_graph:
-            # When using cuda-graph all these tensors should be
-            # padded.
-            assert seq_lens_tensor.shape[0] == len(input_tokens)
-            assert seq_lens_tensor.shape[0] == len(input_positions)
-            assert seq_lens_tensor.shape[0] == len(slot_mapping)
-
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].
             input_block_tables = self.graph_block_tables[:batch_size]
@@ -404,6 +424,9 @@ class ModelRunner:
         else:
             multi_modal_input = None
 
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.int,
+                                       device=self.device)
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
@@ -428,33 +451,71 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        input_tokens = torch.tensor(input_tokens,
-                                    dtype=torch.long,
-                                    device=self.device)
-        input_positions = torch.tensor(input_positions,
-                                       dtype=torch.long,
-                                       device=self.device)
-        slot_mapping = torch.tensor(slot_mapping,
-                                    dtype=torch.long,
-                                    device=self.device)
+        input_tokens_tensor = torch.tensor(input_tokens,
+                                           dtype=torch.long,
+                                           device=self.device)
+        input_positions_tensor = torch.tensor(input_positions,
+                                              dtype=torch.long,
+                                              device=self.device)
+        slot_mapping_tensor = torch.tensor(slot_mapping,
+                                           dtype=torch.long,
+                                           device=self.device)
 
-        attn_metadata = self.attn_backend.make_metadata(
-            num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            kv_cache_dtype=self.kv_cache_dtype,
-            seq_lens=seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
-            max_prefill_seq_len=max_prefill_seq_len,
-            max_decode_seq_len=max_decode_seq_len,
-            query_start_loc=query_start_loc,
-            seq_start_loc=seq_start_loc,
-            context_lens_tensor=context_lens_tensor,
-            block_tables=block_tables,
-            use_cuda_graph=False,
-        )
+        if self.attn_backend.get_name() == "flashinfer":
+            if not hasattr(self, "flashinfer_workspace_buffer"):
+                # Allocate 16MB workspace buffer
+                # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
+                self.flashinfer_workspace_buffer = torch.empty(
+                    16 * 1024 * 1024, dtype=torch.uint8, device=self.device)
+            paged_kv_indptr_tensor = torch.tensor(paged_kv_indptr,
+                                                  dtype=torch.int,
+                                                  device=self.device)
+            paged_kv_indices_tensor = torch.tensor(paged_kv_indices,
+                                                   dtype=torch.int,
+                                                   device=self.device)
+            paged_kv_last_page_len_tensor = torch.tensor(
+                paged_kv_last_page_len, dtype=torch.int, device=self.device)
+            kv_cache_dtype = get_kv_cache_torch_dtype(self.kv_cache_dtype,
+                                                      self.model_config.dtype)
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=num_prefills,
+                slot_mapping=slot_mapping_tensor,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                kv_cache_dtype=self.kv_cache_dtype,
+                use_cuda_graph=False,
+                max_prefill_seq_len=max_prefill_seq_len,
+                block_tables=block_tables,
+                workspace_buffer=self.flashinfer_workspace_buffer,
+                paged_kv_indptr=paged_kv_indptr_tensor,
+                paged_kv_indices=paged_kv_indices_tensor,
+                paged_kv_last_page_len=paged_kv_last_page_len_tensor,
+                num_qo_heads=self.model_config.get_num_attention_heads(
+                    self.parallel_config),
+                num_kv_heads=self.model_config.get_num_kv_heads(
+                    self.parallel_config),
+                head_dim=self.model_config.get_head_size(),
+                page_size=16,
+                seq_start_loc=seq_start_loc,
+                data_type=kv_cache_dtype)
+        else:
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=num_prefills,
+                slot_mapping=slot_mapping_tensor,
+                num_prefill_tokens=num_prefill_tokens,
+                num_decode_tokens=num_decode_tokens,
+                kv_cache_dtype=self.kv_cache_dtype,
+                seq_lens=seq_lens,
+                seq_lens_tensor=seq_lens_tensor,
+                max_query_len=max_query_len,
+                max_prefill_seq_len=max_prefill_seq_len,
+                max_decode_seq_len=max_decode_seq_len,
+                query_start_loc=query_start_loc,
+                seq_start_loc=seq_start_loc,
+                context_lens_tensor=context_lens_tensor,
+                block_tables=block_tables,
+                use_cuda_graph=False,
+            )
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
@@ -465,15 +526,15 @@ class ModelRunner:
             lora_mapping = None
 
         return ModelInput(
-            input_tokens=input_tokens,
-            input_positions=input_positions,
+            input_tokens=input_tokens_tensor,
+            input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
             query_lens=query_lens,
             lora_mapping=lora_mapping,
             lora_requests=lora_requests,
             multi_modal_input=multi_modal_input,
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
