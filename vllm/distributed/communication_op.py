@@ -51,8 +51,8 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     out = custom_all_reduce(input_)
     if out is not None:
         return out
-    if _TP_PYNCCL_COMMUNICATOR is not None and \
-        not _TP_PYNCCL_COMMUNICATOR.disabled:
+    if (_TP_PYNCCL_COMMUNICATOR is not None
+            and not _TP_PYNCCL_COMMUNICATOR.disabled):
         _TP_PYNCCL_COMMUNICATOR.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
