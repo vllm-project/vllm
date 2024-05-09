@@ -3,5 +3,6 @@
 
 # Dependencies for HPU code
 ray == 2.9.3
+triton
 pandas
 tabulate
