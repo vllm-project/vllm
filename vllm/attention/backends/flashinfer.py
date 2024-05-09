@@ -137,6 +137,16 @@ class FlashInferMetadata(AttentionMetadata):
         skip_fields.add('decode_wrapper')
         return super().asdict_zerocopy(skip_fields)
 
+    @property
+    def prefill_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        return self
+
+    @property
+    def decode_metadata(self) -> Optional["FlashInferMetadata"]:
+        # Currently chunked prefill is not supported
+        return self
+
 
 class FlashInferImpl(AttentionImpl):
 

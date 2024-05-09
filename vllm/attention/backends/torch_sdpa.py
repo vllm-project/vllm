@@ -53,8 +53,7 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
-                        AttentionMetadata):
+class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -70,6 +69,16 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
         # from xformer API.
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[torch.Tensor]] = None
+
+    @property
+    def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        return self
+
+    @property
+    def decode_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        return self
 
 
 class TorchSDPABackendImpl(AttentionImpl):
