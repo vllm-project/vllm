@@ -238,17 +238,25 @@ class LLM:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests,
-                        desc="Processed prompts",
-                        dynamic_ncols=True)
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=f"Generation Speed: {0:.2f} toks/s",
+            )
         # Run the engine.
         outputs: List[RequestOutput] = []
+        total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
+                        total_toks += (sum(
+                            len(stp.token_ids) for stp in output.outputs))
+                        spd = total_toks / pbar.format_dict["elapsed"]
+                        pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
