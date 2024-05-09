@@ -4,6 +4,7 @@ from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
 
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponse,
@@ -29,11 +30,11 @@ TypeCreateLogProbsFn = Callable[
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
+    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]]):
         super().__init__(engine=engine,
+                         model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules)
 
