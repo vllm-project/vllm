@@ -42,7 +42,7 @@ _CPU_WORLD_GROUP = None
 
 # A list of global ranks for each pipeline group to ease calculation of the
 # source rank when broadcasting from the first or last pipeline stage.
-_PIPELINE_GLOBAL_RANKS: Optional[List[int]] = None
+_PP_GLOBAL_RANKS: Optional[List[int]] = None
 
 _LOCAL_RANK = -1
 
@@ -165,7 +165,7 @@ def initialize_model_parallel(
 
     # Build the pipeline model-parallel groups.
     global _PP_DEVICE_GROUP
-    global _PIPELINE_GLOBAL_RANKS
+    global _PP_GLOBAL_RANKS
     assert _PP_DEVICE_GROUP is None, (
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
@@ -173,7 +173,7 @@ def initialize_model_parallel(
         group = torch.distributed.new_group(ranks, backend=backend)
         if rank in ranks:
             _PP_DEVICE_GROUP = group
-            _PIPELINE_GLOBAL_RANKS = ranks
+            _PP_GLOBAL_RANKS = ranks
 
 
 def ensure_model_parallel_initialized(
@@ -271,36 +271,36 @@ def get_tensor_model_parallel_src_rank():
 def get_pipeline_model_parallel_first_rank():
     """Return the global rank of the first process in the pipeline for the
     current tensor parallel group"""
-    assert _PIPELINE_GLOBAL_RANKS is not None, (
+    assert _PP_GLOBAL_RANKS is not None, (
         "Pipeline parallel group is not initialized")
-    return _PIPELINE_GLOBAL_RANKS[0]
+    return _PP_GLOBAL_RANKS[0]
 
 
 def get_pipeline_model_parallel_last_rank():
     """Return the global rank of the last process in the pipeline for the
     current tensor parallel group"""
-    assert _PIPELINE_GLOBAL_RANKS is not None, (
+    assert _PP_GLOBAL_RANKS is not None, (
         "Pipeline parallel group is not initialized")
     last_rank_local = get_pipeline_model_parallel_world_size() - 1
-    return _PIPELINE_GLOBAL_RANKS[last_rank_local]
+    return _PP_GLOBAL_RANKS[last_rank_local]
 
 
 def get_pipeline_model_parallel_next_rank():
     """Return the global rank that follows the caller in the pipeline"""
-    assert _PIPELINE_GLOBAL_RANKS is not None, (
+    assert _PP_GLOBAL_RANKS is not None, (
         "Pipeline parallel group is not initialized")
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
-    return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
+    return _PP_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
 
 
 def get_pipeline_model_parallel_prev_rank():
     """Return the global rank that precedes the caller in the pipeline"""
-    assert _PIPELINE_GLOBAL_RANKS is not None, (
+    assert _PP_GLOBAL_RANKS is not None, (
         "Pipeline parallel group is not initialized")
     rank_in_pipeline = get_pipeline_model_parallel_rank()
     world_size = get_pipeline_model_parallel_world_size()
-    return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
+    return _PP_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
 
 
 def destroy_model_parallel():
@@ -320,5 +320,5 @@ def destroy_model_parallel():
     if _PP_DEVICE_GROUP:
         torch.distributed.destroy_process_group(_PP_DEVICE_GROUP)
     _PP_DEVICE_GROUP = None
-    global _PIPELINE_GLOBAL_RANKS
-    _PIPELINE_GLOBAL_RANKS = None
+    global _PP_GLOBAL_RANKS
+    _PP_GLOBAL_RANKS = None
