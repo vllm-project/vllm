@@ -20,6 +20,10 @@ class BlockTable:
         _blocks (Optional[List[Block]], optional): An optional list of existing
             blocks to initialize the BlockTable with. If not provided, an empty
             BlockTable is created.
+        block_sliding_window (Optional[int], optional): The number of blocks to
+            keep around for each sequance. If None, all blocks are kept (eg., when
+            sliding window is note used).
+            It should at least fit the sliding window size of the model.
 
     Attributes:
         _block_size (int): The maximum number of tokens that can be stored in a
