@@ -21,6 +21,10 @@ logger = init_logger(__name__)
 class XFormersBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "xformers"
+
+    @staticmethod
     def get_impl_cls() -> Type["XFormersImpl"]:
         return XFormersImpl
 
@@ -49,7 +53,7 @@ class XFormersBackend(AttentionBackend):
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
