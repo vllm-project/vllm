@@ -2,11 +2,15 @@ import weakref
 from typing import List, Optional, Tuple
 
 import torch
+import time
 
+from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+
+logger = init_logger(__name__)
 
 
 class NGramWorker(LoraNotSupportedWorkerBase):
@@ -77,9 +81,12 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         """
         self._raise_if_unsupported(execute_model_req)
 
-        arr = []
         has_spec_out = False
-        for seq_group_metadata in execute_model_req.seq_group_metadata_list:
+        token_id_list = []
+        token_prob_list = []
+        start = time.perf_counter_ns()
+        for idx, seq_group_metadata in enumerate(
+                execute_model_req.seq_group_metadata_list):
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
 
             input_ids = torch.as_tensor(seq_data.get_token_ids(),
@@ -87,61 +94,72 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                                         device=self.device)
             input_length = seq_data.get_len()
 
-            for ngram_size in range(
-                    min(self.ngram_prompt_lookup_max, input_length - 1),
-                    self.ngram_prompt_lookup_min,
-                    -1,
-            ):
-                ngram_tensor = input_ids[-1 * ngram_size:]
-                windows = input_ids.unfold(dimension=0,
-                                           size=ngram_size,
-                                           step=1)
-                matches = (windows == ngram_tensor).all(dim=1)
-                match_indices = matches.nonzero(as_tuple=True)[0]
-                if match_indices.size()[0] > 1:
-                    has_spec_out = True
-                    res = seq_data.get_token_ids()
-                    res = res[match_indices[0] + ngram_size:match_indices[0] +
-                              ngram_size + sample_len]
-                    res_len = len(res)
-                    # pad 0 towards output as sample_len tokens required
-                    res += [0] * (sample_len - res_len)
-
-                    break
+            if self.ngram_prompt_lookup_max == 1:
+                ngram_tensor = input_ids[-1:]
+                # Find the first match of the n-gram in the input_ids.
+                matches = (input_ids == ngram_tensor).max(dim=-1).indices
+                # Get the speculative sequence by taking the next k tokens.
+                spec_indices = matches.add_(1).repeat(
+                    sample_len) + torch.arange(sample_len, device=self.device)
+                # Clamp the indices to the length of the input_ids.
+                spec_indices.clamp_(max=input_ids.shape[1] - 1)
+                # Get the token ids for the speculative sequence from input IDs.
+                res = input_ids.gather(dim=-1, index=spec_indices)
             else:
-                # if no candidate found, fill with 0
-                res = [0] * sample_len
+                for ngram_size in range(
+                        min(self.ngram_prompt_lookup_max, input_length - 1),
+                        self.ngram_prompt_lookup_min,
+                        -1,
+                ):
+                    ngram_tensor = input_ids[-1 * ngram_size:]
+                    windows = input_ids.unfold(dimension=0,
+                                            size=ngram_size,
+                                            step=1)
+                    matches = (windows == ngram_tensor).all(dim=1)
+                    match_indices = matches.nonzero(as_tuple=True)[0]
+                    if match_indices.size()[0] > 1:
+                        spec_indices = (match_indices[0] + ngram_size
+                                        ).repeat(sample_len) + torch.arange(
+                                            sample_len, device=self.device)
+                        spec_indices.clamp_(max=input_ids.shape[-1] - 1)
+                        res = input_ids.gather(dim=-1, index=spec_indices)
+                        token_id_list.append(res)
+                        token_prob_list.append(
+                            torch.nn.functional.one_hot(
+                                res,
+                                num_classes=self.vocab_size).to(torch.float32))
+                        has_spec_out = True
+                        break
+                else:
+                    token_id_list.append(None)
+                    token_prob_list.append(None)
 
-            arr.append(res)
+        logger.info(
+            f"NGramWorker matching time ({has_spec_out}): {(time.perf_counter_ns() - start) / 1e6} ms"
+        )
+        start = time.perf_counter_ns()
 
         if not has_spec_out:
             return None, False
 
         outputs = []
-        token_ids = torch.as_tensor(arr, dtype=torch.long, device=self.device)
-        indices = token_ids.unsqueeze(2)
+        for idx in range(len(execute_model_req.seq_group_metadata_list)):
+            if token_id_list[idx] is None:
+                outputs.append(None)
+            else:
+                outputs.append(
+                    SamplerOutput(
+                        outputs=None,
+                        sampled_token_probs=token_prob_list[idx],
+                        logprobs=torch.zeros((sample_len, self.vocab_size),
+                                            dtype=torch.float32,
+                                            device=self.device),
+                        sampled_token_ids=token_id_list[idx],
+                    ))
 
-        token_probs = torch.zeros(
-            (len(execute_model_req.seq_group_metadata_list), sample_len,
-             self.vocab_size),
-            dtype=torch.float32,
-            device=self.device,
+        logger.info(
+            f"NGramWorker sampler_output time: {(time.perf_counter_ns() - start) / 1e6} ms"
         )
-        token_probs.scatter_(2, indices, 1)
-        token_logprobs = torch.zeros(
-            (len(execute_model_req.seq_group_metadata_list), sample_len,
-             self.vocab_size),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        for i in range(len(execute_model_req.seq_group_metadata_list)):
-            outputs.append(
-                SamplerOutput(
-                    outputs=None,
-                    sampled_token_probs=token_probs[i],
-                    logprobs=token_logprobs[i],
-                    sampled_token_ids=token_ids[i],
-                ))
         return outputs, False
 
     def get_spec_proposals(

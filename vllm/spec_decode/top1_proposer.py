@@ -73,6 +73,25 @@ class Top1Proposer(SpeculativeProposer):
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
             )
+            if maybe_sampler_output is not None:
+                # Some sequences do not have specualtive tokens, add
+                # them to non-speculative sequences as well
+                zero_seq_idxs = []
+                for seq_idx, sampler_output in zip(
+                        nonzero_proposal_len_indices, maybe_sampler_output):
+                    if sampler_output is None:
+                        proposal_lens[seq_idx] = 0
+                        zero_seq_idxs.append(seq_idx)
+                nonzero_proposal_len_indices = [
+                    idx for idx in nonzero_proposal_len_indices
+                    if idx not in zero_seq_idxs
+                ]
+                maybe_sampler_output = [
+                    sampler_output for sampler_output in maybe_sampler_output
+                    if sampler_output is not None
+                ]
+                if not maybe_sampler_output:
+                    maybe_sampler_output = None
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
