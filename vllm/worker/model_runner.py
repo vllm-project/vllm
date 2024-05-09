@@ -503,7 +503,7 @@ class ModelRunner:
                 seq_start_loc=seq_start_loc,
                 context_lens_tensor=context_lens_tensor,
                 block_tables=block_tables,
-                use_cuda_graph=False,
+                use_cuda_graph=use_captured_graph,
             )
 
         if self.lora_config:
