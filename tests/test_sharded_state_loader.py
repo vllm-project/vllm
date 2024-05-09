@@ -2,9 +2,9 @@ import os
 import shutil
 from tempfile import TemporaryDirectory
 
-from vllm import LLM, SamplingParams
 from huggingface_hub import snapshot_download
 
+from vllm import LLM, SamplingParams
 
 prompts = [
     "Hello, my name is",
