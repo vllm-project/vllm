@@ -18,6 +18,9 @@ def main(args: argparse.Namespace):
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(model=args.model,
+              speculative_model=args.speculative_model,
+              num_speculative_tokens=args.num_speculative_tokens,
+              use_v2_block_manager=True,
               tokenizer=args.tokenizer,
               quantization=args.quantization,
               tensor_parallel_size=args.tensor_parallel_size,
@@ -99,6 +102,8 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--speculative-model', type=str, default=None)
+    parser.add_argument('--num-speculative-tokens', type=int, default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',

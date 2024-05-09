@@ -28,8 +28,8 @@ USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
-        assert (not self.speculative_config
-                ), "Speculative decoding not yet supported for RayGPU backend."
+        #assert (not self.speculative_config
+        #        ), "Speculative decoding not yet supported for RayGPU backend."
 
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
@@ -90,6 +90,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id,
             )
+
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
@@ -97,7 +98,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(
                 worker_module_name="vllm.worker.worker",
-                worker_class_name="Worker",
+                worker_class_name="Worker2",
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
@@ -108,7 +109,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 self.driver_dummy_worker = worker
                 self.driver_worker = RayWorkerWrapper(
                     worker_module_name="vllm.worker.worker",
-                    worker_class_name="Worker",
+                    worker_class_name="Worker2",
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
@@ -165,6 +166,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self._run_workers("load_model",
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
+
+    def _get_worker_kwargs(self, *args, **kwargs):
+        kwargs = super()._get_worker_kwargs(*args, **kwargs)
+        kwargs['speculative_config'] = self.speculative_config
+        return kwargs
 
     def execute_model(
             self,

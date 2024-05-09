@@ -135,6 +135,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         self._configure_model_sampler_for_spec_decode()
 
+    def load_model(self, *args, **kwargs):
+        pass
+
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
         to keep data on device without transferring to CPU and serializing,
@@ -191,21 +194,36 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @torch.inference_mode()
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest = None) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
+        
+        from vllm.distributed.communication_op import broadcast_tensor_dict
+        
+        if self.rank == 0:
+            t_dict = {
+                "key":execute_model_req,
+            }
+            broadcast_tensor_dict(t_dict, src=0)
+        else:
+            t_dict = broadcast_tensor_dict(src=0)
+            execute_model_req = t_dict["key"]
 
         assert execute_model_req.seq_group_metadata_list is not None, (
             "speculative decoding "
             "requires non-None seq_group_metadata_list")
 
-        # If no spec tokens, call the proposer and scorer workers normally.
-        # Used for prefill.
-        if execute_model_req.num_lookahead_slots == 0 or len(
-                execute_model_req.seq_group_metadata_list) == 0:
-            return self._run_no_spec(execute_model_req)
+        if self.rank == 0:
+            # If no spec tokens, call the proposer and scorer workers normally.
+            # Used for prefill.
+            if execute_model_req.num_lookahead_slots == 0 or len(
+                    execute_model_req.seq_group_metadata_list) == 0:
+                return self._run_no_spec(execute_model_req)
 
-        return self._run_speculative_decoding_step(execute_model_req)
+            return self._run_speculative_decoding_step(execute_model_req)
+        else:
+            return self._run_no_spec_dummy(execute_model_req)
+            
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(
@@ -230,6 +248,31 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.sampled_tokens = None
         sampler_output.logprobs = None
         return [sampler_output]
+
+    @nvtx_range("spec_decode_worker._run_no_spec_dummy")
+    def _run_no_spec_dummy(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        """Run a prefill step, without any speculation. The input is sent to the
+        proposer and scorer model so that the KV cache is consistent between the
+        two.
+        """
+        #logger.info("run proposer worker no spec")
+
+        for _ in range(max(execute_model_req.num_lookahead_slots, 1)):
+            self.proposer_worker.execute_model(execute_model_req)
+
+        #logger.info("run target worker no spec")
+        sampler_output = self.scorer_worker.execute_model(execute_model_req)
+        #assert len(sampler_output) == 1
+        #sampler_output = sampler_output[0]
+
+        ## Clear device tensors from sampler output. This reduces communication
+        ## overhead when the engine runs in a different process than the workers.
+        #sampler_output.probs = None
+        #sampler_output.sampled_tokens = None
+        #sampler_output.logprobs = None
+        #return [sampler_output]
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
