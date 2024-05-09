@@ -69,6 +69,12 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
+   :caption: Offline Inference
+
+   offline_inference/llm
+
+.. toctree::
+   :maxdepth: 1
    :caption: Serving
 
    serving/openai_compatible_server
