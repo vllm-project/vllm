@@ -23,14 +23,9 @@ def graph_capture_mode():
     #
     # Note that custom allreduce will have a runtime check, if the tensor size
     # is too large, it will fallback to the next available option.
-    from vllm.distributed.device_communicators import custom_all_reduce
-    if not custom_all_reduce.is_initialized():
-        from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
-        assert _TP_PYNCCL_COMMUNICATOR is not None
-        with _TP_PYNCCL_COMMUNICATOR.enable(
-                stream=torch.cuda.current_stream()):
-            yield
-    else:
+    from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
+    assert _TP_PYNCCL_COMMUNICATOR is not None
+    with _TP_PYNCCL_COMMUNICATOR.enable(stream=torch.cuda.current_stream()):
         yield
 
 
