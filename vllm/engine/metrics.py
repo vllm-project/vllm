@@ -59,12 +59,12 @@ class Metrics:
             name="vllm:cpu_cache_usage_perc",
             documentation="CPU KV-cache usage. 1 means 100 percent usage.",
             labelnames=labelnames)
-        self.gauge_num_cumulative_preemption = Gauge(
+
+        # Iteration stats
+        self.counter_num_preemption = Counter(
             name="vllm:num_cumulative_preemption",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames)
-
-        # Iteration stats
         self.counter_prompt_tokens = Counter(
             name="vllm:prompt_tokens_total",
             documentation="Number of prefill tokens processed.",
@@ -176,8 +176,8 @@ class Stats:
     num_running_sys: int
     num_waiting_sys: int
     num_swapped_sys: int
-    # Total cumulative number of preemptions including both recompute and swap.
-    num_cumulative_preemption: int
+    # Number of preemptions including both recompute and swap.
+    num_preemption_sys: int
     #   KV Cache Usage in %
     gpu_cache_usage_sys: float
     cpu_cache_usage_sys: float
@@ -248,10 +248,10 @@ class StatLogger:
                         stats.gpu_cache_usage_sys)
         self._log_gauge(self.metrics.gauge_cpu_cache_usage,
                         stats.cpu_cache_usage_sys)
-        self._log_gauge(self.metrics.gauge_num_cumulative_preemption,
-                        stats.num_cumulative_preemption)
 
         # Iteration level data
+        self._log_counter(self.metrics.counter_num_preemption,
+                          stats.num_preemption_sys)
         self._log_counter(self.metrics.counter_prompt_tokens,
                           stats.num_prompt_tokens_iter)
         self._log_counter(self.metrics.counter_generation_tokens,
@@ -345,7 +345,7 @@ class StatLogger:
                 "Running: %d reqs, Swapped: %d reqs, "
                 "Pending: %d reqs, GPU KV cache usage: %.1f%%, "
                 "CPU KV cache usage: %.1f%%, "
-                "Cumulative Number of Preemption : %d",
+                "Preempted : %d",
                 prompt_throughput,
                 generation_throughput,
                 stats.num_running_sys,
@@ -353,7 +353,7 @@ class StatLogger:
                 stats.num_waiting_sys,
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
-                stats.num_cumulative_preemption,
+                stats.num_preemption_sys,
             )
 
             # Reset tracked stats for next interval.

@@ -634,7 +634,7 @@ class LLMEngine:
         num_running_sys = len(self.scheduler.running)
         num_swapped_sys = len(self.scheduler.swapped)
         num_waiting_sys = len(self.scheduler.waiting)
-        num_cumulative_preemption = self.scheduler.cumulative_preemption_cnt
+        num_preemption_sys = (self.scheduler.num_cumulative_preemption)
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -744,13 +744,12 @@ class LLMEngine:
 
         return Stats(
             now=now,
-
             # System stats
             #   Scheduler State
             num_running_sys=num_running_sys,
             num_swapped_sys=num_swapped_sys,
             num_waiting_sys=num_waiting_sys,
-            num_cumulative_preemption=num_cumulative_preemption,
+            num_preemption_sys=num_preemption_sys,
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
             cpu_cache_usage_sys=cpu_cache_usage_sys,
