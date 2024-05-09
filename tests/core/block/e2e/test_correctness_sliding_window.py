@@ -4,7 +4,7 @@ from typing import List
 import pytest
 from conftest import get_text_from_llm_generator
 
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
 
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
@@ -49,7 +49,9 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
     print('Getting token ids from block manager v1')
     baseline_texts = get_text_from_llm_generator(baseline_llm_generator,
-                                                 prompts, sampling_params)
+                                                 prompts,
+                                                 sampling_params,
+                                                 llm_cb=check_window(prompts))
 
     check_answers(indices, answer, baseline_texts)
 
@@ -98,8 +100,10 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed):
 
     # We don't compare with the baseline model here, since the results
     # slightly different due to different tailing in attention.
-    test_texts = get_text_from_llm_generator(test_llm_generator, prompts,
-                                             sampling_params)
+    test_texts = get_text_from_llm_generator(test_llm_generator,
+                                             prompts,
+                                             sampling_params,
+                                             llm_cb=check_window(prompts))
     check_answers(indices, answer, test_texts)
 
 
@@ -141,3 +145,15 @@ def check_answers(indices: List[int], answer: List[int], outputs: List[str]):
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok > 0.7
+
+
+def check_window(prompts: List[str]):
+
+    def inner(llm: LLM):
+        sliding_window = llm.llm_engine.model_config.get_sliding_window()
+        assert sliding_window and sliding_window > 0
+        assert any(
+            len(llm.get_tokenizer().tokenize(prompt)) > sliding_window
+            for prompt in prompts)
+
+    return inner

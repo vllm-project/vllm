@@ -1,4 +1,4 @@
-from typing import Iterable
+from typing import Callable, Iterable, Optional
 
 import pytest
 
@@ -43,9 +43,14 @@ def create_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
         del llm
 
 
-def get_text_from_llm_generator(llm_generator: Iterable[LLM], prompts,
-                                sampling_params):
+def get_text_from_llm_generator(llm_generator: Iterable[LLM],
+                                prompts,
+                                sampling_params,
+                                llm_cb: Optional[Callable[[LLM],
+                                                          None]] = None):
     for llm in llm_generator:
+        if llm_cb:
+            llm_cb(llm)
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         text = [output.outputs[0].text for output in outputs]
         del llm
