@@ -269,18 +269,10 @@ class ModelRunner:
                 # it contains output tokens.
                 seq_len = min(seq_data.get_len(),
                               context_len + token_chunk_size)
+                if self.sliding_window is not None:
+                    seq_len = min(seq_len, self.sliding_window)
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 seq_lens.append(seq_len)
-
-                if seq_group_metadata.is_prompt:
-                    assert len(seq_ids) == 1
-                    num_prefills += 1
-                    num_prefill_tokens += len(tokens)
-                    decode_only = False
-                    prefill_seq_lens.append(seq_len)
-                else:
-                    num_decode_tokens += 1
-                    decode_seq_lens.append(seq_len)
 
                 # NOTE: This only works for oooooooxxx style attention.
                 if computed_block_nums is not None and len(
@@ -297,6 +289,10 @@ class ModelRunner:
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
+                        if self.sliding_window is not None:
+                            sliding_window_blocks = (self.sliding_window //
+                                                    self.block_size)
+                            block_table = block_table[-sliding_window_blocks:]
                         block_tables.append(block_table)
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
@@ -321,6 +317,16 @@ class ModelRunner:
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
+
+                if seq_group_metadata.is_prompt:
+                    assert len(seq_ids) == 1
+                    num_prefills += 1
+                    num_prefill_tokens += len(tokens)
+                    decode_only = False
+                    prefill_seq_lens.append(seq_len)
+                else:
+                    num_decode_tokens += 1
+                    decode_seq_lens.append(seq_len)
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
