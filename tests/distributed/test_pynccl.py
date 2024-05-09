@@ -6,7 +6,7 @@ import torch
 
 from vllm.distributed.communication_op import (
     tensor_model_parallel_all_reduce, use_pynccl_allreduce)
-from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -52,12 +52,13 @@ def worker_fn_wrapper(fn):
 
 @worker_fn_wrapper
 def worker_fn():
-    comm = NCCLCommunicator()
-    tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(comm.rank)
-    with comm.enable():
-        comm.all_reduce(tensor)
+    pynccl_comm = PyNcclCommunicator()
+    tensor = torch.ones(16, 1024, 1024,
+                        dtype=torch.float32).cuda(pynccl_comm.rank)
+    with pynccl_comm.enable():
+        pynccl_comm.all_reduce(tensor)
     result = tensor.mean().cpu().item()
-    assert result == comm.world_size
+    assert result == pynccl_comm.world_size
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -74,17 +75,17 @@ def multiple_tp_worker_fn():
         torch.distributed.new_group(ranks=[2, 3], backend="gloo")
     ]
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
-    comm = NCCLCommunicator(group=group, device=device)
+    pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with comm.enable():
+    with pynccl_comm.enable():
         # two groups can communicate independently
         if torch.distributed.get_rank() in [0, 1]:
-            comm.all_reduce(tensor)
-            comm.all_reduce(tensor)
+            pynccl_comm.all_reduce(tensor)
+            pynccl_comm.all_reduce(tensor)
             result = tensor.mean().cpu().item()
             assert result == 4
         else:
-            comm.all_reduce(tensor)
+            pynccl_comm.all_reduce(tensor)
             result = tensor.mean().cpu().item()
             assert result == 2
 
@@ -93,7 +94,7 @@ def multiple_tp_worker_fn():
                     reason="Need at least 4 GPUs to run the test.")
 def test_pynccl_multiple_tp():
     # this tests pynccl for multiple tp groups, in a standalone way
-    # i.e. call `comm.all_reduce` directly
+    # i.e. call `pynccl_comm.all_reduce` directly
     distributed_run(multiple_tp_worker_fn, 4)
 
 
@@ -127,19 +128,20 @@ def test_pynccl_multiple_tp_with_vllm():
 def worker_fn_with_cudagraph():
     with torch.no_grad():
         graph = torch.cuda.CUDAGraph()
-        comm = NCCLCommunicator()
+        pynccl_comm = PyNcclCommunicator()
         # run something in the default stream to initialize torch engine
-        a = torch.ones((4, 4), device=f'cuda:{comm.rank}')
+        a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(graph, stream=comm.stream), comm.enable():
+        with torch.cuda.graph(graph,
+                              stream=pynccl_comm.stream), pynccl_comm.enable():
             # operation during the graph capture is recorded but not executed
             # see https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#creating-a-graph-using-stream-capture # noqa
-            comm.all_reduce(a)
-        comm.stream.synchronize()
-        assert a.mean().cpu().item() == comm.world_size**0
+            pynccl_comm.all_reduce(a)
+        pynccl_comm.stream.synchronize()
+        assert a.mean().cpu().item() == pynccl_comm.world_size**0
         graph.replay()
-        comm.stream.synchronize()
-        assert a.mean().cpu().item() == comm.world_size**1
+        pynccl_comm.stream.synchronize()
+        assert a.mean().cpu().item() == pynccl_comm.world_size**1
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,

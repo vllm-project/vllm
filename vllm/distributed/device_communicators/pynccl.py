@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class NCCLCommunicator:
+class PyNcclCommunicator:
 
     def __init__(
         self,
@@ -27,7 +27,7 @@ class NCCLCommunicator:
         Args:
             group: the process group to work on. If None, it will use the
                 default process group.
-            device: the device to bind the NCCLCommunicator to. If None,
+            device: the device to bind the PyNcclCommunicator to. If None,
                 it will be bind to f"cuda:{local_rank}".
             library_path: the path to the NCCL library. If None, it will
                 use the default library path.
@@ -37,7 +37,7 @@ class NCCLCommunicator:
         assert dist.is_initialized()
         group = get_cpu_world_group() if group is None else group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
-            "NCCLCommunicator should be attached to a non-NCCL group.")
+            "PyNcclCommunicator should be attached to a non-NCCL group.")
         self.group = group
         # note: this rank is the rank in the group
         self.rank = dist.get_rank(group)

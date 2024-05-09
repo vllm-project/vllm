@@ -157,8 +157,8 @@ def initialize_model_parallel(
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
 
-    from vllm.distributed.device_communicators.pynccl import NCCLCommunicator
-    _TP_PYNCCL_COMMUNICATOR = NCCLCommunicator(
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
         group=_TP_CPU_GROUP,
         device=_LOCAL_RANK,
     )
