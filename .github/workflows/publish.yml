@@ -49,7 +49,7 @@ jobs:
       matrix:
           os: ['ubuntu-20.04']
           python-version: ['3.8', '3.9', '3.10', '3.11']
-          pytorch-version: ['2.2.1']  # Must be the most recent version that meets requirements-cuda.txt.
+          pytorch-version: ['2.3.0']  # Must be the most recent version that meets requirements-cuda.txt.
           cuda-version: ['11.8', '12.1']
 
     steps:
@@ -58,6 +58,9 @@ jobs:
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: ${{ github.job }}-${{ matrix.python-version }}-${{ matrix.cuda-version }}
 
       - name: Set up Linux Env
         if: ${{ runner.os == 'Linux' }}
@@ -79,6 +82,8 @@ jobs:
 
       - name: Build wheel
         shell: bash
+        env:
+          CMAKE_BUILD_TYPE: Release # do not compile with debug symbol to reduce wheel size
         run: |
           bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)

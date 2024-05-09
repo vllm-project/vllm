@@ -109,7 +109,7 @@ class RotaryEmbedding(nn.Module):
             key_pass = key[..., self.rotary_dim:]
 
         self.cos_sin_cache: torch.Tensor = self.cos_sin_cache.to(
-            positions.device)
+            positions.device, dtype=query.dtype)
         cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
                                      if offsets is not None else positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -143,7 +143,8 @@ class RotaryEmbedding(nn.Module):
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
+        self.cos_sin_cache = self.cos_sin_cache.to(positions.device,
+                                                   dtype=query.dtype)
         # ops.rotary_embedding()/batched_rotary_embedding()
         # are in-place operations that update the query and key tensors.
         if offsets is not None:
@@ -155,6 +156,12 @@ class RotaryEmbedding(nn.Module):
             ops.rotary_embedding(positions, query, key, self.head_size,
                                  self.cos_sin_cache, self.is_neox_style)
         return query, key
+
+    def extra_repr(self) -> str:
+        s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
+        s += f", max_position_embeddings={self.max_position_embeddings}"
+        s += f", base={self.base}, is_neox_style={self.is_neox_style}"
+        return s
 
 
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
@@ -431,8 +438,8 @@ class Phi3SuScaledRotaryEmbedding(nn.Module):
                               torch.full_like(positions, k)).long()
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
-        self.long_short_cos_sin_cache = self.long_short_cos_sin_cache.to(
-            idx.device)
+        self.long_short_cos_sin_cache: torch.Tensor = (
+            self.long_short_cos_sin_cache.to(idx.device))
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 

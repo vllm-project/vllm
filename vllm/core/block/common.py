@@ -1,5 +1,4 @@
-from collections import defaultdict
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 
@@ -7,7 +6,19 @@ BlockId = int
 RefCount = int
 
 
-class RefCounter:
+class RefCounterProtocol(Protocol):
+
+    def incr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def decr(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+    def get(self, block_id: BlockId) -> RefCount:
+        raise NotImplementedError
+
+
+class RefCounter(RefCounterProtocol):
     """A class for managing reference counts for a set of block indices.
 
     The RefCounter class maintains a dictionary that maps block indices to their
@@ -54,7 +65,7 @@ class RefCounter:
         return ReadOnlyRefCounter(self)
 
 
-class ReadOnlyRefCounter:
+class ReadOnlyRefCounter(RefCounterProtocol):
     """A read-only view of the RefCounter class.
 
     The ReadOnlyRefCounter class provides a read-only interface to access the
@@ -96,10 +107,10 @@ class CopyOnWriteTracker:
 
     def __init__(
         self,
-        refcounter: RefCounter,
+        refcounter: RefCounterProtocol,
         allocator: BlockAllocator,
     ):
-        self._copy_on_writes: Dict[BlockId, List[BlockId]] = defaultdict(list)
+        self._copy_on_writes: List[Tuple[BlockId, BlockId]] = []
         self._refcounter = refcounter
         self._allocator = allocator
 
@@ -140,25 +151,25 @@ class CopyOnWriteTracker:
             # Track src/dst copy.
             assert src_block_id is not None
             assert block_id is not None
-            self._copy_on_writes[src_block_id].append(block_id)
+            self._copy_on_writes.append((src_block_id, block_id))
 
         return block_id
 
-    def clear_cows(self) -> Dict[BlockId, List[BlockId]]:
+    def clear_cows(self) -> List[Tuple[BlockId, BlockId]]:
         """Clears the copy-on-write tracking information and returns the current
         state.
 
-        This method returns a dictionary mapping source block indices to lists
-        of destination block indices for the current copy-on-write operations.
+        This method returns a list mapping source block indices to
+         destination block indices for the current copy-on-write operations.
         It then clears the internal tracking information.
 
         Returns:
-            Dict[BlockId, List[BlockId]]: A dictionary mapping source
-                block indices to lists of destination block indices for the
+            List[Tuple[BlockId, BlockId]]: A list mapping source
+                block indices to destination block indices for the
                 current copy-on-write operations.
         """
-        cows = dict(self._copy_on_writes)
-        self._copy_on_writes.clear()
+        cows = self._copy_on_writes
+        self._copy_on_writes = []
         return cows
 
 

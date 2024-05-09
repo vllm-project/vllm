@@ -1,38 +1,44 @@
-# This script build the ROCm docker image and run the API server inside the container.
-# It serves a sanity check for compilation and basic model usage.
+# This script build the ROCm docker image and runs test inside it.
 set -ex
 
 # Print ROCm version
+echo "--- ROCm info"
 rocminfo
 
-# Try building the docker image
-docker build -t rocm -f Dockerfile.rocm .
+echo "--- Resetting GPUs"
 
-# Setup cleanup
-remove_docker_container() { docker rm -f rocm || true; }
-trap remove_docker_container EXIT
-remove_docker_container
+echo "reset" > /opt/amdgpu/etc/gpu_state
 
-# Run the image
-docker run --device /dev/kfd --device /dev/dri --network host --name rocm rocm python3 -m vllm.entrypoints.api_server &
-
-# Wait for the server to start
-wait_for_server_to_start() {
-    timeout=300
-    counter=0
-
-    while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000/health)" != "200" ]; do
-        sleep 1
-        counter=$((counter + 1))
-        if [ $counter -ge $timeout ]; then
-            echo "Timeout after $timeout seconds"
-            break
+while true; do
+        sleep 3
+        if grep -q clean /opt/amdgpu/etc/gpu_state; then
+                echo "GPUs state is \"clean\""
+                break
         fi
-    done
-}
-wait_for_server_to_start
+done
 
-# Test a simple prompt
-curl -X POST -H "Content-Type: application/json" \
-    localhost:8000/generate \
-    -d '{"prompt": "San Francisco is a"}'
+echo "--- Building container"
+sha=$(git rev-parse --short HEAD)
+container_name=rocm_${sha}
+docker build \
+        -t ${container_name} \
+        -f Dockerfile.rocm \
+        --progress plain \
+        .
+
+remove_docker_container() {
+   docker rm -f ${container_name} || docker image rm -f ${container_name} || true
+}
+trap remove_docker_container EXIT
+
+echo "--- Running container"
+
+docker run \
+        --device /dev/kfd --device /dev/dri \
+        --network host \
+        --rm \
+        -e HF_TOKEN \
+        --name ${container_name} \
+        ${container_name} \
+        /bin/bash -c "${@}"
+

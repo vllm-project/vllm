@@ -11,9 +11,11 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
@@ -43,7 +45,7 @@ class TensorizerConfig:
                           str, bytes, os.PathLike, int]
     vllm_tensorized: bool
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -63,7 +65,7 @@ class TensorizerConfig:
             "s3_secret_access_key": self.s3_secret_access_key,
             "s3_endpoint": self.s3_endpoint,
         }
-        return TensorizerArgs(**tensorizer_args)
+        return TensorizerArgs(**tensorizer_args)  # type: ignore
 
     def verify_with_parallel_config(
         self,
@@ -103,7 +105,7 @@ class TensorizerArgs:
                           str, bytes, os.PathLike, int]
     vllm_tensorized: bool
     verify_hash: Optional[bool] = False
-    num_readers: Optional[int] = 1
+    num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
@@ -124,8 +126,9 @@ class TensorizerArgs:
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
       num_readers: Controls how many threads are allowed to read concurrently
-          from the source file. Default is 1. This greatly increases
-          performance.
+          from the source file. Default is `None`, which will dynamically set
+          the number of readers based on the number of available 
+          resources and model size. This greatly increases performance.
       encryption_keyfile: File path to a binary file containing a  
           binary key to use for decryption. `None` (the default) means 
           no decryption. See the example script in 
@@ -140,13 +143,10 @@ class TensorizerArgs:
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = (self.s3_access_key_id
-                                 or os.environ.get("S3_ACCESS_KEY_ID")) or None
-        self.s3_secret_access_key = (
-            self.s3_secret_access_key
-            or os.environ.get("S3_SECRET_ACCESS_KEY")) or None
-        self.s3_endpoint = (self.s3_endpoint
-                            or os.environ.get("S3_ENDPOINT_URL")) or None
+        self.s3_access_key_id = self.s3_access_key_id or envs.S3_ACCESS_KEY_ID
+        self.s3_secret_access_key = (self.s3_secret_access_key
+                                     or envs.S3_SECRET_ACCESS_KEY)
+        self.s3_endpoint = self.s3_endpoint or envs.S3_ENDPOINT_URL
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -198,10 +198,12 @@ class TensorizerArgs:
             "use for decryption. Can be a file path or S3 network URI.")
         group.add_argument(
             "--num-readers",
-            default=1,
+            default=None,
             type=int,
             help="Controls how many threads are allowed to read concurrently "
-            "from the source file.")
+            "from the source file. Default is `None`, which will dynamically "
+            "set the number of readers based on the available resources "
+            "and model size. This greatly increases performance.")
         group.add_argument(
             "--s3-access-key-id",
             default=None,
@@ -251,7 +253,7 @@ class TensorizerAgent:
     """
 
     def __init__(self, tensorizer_config: TensorizerConfig,
-                 linear_method: LinearMethodBase, **extra_kwargs):
+                 quant_config: QuantizationConfig, **extra_kwargs):
         if tensorizer_load_fail is not None:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
@@ -262,19 +264,21 @@ class TensorizerAgent:
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
         self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("linear_method", None) is not None:
-            self.linear_method = extra_kwargs["linear_method"]
+        if extra_kwargs.get("quant_config", None) is not None:
+            self.quant_config = extra_kwargs["quant_config"]
         else:
-            self.linear_method = linear_method
+            self.quant_config = quant_config
         self.model = self._init_model()
 
     def _init_model(self):
+        assert self.tensorizer_config.hf_config is not None
         model_args = self.tensorizer_config.hf_config
         model_args.torch_dtype = self.tensorizer_config.dtype
+        assert self.tensorizer_config.model_class is not None
         with no_init_or_tensor():
             return self.tensorizer_config.model_class(
                 config=model_args,
-                linear_method=self.linear_method,
+                quant_config=self.quant_config,
                 **self.extra_kwargs)
 
     def _resize_lora_embeddings(self):
@@ -334,10 +338,10 @@ class TensorizerAgent:
         per_second = convert_bytes(deserializer.total_tensor_bytes / duration)
         after_mem = get_mem_usage()
         deserializer.close()
-        logger.info(f"Deserialized {total_bytes_str} in "
-                    f"{end - start:0.2f}s, {per_second}/s")
-        logger.info(f"Memory usage before: {before_mem}")
-        logger.info(f"Memory usage after: {after_mem}")
+        logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
+                    end - start, per_second)
+        logger.info("Memory usage before: %s", before_mem)
+        logger.info("Memory usage after: %s", after_mem)
 
         self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
