@@ -8,7 +8,8 @@ from torch.distributed import ProcessGroup
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
-                             get_tensor_model_parallel_world_size)
+                             get_tensor_model_parallel_world_size,
+                             get_tp_pynccl_communicator)
 
 
 @contextmanager
@@ -23,10 +24,10 @@ def graph_capture_mode():
     #
     # Note that custom allreduce will have a runtime check, if the tensor size
     # is too large, it will fallback to the next available option.
-    from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
-    assert _TP_PYNCCL_COMMUNICATOR is not None
-    with _TP_PYNCCL_COMMUNICATOR.change_state(
-            enable=True, stream=torch.cuda.current_stream()):
+    pynccl_comm = get_tp_pynccl_communicator()
+    assert pynccl_comm is not None
+    with pynccl_comm.change_state(enable=True,
+                                  stream=torch.cuda.current_stream()):
         yield
 
 
@@ -44,7 +45,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """
     from vllm.distributed.device_communicators.custom_all_reduce import (
         custom_all_reduce)
-    from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
 
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
@@ -52,9 +52,9 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     out = custom_all_reduce(input_)
     if out is not None:
         return out
-    if (_TP_PYNCCL_COMMUNICATOR is not None
-            and not _TP_PYNCCL_COMMUNICATOR.disabled):
-        _TP_PYNCCL_COMMUNICATOR.all_reduce(input_)
+    pynccl_comm = get_tp_pynccl_communicator()
+    if (pynccl_comm is not None and not pynccl_comm.disabled):
+        pynccl_comm.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
                                      group=get_tensor_model_parallel_group())

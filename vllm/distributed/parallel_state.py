@@ -47,6 +47,11 @@ _PP_GLOBAL_RANKS: Optional[List[int]] = None
 _LOCAL_RANK = -1
 
 
+def get_tp_pynccl_communicator():
+    global _TP_PYNCCL_COMMUNICATOR
+    return _TP_PYNCCL_COMMUNICATOR
+
+
 def get_local_rank():
     global _LOCAL_RANK
     return _LOCAL_RANK
