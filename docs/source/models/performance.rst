@@ -24,17 +24,19 @@ It batches all pending decode requests to the batch before scheduling any prefil
 When there are available token_budget (``max_num_batched_tokens``), it schedules pending prefills.
 If a last pending prefill request cannot fit into ``max_num_batched_tokens``, it chunks it.
 
-This policy has two benefits.
+This policy has two benefits:
 
 - It improves ITL and generation decode because decode requests are prioritized.
 - It helps achieve better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
 
 You can tune the performance by changing ``max_num_batched_tokens``.
-By default, it is set to 512, which has the best ITL on A100 in the initial benchmark.
-Smaller batch size achieves better ITL because there are fewer prefills interrupting decodes.
-Higher batch size achieves better TTFT as you can put more prefill to the batch.
-If ``max_num_batched_tokens`` is the same as ``max_model_len``, that's almost the equivalent to the default scheduling policy (except that it still prioritizes decodes).
-Note that the default batch size (512) is optimized for ITL, and it may have lower throughput than the default scheduler.
+By default, it is set to 512, which has the best ITL on A100 in the initial benchmark (llama 70B and mixtral 8x22B).
+Smaller ``max_num_batched_tokens`` achieves better ITL because there are fewer prefills interrupting decodes.
+Higher ``max_num_batched_tokens`` achieves better TTFT as you can put more prefill to the batch.
+
+- If ``max_num_batched_tokens`` is the same as ``max_model_len``, that's almost the equivalent to the default scheduling policy (except that it still prioritizes decodes).
+- Note that the default value (512) of ``max_num_batched_tokens`` is optimized for ITL, and it may have lower throughput than the default scheduler.
+
 We recommend you set ``max_num_batched_tokens > 2048`` for throughput.
 
 See related papers for more details (https://arxiv.org/pdf/2401.08671 or https://arxiv.org/pdf/2308.16369).
