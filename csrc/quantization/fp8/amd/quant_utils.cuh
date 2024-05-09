@@ -5,7 +5,7 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_bfloat16.h>
 
-#include "../dtype_kv_cache.cuh"
+#include "../../../attention/dtype_fp8.cuh"
 #include "../../../attention/dtype_float32.cuh"
 #include "../../../attention/dtype_bfloat16.cuh"
 
@@ -522,8 +522,7 @@ __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(const uint3
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout convert(const Tin &x) {
 #ifdef ENABLE_FP8
-  if constexpr (kv_dt == Fp8KVCacheDataType::kAuto ||
-                kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
     return vec_conversion<Tout, Tin>(x);
   }
 #endif
@@ -533,8 +532,7 @@ __inline__ __device__ Tout convert(const Tin &x) {
 template <typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __inline__ __device__ Tout scaled_convert(const Tin &x, const float scale) {
 #ifdef ENABLE_FP8
-  if constexpr (kv_dt == Fp8KVCacheDataType::kAuto ||
-                kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
+  if constexpr (kv_dt == Fp8KVCacheDataType::kFp8E4M3) {
     return scaled_vec_conversion<Tout, Tin>(x, scale);
   }
 #endif

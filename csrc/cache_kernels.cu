@@ -4,7 +4,7 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/fp8/dtype_kv_cache.cuh"
+
 #ifdef USE_ROCM
 #include "quantization/fp8/amd/quant_utils.cuh"
 #else

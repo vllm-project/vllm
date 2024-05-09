@@ -24,7 +24,6 @@
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
 
-#include "../quantization/fp8/dtype_kv_cache.cuh"
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
   #include "../quantization/fp8/amd/quant_utils.cuh"
