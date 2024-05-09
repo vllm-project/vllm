@@ -539,6 +539,40 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
+        "model": "JackFram/llama-160m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "JackFram/llama-68m",
+        "num_speculative_tokens": 5,
+        "speculative_disable_by_batch_size": 2,
+    },
+])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("output_len", [10])
+@pytest.mark.parametrize("seed", [1])
+def test_disable_speculation(baseline_llm_generator, test_llm_generator,
+                             batch_size: int, output_len: int):
+    """Verify greedy equality when all sequences disable speculation.
+    """
+    run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
         "model": "JackFram/llama-68m",
 
         # Skip cuda graph recording for fast test.
