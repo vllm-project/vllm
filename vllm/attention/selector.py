@@ -111,7 +111,7 @@ def _which_attn_to_use(
         import vllm_flash_attn  # noqa: F401
     except ImportError:
         logger.info(
-            "Cannot use FlashAttention backend because the vllm_flash_attn "
+            "Cannot use FlashAttention-2 backend because the vllm_flash_attn "
             "package is not found. `pip install vllm-flash-attn` for better "
             "performance.")
         return _Backend.XFORMERS
