@@ -162,7 +162,8 @@ class HfRunner:
             )
         elif model_name in _EMBEDDING_MODELS:
             print("using sentence transformer")
-            self.model = SentenceTransformer(model_name, ).cuda()
+            self.model = SentenceTransformer(
+                model_name, ).to(dtype=torch_dtype).cuda()
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,

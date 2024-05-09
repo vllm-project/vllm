@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup
@@ -47,13 +47,13 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         return AllocStatus.OK
 
     def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
+                num_lookahead_slots: int) -> List[Tuple[int, int]]:
         return None  # type: ignore
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         return None  # type: ignore
 
     def free(self, seq: Sequence) -> None:

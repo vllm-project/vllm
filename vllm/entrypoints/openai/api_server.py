@@ -205,8 +205,8 @@ if __name__ == "__main__":
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
-    openai_serving_embedding = OpenAIServingEmbedding(
-        engine, model_config, served_model_names)
+    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
+                                                      served_model_names)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,
