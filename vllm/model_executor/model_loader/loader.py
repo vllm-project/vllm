@@ -401,7 +401,7 @@ class ShardedStateLoader(BaseModelLoader):
                     state_dict.pop(key)
             for key, val in state_dict.items():
                 if val.data_ptr() in data_ptrs:
-                    logger.warning(f"Skipping loading shared tensor '{key}'")
+                    logger.warning("Skipping loading shared tensor '%s'", key)
                 else:
                     raise ValueError(f"Missing key '{key}' in loaded state!")
         return model.eval()
@@ -425,7 +425,7 @@ class ShardedStateLoader(BaseModelLoader):
         data_ptrs = {}
         for name, tensor in model.state_dict().items():
             if tensor.data_ptr() in data_ptrs:
-                logger.warning(f"Skipping saving shared tensor '{name}'")
+                logger.warning("Skipping saving shared tensor '%s'", name)
                 continue
             data_ptrs[tensor.data_ptr()] = name
             param_size = tensor.nelement() * tensor.element_size()
