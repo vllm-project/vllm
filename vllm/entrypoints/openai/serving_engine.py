@@ -179,6 +179,10 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
+            # The special tokens (BOS) have already been included by the chat template at this point,
+            # so we don't add them again.
+            # See how it's done in huggingface/transformers:
+            # https://github.com/huggingface/transformers/blob/5962d62bac850cd01ee830ffba880469338c96fd/src/transformers/tokenization_utils_base.py#L1820-L1829
             tokenizer_kwargs = {"add_special_tokens": False}
             if truncate_prompt_tokens is not None:
                 tokenizer_kwargs.update(
