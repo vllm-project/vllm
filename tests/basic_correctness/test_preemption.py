@@ -71,6 +71,7 @@ def test_chunked_prefill_recompute(
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
 def test_preemption(
+    caplog_vllm,
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -100,6 +101,8 @@ def test_preemption(
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+    assert ("is preempted by PreemptionMode.RECOMPUTE mode because there "
+            "is not enough KV cache space." in caplog_vllm.text)
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -107,6 +110,7 @@ def test_preemption(
 @pytest.mark.parametrize("max_tokens", [96])
 @pytest.mark.parametrize("beam_width", [4])
 def test_swap(
+    caplog_vllm,
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -137,6 +141,9 @@ def test_swap(
             assert hf_output_ids[j] == vllm_output_ids[j], (
                 f"Test{i} output{j}:\nHF: {hf_output_ids}\n"
                 f"vLLM: {vllm_output_ids}")
+
+    assert ("is preempted by PreemptionMode.SWAP mode because there "
+            "is not enough KV cache space." in caplog_vllm.text)
 
 
 @pytest.mark.parametrize("model", MODELS)
