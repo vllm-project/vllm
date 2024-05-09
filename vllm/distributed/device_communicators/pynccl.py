@@ -100,7 +100,7 @@ class PyNcclCommunicator:
             self.stream.synchronize()
 
         # by default it is disabled, e.g. in profiling models and prefill phase.
-        # to use it, we have to use under `with obj.enable()`, usually
+        # to use it, use under `with obj.change_state(enable=True)`, usually
         # when we are using CUDA graph.
         self.disabled = True
 
@@ -125,11 +125,11 @@ class PyNcclCommunicator:
                                 cudaStream_t(stream.cuda_stream))
 
     @contextmanager
-    def enable(self,
-               enable: Optional[bool] = None,
-               stream: Optional[torch.cuda.Stream] = None):
+    def change_state(self,
+                     enable: Optional[bool] = None,
+                     stream: Optional[torch.cuda.Stream] = None):
         """
-        A context manager to enable or disable the communicator.
+        A context manager to change the state of the communicator.
         """
         if enable is None:
             # guess a default value when not specified

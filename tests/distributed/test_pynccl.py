@@ -55,7 +55,7 @@ def worker_fn():
     pynccl_comm = PyNcclCommunicator()
     tensor = torch.ones(16, 1024, 1024,
                         dtype=torch.float32).cuda(pynccl_comm.rank)
-    with pynccl_comm.enable():
+    with pynccl_comm.change_state(enable=True):
         pynccl_comm.all_reduce(tensor)
     result = tensor.mean().cpu().item()
     assert result == pynccl_comm.world_size
@@ -77,7 +77,7 @@ def multiple_tp_worker_fn():
     group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    with pynccl_comm.enable():
+    with pynccl_comm.change_state(enable=True):
         # two groups can communicate independently
         if torch.distributed.get_rank() in [0, 1]:
             pynccl_comm.all_reduce(tensor)
@@ -132,8 +132,9 @@ def worker_fn_with_cudagraph():
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f'cuda:{pynccl_comm.rank}')
         torch.cuda.synchronize()
-        with torch.cuda.graph(graph,
-                              stream=pynccl_comm.stream), pynccl_comm.enable():
+        with torch.cuda.graph(
+                graph, stream=pynccl_comm.stream), pynccl_comm.change_state(
+                    enable=True):
             # operation during the graph capture is recorded but not executed
             # see https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#creating-a-graph-using-stream-capture # noqa
             pynccl_comm.all_reduce(a)

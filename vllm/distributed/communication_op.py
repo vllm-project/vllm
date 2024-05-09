@@ -25,7 +25,8 @@ def graph_capture_mode():
     # is too large, it will fallback to the next available option.
     from vllm.distributed.parallel_state import _TP_PYNCCL_COMMUNICATOR
     assert _TP_PYNCCL_COMMUNICATOR is not None
-    with _TP_PYNCCL_COMMUNICATOR.enable(stream=torch.cuda.current_stream()):
+    with _TP_PYNCCL_COMMUNICATOR.change_state(
+            enable=True, stream=torch.cuda.current_stream()):
         yield
 
 
