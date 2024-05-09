@@ -222,11 +222,12 @@ def test_reshape_and_cache_flash(
     random.seed(seed)
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
 
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device='cuda')
+    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=device)
 
     qkv = torch.randn(num_tokens,
                       3,
@@ -245,6 +246,7 @@ def test_reshape_and_cache_flash(
         head_size,
         kv_cache_dtype,
         dtype,
+        device=device,
     )
     key_cache, value_cache = key_caches[0], value_caches[0]
 
@@ -315,7 +317,10 @@ def test_swap_blocks(
     else:
         dst_blocks = random.sample(range(num_blocks), num_mappings)
 
-    block_mapping = dict(zip(src_blocks, dst_blocks))
+    block_mapping = list(zip(src_blocks, dst_blocks))
+    block_mapping_tensor = torch.tensor(block_mapping,
+                                        dtype=torch.int64,
+                                        device="cpu").view(-1, 2)
 
     # Create the KV caches on the first device.
     src_key_caches, src_value_caches = kv_cache_factory(
@@ -331,10 +336,12 @@ def test_swap_blocks(
     src_value_caches_clone = src_value_caches[0].clone()
 
     # Call the swap_blocks kernel.
-    ops.swap_blocks(src_key_caches[0], dist_key_caches[0], block_mapping)
-    ops.swap_blocks(src_value_caches[0], dist_value_caches[0], block_mapping)
+    ops.swap_blocks(src_key_caches[0], dist_key_caches[0],
+                    block_mapping_tensor)
+    ops.swap_blocks(src_value_caches[0], dist_value_caches[0],
+                    block_mapping_tensor)
 
-    for src, dst in block_mapping.items():
+    for src, dst in block_mapping:
         assert torch.allclose(src_key_caches_clone[src].cpu(),
                               dist_key_caches[0][dst].cpu())
         assert torch.allclose(src_value_caches_clone[src].cpu(),

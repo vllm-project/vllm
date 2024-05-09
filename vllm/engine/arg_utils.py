@@ -83,6 +83,7 @@ class EngineArgs:
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
+    speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
 
@@ -468,6 +469,13 @@ class EngineArgs:
             'speculation.')
 
         parser.add_argument(
+            '--speculative-disable-by-batch-size',
+            type=int,
+            default=EngineArgs.speculative_disable_by_batch_size,
+            help='Disable speculative decoding for new incoming requests '
+            'if the number of enqueue requests is larger than this value.')
+
+        parser.add_argument(
             '--ngram-prompt-lookup-max',
             type=int,
             default=EngineArgs.ngram_prompt_lookup_max,
@@ -508,7 +516,7 @@ class EngineArgs:
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
+    def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -547,6 +555,8 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_disable_by_batch_size=self.
+            speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
