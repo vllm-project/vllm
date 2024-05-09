@@ -11,6 +11,8 @@ import triton.language as tl
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils import is_hip
+import vllm._moe_C as moe_kernels
+
 
 logger = init_logger(__name__)
 
@@ -319,34 +321,26 @@ def fused_topk(
 
     M, _ = hidden_states.shape
 
-    if is_hip():
-        # The MoE kernels are not yet supported on ROCm.
-        routing_weights = torch.softmax(gating_output,
-                                        dim=-1,
-                                        dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
-    else:
-        import vllm._moe_C as moe_kernels
+    topk_weights = torch.empty(M,
+                                topk,
+                                dtype=torch.float32,
+                                device=hidden_states.device)
+    topk_ids = torch.empty(M,
+                            topk,
+                            dtype=torch.int32,
+                            device=hidden_states.device)
+    token_expert_indicies = torch.empty(M,
+                                        topk,
+                                        dtype=torch.int32,
+                                        device=hidden_states.device)
+    moe_kernels.topk_softmax(
+        topk_weights,
+        topk_ids,
+        token_expert_indicies,
+        gating_output.float(),  # TODO(woosuk): Optimize this.
+    )
+    del token_expert_indicies  # Not used. Will be used in the future.
 
-        topk_weights = torch.empty(M,
-                                   topk,
-                                   dtype=torch.float32,
-                                   device=hidden_states.device)
-        topk_ids = torch.empty(M,
-                               topk,
-                               dtype=torch.int32,
-                               device=hidden_states.device)
-        token_expert_indicies = torch.empty(M,
-                                            topk,
-                                            dtype=torch.int32,
-                                            device=hidden_states.device)
-        moe_kernels.topk_softmax(
-            topk_weights,
-            topk_ids,
-            token_expert_indicies,
-            gating_output.float(),  # TODO(woosuk): Optimize this.
-        )
-        del token_expert_indicies  # Not used. Will be used in the future.
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
