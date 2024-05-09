@@ -75,6 +75,7 @@ class Worker(WorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
@@ -196,7 +197,6 @@ class Worker(WorkerBase):
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -207,15 +207,14 @@ class Worker(WorkerBase):
 
     def cache_swap(
         self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
+        blocks_to_swap_in: torch.Tensor,
+        blocks_to_swap_out: torch.Tensor,
         blocks_to_copy: torch.Tensor,
     ) -> None:
         # Issue cache operations.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if blocks_to_swap_in:
+        if blocks_to_swap_in.numel() > 0:
             self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out:
+        if blocks_to_swap_out.numel() > 0:
             self.cache_engine.swap_out(blocks_to_swap_out)
         if blocks_to_copy.numel() > 0:
             self.cache_engine.copy(blocks_to_copy)
@@ -231,12 +230,26 @@ class Worker(WorkerBase):
         else:
             seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
+        blocks_to_swap_in: torch.Tensor
+        blocks_to_swap_out: torch.Tensor
+        blocks_to_copy: torch.Tensor
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert execute_model_req is not None
             num_seq_groups = len(seq_group_metadata_list)
-            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
+            # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+            # they contain parameters to launch cudamemcpyasync.
+            blocks_to_swap_in = torch.tensor(
+                execute_model_req.blocks_to_swap_in,
+                device="cpu",
+                dtype=torch.int64).view(-1, 2)
+            blocks_to_swap_out = torch.tensor(
+                execute_model_req.blocks_to_swap_out,
+                device="cpu",
+                dtype=torch.int64).view(-1, 2)
+            # `blocks_to_copy` is a gpu tensor. The src and tgt of
+            # blocks to copy are in the same device, and `blocks_to_copy`
+            # can be used directly within cuda kernels.
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)

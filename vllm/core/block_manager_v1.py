@@ -473,11 +473,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def swap_in(self,
                 seq_group: SequenceGroup,
-                num_lookahead_slots: int = 0) -> Dict[int, int]:
+                num_lookahead_slots: int = 0) -> List[Tuple[int, int]]:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
         # CPU block -> GPU block.
+        # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             new_block_table: BlockTable = []
@@ -500,14 +501,16 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             cpu_block.block_number: gpu_block.block_number
             for cpu_block, gpu_block in mapping.items()
         }
-        return block_number_mapping
+        # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         # GPU block -> CPU block.
+        # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             new_block_table: BlockTable = []
@@ -530,7 +533,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             gpu_block.block_number: cpu_block.block_number
             for gpu_block, cpu_block in mapping.items()
         }
-        return block_number_mapping
+        # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def _free_block_table(self, block_table: BlockTable) -> None:
         # when using a sliding window, each seq will only use up

@@ -3,8 +3,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import flashinfer
 import torch
-from flash_attn import flash_attn_varlen_func
 from flashinfer import BatchDecodeWithPagedKVCacheWrapper
+from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -39,7 +39,7 @@ class FlashInferBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
