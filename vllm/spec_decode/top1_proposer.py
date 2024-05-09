@@ -74,8 +74,9 @@ class Top1Proposer(SpeculativeProposer):
                 sample_len=proposal_len,
             )
             if maybe_sampler_output is not None:
-                # Some sequences do not have specualtive tokens, add
-                # them to non-speculative sequences as well
+                # Some sequences do not get speculative tokens from
+                # the draft worker. Remove these sequences from nonzero
+                # proposal len seqs to reduce scoring overhead
                 zero_seq_idxs = []
                 for seq_idx, sampler_output in zip(
                         nonzero_proposal_len_indices, maybe_sampler_output):
@@ -90,8 +91,11 @@ class Top1Proposer(SpeculativeProposer):
                     sampler_output for sampler_output in maybe_sampler_output
                     if sampler_output is not None
                 ]
-                if not maybe_sampler_output:
-                    maybe_sampler_output = None
+                # We assume sampler_output will not return a list of
+                # maybe_sampler_output with all Nones. In this case it should
+                # directly return maybe_sampler_output=None and should not
+                # enter this branch
+                assert maybe_sampler_output
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
