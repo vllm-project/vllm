@@ -138,7 +138,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                 SamplerOutput(
                     outputs=None,
                     sampled_token_probs=token_probs[i],
-                    logprobs=token_logprobs,
+                    logprobs=token_logprobs[i],
                     sampled_token_ids=token_ids[i],
                 ))
         return outputs, False
