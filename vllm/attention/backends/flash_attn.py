@@ -65,9 +65,6 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     dynamically, it should be stored in tensor. The tensor has to be
     updated from `CUDAGraphRunner.forward` API.
     """
-    # Currently, input sequences can only contain all prompts
-    # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]]
@@ -82,10 +79,12 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
-    # Maximum query length in the batch.
+    # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
-    # Maximum sequence length in the batch.
-    max_seq_len: Optional[int]
+    # Maximum sequence length among prefill batch.
+    max_prefill_seq_len: Optional[int]
+    # Maximum sequence length among decode batch.
+    max_decode_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -102,6 +101,71 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+    _cached_prefill_metadata: Optional["FlashAttentionMetadata"] = None
+    _cached_decode_metadata: Optional["FlashAttentionMetadata"] = None
+
+    @property
+    def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
+        if self.num_prefills == 0:
+            return None
+
+        if self._cached_prefill_metadata is not None:
+            return self._cached_prefill_metadata
+
+        assert self.seq_lens is not None
+        assert self.seq_lens_tensor is not None
+        assert self.query_start_loc is not None
+        assert self.context_lens_tensor is not None
+        assert self.block_tables is not None
+        assert self.seq_start_loc is not None
+
+        self._cached_prefill_metadata = FlashAttentionMetadata(
+            num_prefills=self.num_prefills,
+            num_prefill_tokens=self.num_prefill_tokens,
+            num_decode_tokens=0,
+            slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            kv_cache_dtype=self.kv_cache_dtype,
+            seq_lens=self.seq_lens[:self.num_prefills],
+            seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+            max_query_len=self.max_query_len,
+            max_prefill_seq_len=self.max_prefill_seq_len,
+            max_decode_seq_len=None,
+            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+            seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
+            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+            block_tables=self.block_tables[:self.num_prefills],
+            use_cuda_graph=False,
+        )
+        return self._cached_prefill_metadata
+
+    @property
+    def decode_metadata(self) -> Optional["FlashAttentionMetadata"]:
+        if self.num_decode_tokens == 0:
+            return None
+
+        if self._cached_decode_metadata is not None:
+            return self._cached_decode_metadata
+        assert self.block_tables is not None
+        assert self.seq_lens_tensor is not None
+
+        self._cached_decode_metadata = FlashAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decode_tokens=self.num_decode_tokens,
+            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            kv_cache_dtype=self.kv_cache_dtype,
+            seq_lens=None,
+            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+            max_query_len=None,
+            max_prefill_seq_len=None,
+            max_decode_seq_len=self.max_decode_seq_len,
+            query_start_loc=None,
+            seq_start_loc=None,
+            context_lens_tensor=None,
+            block_tables=self.block_tables[self.num_prefills:],
+            use_cuda_graph=self.use_cuda_graph,
+        )
+        return self._cached_decode_metadata
 
 
 class FlashAttentionImpl(AttentionImpl):
@@ -225,8 +289,8 @@ class FlashAttentionImpl(AttentionImpl):
                     v=value,
                     cu_seqlens_q=prefill_meta.seq_start_loc,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_q=prefill_meta.max_seq_len,
-                    max_seqlen_k=prefill_meta.max_seq_len,
+                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=self.sliding_window,
@@ -261,7 +325,7 @@ class FlashAttentionImpl(AttentionImpl):
                 value_cache,
                 decode_meta.block_tables,
                 decode_meta.seq_lens_tensor,
-                decode_meta.max_seq_len,
+                decode_meta.max_decode_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,

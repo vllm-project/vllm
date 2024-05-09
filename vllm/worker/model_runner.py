@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, get_attn_backend)
-from vllm.attention.backends.flashinfer import FlashInferBackend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
@@ -439,36 +438,23 @@ class ModelRunner:
                                     dtype=torch.long,
                                     device=self.device)
 
-        if self.attn_backend is FlashInferBackend:
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=num_prefills,
-                slot_mapping=slot_mapping,
-                num_prefill_tokens=num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                kv_cache_dtype=self.kv_cache_dtype,
-                use_cuda_graph=False,
-                seq_start_loc=seq_start_loc,
-                max_prefill_seq_len=max_prefill_seq_len,
-                max_decode_seq_len=max_decode_seq_len,
-                block_tables=block_tables)
-        else:
-            attn_metadata = self.attn_backend.make_metadata(
-                num_prefills=num_prefills,
-                slot_mapping=slot_mapping,
-                num_prefill_tokens=num_prefill_tokens,
-                num_decode_tokens=num_decode_tokens,
-                kv_cache_dtype=self.kv_cache_dtype,
-                seq_lens=seq_lens,
-                seq_lens_tensor=seq_lens_tensor,
-                max_query_len=max_query_len,
-                max_prefill_seq_len=max_prefill_seq_len,
-                max_decode_seq_len=max_decode_seq_len,
-                query_start_loc=query_start_loc,
-                seq_start_loc=seq_start_loc,
-                context_lens_tensor=context_lens_tensor,
-                block_tables=block_tables,
-                use_cuda_graph=False,
-            )
+        attn_metadata = self.attn_backend.make_metadata(
+            num_prefills=num_prefills,
+            slot_mapping=slot_mapping,
+            num_prefill_tokens=num_prefill_tokens,
+            num_decode_tokens=num_decode_tokens,
+            kv_cache_dtype=self.kv_cache_dtype,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_query_len=max_query_len,
+            max_prefill_seq_len=max_prefill_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
+            query_start_loc=query_start_loc,
+            seq_start_loc=seq_start_loc,
+            context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=False,
+        )
 
         if self.lora_config:
             lora_mapping = LoRAMapping(

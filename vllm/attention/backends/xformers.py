@@ -78,7 +78,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # |-------------------- seq_len ----------------------|
     #                                   |-- query_len ---|
 
-    # Maximum query length in the batch.
+    # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
     # FIXME: It is for flash attn.
     # Maximum sequence length among prefill batch.
