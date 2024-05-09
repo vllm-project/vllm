@@ -73,11 +73,15 @@ class AttentionMetadata:
     @property
     @abstractmethod
     def prefill_metadata(self) -> Optional["AttentionMetadata"]:
+        """Return the attention metadata that's required to run prefill
+        attention."""
         pass
 
     @property
     @abstractmethod
     def decode_metadata(self) -> Optional["AttentionMetadata"]:
+        """Return the attention metadata that's required to run decode
+        attention."""
         pass
 
     def asdict_zerocopy(self,
@@ -94,7 +98,10 @@ class AttentionMetadata:
         }
 
 
-class AttentionImpl(ABC):
+T = TypeVar("T", bound=AttentionMetadata)
+
+
+class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(
@@ -115,7 +122,7 @@ class AttentionImpl(ABC):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
+        attn_metadata: T,
         kv_scale: float,
     ) -> torch.Tensor:
         raise NotImplementedError

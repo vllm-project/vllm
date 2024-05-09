@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from vllm.attention import (AttentionMetadata, get_attn_backend)
+from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
@@ -39,7 +39,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
-    attn_metadata: Optional[AttentionMetadata]
+    attn_metadata: AttentionMetadata
     seq_lens: List[int]
     query_lens: List[int]
     lora_mapping: Optional[LoRAMapping]
@@ -49,23 +49,6 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
-
-    @classmethod
-    def empty(cls):
-        return ModelInput(
-            input_tokens=torch.empty(),
-            input_positions=torch.empty(),
-            attn_metadata=None,
-            seq_lens=[],
-            query_lens=[],
-            lora_mapping=None,
-            lora_requests=set(),
-            multi_modal_input=None,
-            slot_mapping=torch.empty(),
-            num_prefill_tokens=0,
-            num_decode_tokens=0,
-            num_prefills=0,
-        )
 
 
 class ModelRunner:
@@ -199,10 +182,9 @@ class ModelRunner:
         """Prepare the model input based on a given sequence group.
 
         The API assumes seq_group_metadata_list is sorted by prefill -> decode.
-        If this assumption is wrong, assertion error will be raised.
 
         The result tensors and data structure also batches input in prefill
-        -> decode orders. For example,
+        -> decode order. For example,
 
         - input_tokens[:num_prefill_tokens] contains prefill tokens.
         - input_tokens[num_prefill_tokens:] contains decode tokens.
@@ -246,9 +228,6 @@ class ModelRunner:
         # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_last_page_len: List[int] = []
 
-        if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty()
-
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
 
@@ -275,9 +254,10 @@ class ModelRunner:
                 seq_lens.append(seq_len)
 
                 # NOTE: This only works for oooooooxxx style attention.
-                if computed_block_nums is not None and len(
-                        computed_block_nums
-                ) > 0 and self.sliding_window is None:
+                if (computed_block_nums is not None
+                        and len(computed_block_nums) > 0
+                        and self.sliding_window is None
+                        and seq_group_metadata.is_prompt):
                     # Prefix is not supported with sliding_window
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
@@ -291,7 +271,7 @@ class ModelRunner:
                         block_table = seq_group_metadata.block_tables[seq_id]
                         if self.sliding_window is not None:
                             sliding_window_blocks = (self.sliding_window //
-                                                    self.block_size)
+                                                     self.block_size)
                             block_table = block_table[-sliding_window_blocks:]
                         block_tables.append(block_table)
                         if self.attn_backend.get_name() == "flashinfer":
@@ -307,8 +287,7 @@ class ModelRunner:
                         # It is profiling only.
                         block_tables.append([])
                 else:
-                    # If chunked prefill is not enabled and batch only
-                    # contains prefills.
+                    # This is a regular prefill.
                     block_tables.append([])
                     assert context_len == 0
 
@@ -327,6 +306,7 @@ class ModelRunner:
                 else:
                     num_decode_tokens += 1
                     decode_seq_lens.append(seq_len)
+                    assert token_chunk_size == 1
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
@@ -341,24 +321,27 @@ class ModelRunner:
                         seq_group_metadata.multi_modal_data.data)
 
                 if seq_group_metadata.block_tables is None:
-                    # During memory profiling, the block tables are not initialized
-                    # yet. In this case, we just use a dummy slot mapping.
+                    # During memory profiling, the block tables are not
+                    # initialized yet. In this case, we just use a dummy
+                    # slot mapping.
                     slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                     continue
 
                 # Compute the slot mapping.
                 block_table = seq_group_metadata.block_tables[seq_id]
 
-                # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
-                # where start_idx is max(0, seq_len - sliding_window).
-                # For example, if the prompt len is 10, sliding window is 8, and
-                # block size is 4, the first two tokens are masked and the slot
-                # mapping will be [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
+                # Mask the [0, start_idx) tokens of the prompt with
+                # _PAD_SLOT_ID, where start_idx is max(0, seq_len -
+                # sliding_window). For example, if the prompt len is 10,
+                # sliding window is 8, and block size is 4, the first two
+                # tokens are masked and the slot mapping will be
+                # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
                 start_idx = 0
                 if self.sliding_window is not None:
-                    assert context_len == 0, (
-                        "Prefix caching is currently not supported with "
-                        "sliding window attention")
+                    if seq_group_metadata.is_prompt:
+                        assert context_len == 0, (
+                            "Prefix caching is currently not supported with "
+                            "sliding window attention")
                     start_idx = max(0, seq_len - self.sliding_window)
 
                 for i in range(context_len, seq_len):
@@ -551,6 +534,7 @@ class ModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
+        assert len(seq_group_metadata_list) > 0
         if self.is_driver_worker:
             # Prepare input tensors.
             (
@@ -615,6 +599,9 @@ class ModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
+        if len(seq_group_metadata_list) == 0:
+            return None
+
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)

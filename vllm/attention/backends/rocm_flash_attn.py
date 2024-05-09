@@ -79,9 +79,11 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
-    # Maximum sequence length among prefill batch.
+    # Maximum sequence length among prefill batch. None if there are decoding
+    # requests only.
     max_prefill_seq_len: Optional[int]
-    # Maximum sequence length among decode batch.
+    # Maximum sequence length among decode batch. None if there are prefill
+    # requests only.
     max_decode_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length

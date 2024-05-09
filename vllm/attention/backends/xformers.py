@@ -10,7 +10,8 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import PagedAttention, PagedAttentionMetadata
+from vllm.attention.ops.paged_attn import (PagedAttention,
+                                           PagedAttentionMetadata)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -81,9 +82,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
     # FIXME: It is for flash attn.
-    # Maximum sequence length among prefill batch.
+    # Maximum sequence length among prefill batch. None if there are decoding
+    # requests only.
     max_prefill_seq_len: Optional[int]
-    # Maximum sequence length among decode batch.
+    # Maximum sequence length among decode batch. None if there are prefill
+    # requests only.
     max_decode_seq_len: Optional[int]
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
@@ -114,7 +117,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[AttentionBias]] = None
 
     @property
-    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
+    def prefill_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_prefills == 0:
             return None
 
@@ -147,7 +150,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["AttentionMetadata"]:
+    def decode_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
@@ -176,7 +179,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self._cached_decode_metadata
 
 
-class XFormersImpl(AttentionImpl):
+class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
     |<--------------- num_prefill_tokens ----------------->|	
@@ -235,7 +238,7 @@ class XFormersImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: Optional[torch.Tensor],
-        attn_metadata: XFormersMetadata,
+        attn_metadata: "XFormersMetadata",
         kv_scale: float,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
@@ -249,7 +252,6 @@ class XFormersImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
@@ -261,7 +263,6 @@ class XFormersImpl(AttentionImpl):
             # Reshape the input keys and values and store them in the cache.
             # If kv_cache is not provided, the new key and value tensors are
             # not cached. This happens during the initial memory profiling run.
-            # breakpoint()
             PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                 value_cache,
                                                 attn_metadata.slot_mapping,

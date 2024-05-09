@@ -64,7 +64,8 @@ class FlashInferMetadata(AttentionMetadata):
     # Metadata for the prefill stage since we still
     # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
-    # Maximum sequence length among prefill batch.
+    # Maximum sequence length among prefill batch. None if there are decoding
+    # requests only.
     max_prefill_seq_len: Optional[int] = None
     block_tables: Optional[torch.Tensor] = None
 

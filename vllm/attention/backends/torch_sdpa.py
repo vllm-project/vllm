@@ -71,7 +71,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[torch.Tensor]] = None
 
     @property
-    def prefill_metadata(self) -> Optional["FlashInferMetadata"]:
+    def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
         # Currently chunked prefill is not supported
         if self.num_decode_tokens == 0:
             assert self.num_prefills > 0
@@ -80,7 +80,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         return None
 
     @property
-    def decode_metadata(self) -> Optional["FlashInferMetadata"]:
+    def decode_metadata(self) -> Optional["TorchSDPAMetadata"]:
         # Currently chunked prefill is not supported
         if self.num_prefills > 0:
             assert self.num_decode_tokens == 0
@@ -89,7 +89,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self
 
 
-class TorchSDPABackendImpl(AttentionImpl):
+class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def __init__(
         self,
