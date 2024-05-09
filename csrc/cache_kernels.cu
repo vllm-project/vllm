@@ -23,7 +23,7 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  const std::map<int64_t, int64_t>& block_mapping) {
+  const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -40,6 +40,11 @@ void swap_blocks(
     TORCH_CHECK(false, "Invalid device combination");
   }
 
+  // NOTE(youkaichao): keep in mind that `block_mapping` should be 
+  // a cpu tensor, otherwise every `item` call will require a gpu-cpu
+  // synchronization.
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
   char *src_ptr = static_cast<char*>(src.data_ptr());
   char *dst_ptr = static_cast<char*>(dst.data_ptr());
 
@@ -47,9 +52,10 @@ void swap_blocks(
   const at::cuda::OptionalCUDAGuard device_guard(src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    int64_t dst_block_number = pair.second;
+  const int64_t num_blocks = block_mapping.size(0);
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
     int64_t src_offset = src_block_number * block_size_in_bytes;
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(
@@ -97,7 +103,7 @@ __global__ void copy_blocks_kernel(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  torch::Tensor& block_mapping) {
+  const torch::Tensor& block_mapping) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {

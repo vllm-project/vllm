@@ -19,6 +19,10 @@ logger = init_logger(__name__)
 class XFormersBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "xformers"
+
+    @staticmethod
     def get_impl_cls() -> Type["XFormersImpl"]:
         return XFormersImpl
 
