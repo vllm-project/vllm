@@ -7,6 +7,7 @@ from lmformatenforcer import (CharacterLevelParser, JsonSchemaParser,
                               TokenEnforcerTokenizerData, UnionParser)
 from lmformatenforcer.integrations.vllm import (
     build_vllm_logits_processor, build_vllm_token_enforcer_tokenizer_data)
+from outlines.fsm.types import python_types_to_regex
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -46,6 +47,8 @@ async def get_lm_format_enforcer_guided_decoding_logits_processor(
           and request.response_format.type == "json_object"):
         character_level_parser = JsonSchemaParser(
             None)  # None means any json object
+    elif request.guided_type:
+        _, character_level_parser = python_types_to_regex(request.guided_type)
     else:
         return None
 

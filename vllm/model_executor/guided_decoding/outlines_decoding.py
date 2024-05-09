@@ -13,7 +13,7 @@ from transformers import PreTrainedTokenizerBase
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest)
 from vllm.model_executor.guided_decoding.outlines_logits_processors import (
-    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor)
+    CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor, TypeLogitsProcessor)
 
 
 class GuidedDecodingMode(Enum):
@@ -21,6 +21,7 @@ class GuidedDecodingMode(Enum):
     REGEX = "regex"
     CHOICE = "choice"
     GRAMMAR = "grammar"
+    TYPE = "type"
 
 
 # https://github.com/outlines-dev/outlines/blob/main/outlines/grammars/json.lark
@@ -55,7 +56,7 @@ global_thread_pool = None  # used for generating logits processor fsm
 
 async def get_outlines_guided_decoding_logits_processor(
         request: Union[CompletionRequest, ChatCompletionRequest],
-        tokenizer) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, None]:
+        tokenizer) -> Union[CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor, TypeLogitsProcessor, None]:
     """
     Given an OpenAI-compatible request, check for guided decoding parameters
     and get the necessary logits processor for the given guide.
@@ -111,20 +112,26 @@ def _get_guide_and_mode(
     elif (request.response_format is not None
           and request.response_format.type == "json_object"):
         return JSON_GRAMMAR, GuidedDecodingMode.GRAMMAR
+    elif request.guided_type:
+        return request.guided_type, GuidedDecodingMode.TYPE
     else:
         return None, None
 
 
 @lru_cache(maxsize=32)
-def _get_cached_logits_processor(guide: str,
-                                 tokenizer: PreTrainedTokenizerBase,
-                                 mode: GuidedDecodingMode,
-                                 whitespace_pattern: Union[str, None]):
+def _get_cached_logits_processor(
+    guide: str,
+    tokenizer: PreTrainedTokenizerBase,
+    mode: GuidedDecodingMode,
+    whitespace_pattern: Union[str, None]
+    ) -> Union[CFGLogitsProcessor, JSONLogitsProcessor, RegexLogitsProcessor, TypeLogitsProcessor, ValueError]:
     if mode == GuidedDecodingMode.JSON:
         return JSONLogitsProcessor(guide, tokenizer, whitespace_pattern)
     elif mode == GuidedDecodingMode.REGEX or mode == GuidedDecodingMode.CHOICE:
         return RegexLogitsProcessor(guide, tokenizer)
     elif mode == GuidedDecodingMode.GRAMMAR:
         return CFGLogitsProcessor(guide, tokenizer)
+    elif mode == GuidedDecodingMode.TYPE:
+        return TypeLogitsProcessor(guide, tokenizer)
     else:
         raise ValueError(f"Unknown guided decoding mode {mode}")

@@ -23,6 +23,7 @@ from typing import Callable, DefaultDict, Dict, List, Union
 import torch
 from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM
 from outlines.fsm.json_schema import build_regex_from_schema
+from outlines.fsm.types import python_types_to_regex
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -135,6 +136,22 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         super().init_state()
         self.fsm = self.fsm.copy()
 
+
+class TypeLogitsProcessor(RegexLogitsProcessor):
+
+    def __init__(self, python_type: Any,
+                 tokenizer: PreTrainedTokenizerBase):
+        """Compile the FSM that drives the Type-guided generation.
+
+        Parameters
+        ----------
+        python_type
+            A Python type
+        tokenizer
+            The model's tokenizer
+        """
+        regex_str, _ = python_types_to_regex(python_type)
+        super().__init__(regex_string, tokenizer)
 
 @lru_cache
 def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
