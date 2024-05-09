@@ -1,4 +1,5 @@
 import multiprocessing
+import os
 
 import pytest
 import torch
@@ -40,7 +41,6 @@ def worker_fn_wrapper(fn):
     # and update the environment variables in the function
     def wrapped_fn(env):
         update_environment_variables(env)
-        import os
         local_rank = os.environ['LOCAL_RANK']
         device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
