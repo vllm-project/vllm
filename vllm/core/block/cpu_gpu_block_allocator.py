@@ -243,8 +243,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
 class NullBlock(Block):
     """
-    Used as a placeholders for KV cache blocks that have been dropped
-    due to sliding window.
+    Null blocks are used as a placeholders for KV cache blocks that have
+    been dropped due to sliding window.
+    This implementation just wraps an ordinary block and prevents it from
+    being modified. It also allows for testing if a block is NullBlock
+    via isinstance().
     """
 
     def __init__(self, proxy: Block):
@@ -260,7 +263,7 @@ class NullBlock(Block):
 
     @block_id.setter
     def block_id(self, value: Optional[BlockId]):
-        raise NotImplementedError
+        raise ValueError("null block should not be modified")
 
     @property
     def token_ids(self) -> List[BlockId]:

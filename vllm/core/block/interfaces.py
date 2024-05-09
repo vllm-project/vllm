@@ -207,8 +207,8 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def allocate_or_get_null_block(self) -> Block:
         """
-        Used as a placeholders for KV cache blocks that have been dropped
-        due to sliding window.
+        Null blocks are used as a placeholders for KV cache blocks that have
+        been dropped due to sliding window.
         There is at most one null block per allocator.
         """
         pass
