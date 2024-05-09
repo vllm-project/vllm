@@ -96,6 +96,7 @@ class HabanaExecutor(ExecutorBase):
         log_cpu_fallbacks = os.environ.get('VLLM_HPU_LOG_STEP_CPU_FALLBACKS', '0') != '0' or log_cpu_fallbacks_all
         if log_graph_compilation or log_cpu_fallbacks:
             from habana_frameworks.torch.hpu.metrics import metric_localcontext
+            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
             is_prompt = any([seq_group_metadata.is_prompt for seq_group_metadata in seq_group_metadata_list])
             max_context_len = max([max([len(v.prompt_token_ids) + len(v.output_token_ids) for v in seq_group_metadata.seq_data.values()]) for seq_group_metadata in seq_group_metadata_list]) # whoa, that's some spicy stuff right here
             max_num_blocks = ((max_context_len - 1) // self.cache_config.block_size) + 1
