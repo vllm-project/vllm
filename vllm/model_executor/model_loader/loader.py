@@ -393,11 +393,17 @@ class ShardedStateLoader(BaseModelLoader):
                     f"pre-sharded checkpoints are currently supported!"
                 )
             state_dict = dict(model.state_dict())
+            data_ptrs = {}
             for path in filepaths:
                 for key, val in load_file(path).items():
+                    data_ptrs[state_dict[key].data_ptr()] = key
                     state_dict[key].copy_(val)
                     state_dict.pop(key)
-            assert not state_dict
+            for key, val in state_dict.items():
+                if val.data_ptr() in data_ptrs:
+                    logger.warning(f"Skipping loading shared tensor '{key}'")
+                else:
+                    raise ValueError(f"Missing key '{key}' in loaded state!")
         return model.eval()
 
     @staticmethod
@@ -416,7 +422,12 @@ class ShardedStateLoader(BaseModelLoader):
         part = 0
         total_size = 0
         state_dict: Dict[str, torch.Tensor] = {}
+        data_ptrs = {}
         for name, tensor in model.state_dict().items():
+            if tensor.data_ptr() in data_ptrs:
+                logger.warning(f"Skipping saving shared tensor '{name}'")
+                continue
+            data_ptrs[tensor.data_ptr()] = name
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
                 save_file(
