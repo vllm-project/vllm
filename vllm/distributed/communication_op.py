@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.distributed import ProcessGroup
+from vllm.utils import is_hpu
 
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
@@ -156,7 +157,7 @@ def _split_tensor_dict(
             # because it contains not only the device type but also the device
             # index (e.g. "cuda:0"). We only need the device type.
             # receiving side will set the device index.
-            device = "cpu" if value.is_cpu else "cuda"
+            device = "cpu" if value.is_cpu else ("hpu" if is_hpu() else "cuda")
             metadata_list.append(
                 (key, TensorMetadata(device, value.dtype, value.size())))
             tensor_list.append(value)

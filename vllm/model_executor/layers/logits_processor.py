@@ -50,7 +50,9 @@ class LogitsProcessor(nn.Module):
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, embedding, embedding_bias)
 
-        if logits is not None: # and sampling_metadata.perform_sampling: FIXME: this is needed for 8xHPU
+        # NOTE(kzawora): allgather on HPU will cause logits to be not None, 
+        # and we need to guard against applying logits processors on non-driver worker
+        if logits is not None and sampling_metadata.seq_groups is not None:
             logits *= self.scale
 
             # Apply logits processors (if any).
