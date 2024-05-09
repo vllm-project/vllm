@@ -1,13 +1,11 @@
 """Compares the outputs of gptq vs gptq_marlin 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
-Marlin/GPTQ models are in the top 3 selections of each other.
+Marlin/GPTQ models are in the top 5 selections of each other.
 Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
-Note: This test currently fails running with --forked with the following:
-    RuntimeError: Cannot re-initialize CUDA in forked subprocess.
-    To use CUDA with multiprocessing, you must use the 'spawn' start method
+
 Run `pytest tests/models/test_gptq_marlin.py`.
 """
 import os
