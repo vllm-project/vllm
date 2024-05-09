@@ -14,7 +14,6 @@ void paged_attention_v1(
   int block_size,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  int sliding_window,
   const std::string& kv_cache_dtype,
   float kv_scale);
 
@@ -33,7 +32,6 @@ void paged_attention_v2(
   int block_size,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
-  int sliding_window,
   const std::string& kv_cache_dtype,
   float kv_scale);
 

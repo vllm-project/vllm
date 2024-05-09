@@ -99,8 +99,6 @@ def main(
         # Using default kv_scale
         kv_scale = 1.0
 
-        sliding_window = None
-
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
@@ -115,7 +113,6 @@ def main(
                     block_size,
                     max_seq_len,
                     alibi_slopes,
-                    sliding_window,
                     kv_cache_dtype,
                     kv_scale,
                 )
@@ -135,7 +132,6 @@ def main(
                     block_size,
                     max_seq_len,
                     alibi_slopes,
-                    sliding_window,
                     kv_cache_dtype,
                     kv_scale,
                 )

@@ -90,7 +90,6 @@ class PagedAttention:
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
-        sliding_window: Optional[int],
         kv_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
@@ -122,7 +121,6 @@ class PagedAttention:
                 block_size,
                 max_seq_len,
                 alibi_slopes,
-                sliding_window,
                 kv_cache_dtype,
                 kv_scale,
             )
@@ -155,7 +153,6 @@ class PagedAttention:
                 block_size,
                 max_seq_len,
                 alibi_slopes,
-                sliding_window,
                 kv_cache_dtype,
                 kv_scale,
             )

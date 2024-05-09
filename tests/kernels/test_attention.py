@@ -175,8 +175,6 @@ def test_paged_attention(
     # Using default kv_scale
     kv_scale = 1.0
 
-    sliding_window = None
-
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
@@ -192,7 +190,6 @@ def test_paged_attention(
             block_size,
             max_seq_len,
             alibi_slopes,
-            sliding_window,
             kv_cache_dtype,
             kv_scale,
         )
@@ -224,7 +221,6 @@ def test_paged_attention(
             block_size,
             max_seq_len,
             alibi_slopes,
-            sliding_window,
             kv_cache_dtype,
             kv_scale,
         )
