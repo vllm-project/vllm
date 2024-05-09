@@ -338,11 +338,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     assert len(input_positions) == len(input_tokens)
     assert attn_metadata.kv_cache_dtype == "auto"
     assert attn_metadata.num_prefills == prefill_batch_size
-    if enforce_eager:
-        assert attn_metadata.num_decode_tokens == decode_batch_size
-    else:
-        assert attn_metadata.num_decode_tokens == _get_graph_batch_size(
-            decode_batch_size)
+    assert attn_metadata.num_decode_tokens == decode_batch_size
     assert attn_metadata.num_prefill_tokens == sum(seq_lens)
 
     # Verify attn metadata is consistent. We don't need to test individual

@@ -156,8 +156,6 @@ class CPUModelRunner:
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
             kv_cache_dtype=self.kv_cache_dtype,
