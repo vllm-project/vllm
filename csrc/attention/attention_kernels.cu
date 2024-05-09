@@ -103,6 +103,7 @@ __device__ void paged_attention_kernel(
   const int* __restrict__ seq_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
   const float* __restrict__ alibi_slopes, // [num_heads]
+  const int sliding_window,
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
@@ -129,6 +130,7 @@ __device__ void paged_attention_kernel(
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx = MIN(start_token_idx + num_blocks * BLOCK_SIZE, seq_len);
   const int num_tokens = end_token_idx - start_token_idx;
+  const int skip_tokens = seq_len > sliding_window ? seq_len - sliding_window : 0;
 
   constexpr int THREAD_GROUP_SIZE = MAX(WARP_SIZE / BLOCK_SIZE, 1);
   constexpr int NUM_THREAD_GROUPS = NUM_THREADS / THREAD_GROUP_SIZE; // Note: This assumes THREAD_GROUP_SIZE divides NUM_THREADS
@@ -237,7 +239,7 @@ __device__ void paged_attention_kernel(
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
         // NOTE(woosuk): It is required to zero out the masked logits.
-        const bool mask = token_idx >= seq_len;
+        const bool mask = token_idx >= seq_len || token_idx < skip_tokens;
         logits[token_idx - start_token_idx] = mask ? 0.f : qk;
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
@@ -437,6 +439,7 @@ __global__ void paged_attention_v1_kernel(
   const int* __restrict__ seq_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
   const float* __restrict__ alibi_slopes, // [num_heads]
+  const int sliding_window,
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
@@ -444,7 +447,8 @@ __global__ void paged_attention_v1_kernel(
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, KV_DTYPE>(
     /* exp_sums */ nullptr, /* max_logits */ nullptr,
     out, q, k_cache, v_cache, num_kv_heads, scale, block_tables, seq_lens,
-    max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride, kv_head_stride, kv_scale);
+    max_num_blocks_per_seq, alibi_slopes, sliding_window,
+    q_stride, kv_block_stride, kv_head_stride, kv_scale);
 }
 
 // Grid: (num_heads, num_seqs, max_num_partitions).
@@ -469,13 +473,14 @@ __global__ void paged_attention_v2_kernel(
   const int* __restrict__ seq_lens,   // [num_seqs]
   const int max_num_blocks_per_seq,
   const float* __restrict__ alibi_slopes, // [num_heads]
+  const int sliding_window,
   const int q_stride,
   const int kv_block_stride,
   const int kv_head_stride,
   const float kv_scale) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS, KV_DTYPE, PARTITION_SIZE>(
     exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
-    block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes,
+    block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, sliding_window,
     q_stride, kv_block_stride, kv_head_stride, kv_scale);
 }
 
@@ -596,6 +601,7 @@ __global__ void paged_attention_v2_reduce_kernel(
     seq_lens_ptr,                                                                              \
     max_num_blocks_per_seq,                                                                   \
     alibi_slopes_ptr,                                                                         \
+    sliding_window,                                                                           \
     q_stride,                                                                                 \
     kv_block_stride,                                                                          \
     kv_head_stride,                                                                           \
@@ -619,6 +625,7 @@ void paged_attention_v1_launcher(
   torch::Tensor& seq_lens,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int sliding_window,
   float kv_scale) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
@@ -695,6 +702,7 @@ void paged_attention_v1_launcher(
     seq_lens,                                                         \
     max_seq_len,                                                      \
     alibi_slopes,                                                     \
+    sliding_window,                                                   \
     kv_scale);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -727,6 +735,7 @@ void paged_attention_v1(
   int block_size,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int sliding_window,
   const std::string& kv_cache_dtype,
   float kv_scale) {
   
@@ -749,6 +758,7 @@ void paged_attention_v1(
     seq_lens_ptr,                                                                      \
     max_num_blocks_per_seq,                                                            \
     alibi_slopes_ptr,                                                                  \
+    sliding_window,                                                                    \
     q_stride,                                                                          \
     kv_block_stride,                                                                   \
     kv_head_stride,                                                                    \
@@ -783,6 +793,7 @@ void paged_attention_v2_launcher(
   torch::Tensor& seq_lens,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int sliding_window,
   float kv_scale) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
@@ -868,6 +879,7 @@ void paged_attention_v2_launcher(
     seq_lens,                                                             \
     max_seq_len,                                                          \
     alibi_slopes,                                                         \
+    sliding_window,                                                       \
     kv_scale);
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -903,6 +915,7 @@ void paged_attention_v2(
   int block_size,
   int max_seq_len,
   const c10::optional<torch::Tensor>& alibi_slopes,
+  int sliding_window,
   const std::string& kv_cache_dtype,
   float kv_scale) {
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype, CALL_V2_LAUNCHER_BLOCK_SIZE)
