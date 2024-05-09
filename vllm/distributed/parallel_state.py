@@ -206,8 +206,7 @@ def ensure_model_parallel_initialized(
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
-    return (_TP_DEVICE_GROUP is not None
-            and _PP_DEVICE_GROUP is not None)
+    return (_TP_DEVICE_GROUP is not None and _PP_DEVICE_GROUP is not None)
 
 
 def get_cpu_world_group():
