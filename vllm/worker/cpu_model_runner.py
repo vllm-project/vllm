@@ -153,6 +153,7 @@ class CPUModelRunner:
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
+            max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
