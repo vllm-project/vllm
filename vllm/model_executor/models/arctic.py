@@ -119,14 +119,12 @@ class ArcticMoE(nn.Module):
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
-                torch.cuda.empty_cache()
                 self.w2s = DeepSpeedFPParameter(
                     torch.Size((self.num_experts, self.hidden_size,
                                 self.intermediate_size)),
                     params_dtype=params_dtype,
                     quant_config=quant_config,
                 )
-                torch.cuda.empty_cache()
             else:
                 self.ws = nn.Parameter(
                     torch.empty(self.num_experts,
