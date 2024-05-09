@@ -72,6 +72,7 @@ Documentation
    :caption: Offline Inference
 
    offline_inference/llm
+   offline_inference/sampling_params
 
 .. toctree::
    :maxdepth: 1
@@ -107,7 +108,6 @@ Documentation
    :maxdepth: 2
    :caption: Developer Documentation
 
-   dev/sampling_params
    dev/engine/engine_index
    dev/kernel/paged_attention
    dev/dockerfile/dockerfile
