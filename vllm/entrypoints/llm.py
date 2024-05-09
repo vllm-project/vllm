@@ -343,10 +343,12 @@ class LLM:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
-                        total_toks += (sum(
-                            len(stp.token_ids) for stp in output.outputs))
-                        spd = total_toks / pbar.format_dict["elapsed"]
-                        pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
+                        if isinstance(output, RequestOutput):
+                            # Calculate tokens only for RequestOutput
+                            total_toks += sum(
+                                len(stp.token_ids) for stp in output.outputs)
+                            spd = total_toks / pbar.format_dict["elapsed"]
+                            pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()
