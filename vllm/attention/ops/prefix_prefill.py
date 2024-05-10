@@ -1,12 +1,14 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
-from typing import Optional
+# ruff: noqa: SIM300
+
 from enum import IntEnum
 
 import torch
 import triton
 import triton.language as tl
+
 
 class Fp8KVCacheDataType(IntEnum):
     AUTO = 0
@@ -19,6 +21,7 @@ class Fp8KVCacheDataType(IntEnum):
             return cls.AUTO
         if s == "fp8":
             return cls.Fp8E5M2
+
 
 if triton.__version__ >= "2.1.0":
 
@@ -308,7 +311,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
-        kv_scale:float,
+        kv_scale: float,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
         BLOCK_N: tl.constexpr,
@@ -514,7 +517,7 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
-        kv_scale:float,
+        kv_scale: float,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
@@ -739,8 +742,8 @@ if triton.__version__ >= "2.1.0":
                               max_input_len,
                               alibi_slopes=None,
                               sliding_window=None,
-                                kv_cache_dtype: str="auto",
-                                kv_scale: float=1.0):
+                              kv_cache_dtype: str = "auto",
+                              kv_scale: float = 1.0):
 
         cap = torch.cuda.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
