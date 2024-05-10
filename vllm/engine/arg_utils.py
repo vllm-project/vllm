@@ -505,7 +505,7 @@ class EngineArgs:
             help='If \'recompute\', the engine performs preemption by block '
             'swapping; If \'swap\', the engine performs preemption by block '
             'swapping.')
-        
+
         parser.add_argument(
             "--served-model-name",
             nargs="+",

@@ -69,6 +69,7 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+        pass
 
     @abstractmethod
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:

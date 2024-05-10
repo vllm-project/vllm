@@ -210,7 +210,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             dest_device (Device): Device to swap the 'blocks' to.
         
         Returns:
-            dict[int, int]: Swap mapping from source_device
+            Dict[int, int]: Swap mapping from source_device
                 on to dest_device.
         """
         source_block_ids = [block.block_id for block in blocks]
