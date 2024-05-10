@@ -290,7 +290,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
-        schedule when BlockManagerV2 become default.
+        schedule when BlockManagerV2 become default. Currently not useful.
 
         Returns:
             List[Tuple[int, int]]: A mapping of source to destination block IDs.
