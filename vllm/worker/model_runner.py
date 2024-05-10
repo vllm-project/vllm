@@ -337,6 +337,8 @@ class ModelRunner:
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
+            print("SLOT_MAPPING", len(slot_mapping), slot_mapping[0:3], slot_mapping[-3:])
+            print("BL_TBL", len(block_table),  block_table[0:50],block_table[-20:])
 
         max_query_len = max(query_lens)
         max_seq_len = max(seq_lens)
@@ -433,6 +435,11 @@ class ModelRunner:
         if len(seq_group_metadata_list) == 0:
             return PrepareDecodeMetadata.empty()
 
+        if self.sliding_window is not None:
+            sliding_window_blocks = (self.sliding_window + self.block_size -
+                                     1) // self.block_size
+            block_aligned_sliding_window = sliding_window_blocks * self.block_size
+
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
             assert seq_group_metadata.token_chunk_size == 1
@@ -452,8 +459,18 @@ class ModelRunner:
                 position = seq_len - 1
                 input_positions.append(position)
 
-                seq_len = seq_len if self.sliding_window is None else min(
-                    seq_len, self.sliding_window)
+                if self.sliding_window is not None:
+                    curr_sliding_window_blocks = sliding_window_blocks
+                    if self.scheduler_config.use_v2_block_manager:
+                        # number of elements in last block
+                        suff_len = seq_len % self.block_size
+                        print(seq_len, block_aligned_sliding_window, suff_len)
+                        seq_len = min(seq_len, block_aligned_sliding_window + suff_len)
+                        if suff_len > 0:
+                            curr_sliding_window_blocks += 1
+                    else:
+                        seq_len = min(seq_len, self.sliding_window)
+
                 seq_lens.append(seq_len)
 
                 block_table = seq_group_metadata.block_tables[seq_id]
@@ -465,9 +482,9 @@ class ModelRunner:
                 lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
-                    sliding_window_blocks = (self.sliding_window //
-                                             self.block_size)
-                    block_table = block_table[-sliding_window_blocks:]
+                    print("B", len(block_table),  block_table[0:3],block_table[-3:])
+                    block_table = block_table[-curr_sliding_window_blocks:]
+                    print("B2", len(block_table),  block_table[0:3],block_table[-3:], slot)
                 block_tables.append(block_table)
 
         # vLLM uses cuda graph only for decoding requests.
