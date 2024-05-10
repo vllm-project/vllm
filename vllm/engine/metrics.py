@@ -119,35 +119,36 @@ class Metrics:
 
         # Request stats
         #   Latency
+        request_latency_buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0]
         self.histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
-            buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
-        self.histogram_queue_time_request = Histogram(
+            buckets=request_latency_buckets)
+        self.histogram_queue_time_request = self._histogram_cls(
             name="vllm:request_queue_time_seconds",
             documentation=
             "Histogram of time spent in WAITING phase for request.",
             labelnames=labelnames,
-            buckets=[0.1, 1.0, 2.5, 5.0, 10.0, 20.0, 50.0, 100])
-        self.histogram_inference_time_request = Histogram(
+            buckets=request_latency_buckets)
+        self.histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
             documentation=
             "Histogram of time spent in RUNNING phase for request.",
             labelnames=labelnames,
-            buckets=[0.1, 1.0, 2.5, 5.0, 10.0, 20.0, 50.0, 100])
-        self.histogram_prefill_time_request = Histogram(
+            buckets=request_latency_buckets)
+        self.histogram_prefill_time_request = self._histogram_cls(
             name="vllm:request_prefill_time_seconds",
             documentation=
             "Histogram of time spent in PREFILL phase for request.",
             labelnames=labelnames,
-            buckets=[0.1, 1.0, 2.5, 5.0, 10.0, 20.0, 50.0, 100])
-        self.histogram_decode_time_request = Histogram(
+            buckets=request_latency_buckets)
+        self.histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation=
             "Histogram of time spent in DECODE phase for request.",
             labelnames=labelnames,
-            buckets=[0.1, 1.0, 2.5, 5.0, 10.0, 20.0, 50.0, 100])
+            buckets=request_latency_buckets)
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
