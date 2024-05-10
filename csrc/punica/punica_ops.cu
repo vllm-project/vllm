@@ -45,7 +45,7 @@ inline bool launch_bgmv_kernel(out_T* Y, const in_T* X, const W_T* W, const int6
                                int64_t layer_idx, float scale) {
   // NOTE(woosuk): While Punica supports various combinations of input/output
   // data types, we limit the supported data types to reduce the binary size.
-  constexpr bool is_input_float  = std::is_same<in_T, float>::value;
+  constexpr bool is_input_float = std::is_same<in_T, float>::value;
   constexpr bool is_output_float = std::is_same<out_T, float>::value;
   if (is_input_float) {
     if (!std::is_same<out_T, W_T>::value) {
@@ -91,16 +91,16 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
   CHECK_DIM(4, w);
   CHECK_DIM(1, indicies);
 
-  int64_t B          = x.size(0);
-  int64_t h_in       = x.size(1);
-  int64_t h_out      = y.size(1);
+  int64_t B = x.size(0);
+  int64_t h_in = x.size(1);
+  int64_t h_out = y.size(1);
   int64_t num_layers = w.size(1);
   CHECK_EQ(w.size(3), h_in);
   CHECK_EQ(w.size(2), h_out);
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  bool                              ok = false;
+  bool ok = false;
   if (h_in <= 128512 && h_out <= 128512) {
     // TODO: See if we can get rid of this massive nested switch
     switch (x.scalar_type()) {
@@ -307,15 +307,15 @@ void dispatch_bgmv_low_level(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_DIM(4, w);
   CHECK_DIM(1, indicies);
 
-  int64_t B           = x.size(0);
-  int64_t num_layers  = w.size(1);
+  int64_t B = x.size(0);
+  int64_t num_layers = w.size(1);
   int64_t full_y_size = y.size(1);
   CHECK_EQ(w.size(3), h_in);
   CHECK_EQ(w.size(2), h_out);
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
-  bool                              ok = false;
+  bool ok = false;
   if (h_in <= 128512 && h_out <= 128512) {
     // TODO: See if we can get rid of this massive nested switch
     switch (x.scalar_type()) {

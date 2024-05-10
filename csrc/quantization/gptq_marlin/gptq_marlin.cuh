@@ -21,11 +21,11 @@ static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
 
 static constexpr int tile_size = 16;
-static constexpr int max_par   = 16;
+static constexpr int max_par = 16;
 
 template <typename T, int n>
 struct Vec {
-  T             elems[n];
+  T elems[n];
   __device__ T& operator[](int i) { return elems[i]; }
 };
 
@@ -39,7 +39,7 @@ constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 
 __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool pred = true) {
   const int BYTES = 16;
-  uint32_t  smem  = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
       "{\n"
       "   .reg .pred p;\n"
@@ -51,7 +51,7 @@ __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool
 
 __device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
   const int BYTES = 16;
-  uint32_t  smem  = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
       "{\n"
       "   cp.async.cg.shared.global [%0], [%1], %2;\n"

@@ -23,7 +23,7 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
                                             int32_t* total_tokens_post_pad, int32_t num_experts,
                                             int32_t block_size, size_t numel) {
   const size_t tokens_per_thread = CEILDIV(numel, blockDim.x);
-  const size_t start_idx         = threadIdx.x * tokens_per_thread;
+  const size_t start_idx = threadIdx.x * tokens_per_thread;
 
   extern __shared__ int32_t shared_mem[];
 

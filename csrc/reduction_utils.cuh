@@ -44,10 +44,10 @@ __inline__ __device__ T blockReduceSum(T val) {
   if constexpr (maxBlockSize > WARP_SIZE) {
     val = warpReduceSum<T>(val);
     // Calculates max number of lanes that need to participate in the last warpReduce
-    constexpr int       maxActiveLanes = (maxBlockSize + WARP_SIZE - 1) / WARP_SIZE;
+    constexpr int maxActiveLanes = (maxBlockSize + WARP_SIZE - 1) / WARP_SIZE;
     static __shared__ T shared[maxActiveLanes];
-    int                 lane = threadIdx.x % WARP_SIZE;
-    int                 wid  = threadIdx.x / WARP_SIZE;
+    int lane = threadIdx.x % WARP_SIZE;
+    int wid = threadIdx.x / WARP_SIZE;
     if (lane == 0) shared[wid] = val;
 
     __syncthreads();

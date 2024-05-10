@@ -9,21 +9,21 @@ void copy_blocks_cpu_impl(std::vector<torch::Tensor>& key_caches,
                           std::vector<torch::Tensor>& value_caches,
                           const torch::Tensor& mapping_pairs, const int element_num_per_block,
                           const int layer_num) {
-  const size_t pair_num    = mapping_pairs.size(0);
+  const size_t pair_num = mapping_pairs.size(0);
   const size_t block_bytes = sizeof(scalar_t) * element_num_per_block;
 #pragma omp parallel for collapse(2)
   for (int layer = 0; layer < layer_num; ++layer) {
     for (size_t pair = 0; pair < pair_num; ++pair) {
-      int64_t   source_offset = element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
-      int64_t   target_offset = element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
+      int64_t source_offset = element_num_per_block * mapping_pairs[pair][0].item<int64_t>();
+      int64_t target_offset = element_num_per_block * mapping_pairs[pair][1].item<int64_t>();
       scalar_t* key_cache_ptr = key_caches[layer].data_ptr<scalar_t>();
-      scalar_t* source_ptr    = key_cache_ptr + source_offset;
-      scalar_t* target_ptr    = key_cache_ptr + target_offset;
+      scalar_t* source_ptr = key_cache_ptr + source_offset;
+      scalar_t* target_ptr = key_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
 
       scalar_t* value_cache_ptr = value_caches[layer].data_ptr<scalar_t>();
-      source_ptr                = value_cache_ptr + source_offset;
-      target_ptr                = value_cache_ptr + target_offset;
+      source_ptr = value_cache_ptr + source_offset;
+      target_ptr = value_cache_ptr + target_offset;
       std::memcpy(target_ptr, source_ptr, block_bytes);
     }
   }
@@ -44,13 +44,13 @@ void reshape_and_cache_cpu_impl(const scalar_t* __restrict__ key,
     for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
       const int64_t slot_idx = slot_mapping[token_idx];
       if (slot_idx >= 0) {
-        int             src_key_head_idx   = token_idx * key_stride + head_idx * head_size;
-        int             src_value_head_idx = token_idx * value_stride + head_idx * head_size;
-        const scalar_t* src_key_head_ptr   = key + src_key_head_idx;
+        int src_key_head_idx = token_idx * key_stride + head_idx * head_size;
+        int src_value_head_idx = token_idx * value_stride + head_idx * head_size;
+        const scalar_t* src_key_head_ptr = key + src_key_head_idx;
         const scalar_t* src_value_head_ptr = value + src_value_head_idx;
-        const int64_t   block_index        = slot_idx / block_size;
-        const int64_t   block_offset       = slot_idx % block_size;
-        scalar_t*       target_key_head_ptr =
+        const int64_t block_index = slot_idx / block_size;
+        const int64_t block_offset = slot_idx % block_size;
+        scalar_t* target_key_head_ptr =
             key_cache + block_elem_num * block_index + head_idx * block_size * head_size;
         scalar_t* target_value_head_ptr =
             value_cache + block_elem_num * block_index + head_idx * block_size * head_size;
@@ -63,7 +63,7 @@ void reshape_and_cache_cpu_impl(const scalar_t* __restrict__ key,
         }
 
         for (int src_value_idx = 0; src_value_idx < head_size; ++src_value_idx) {
-          const int64_t target_offset          = src_value_idx * block_size + block_offset;
+          const int64_t target_offset = src_value_idx * block_size + block_offset;
           target_value_head_ptr[target_offset] = src_value_head_ptr[src_value_idx];
         }
       }
@@ -95,12 +95,12 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value, torch::Tensor& 
   TORCH_CHECK(kv_scale == 1.0f);
 
   int num_tokens = key.size(0);
-  int num_heads  = key.size(1);
-  int head_size  = key.size(2);
+  int num_heads = key.size(1);
+  int head_size = key.size(2);
   int block_size = key_cache.size(3);
-  int x          = key_cache.size(4);
+  int x = key_cache.size(4);
 
-  int key_stride   = key.stride(0);
+  int key_stride = key.stride(0);
   int value_stride = value.stride(0);
 
   VLLM_DISPATCH_FLOATING_TYPES(key.scalar_type(), "reshape_and_cache_cpu_impl", [&] {

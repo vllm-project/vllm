@@ -75,8 +75,8 @@ __global__ void gen_data(curandState_t* state, T* data, double* ground_truth, in
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
     double sum = 0.0;
     for (int i = 0; i < nRanks; i++) {
-      double val  = curand_uniform_double(&state[idx * nRanks + i]) * 4;
-      T      hval = val;  // downcast first
+      double val = curand_uniform_double(&state[idx * nRanks + i]) * 4;
+      T hval = val;  // downcast first
       sum += static_cast<double>(hval);
       if (i == myRank) data[idx] = hval;
     }
@@ -87,7 +87,7 @@ __global__ void gen_data(curandState_t* state, T* data, double* ground_truth, in
 template <typename T>
 void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit, int data_size,
          bool performance_test) {
-  T*           result;
+  T* result;
   cudaStream_t stream;
   CUDACHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
   CUDACHECK(cudaMalloc(&result, data_size * sizeof(T)));
@@ -95,8 +95,8 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
 
   cudaIpcMemHandle_t self_data_handle;
   cudaIpcMemHandle_t data_handles[8];
-  vllm::Signal*      buffer;
-  T*                 self_data_copy;
+  vllm::Signal* buffer;
+  T* self_data_copy;
   /**
    * Allocate IPC buffer
    *
@@ -116,10 +116,10 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
   MPICHECK(MPI_Allgather(&self_data_handle, sizeof(cudaIpcMemHandle_t), MPI_BYTE, data_handles,
                          sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD));
 
-  void*  rank_data;
+  void* rank_data;
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
-  std::vector<int64_t>  offsets(nRanks, 0);
+  std::vector<int64_t> offsets(nRanks, 0);
   vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles, offsets, myRank);
   auto* self_data = reinterpret_cast<T*>(reinterpret_cast<char*>(buffer) + sizeof(vllm::Signal) +
                                          data_size * sizeof(T));
@@ -129,7 +129,7 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
     handles.reserve(nRanks);
     for (int i = 0; i < nRanks; i++) {
       char* begin = (char*)&data_handles[i];
-      char* end   = (char*)&data_handles[i + 1];
+      char* end = (char*)&data_handles[i + 1];
       handles.emplace_back(begin, end);
     }
     std::vector<int64_t> offsets(nRanks, sizeof(vllm::Signal) + data_size * sizeof(T));
@@ -162,7 +162,7 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
   if (performance_test) {
     dummy_kernel<<<1, 1, 0, stream>>>();
     constexpr int warmup_iters = 5;
-    constexpr int num_iters    = 100;
+    constexpr int num_iters = 100;
     // warmup
     for (int i = 0; i < warmup_iters; i++) {
       NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum, comm, stream));
@@ -215,7 +215,7 @@ void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
       }
     }
     long double nccl_diffs = 0.0;
-    long double my_diffs   = 0.0;
+    long double my_diffs = 0.0;
     for (int j = 0; j < data_size; j++) {
       nccl_diffs += abs(nccl_result[j] - ground_truth[j]);
       my_diffs += abs(my_result[j] - ground_truth[j]);
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
   MPICHECK(MPI_Comm_size(MPI_COMM_WORLD, &nRanks));
   CUDACHECK(cudaSetDevice(myRank));
   ncclUniqueId id;
-  ncclComm_t   comm;
+  ncclComm_t comm;
   if (myRank == 0) ncclGetUniqueId(&id);
   MPICHECK(MPI_Bcast(static_cast<void*>(&id), sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
   NCCLCHECK(ncclCommInitRank(&comm, nRanks, id, myRank));

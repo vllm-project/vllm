@@ -1,12 +1,12 @@
 #pragma once
 
 #ifdef __HIPCC__
-#include <hip/hip_runtime.h>
+  #include <hip/hip_runtime.h>
 #else
-#include <iostream>
-#include <math.h>
-#include <stdint.h>
-#include <type_traits>
+  #include <iostream>
+  #include <math.h>
+  #include <stdint.h>
+  #include <type_traits>
 #endif
 
 #include "hip_float8_impl.h"
@@ -14,11 +14,11 @@
 struct alignas(1) hip_fp8 {
   struct from_bits_t {};
   HIP_FP8_HOST_DEVICE static constexpr from_bits_t from_bits() { return from_bits_t(); }
-  uint8_t                                          data;
+  uint8_t data;
 
-  hip_fp8()                                             = default;
+  hip_fp8() = default;
   HIP_FP8_HOST_DEVICE constexpr hip_fp8(const hip_fp8&) = default;
-  HIP_FP8_HOST_DEVICE constexpr hip_fp8(uint8_t v)      = delete;
+  HIP_FP8_HOST_DEVICE constexpr hip_fp8(uint8_t v) = delete;
   explicit HIP_FP8_HOST_DEVICE constexpr hip_fp8(uint8_t v, from_bits_t) : data(v) {}
 
 #ifdef __HIP__MI300__
@@ -42,7 +42,7 @@ struct alignas(1) hip_fp8 {
 #ifdef __HIP__MI300__
   // upcast using device specific intrinsic
   explicit inline HIP_FP8_DEVICE operator float() const {
-    float    fval;
+    float fval;
     uint32_t i32val = static_cast<uint32_t>(data);
 
     // upcast
@@ -61,8 +61,8 @@ struct alignas(1) hip_fp8 {
 };
 
 namespace std {
-inline hip_fp8                        sin(hip_fp8 a) { return hip_fp8(sinf(float(a))); }
-inline hip_fp8                        cos(hip_fp8 a) { return hip_fp8(cosf(float(a))); }
+inline hip_fp8 sin(hip_fp8 a) { return hip_fp8(sinf(float(a))); }
+inline hip_fp8 cos(hip_fp8 a) { return hip_fp8(cosf(float(a))); }
 HIP_FP8_HOST_DEVICE constexpr hip_fp8 real(const hip_fp8& a) { return a; }
 }  // namespace std
 

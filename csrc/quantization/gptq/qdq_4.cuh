@@ -30,15 +30,15 @@ __forceinline__ __device__ void shuffle_4bit_8(uint32_t* q, int stride) {
 
 __forceinline__ __device__ void dequant_4bit_8(const uint32_t q_0, half2 (&dq)[4], int stride,
                                                const uint32_t zero) {
-  const uint32_t    c0   = 0x64006400;
-  const half        y16_ = __float2half_rn(1.0f / 16.0f);
-  const half2       y16  = __halves2half2(y16_, y16_);
+  const uint32_t c0 = 0x64006400;
+  const half y16_ = __float2half_rn(1.0f / 16.0f);
+  const half2 y16 = __halves2half2(y16_, y16_);
   const half_uint16 z1_(0xe400 | zero);  // half(-1024.0f - zero);
-  const half        z16_ = __hsub(__int2half_rn(-64), __int2half_rn(zero));
-  const half2       z1   = __half2half2(z1_.as_half);
-  const half2       z16  = __half2half2(z16_);
+  const half z16_ = __hsub(__int2half_rn(-64), __int2half_rn(zero));
+  const half2 z1 = __half2half2(z1_.as_half);
+  const half2 z16 = __half2half2(z16_);
 
-  uint32_t     qa = q_0;
+  uint32_t qa = q_0;
   half2_uint32 q0((qa & 0x000f000f) | c0);  // half2(q[ 0], q[ 1])      + 1024
   half2_uint32 q1((qa & 0x00f000f0) | c0);  // half2(q[ 2], q[ 3]) * 16 + 1024
   qa >>= 8;
@@ -55,14 +55,14 @@ __forceinline__ __device__ void dequant_4bit_8_prep_zero_scale(const uint32_t ze
                                                                const half scale, half2 (&z1z16)[2],
                                                                half2 (&y1y16)[2]) {
   half_uint16 z1(0xe400 | zero);  // half(-1024.0f - zero);
-  half        z16 = __hsub(__int2half_rn(-64), __int2half_rn(zero));
+  half z16 = __hsub(__int2half_rn(-64), __int2half_rn(zero));
 
   half2 scale2 = __half2half2(scale);
 
   z1z16[0] = __hmul2(scale2, __half2half2(z1.as_half));
   z1z16[1] = __hmul2(scale2, __half2half2(z16));
 
-  const half y1  = __float2half_rn(1.0f);
+  const half y1 = __float2half_rn(1.0f);
   const half y16 = __float2half_rn(1.0f / 16.0f);
 
   y1y16[0] = __hmul2(scale2, __half2half2(y1));
@@ -72,12 +72,12 @@ __forceinline__ __device__ void dequant_4bit_8_prep_zero_scale(const uint32_t ze
 __forceinline__ __device__ void dequant_4bit_8_prep_zero(const uint32_t zero, half2 (&z1z16)[2],
                                                          half2 (&y1y16)[2]) {
   half_uint16 z1(0xe400 | zero);  // half(-1024.0f - zero);
-  half        z16 = __hsub(__int2half_rn(-64), __int2half_rn(zero));
+  half z16 = __hsub(__int2half_rn(-64), __int2half_rn(zero));
 
   z1z16[0] = __half2half2(z1.as_half);
   z1z16[1] = __half2half2(z16);
 
-  const half y1  = __float2half_rn(1.0f);
+  const half y1 = __float2half_rn(1.0f);
   const half y16 = __float2half_rn(1.0f / 16.0f);
 
   y1y16[0] = __half2half2(y1);
@@ -89,7 +89,7 @@ __forceinline__ __device__ void dequant_4bit_8_gptq(const uint32_t q_0, half2 (&
                                                     int stride, bool scaled) {
   const uint32_t c0 = 0x64006400;
 
-  uint32_t     qa = q_0;
+  uint32_t qa = q_0;
   half2_uint32 q0((qa & 0x000f000f) | c0);  // half2( q[0]      + 1024, q[1]      + 1024 )
   half2_uint32 q1((qa & 0x00f000f0) | c0);  // half2( q[2] * 16 + 1024, q[3] * 16 + 1024 )
   qa >>= 8;

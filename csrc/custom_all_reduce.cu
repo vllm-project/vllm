@@ -88,7 +88,7 @@ void _all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out, cudaStream_
 
 void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
-  auto                              stream = c10::cuda::getCurrentCUDAStream().stream();
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   _all_reduce(_fa, inp, out, stream);
@@ -97,7 +97,7 @@ void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out) {
 void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
                       torch::Tensor& out) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
-  auto                              stream = c10::cuda::getCurrentCUDAStream().stream();
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
 
   auto input_size = inp.numel() * inp.element_size();
   TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());

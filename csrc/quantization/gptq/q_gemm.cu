@@ -32,7 +32,7 @@ namespace gptq {
 #define DIVIDE(x, size) (((x) + (size) - 1) / (size))
 
 #if defined(USE_ROCM)
-#include <hipblas/hipblas.h>
+  #include <hipblas/hipblas.h>
 __host__ __forceinline__ hipblasStatus_t
 __compat_hipblasHgemm(hipblasHandle_t handle, hipblasOperation_t transA, hipblasOperation_t transB,
                       int m, int n, int k, const half* alpha, const half* AP, int lda,
@@ -42,15 +42,15 @@ __compat_hipblasHgemm(hipblasHandle_t handle, hipblasOperation_t transA, hipblas
       reinterpret_cast<const hipblasHalf*>(AP), lda, reinterpret_cast<const hipblasHalf*>(BP), ldb,
       reinterpret_cast<const hipblasHalf*>(beta), reinterpret_cast<hipblasHalf*>(CP), ldc);
 }
-#define hipblasHgemm __compat_hipblasHgemm
+  #define hipblasHgemm __compat_hipblasHgemm
 
-// Previous version of PyTorch were converting to rocBLAS instead of hipBLAS.
-#define rocblas_operation_none HIPBLAS_OP_N
-#define rocblas_hgemm __compat_hipblasHgemm
+  // Previous version of PyTorch were converting to rocBLAS instead of hipBLAS.
+  #define rocblas_operation_none HIPBLAS_OP_N
+  #define rocblas_hgemm __compat_hipblasHgemm
 #endif
 
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr, const half2 g_result) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -58,7 +58,7 @@ __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr, cons
 }
 
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -67,7 +67,7 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
 
 __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr, const half2 g_result,
                                          const half qs_h) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -76,7 +76,7 @@ __forceinline__ __device__ half2 dot22_8(half2 (&dq)[4], const half* a_ptr, cons
 
 __forceinline__ __device__ half2 dot22_16(half2 (&dq)[8], const half* a_ptr, const half2 g_result,
                                           const half qs_h) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -85,7 +85,7 @@ __forceinline__ __device__ half2 dot22_16(half2 (&dq)[8], const half* a_ptr, con
 
 __forceinline__ __device__ half2 dot22_32(half2 (&dq)[16], const half* a_ptr, const half2 g_result,
                                           const half qs_h) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -94,7 +94,7 @@ __forceinline__ __device__ half2 dot22_32(half2 (&dq)[16], const half* a_ptr, co
 
 __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr, const float g_result,
                                            const float qs_f) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -104,7 +104,7 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr, co
 
 __forceinline__ __device__ float dot22_16_f(half2 (&dq)[8], const half* a_ptr, const float g_result,
                                             const float qs_f) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -114,7 +114,7 @@ __forceinline__ __device__ float dot22_16_f(half2 (&dq)[8], const half* a_ptr, c
 
 __forceinline__ __device__ float dot22_32_f(half2 (&dq)[16], const half* a_ptr,
                                             const float g_result, const float qs_f) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -131,12 +131,12 @@ __forceinline__ __device__ half dot22_8_h(half2 (&dq)[4], const half* a_ptr, con
 #pragma unroll
   for (int i = 0; i < 4; i++) {
     half2 w01 = dq[i];
-    float w0  = __low2float(w01);
-    float w1  = __high2float(w01);
-    float x0  = __half2float(*a_ptr++);
-    float x1  = __half2float(*a_ptr++);
-    result    = fma(w0, x0, result);
-    result    = fma(w1, x1, result);
+    float w0 = __low2float(w01);
+    float w1 = __high2float(w01);
+    float x0 = __half2float(*a_ptr++);
+    float x1 = __half2float(*a_ptr++);
+    result = fma(w0, x0, result);
+    result = fma(w1, x1, result);
   }
   float qs = __half2float(qs_h);
   result *= qs;
@@ -146,7 +146,7 @@ __forceinline__ __device__ half dot22_8_h(half2 (&dq)[4], const half* a_ptr, con
 
 __forceinline__ __device__ half dot22_16_h(half2 (&dq)[8], const half* a_ptr, const half g_result,
                                            const half qs_h) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 8; i++) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -156,7 +156,7 @@ __forceinline__ __device__ half dot22_16_h(half2 (&dq)[8], const half* a_ptr, co
 
 __forceinline__ __device__ half dot22_32_h(half2 (&dq)[16], const half* a_ptr, const half g_result,
                                            const half qs_h) {
-  half2        result = {};
+  half2 result = {};
   const half2* a2_ptr = (const half2*)a_ptr;
 #pragma unroll
   for (int i = 0; i < 16; i += 1) result = __hfma2(dq[i], *a2_ptr++, result);
@@ -174,10 +174,10 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
     const uint32_t* __restrict__ b_gptq_qzeros, const half* __restrict__ b_gptq_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k, const int groups,
     const int* __restrict__ b_q_perm) {
-  MatrixView_half    a_(a, size_m, size_k);
+  MatrixView_half a_(a, size_m, size_k);
   MatrixView_half_rw c_(c, size_m, size_n);
-  MatrixView_q4_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int t = threadIdx.x;
 
@@ -197,8 +197,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
 
   if (offset_k + t < end_k) {
     for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr       = a_.item_ptr(offset_m + m, 0);
-      half*       block_a_ptr = block_a[m];
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
 
       half a0;
       if (b_q_perm)
@@ -220,18 +220,18 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // a, b offset
   int qk = offset_k / (32 / 4);
 
-  const uint32_t* b_ptr    = b_q_weight + qk * size_n + n;
-  const half*     a_ptr    = &block_a[0][0];
-  int             a_stride = BLOCK_KN_SIZE;
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
 
   // Initial group
-  int   zeros[4];
+  int zeros[4];
   float scales[4];
   half2 z1z16[4][2];
   half2 y1y16[4][2];
@@ -261,8 +261,8 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
 
 #pragma unroll
     for (int j = 0; j < 4; j++) {
-      const int4* b_ptr4    = (int4*)b_ptr;
-      int4        load_int4 = *b_ptr4;
+      const int4* b_ptr4 = (int4*)b_ptr;
+      int4 load_int4 = *b_ptr4;
 
       half2 dq[4][4];
       dequant_4bit_8_gptq(load_int4.x, dq[0], z1z16[0], y1y16[0], size_n, false);
@@ -286,7 +286,7 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   }
 
   for (int m = 0; m < m_count; m++) {
-    half2* out     = (half2*)c_.item_ptr(offset_m + m, n);
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
     half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
     half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
     atomicAdd(out, result01);
@@ -300,10 +300,10 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
     const uint32_t* __restrict__ b_gptq_qzeros, const half* __restrict__ b_gptq_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k, const int groups,
     const int* __restrict__ b_q_perm) {
-  MatrixView_half    a_(a, size_m, size_k);
+  MatrixView_half a_(a, size_m, size_k);
   MatrixView_half_rw c_(c, size_m, size_n);
-  MatrixView_q2_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q2_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int t = threadIdx.x;
 
@@ -323,8 +323,8 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
 
   if (offset_k + t < end_k) {
     for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr       = a_.item_ptr(offset_m + m, 0);
-      half*       block_a_ptr = block_a[m];
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
 
       half a0;
       if (b_q_perm)
@@ -346,18 +346,18 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // a, b offset
   int qk = offset_k / (32 / 2);
 
-  const uint32_t* b_ptr    = b_q_weight + qk * size_n + n;
-  const half*     a_ptr    = &block_a[0][0];
-  int             a_stride = BLOCK_KN_SIZE;
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
 
   // Initial group
-  int  zeros[4];
+  int zeros[4];
   half scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4(scales, group, n);
@@ -376,8 +376,8 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
 
 #pragma unroll
     for (int j = 0; j < 1; j++) {
-      const int4* b_ptr4    = (int4*)b_ptr;
-      int4        load_int4 = *b_ptr4;
+      const int4* b_ptr4 = (int4*)b_ptr;
+      int4 load_int4 = *b_ptr4;
 
       half2 dq[4][8];
       dequant_2bit_16(load_int4.x, dq[0], size_n, zeros[0] + 1);
@@ -401,9 +401,9 @@ __global__ void gemm_half_q_half_gptq_2bit_kernel(
   }
 
   for (int m = 0; m < m_count; m++) {
-    half2* out      = (half2*)c_.item_ptr(offset_m + m, n);
-    half2  result01 = __halves2half2(block_c[m][0], block_c[m][1]);
-    half2  result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+    half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+    half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
     atomicAdd(out, result01);
     atomicAdd(out + 1, result23);
   }
@@ -415,10 +415,10 @@ __global__ void gemm_half_q_half_gptq_3bit_kernel(
     const uint32_t* __restrict__ b_gptq_qzeros, const half* __restrict__ b_gptq_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k, const int groups,
     const int* __restrict__ b_q_perm) {
-  MatrixView_half    a_(a, size_m, size_k);
+  MatrixView_half a_(a, size_m, size_k);
   MatrixView_half_rw c_(c, size_m, size_n);
-  MatrixView_q3_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q3_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int t = threadIdx.x;
 
@@ -438,8 +438,8 @@ __global__ void gemm_half_q_half_gptq_3bit_kernel(
 
   if (offset_k + t < end_k) {
     for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr       = a_.item_ptr(offset_m + m, 0);
-      half*       block_a_ptr = block_a[m];
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
 
       half a0;
       if (b_q_perm)
@@ -461,18 +461,18 @@ __global__ void gemm_half_q_half_gptq_3bit_kernel(
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // a, b offset
   int qk = offset_k / 32 * 3;
 
-  const uint32_t* b_ptr    = b_q_weight + qk * size_n + n;
-  const half*     a_ptr    = &block_a[0][0];
-  int             a_stride = BLOCK_KN_SIZE;
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
 
   // Initial group
-  int  zeros[4];
+  int zeros[4];
   half scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4(scales, group, n);
@@ -519,9 +519,9 @@ __global__ void gemm_half_q_half_gptq_3bit_kernel(
   }
 
   for (int m = 0; m < m_count; m++) {
-    half2* out      = (half2*)c_.item_ptr(offset_m + m, n);
-    half2  result01 = __halves2half2(block_c[m][0], block_c[m][1]);
-    half2  result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+    half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+    half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
     atomicAdd(out, result01);
     atomicAdd(out + 1, result23);
   }
@@ -533,10 +533,10 @@ __global__ void gemm_half_q_half_gptq_8bit_kernel(
     const uint32_t* __restrict__ b_gptq_qzeros, const half* __restrict__ b_gptq_scales,
     half* __restrict__ c, const int size_m, const int size_n, const int size_k, const int groups,
     const int* __restrict__ b_q_perm) {
-  MatrixView_half    a_(a, size_m, size_k);
+  MatrixView_half a_(a, size_m, size_k);
   MatrixView_half_rw c_(c, size_m, size_n);
-  MatrixView_q8_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q8_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int t = threadIdx.x;
 
@@ -556,8 +556,8 @@ __global__ void gemm_half_q_half_gptq_8bit_kernel(
 
   if (offset_k + t < end_k) {
     for (int m = 0; m < m_count; ++m) {
-      const half* a_ptr       = a_.item_ptr(offset_m + m, 0);
-      half*       block_a_ptr = block_a[m];
+      const half* a_ptr = a_.item_ptr(offset_m + m, 0);
+      half* block_a_ptr = block_a[m];
 
       half a0;
       if (b_q_perm)
@@ -579,18 +579,18 @@ __global__ void gemm_half_q_half_gptq_8bit_kernel(
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // a, b offset
   int qk = offset_k / (32 / 8);
 
-  const uint32_t* b_ptr    = b_q_weight + qk * size_n + n;
-  const half*     a_ptr    = &block_a[0][0];
-  int             a_stride = BLOCK_KN_SIZE;
+  const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
+  const half* a_ptr = &block_a[0][0];
+  int a_stride = BLOCK_KN_SIZE;
 
   // Initial group
-  int  zeros[4];
+  int zeros[4];
   half scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4(scales, group, n);
@@ -633,15 +633,15 @@ __global__ void gemm_half_q_half_gptq_8bit_kernel(
   }
 
   for (int m = 0; m < m_count; m++) {
-    half2* out      = (half2*)c_.item_ptr(offset_m + m, n);
-    half2  result01 = __halves2half2(block_c[m][0], block_c[m][1]);
-    half2  result23 = __halves2half2(block_c[m][2], block_c[m][3]);
+    half2* out = (half2*)c_.item_ptr(offset_m + m, n);
+    half2 result01 = __halves2half2(block_c[m][0], block_c[m][1]);
+    half2 result23 = __halves2half2(block_c[m][2], block_c[m][3]);
     atomicAdd(out, result01);
     atomicAdd(out + 1, result23);
   }
 }
 
-fp_gemm_half_q_half_gptq_kernel pick_gemm_half_q_half_gptq_kernel(bool      first_block,
+fp_gemm_half_q_half_gptq_kernel pick_gemm_half_q_half_gptq_kernel(bool first_block,
                                                                   const int m_count,
                                                                   const int bit) {
 #define SELECT_KERNEL(M_COUNT)                                             \
@@ -686,9 +686,9 @@ void gemm_half_q_half_cuda_part(const half* a, const uint32_t* b_q_weight,
   blockDim.x = BLOCK_KN_SIZE;
   blockDim.y = 1;
   blockDim.z = 1;
-  gridDim.x  = DIVIDE(size_n, BLOCK_KN_SIZE * 4);
-  gridDim.y  = DIVIDE(size_m, m_count);
-  gridDim.z  = DIVIDE(size_k, BLOCK_KN_SIZE);
+  gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE * 4);
+  gridDim.y = DIVIDE(size_m, m_count);
+  gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
 
   fp_gemm_half_q_half_gptq_kernel kernel = pick_gemm_half_q_half_gptq_kernel(true, m_count, bit);
 
@@ -704,8 +704,8 @@ __global__ void reconstruct_exllama_8bit_kernel(const uint32_t* __restrict__ b_q
                                                 const int size_k, const int size_n,
                                                 const int groups, half* __restrict__ b) {
   MatrixView_half_rw b_(b, size_k, size_n);
-  MatrixView_q8_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q8_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int offset_k = BLOCK_KN_SIZE * blockIdx.y;
   int offset_n = BLOCK_KN_SIZE * blockIdx.x * 4;
@@ -714,7 +714,7 @@ __global__ void reconstruct_exllama_8bit_kernel(const uint32_t* __restrict__ b_q
 
   // Preload remapping table
   __shared__ int perm[BLOCK_KN_SIZE];
-  int            t = threadIdx.x;
+  int t = threadIdx.x;
 
   if (b_q_perm) {
     if (offset_k + t < size_k) perm[t] = b_q_perm[offset_k + t];
@@ -726,7 +726,7 @@ __global__ void reconstruct_exllama_8bit_kernel(const uint32_t* __restrict__ b_q
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // b offset
@@ -735,14 +735,14 @@ __global__ void reconstruct_exllama_8bit_kernel(const uint32_t* __restrict__ b_q
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
   // Initial zeros/scale
-  int   zeros[4];
+  int zeros[4];
   half2 scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4_h2(scales, group, n);
 
   __syncthreads();
 
-  int k  = offset_k;
+  int k = offset_k;
   int lk = 0;
 
   while (k < end_k) {
@@ -796,8 +796,8 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
                                                 const int size_k, const int size_n,
                                                 const int groups, half* __restrict__ b) {
   MatrixView_half_rw b_(b, size_k, size_n);
-  MatrixView_q4_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int offset_k = BLOCK_KN_SIZE * blockIdx.y;
   int offset_n = BLOCK_KN_SIZE * blockIdx.x * 4;
@@ -806,7 +806,7 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
 
   // Preload remapping table
   __shared__ int perm[BLOCK_KN_SIZE];
-  int            t = threadIdx.x;
+  int t = threadIdx.x;
 
   if (b_q_perm) {
     if (offset_k + t < size_k) perm[t] = b_q_perm[offset_k + t];
@@ -818,7 +818,7 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // b offset
@@ -827,7 +827,7 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
   // Initial zeros/scale
-  int   zeros[4];
+  int zeros[4];
   half2 scales[4];
   half2 z1z16[4][2];
   half2 y1y16[4][2];
@@ -840,7 +840,7 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
 
   __syncthreads();
 
-  int k  = offset_k;
+  int k = offset_k;
   int lk = 0;
 
   while (k < end_k) {
@@ -856,9 +856,9 @@ __global__ void reconstruct_exllama_4bit_kernel(const uint32_t* __restrict__ b_q
     }
 
     for (int p = 0; p < 4; p++) {
-      half2       dq[4][4];
-      const int4* b_ptr4    = (int4*)b_ptr;
-      int4        load_int4 = *b_ptr4;
+      half2 dq[4][4];
+      const int4* b_ptr4 = (int4*)b_ptr;
+      int4 load_int4 = *b_ptr4;
 
       dequant_4bit_8_gptq(load_int4.x, dq[0], z1z16[0], y1y16[0], size_n, false);
       dequant_4bit_8_gptq(load_int4.y, dq[1], z1z16[1], y1y16[1], size_n, false);
@@ -896,8 +896,8 @@ __global__ void reconstruct_exllama_3bit_kernel(const uint32_t* __restrict__ b_q
                                                 const int size_k, const int size_n,
                                                 const int groups, half* __restrict__ b) {
   MatrixView_half_rw b_(b, size_k, size_n);
-  MatrixView_q3_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q3_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int offset_k = BLOCK_KN_SIZE * blockIdx.y;
   int offset_n = BLOCK_KN_SIZE * blockIdx.x * 4;
@@ -906,7 +906,7 @@ __global__ void reconstruct_exllama_3bit_kernel(const uint32_t* __restrict__ b_q
 
   // Preload remapping table
   __shared__ int perm[BLOCK_KN_SIZE];
-  int            t = threadIdx.x;
+  int t = threadIdx.x;
 
   if (b_q_perm) {
     if (offset_k + t < size_k) perm[t] = b_q_perm[offset_k + t];
@@ -918,7 +918,7 @@ __global__ void reconstruct_exllama_3bit_kernel(const uint32_t* __restrict__ b_q
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // b offset
@@ -927,14 +927,14 @@ __global__ void reconstruct_exllama_3bit_kernel(const uint32_t* __restrict__ b_q
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
   // Initial zeros/scale
-  int   zeros[4];
+  int zeros[4];
   half2 scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4_h2(scales, group, n);
 
   __syncthreads();
 
-  int k  = offset_k;
+  int k = offset_k;
   int lk = 0;
 
   while (k < end_k) {
@@ -989,8 +989,8 @@ __global__ void reconstruct_exllama_2bit_kernel(const uint32_t* __restrict__ b_q
                                                 const int size_k, const int size_n,
                                                 const int groups, half* __restrict__ b) {
   MatrixView_half_rw b_(b, size_k, size_n);
-  MatrixView_q2_row  b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
-  MatrixView_half    b_gptq_scales_(b_gptq_scales, groups, size_n);
+  MatrixView_q2_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
+  MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
   int offset_k = BLOCK_KN_SIZE * blockIdx.y;
   int offset_n = BLOCK_KN_SIZE * blockIdx.x * 4;
@@ -999,7 +999,7 @@ __global__ void reconstruct_exllama_2bit_kernel(const uint32_t* __restrict__ b_q
 
   // Preload remapping table
   __shared__ int perm[BLOCK_KN_SIZE];
-  int            t = threadIdx.x;
+  int t = threadIdx.x;
 
   if (b_q_perm) {
     if (offset_k + t < size_k) perm[t] = b_q_perm[offset_k + t];
@@ -1011,7 +1011,7 @@ __global__ void reconstruct_exllama_2bit_kernel(const uint32_t* __restrict__ b_q
 
   // Find initial group
   int groupsize = size_k / groups;
-  int group     = offset_k / groupsize;
+  int group = offset_k / groupsize;
   int nextgroup = offset_k + groupsize;
 
   // b offset
@@ -1020,14 +1020,14 @@ __global__ void reconstruct_exllama_2bit_kernel(const uint32_t* __restrict__ b_q
   const uint32_t* b_ptr = b_q_weight + qk * size_n + n;
 
   // Initial zeros/scale
-  int   zeros[4];
+  int zeros[4];
   half2 scales[4];
   b_gptq_qzeros_.item4(zeros, group, n);
   b_gptq_scales_.item4_h2(scales, group, n);
 
   __syncthreads();
 
-  int k  = offset_k;
+  int k = offset_k;
   int lk = 0;
 
   while (k < end_k) {
@@ -1039,8 +1039,8 @@ __global__ void reconstruct_exllama_2bit_kernel(const uint32_t* __restrict__ b_q
     }
 
     for (int p = 0; p < 2; p++) {
-      const int4* b_ptr4    = (int4*)b_ptr;
-      int4        load_int4 = *b_ptr4;
+      const int4* b_ptr4 = (int4*)b_ptr;
+      int4 load_int4 = *b_ptr4;
 
       half2 dq[4][8];
       dequant_2bit_16(load_int4.x, dq[0], size_n, zeros[0] + 1);
@@ -1078,8 +1078,8 @@ void reconstruct_exllama(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzer
   dim3 blockDim, gridDim;
   blockDim.x = BLOCK_KN_SIZE;
   blockDim.y = 1;
-  gridDim.y  = DIVIDE(height, BLOCK_KN_SIZE);
-  gridDim.x  = DIVIDE(width, BLOCK_KN_SIZE);
+  gridDim.y = DIVIDE(height, BLOCK_KN_SIZE);
+  gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
 
   auto reconstruct_exllama_kernel = reconstruct_exllama_4bit_kernel;
   if (bit == 2) {
@@ -1099,14 +1099,14 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
     const half2* __restrict__ vec, const uint32_t* __restrict__ mat, half* __restrict__ mul,
     const half* __restrict__ scales, const uint32_t* __restrict__ zeros,
     const int* __restrict__ g_idx, int batch, int height, int width) {
-  int       zero_width  = width / 8;
-  int       vec_height  = height * 4;
+  int zero_width = width / 8;
+  int vec_height = height * 4;
   const int blockwidth2 = BLOCK_KN_SIZE / 2;
-  int       b           = blockIdx.y * BLOCK_M_SIZE_MAX;
-  int       b_end       = min(BLOCK_M_SIZE_MAX, batch - b);
-  int       h           = BLOCK_KN_SIZE * blockIdx.z / 8;
-  int       h_end       = min(BLOCK_KN_SIZE / 8, height - h) * 4;
-  int       w           = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
+  int b = blockIdx.y * BLOCK_M_SIZE_MAX;
+  int b_end = min(BLOCK_M_SIZE_MAX, batch - b);
+  int h = BLOCK_KN_SIZE * blockIdx.z / 8;
+  int h_end = min(BLOCK_KN_SIZE / 8, height - h) * 4;
+  int w = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
 
   __shared__ half2 blockvec[BLOCK_M_SIZE_MAX][blockwidth2];
   if (threadIdx.x < h_end) {
@@ -1117,8 +1117,8 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
   }
 
   __shared__ half2 deq2[256][8];
-  int              val = threadIdx.x / 8;
-  int              off = threadIdx.x % 8;
+  int val = threadIdx.x / 8;
+  int off = threadIdx.x % 8;
   for (; val < 256; val += BLOCK_KN_SIZE / 8) {
     deq2[val][off] = __halves2half2(__int2half_rn(val & 0xF), __int2half_rn(val >> 4));
   }
@@ -1128,13 +1128,13 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
   }
   __syncthreads();
 
-  int   i     = width * h + w;
-  int   g_h   = h * 8;
-  int   k     = 0;
-  int   z_w   = w / 8;
-  int   z_mod = (w % 8) * 4;
+  int i = width * h + w;
+  int g_h = h * 8;
+  int k = 0;
+  int z_w = w / 8;
+  int z_mod = (w % 8) * 4;
   half2 res2;
-  half  res[BLOCK_M_SIZE_MAX] = {};
+  half res[BLOCK_M_SIZE_MAX] = {};
 
   unsigned int tmp;
   while (k < h_end) {
@@ -1142,16 +1142,16 @@ __global__ void gemm_half_q_half_alt_4bit_kernel(
     half2 scales_tmp[4];
     half2 zeros_tmp[4];
     for (int tmp_k = 0; tmp_k < 4; tmp_k++) {
-      int   g        = g_idx[g_h + (k + tmp_k) * 2];
-      int   g2       = g_idx[g_h + (k + tmp_k) * 2 + 1];
-      half  scale_f  = scales[g * width + w];
-      half  scale_f2 = scales[g2 * width + w];
-      half2 scale    = __halves2half2(scale_f, scale_f2);
-      half2 zero     = __halves2half2(
+      int g = g_idx[g_h + (k + tmp_k) * 2];
+      int g2 = g_idx[g_h + (k + tmp_k) * 2 + 1];
+      half scale_f = scales[g * width + w];
+      half scale_f2 = scales[g2 * width + w];
+      half2 scale = __halves2half2(scale_f, scale_f2);
+      half2 zero = __halves2half2(
           __hmul(scale_f, __int2half_rn(-((zeros[g * zero_width + z_w] >> z_mod) & 0xF) - 1)),
           __hmul(scale_f2, __int2half_rn(-((zeros[g2 * zero_width + z_w] >> z_mod) & 0xF) - 1)));
       scales_tmp[tmp_k] = scale;
-      zeros_tmp[tmp_k]  = zero;
+      zeros_tmp[tmp_k] = zero;
     }
     for (int m = 0; m < b_end; m++) {
 #ifndef USE_ROCM
@@ -1186,14 +1186,14 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
     const half2* __restrict__ vec, const uint32_t* __restrict__ mat, half* __restrict__ mul,
     const half* __restrict__ scales, const uint32_t* __restrict__ zeros,
     const int* __restrict__ g_idx, int batch, int height, int width) {
-  int       zero_width  = width / 4;
-  int       vec_height  = height * 2;
+  int zero_width = width / 4;
+  int vec_height = height * 2;
   const int blockwidth2 = BLOCK_KN_SIZE / 2;
-  int       b           = blockIdx.y * BLOCK_M_SIZE_MAX;
-  int       b_end       = min(BLOCK_M_SIZE_MAX, batch - b);
-  int       h           = BLOCK_KN_SIZE * blockIdx.z / 4;
-  int       h_end       = min(BLOCK_KN_SIZE / 4, height - h) * 2;
-  int       w           = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
+  int b = blockIdx.y * BLOCK_M_SIZE_MAX;
+  int b_end = min(BLOCK_M_SIZE_MAX, batch - b);
+  int h = BLOCK_KN_SIZE * blockIdx.z / 4;
+  int h_end = min(BLOCK_KN_SIZE / 4, height - h) * 2;
+  int w = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
 
   __shared__ half2 blockvec[BLOCK_M_SIZE_MAX][blockwidth2];
   if (threadIdx.x < h_end) {
@@ -1208,13 +1208,13 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
   }
   __syncthreads();
 
-  int   i     = width * h + w;
-  int   g_h   = h * 4;
-  int   k     = 0;
-  int   z_w   = w / 4;
-  int   z_mod = (w % 4) * 8;
+  int i = width * h + w;
+  int g_h = h * 4;
+  int k = 0;
+  int z_w = w / 4;
+  int z_mod = (w % 4) * 8;
   half2 res2;
-  half  res[BLOCK_M_SIZE_MAX] = {};
+  half res[BLOCK_M_SIZE_MAX] = {};
 
   unsigned int tmp;
   while (k < h_end) {
@@ -1222,16 +1222,16 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
     half2 scales_tmp[2];
     half2 zeros_tmp[2];
     for (int tmp_k = 0; tmp_k < 2; tmp_k++) {
-      int   g        = g_idx[g_h + (k + tmp_k) * 2];
-      int   g2       = g_idx[g_h + (k + tmp_k) * 2 + 1];
-      half  scale_f  = scales[g * width + w];
-      half  scale_f2 = scales[g2 * width + w];
-      half2 scale    = __halves2half2(scale_f, scale_f2);
-      half2 zero     = __halves2half2(
+      int g = g_idx[g_h + (k + tmp_k) * 2];
+      int g2 = g_idx[g_h + (k + tmp_k) * 2 + 1];
+      half scale_f = scales[g * width + w];
+      half scale_f2 = scales[g2 * width + w];
+      half2 scale = __halves2half2(scale_f, scale_f2);
+      half2 zero = __halves2half2(
           __hmul(scale_f, __int2half_rn(-((zeros[g * zero_width + z_w] >> z_mod) & 0xff) - 1)),
           __hmul(scale_f2, __int2half_rn(-((zeros[g2 * zero_width + z_w] >> z_mod) & 0xff) - 1)));
       scales_tmp[tmp_k] = scale;
-      zeros_tmp[tmp_k]  = zero;
+      zeros_tmp[tmp_k] = zero;
     }
     for (int m = 0; m < b_end; m++) {
 #ifndef USE_ROCM
@@ -1241,7 +1241,7 @@ __global__ void gemm_half_q_half_alt_8bit_kernel(
       res2.y = __half_as_ushort(__float2half(0));
 #endif
       half2 v12 = __halves2half2(__int2half_rn(tmp & 0xFF), __int2half_rn((tmp >> 8) & 0xFF));
-      res2      = __hfma2(__hfma2(v12, scales_tmp[0], zeros_tmp[0]), blockvec[m][k + 0], res2);
+      res2 = __hfma2(__hfma2(v12, scales_tmp[0], zeros_tmp[0]), blockvec[m][k + 0], res2);
       half2 v34 =
           __halves2half2(__int2half_rn((tmp >> 16) & 0xFF), __int2half_rn((tmp >> 24) & 0xFF));
       res2 = __hfma2(__hfma2(v34, scales_tmp[1], zeros_tmp[1]), blockvec[m][k + 1], res2);
@@ -1266,9 +1266,9 @@ void gemm_half_q_half_alt(const half* a, const uint32_t* b_q_weight, const uint3
   blockDim.x = BLOCK_KN_SIZE;
   blockDim.y = 1;
   blockDim.z = 1;
-  gridDim.x  = DIVIDE(size_n, BLOCK_KN_SIZE);
-  gridDim.y  = DIVIDE(size_m, BLOCK_M_SIZE_MAX);
-  gridDim.z  = DIVIDE(size_k, BLOCK_KN_SIZE);
+  gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE);
+  gridDim.y = DIVIDE(size_m, BLOCK_M_SIZE_MAX);
+  gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
 
   auto kernel = gemm_half_q_half_alt_4bit_kernel;
   if (bit == 8) {
@@ -1290,25 +1290,25 @@ __global__ void reconstruct_gptq_kernel(const uint32_t* __restrict__ w,
   // Start of block
 
   int column = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
-  int row    = blockIdx.y * 32 / bit;
+  int row = blockIdx.y * 32 / bit;
   if (column >= width) return;
 
   // Views
 
   MatrixView_half_rw out_(out, height, width);
-  MatrixView_half    w_scales_(w_scales, group, width);
-  T                  w_zeros_(w_zeros, group, width);
+  MatrixView_half w_scales_(w_scales, group, width);
+  T w_zeros_(w_zeros, group, width);
 
-  uint32_t w_read  = w[blockIdx.y * width + column];
-  half*    out_ptr = out_.item_ptr(row, column);
+  uint32_t w_read = w[blockIdx.y * width + column];
+  half* out_ptr = out_.item_ptr(row, column);
 
 #pragma unroll
   for (int s = 0; s < 32; s += bit) {
-    int      group   = g_idx[row + s / bit];
-    half     w_scale = w_scales_.item(group, column);
-    uint32_t w_zero  = w_zeros_.item(group, column) + 1;
+    int group = g_idx[row + s / bit];
+    half w_scale = w_scales_.item(group, column);
+    uint32_t w_zero = w_zeros_.item(group, column) + 1;
     half w_item = __hmul(__int2half_rn((int)((w_read >> s) & ((1 << bit) - 1)) - w_zero), w_scale);
-    *out_ptr    = w_item;
+    *out_ptr = w_item;
     out_ptr += out_.width;
   }
 }
@@ -1321,26 +1321,26 @@ __global__ void reconstruct_gptq_3bit_kernel(const uint32_t* __restrict__ w,
                                              half* __restrict__ out) {
   // Start of block
   int column = BLOCK_KN_SIZE * blockIdx.x + threadIdx.x;
-  int row    = blockIdx.y * 32;
+  int row = blockIdx.y * 32;
   if (column >= width) return;
 
   // Views
 
   MatrixView_half_rw out_(out, height, width);
-  MatrixView_half    w_scales_(w_scales, group, width);
-  MatrixView_q3_row  w_zeros_(w_zeros, group, width);
+  MatrixView_half w_scales_(w_scales, group, width);
+  MatrixView_q3_row w_zeros_(w_zeros, group, width);
 
-  uint32_t w1      = w[(blockIdx.y * 3) * width + column];
-  uint32_t w2      = w[(blockIdx.y * 3 + 1) * width + column];
-  uint32_t w3      = w[(blockIdx.y * 3 + 2) * width + column];
-  half*    out_ptr = out_.item_ptr(row, column);
+  uint32_t w1 = w[(blockIdx.y * 3) * width + column];
+  uint32_t w2 = w[(blockIdx.y * 3 + 1) * width + column];
+  uint32_t w3 = w[(blockIdx.y * 3 + 2) * width + column];
+  half* out_ptr = out_.item_ptr(row, column);
 
 #pragma unroll
   for (int i = 0; i < 32; i += 1) {
-    int      group   = g_idx[row + i];
-    half     w_scale = w_scales_.item(group, column);
-    uint32_t w_zero  = w_zeros_.item(group, column) + 1;
-    int      w_item;
+    int group = g_idx[row + i];
+    half w_scale = w_scales_.item(group, column);
+    uint32_t w_zero = w_zeros_.item(group, column) + 1;
+    int w_item;
     if (i == 10) {
       w_item = (w1 >> 30) | ((w2 << 2) & 0x4);
     } else if (i == 21) {
@@ -1363,8 +1363,8 @@ void reconstruct_gptq(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzeros,
   dim3 blockDim, gridDim;
   blockDim.x = BLOCK_KN_SIZE;
   blockDim.y = 1;
-  gridDim.y  = DIVIDE(height, 32 / bit);
-  gridDim.x  = DIVIDE(width, BLOCK_KN_SIZE);
+  gridDim.y = DIVIDE(height, 32 / bit);
+  gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
 
   auto kernel = reconstruct_gptq_kernel<MatrixView_q4_row, 4>;
   if (bit == 2) {
@@ -1372,7 +1372,7 @@ void reconstruct_gptq(const uint32_t* b_q_weight, const uint32_t* b_gptq_qzeros,
   } else if (bit == 8) {
     kernel = reconstruct_gptq_kernel<MatrixView_q8_row, 8>;
   } else if (bit == 3) {
-    kernel    = reconstruct_gptq_3bit_kernel;
+    kernel = reconstruct_gptq_3bit_kernel;
     gridDim.y = DIVIDE(height, 32);
   }
 
@@ -1405,13 +1405,13 @@ void gemm_half_q_half_cuda(cublasHandle_t cublas_handle, const half* a, const ui
     }
 
     const half alpha = __float2half(1.0f);
-    const half beta  = __float2half(0.0f);
+    const half beta = __float2half(0.0f);
     cublasHgemm(cublas_handle, CUBLAS_OP_N, CUBLAS_OP_N, size_n, size_m, size_k, &alpha, temp_dq,
                 size_n, a, size_k, &beta, c, size_n);
   } else if (use_exllama) {
     // Quantized matmul
-    int max_chunks      = size_m / BLOCK_M_SIZE_MAX;
-    int last_chunk      = max_chunks * BLOCK_M_SIZE_MAX;
+    int max_chunks = size_m / BLOCK_M_SIZE_MAX;
+    int last_chunk = max_chunks * BLOCK_M_SIZE_MAX;
     int last_chunk_size = size_m - last_chunk;
 
     if (max_chunks) {
@@ -1434,7 +1434,7 @@ __global__ void shuffle_4bit_kernel(uint32_t* __restrict__ b_q_weight, const int
                                     const int size_n) {
   int n = blockIdx.x * THREADS_X + threadIdx.x;
   if (n >= size_n) return;
-  int       k     = 0;
+  int k = 0;
   uint32_t* b_ptr = b_q_weight + n;
   while (k < size_k) {
     shuffle_4bit_8(b_ptr, size_n);
@@ -1447,7 +1447,7 @@ __global__ void shuffle_8bit_kernel(uint32_t* __restrict__ b_q_weight, const int
                                     const int size_n) {
   int n = blockIdx.x * THREADS_X + threadIdx.x;
   if (n >= size_n) return;
-  int       k     = 0;
+  int k = 0;
   uint32_t* b_ptr = b_q_weight + n;
   while (k < size_k) {
     shuffle_8bit_4(b_ptr, size_n);
@@ -1460,7 +1460,7 @@ __global__ void shuffle_2bit_kernel(uint32_t* __restrict__ b_q_weight, const int
                                     const int size_n) {
   int n = blockIdx.x * THREADS_X + threadIdx.x;
   if (n >= size_n) return;
-  int       k     = 0;
+  int k = 0;
   uint32_t* b_ptr = b_q_weight + n;
   while (k < size_k) {
     shuffle_2bit_16(b_ptr, size_n);
@@ -1473,7 +1473,7 @@ __global__ void shuffle_3bit_kernel(uint32_t* __restrict__ b_q_weight, const int
                                     const int size_n) {
   int n = blockIdx.x * THREADS_X + threadIdx.x;
   if (n >= size_n) return;
-  int       k     = 0;
+  int k = 0;
   uint32_t* b_ptr = b_q_weight + n;
   while (k < size_k) {
     shuffle_3bit_32(b_ptr, size_n);
@@ -1485,22 +1485,22 @@ __global__ void shuffle_3bit_kernel(uint32_t* __restrict__ b_q_weight, const int
 __global__ void make_sequential_4bit_kernel(const uint32_t* __restrict__ w,
                                             uint32_t* __restrict__ w_new,
                                             const int* __restrict__ q_perm, const int w_width) {
-  const uint64_t* w2        = (uint64_t*)w;
-  uint64_t*       w_new2    = (uint64_t*)w_new;
-  int             w2_stride = w_width >> 1;
-  int             w2_column = THREADS_X * blockIdx.x + threadIdx.x;
+  const uint64_t* w2 = (uint64_t*)w;
+  uint64_t* w_new2 = (uint64_t*)w_new;
+  int w2_stride = w_width >> 1;
+  int w2_column = THREADS_X * blockIdx.x + threadIdx.x;
   if (w2_column >= w2_stride) return;
-  int      w_new2_row = blockIdx.y;
-  int      q_perm_idx = w_new2_row << 3;
-  uint64_t dst        = 0;
+  int w_new2_row = blockIdx.y;
+  int q_perm_idx = w_new2_row << 3;
+  uint64_t dst = 0;
 
 #pragma unroll
   for (int i = 0; i < 8; i++) {
     int source_row = q_perm[q_perm_idx++];
 
-    int w2_row          = source_row >> 3;
-    int w2_subrow       = source_row & 0x07;
-    int w2_row_shift    = w2_subrow << 2;
+    int w2_row = source_row >> 3;
+    int w2_subrow = source_row & 0x07;
+    int w2_row_shift = w2_subrow << 2;
     int wnew2_row_shift = i << 2;
 
     uint64_t src = w2[w2_row * w2_stride + w2_column];
@@ -1515,22 +1515,22 @@ __global__ void make_sequential_4bit_kernel(const uint32_t* __restrict__ w,
 __global__ void make_sequential_2bit_kernel(const uint32_t* __restrict__ w,
                                             uint32_t* __restrict__ w_new,
                                             const int* __restrict__ q_perm, const int w_width) {
-  const uint64_t* w2        = (uint64_t*)w;
-  uint64_t*       w_new2    = (uint64_t*)w_new;
-  int             w2_stride = w_width >> 1;
-  int             w2_column = THREADS_X * blockIdx.x + threadIdx.x;
+  const uint64_t* w2 = (uint64_t*)w;
+  uint64_t* w_new2 = (uint64_t*)w_new;
+  int w2_stride = w_width >> 1;
+  int w2_column = THREADS_X * blockIdx.x + threadIdx.x;
   if (w2_column >= w2_stride) return;
-  int      w_new2_row = blockIdx.y;
-  int      q_perm_idx = w_new2_row << 4;
-  uint64_t dst        = 0;
+  int w_new2_row = blockIdx.y;
+  int q_perm_idx = w_new2_row << 4;
+  uint64_t dst = 0;
 
 #pragma unroll
   for (int i = 0; i < 16; i++) {
     int source_row = q_perm[q_perm_idx++];
 
-    int w2_row          = source_row >> 4;
-    int w2_subrow       = source_row & 0x0f;
-    int w2_row_shift    = w2_subrow << 1;
+    int w2_row = source_row >> 4;
+    int w2_subrow = source_row & 0x0f;
+    int w2_row_shift = w2_subrow << 1;
     int wnew2_row_shift = i << 1;
 
     uint64_t src = w2[w2_row * w2_stride + w2_column];
@@ -1547,15 +1547,15 @@ __global__ void make_sequential_3bit_kernel(const uint32_t* __restrict__ w,
                                             const int* __restrict__ q_perm, const int w_width) {
   int w_column = THREADS_X * blockIdx.x + threadIdx.x;
   if (w_column >= w_width) return;
-  int      w_new_row  = blockIdx.y * 3;
-  int      q_perm_idx = blockIdx.y << 5;
-  uint32_t dst[3]     = {0, 0, 0};
+  int w_new_row = blockIdx.y * 3;
+  int q_perm_idx = blockIdx.y << 5;
+  uint32_t dst[3] = {0, 0, 0};
 
 #pragma unroll
   for (int i = 0; i < 32; i++) {
     int source_row = q_perm[q_perm_idx++];
-    int z_w        = (source_row / 32) * 3;
-    int z_mod      = source_row % 32;
+    int z_w = (source_row / 32) * 3;
+    int z_mod = source_row % 32;
     int z_bit;
 
     if (z_mod != 10) {
@@ -1617,7 +1617,7 @@ __global__ void make_sequential_3bit_kernel(const uint32_t* __restrict__ w,
       dst[z_w] |= (src << z_bit);
     }
   }
-  w_new[w_new_row * w_width + w_column]       = dst[0];
+  w_new[w_new_row * w_width + w_column] = dst[0];
   w_new[(w_new_row + 1) * w_width + w_column] = dst[1];
   w_new[(w_new_row + 2) * w_width + w_column] = dst[2];
 }
@@ -1625,22 +1625,22 @@ __global__ void make_sequential_3bit_kernel(const uint32_t* __restrict__ w,
 __global__ void make_sequential_8bit_kernel(const uint32_t* __restrict__ w,
                                             uint32_t* __restrict__ w_new,
                                             const int* __restrict__ q_perm, const int w_width) {
-  const uint64_t* w2        = (uint64_t*)w;
-  uint64_t*       w_new2    = (uint64_t*)w_new;
-  int             w2_stride = w_width >> 1;
-  int             w2_column = THREADS_X * blockIdx.x + threadIdx.x;
+  const uint64_t* w2 = (uint64_t*)w;
+  uint64_t* w_new2 = (uint64_t*)w_new;
+  int w2_stride = w_width >> 1;
+  int w2_column = THREADS_X * blockIdx.x + threadIdx.x;
   if (w2_column >= w2_stride) return;
-  int      w_new2_row = blockIdx.y;
-  int      q_perm_idx = w_new2_row << 2;
-  uint64_t dst        = 0;
+  int w_new2_row = blockIdx.y;
+  int q_perm_idx = w_new2_row << 2;
+  uint64_t dst = 0;
 
 #pragma unroll
   for (int i = 0; i < 4; i++) {
     int source_row = q_perm[q_perm_idx++];
 
-    int w2_row          = source_row >> 2;
-    int w2_subrow       = source_row & 0x03;
-    int w2_row_shift    = w2_subrow << 3;
+    int w2_row = source_row >> 2;
+    int w2_subrow = source_row & 0x03;
+    int w2_row_shift = w2_subrow << 3;
     int wnew2_row_shift = i << 3;
 
     uint64_t src = w2[w2_row * w2_stride + w2_column];
@@ -1660,14 +1660,14 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height, int wid
     dim3 blockDim, gridDim;
     blockDim.x = THREADS_X;
     blockDim.y = 1;
-    gridDim.x  = DIVIDE(width, THREADS_X);
-    gridDim.y  = height / 32 * bit;
+    gridDim.x = DIVIDE(width, THREADS_X);
+    gridDim.y = height / 32 * bit;
 
     auto kernel = make_sequential_4bit_kernel;
     if (bit == 2) {
       kernel = make_sequential_2bit_kernel;
     } else if (bit == 3) {
-      kernel    = make_sequential_3bit_kernel;
+      kernel = make_sequential_3bit_kernel;
       gridDim.y = height / 32;
     } else if (bit == 8) {
       kernel = make_sequential_8bit_kernel;
@@ -1682,10 +1682,10 @@ void shuffle_exllama_weight(uint32_t* q_weight, int* q_perm, int height, int wid
     cudaFree(new_qweight);
   }
   dim3 blockDim, gridDim;
-  blockDim.x          = THREADS_X;
-  blockDim.y          = 1;
-  gridDim.x           = DIVIDE(width, THREADS_X);
-  gridDim.y           = 1;
+  blockDim.x = THREADS_X;
+  blockDim.y = 1;
+  gridDim.x = DIVIDE(width, THREADS_X);
+  gridDim.y = 1;
   auto shuffle_kernel = shuffle_4bit_kernel;
   if (bit == 2) {
     shuffle_kernel = shuffle_2bit_kernel;
@@ -1705,8 +1705,8 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight, torch::Tensor
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx, bool use_exllama,
                         int bit) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
-  auto       options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  at::Tensor c       = torch::empty({a.size(0), b_q_weight.size(1)}, options);
+  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  at::Tensor c = torch::empty({a.size(0), b_q_weight.size(1)}, options);
   at::Tensor temp_dq = torch::empty({b_q_weight.size(0) * 32 / bit, b_q_weight.size(1)}, options);
 
   vllm::gptq::gemm_half_q_half_cuda(

@@ -16,8 +16,8 @@ namespace gptq {
 class MatrixView_half {
  public:
   const half* data;
-  const int   height;
-  const int   width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_half(const half* data, const int height, const int width)
       : data(data), height(height), width(width) {}
@@ -37,37 +37,37 @@ class MatrixView_half {
 
   __device__ __forceinline__ void item4(half (&items)[4], int row, int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
-    half2  i01 = ptr[0];
-    half2  i23 = ptr[1];
-    items[0]   = __low2half(i01);
-    items[1]   = __high2half(i01);
-    items[2]   = __low2half(i23);
-    items[3]   = __high2half(i23);
+    half2 i01 = ptr[0];
+    half2 i23 = ptr[1];
+    items[0] = __low2half(i01);
+    items[1] = __high2half(i01);
+    items[2] = __low2half(i23);
+    items[3] = __high2half(i23);
   }
   __device__ __forceinline__ void item4_f(float (&items)[4], int row, int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
-    half2  i01 = ptr[0];
-    half2  i23 = ptr[1];
-    items[0]   = __half2float(__low2half(i01));
-    items[1]   = __half2float(__high2half(i01));
-    items[2]   = __half2float(__low2half(i23));
-    items[3]   = __half2float(__high2half(i23));
+    half2 i01 = ptr[0];
+    half2 i23 = ptr[1];
+    items[0] = __half2float(__low2half(i01));
+    items[1] = __half2float(__high2half(i01));
+    items[2] = __half2float(__low2half(i23));
+    items[3] = __half2float(__high2half(i23));
   }
 
   __device__ __forceinline__ void item4_h2(half2 (&items)[4], int row, int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
-    half2  i01 = ptr[0];
-    half2  i23 = ptr[1];
-    items[0]   = __half2half2(__low2half(i01));
-    items[1]   = __half2half2(__high2half(i01));
-    items[2]   = __half2half2(__low2half(i23));
-    items[3]   = __half2half2(__high2half(i23));
+    half2 i01 = ptr[0];
+    half2 i23 = ptr[1];
+    items[0] = __half2half2(__low2half(i01));
+    items[1] = __half2half2(__high2half(i01));
+    items[2] = __half2half2(__low2half(i23));
+    items[3] = __half2half2(__high2half(i23));
   }
 };
 
 class MatrixView_half_rw {
  public:
-  half*     data;
+  half* data;
   const int height;
   const int width;
 
@@ -91,19 +91,19 @@ class MatrixView_half_rw {
   }
 
   __device__ __forceinline__ void set4(int row, int column, half v0, half v1, half v2, half v3) {
-    half2  v01 = __halves2half2(v0, v1);
-    half2  v23 = __halves2half2(v2, v3);
+    half2 v01 = __halves2half2(v0, v1);
+    half2 v23 = __halves2half2(v2, v3);
     half2* ptr = (half2*)item_ptr(row, column);
-    ptr[0]     = v01;
-    ptr[1]     = v23;
+    ptr[0] = v01;
+    ptr[1] = v23;
   }
 };
 
 class MatrixView_q4_row {
  public:
   const uint32_t* data;
-  const int       height;
-  const int       width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_q4_row(const uint32_t* data, const int height,
                                                const int width)
@@ -115,27 +115,27 @@ class MatrixView_q4_row {
   }
 
   __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
-    int      shift = (column & 0x07) * 4;
-    uint32_t d     = data[row * width / 8 + column / 8] >> shift;
-    items[0]       = d & 0x0f;
-    items[1]       = (d >> 4) & 0x0f;
+    int shift = (column & 0x07) * 4;
+    uint32_t d = data[row * width / 8 + column / 8] >> shift;
+    items[0] = d & 0x0f;
+    items[1] = (d >> 4) & 0x0f;
   }
 
   __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
-    int      shift = (column & 0x07) * 4;
-    uint32_t d     = data[row * width / 8 + column / 8] >> shift;
-    items[0]       = d & 0x0f;
-    items[1]       = (d >> 4) & 0x0f;
-    items[2]       = (d >> 8) & 0x0f;
-    items[3]       = (d >> 12) & 0x0f;
+    int shift = (column & 0x07) * 4;
+    uint32_t d = data[row * width / 8 + column / 8] >> shift;
+    items[0] = d & 0x0f;
+    items[1] = (d >> 4) & 0x0f;
+    items[2] = (d >> 8) & 0x0f;
+    items[3] = (d >> 12) & 0x0f;
   }
 };
 
 class MatrixView_q4_column {
  public:
   const uint32_t* data;
-  const int       height;
-  const int       width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_q4_column(const uint32_t* data, const int height,
                                                   const int width)
@@ -157,8 +157,8 @@ class MatrixView_q4_column {
 class MatrixView_q2_row {
  public:
   const uint32_t* data;
-  const int       height;
-  const int       width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_q2_row(const uint32_t* data, const int height,
                                                const int width)
@@ -170,34 +170,34 @@ class MatrixView_q2_row {
   }
 
   __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
-    int      shift = (column & 0x0f) * 2;
-    uint32_t d     = data[row * width / 16 + column / 16] >> shift;
-    items[0]       = d & 0x03;
-    items[1]       = (d >> 2) & 0x03;
+    int shift = (column & 0x0f) * 2;
+    uint32_t d = data[row * width / 16 + column / 16] >> shift;
+    items[0] = d & 0x03;
+    items[1] = (d >> 2) & 0x03;
   }
 
   __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
-    int      shift = (column & 0x0f) * 2;
-    uint32_t d     = data[row * width / 16 + column / 16] >> shift;
-    items[0]       = d & 0x03;
-    items[1]       = (d >> 2) & 0x03;
-    items[2]       = (d >> 4) & 0x03;
-    items[3]       = (d >> 6) & 0x03;
+    int shift = (column & 0x0f) * 2;
+    uint32_t d = data[row * width / 16 + column / 16] >> shift;
+    items[0] = d & 0x03;
+    items[1] = (d >> 2) & 0x03;
+    items[2] = (d >> 4) & 0x03;
+    items[3] = (d >> 6) & 0x03;
   }
 };
 
 class MatrixView_q3_row {
  public:
   const uint32_t* data;
-  const int       height;
-  const int       width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_q3_row(const uint32_t* data, const int height,
                                                const int width)
       : data(data), height(height), width(width) {}
 
   __device__ __forceinline__ int item(int row, int column) const {
-    int z_w   = column * 3 / 32;
+    int z_w = column * 3 / 32;
     int z_mod = column & 0x1f;
 
     if (z_mod == 10) {
@@ -216,7 +216,7 @@ class MatrixView_q3_row {
   }
 
   __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
-    int      shift = (column & 0x1f);
+    int shift = (column & 0x1f);
     uint32_t d;
     if (shift <= 4) {
       d = data[row * width / 32 * 3 + column * 3 / 32] >> (shift * 3);
@@ -241,8 +241,8 @@ class MatrixView_q3_row {
 class MatrixView_q8_row {
  public:
   const uint32_t* data;
-  const int       height;
-  const int       width;
+  const int height;
+  const int width;
 
   __device__ __forceinline__ MatrixView_q8_row(const uint32_t* data, const int height,
                                                const int width)
@@ -254,19 +254,19 @@ class MatrixView_q8_row {
   }
 
   __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
-    int      shift = (column & 0x03) * 8;
-    uint32_t d     = data[row * width / 4 + column / 4] >> shift;
-    items[0]       = d & 0xff;
-    items[1]       = (d >> 8) & 0xff;
+    int shift = (column & 0x03) * 8;
+    uint32_t d = data[row * width / 4 + column / 4] >> shift;
+    items[0] = d & 0xff;
+    items[1] = (d >> 8) & 0xff;
   }
 
   __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
-    int      shift = (column & 0x03) * 2;
-    uint32_t d     = data[row * width / 4 + column / 4] >> shift;
-    items[0]       = d & 0xff;
-    items[1]       = (d >> 8) & 0xff;
-    items[2]       = (d >> 16) & 0xff;
-    items[3]       = (d >> 24) & 0xff;
+    int shift = (column & 0x03) * 2;
+    uint32_t d = data[row * width / 4 + column / 4] >> shift;
+    items[0] = d & 0xff;
+    items[1] = (d >> 8) & 0xff;
+    items[2] = (d >> 16) & 0xff;
+    items[3] = (d >> 24) & 0xff;
   }
 };
 

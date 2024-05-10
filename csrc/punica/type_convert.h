@@ -3,18 +3,18 @@
 
 #ifndef USE_ROCM
 
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
+  #include <cuda_bf16.h>
+  #include <cuda_fp16.h>
 
 #else
 
-#include <hip/hip_bf16.h>
-#include <hip/hip_fp16.h>
+  #include <hip/hip_bf16.h>
+  #include <hip/hip_fp16.h>
 
-#define __TYPE_CONVERT__HOST_DEVICE__ __host__ __device__
+  #define __TYPE_CONVERT__HOST_DEVICE__ __host__ __device__
 
-typedef __half          nv_half;
-typedef __hip_bfloat16  nv_bfloat16;
+typedef __half nv_half;
+typedef __hip_bfloat16 nv_bfloat16;
 typedef __hip_bfloat162 nv_bfloat162;
 
 __TYPE_CONVERT__HOST_DEVICE__
@@ -66,7 +66,7 @@ __TYPE_CONVERT__HOST_DEVICE__ inline __hip_bfloat16 vllm_add<__hip_bfloat16>(__h
   return __hadd(a, b);
 }
 
-#undef __TYPE_CONVERT__HOST_DEVICE__
+  #undef __TYPE_CONVERT__HOST_DEVICE__
 
 #endif  // USE_ROCM
 

@@ -1,17 +1,17 @@
 #pragma once
 
 #if defined(__HIPCC__) && (defined(__gfx940__) || defined(__gfx941__) || defined(__gfx942__))
-#define __HIP__MI300__
+  #define __HIP__MI300__
 #endif
 
 #ifdef __HIPCC__
-#define HIP_FP8_HOST_DEVICE __host__ __device__
-#define HIP_FP8_HOST __host__
-#define HIP_FP8_DEVICE __device__
+  #define HIP_FP8_HOST_DEVICE __host__ __device__
+  #define HIP_FP8_HOST __host__
+  #define HIP_FP8_DEVICE __device__
 #else
-#define HIP_FP8_HOST_DEVICE
-#define HIP_FP8_HOST
-#define HIP_FP8_DEVICE
+  #define HIP_FP8_HOST_DEVICE
+  #define HIP_FP8_HOST
+  #define HIP_FP8_DEVICE
 #endif
 
 namespace hip_fp8_impl {
@@ -20,22 +20,22 @@ namespace hip_fp8_impl {
 HIP_FP8_DEVICE uint8_t to_fp8_from_fp32(float v) {
   uint8_t i8data;
   union {
-    float    fval;
+    float fval;
     uint32_t i32val;
-    uint8_t  i8val[4];  // NOTE: not endian independent
+    uint8_t i8val[4];  // NOTE: not endian independent
   } val;
 
   uint32_t ival = 0;
-  val.fval      = v;
+  val.fval = v;
 
   if ((val.i32val & 0x7F800000) != 0x7F800000) {  /// propagate NAN/INF, no clipping
     val.fval = __builtin_amdgcn_fmed3f(val.fval, 240.0, -240.0);
   }
 
-  ival       = __builtin_amdgcn_cvt_pk_fp8_f32(val.fval, val.fval, ival,
-                                               false);  // false -> WORD0
+  ival = __builtin_amdgcn_cvt_pk_fp8_f32(val.fval, val.fval, ival,
+                                         false);  // false -> WORD0
   val.i32val = ival;
-  i8data     = val.i8val[0];
+  i8data = val.i8val[0];
 
   return i8data;
 }
@@ -58,7 +58,7 @@ HIP_FP8_HOST_DEVICE uint8_t to_float8(T _x, bool stoch = false, uint32_t rng = 0
   static_assert(is_half || is_float, "Only half and float can be cast to f8");
 
   const int mfmt = (sizeof(T) == 4) ? 23 : 10;
-  uint32_t  x;
+  uint32_t x;
   if (sizeof(T) == 4) {
     x = reinterpret_cast<uint32_t&>(_x);
   } else {
@@ -66,21 +66,21 @@ HIP_FP8_HOST_DEVICE uint8_t to_float8(T _x, bool stoch = false, uint32_t rng = 0
   }
 
   uint32_t head, mantissa;
-  int      exponent, bias;
+  int exponent, bias;
   uint32_t sign;
 
   if (sizeof(T) == 4) {
-    head     = x & 0xFF800000;
+    head = x & 0xFF800000;
     mantissa = x & 0x7FFFFF;
     exponent = (head >> 23) & 0xFF;
-    sign     = head >> 31;
-    bias     = 127;
+    sign = head >> 31;
+    bias = 127;
   } else {
-    head     = x & 0xFC00;
+    head = x & 0xFC00;
     mantissa = x & 0x3FF;
     exponent = (head >> 10) & 0x1F;
-    sign     = head >> 15;
-    bias     = 15;
+    sign = head >> 15;
+    bias = 15;
   }
 
   uint32_t signed_inf = (sign << 7) + (((1 << we) - 1) << wm);
@@ -120,7 +120,7 @@ HIP_FP8_HOST_DEVICE uint8_t to_float8(T _x, bool stoch = false, uint32_t rng = 0
 
   // For IEEE bias mode, the bias is 2^(k-1) -1 where k is the width of exponent
   // bits
-  const int f8_bias                  = (1 << (we - 1)) - 1 + (negative_zero_nan ? 1 : 0);
+  const int f8_bias = (1 << (we - 1)) - 1 + (negative_zero_nan ? 1 : 0);
   const int f8_denormal_act_exponent = 1 - f8_bias;  // actual exponent of f8 denormal
   // act_exponent is the actual exponent of fp32/fp16 (after subtracting bias)
   // f8_exponent is the converted f8 exponent with bias encoding
@@ -136,7 +136,7 @@ exponent bias 16. It means that there are some numbers in fp16 denormal but they
 are bf8 (NANOO) normals - smallest bf8 (NANOO) normal is 2^-15. fp16 numbers
 where exponent==0 (actual exponent -14) and highest bit of mantissa is 1 are bf8
 (NANOO) normal. In this case, the fp16 mantissa should be shift left by 1  */
-    act_exponent  = exponent - bias + 1;
+    act_exponent = exponent - bias + 1;
     exponent_diff = f8_denormal_act_exponent -
                     act_exponent;  // actual exponent is exponent-bias+1 as it is denormal
   } else {                         // fp32/fp16 is normal with implicit 1
@@ -178,8 +178,8 @@ So for fp32/fp16, exponent -8 is the cut point to convert to fp8 nanoo */
 
   // Now we have the exponent and mantissa adjusted
   uint32_t drop_mask = (1 << (mfmt - wm)) - 1;
-  bool     odd       = mantissa & (1 << (mfmt - wm));  // if the least significant bit that
-                                                       // is not truncated is 1
+  bool odd = mantissa & (1 << (mfmt - wm));  // if the least significant bit that
+                                             // is not truncated is 1
   mantissa += (stoch ? rng : (midpoint ? (odd ? mantissa : mantissa - 1) : mantissa)) & drop_mask;
 
   // Now we deal with overflow
@@ -200,7 +200,7 @@ So for fp32/fp16, exponent -8 is the cut point to convert to fp8 nanoo */
   const int max_exp = (1 << we) - (negative_zero_nan ? 1 : 2);
   if (f8_exponent > max_exp) {
     if (clip) {
-      mantissa    = (1 << wm) - 1;
+      mantissa = (1 << wm) - 1;
       f8_exponent = max_exp;
     } else {
       return signed_inf;
@@ -231,34 +231,34 @@ inline HIP_FP8_HOST_DEVICE T from_float8(uint8_t x) {
 
 #ifdef __HIPCC__
   if (is_half) {
-    const uint16_t ihInf    = 0x7C00;
+    const uint16_t ihInf = 0x7C00;
     const uint16_t ihNegInf = 0xFC00;
-    const uint16_t ihNaN    = 0x7C01;
-    const uint16_t ihNeg0   = 0x8000;
-    fInf                    = reinterpret_cast<const _Float16&>(ihInf);
-    fNegInf                 = reinterpret_cast<const _Float16&>(ihNegInf);
-    fNaN                    = reinterpret_cast<const _Float16&>(ihNaN);
-    fNeg0                   = reinterpret_cast<const _Float16&>(ihNeg0);
+    const uint16_t ihNaN = 0x7C01;
+    const uint16_t ihNeg0 = 0x8000;
+    fInf = reinterpret_cast<const _Float16&>(ihInf);
+    fNegInf = reinterpret_cast<const _Float16&>(ihNegInf);
+    fNaN = reinterpret_cast<const _Float16&>(ihNaN);
+    fNeg0 = reinterpret_cast<const _Float16&>(ihNeg0);
   } else
 #endif
       if (is_float) {
-    const uint32_t ifInf    = 0x7F800000;
+    const uint32_t ifInf = 0x7F800000;
     const uint32_t ifNegInf = 0xFF800000;
-    const uint32_t ifNaN    = 0x7F800001;
-    const uint32_t ifNeg0   = 0x80000000;
-    fInf                    = reinterpret_cast<const float&>(ifInf);
-    fNegInf                 = reinterpret_cast<const float&>(ifNegInf);
-    fNaN                    = reinterpret_cast<const float&>(ifNaN);
-    fNeg0                   = reinterpret_cast<const float&>(ifNeg0);
+    const uint32_t ifNaN = 0x7F800001;
+    const uint32_t ifNeg0 = 0x80000000;
+    fInf = reinterpret_cast<const float&>(ifInf);
+    fNegInf = reinterpret_cast<const float&>(ifNegInf);
+    fNaN = reinterpret_cast<const float&>(ifNaN);
+    fNeg0 = reinterpret_cast<const float&>(ifNeg0);
   }
 
   if (x == 0) {
     return 0;
   }
 
-  uint32_t sign     = x >> 7;
+  uint32_t sign = x >> 7;
   uint32_t mantissa = x & ((1 << wm) - 1);
-  int      exponent = (x & 0x7F) >> wm;
+  int exponent = (x & 0x7F) >> wm;
   if (negative_zero_nan) {
     if (x == 0x80) {
       return fNaN;

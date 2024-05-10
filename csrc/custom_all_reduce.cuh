@@ -37,7 +37,7 @@ struct __align__(16) RankSignals { volatile Signal* signals[8]; };
 template <typename T, int sz>
 struct __align__(alignof(T) * sz) array_t {
   T data[sz];
-  using type                = T;
+  using type = T;
   static constexpr int size = sz;
 };
 
@@ -198,21 +198,21 @@ template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
     cross_device_reduce_2stage(RankData* _dp, RankSignals sg, volatile Signal* self_sg,
                                T* __restrict__ result, int rank, int size) {
-  int tid               = blockIdx.x * blockDim.x + threadIdx.x;
-  int stride            = gridDim.x * blockDim.x;
-  using P               = typename packed_t<T>::P;
-  using A               = typename packed_t<T>::A;
-  int      part         = size / ngpus;
-  int      start        = rank * part;
-  int      end          = rank == ngpus - 1 ? size : start + part;
-  int      largest_part = part + size % ngpus;
+  int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = gridDim.x * blockDim.x;
+  using P = typename packed_t<T>::P;
+  using A = typename packed_t<T>::A;
+  int part = size / ngpus;
+  int start = rank * part;
+  int end = rank == ngpus - 1 ? size : start + part;
+  int largest_part = part + size % ngpus;
   const P* ptrs[ngpus];
-  P*       tmps[ngpus];
+  P* tmps[ngpus];
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
-    ptrs[i]    = (const P*)_dp->ptrs[target];
-    tmps[i]    = get_tmp_buf<P>(sg.signals[target]);
+    ptrs[i] = (const P*)_dp->ptrs[target];
+    tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
   start_sync<ngpus>(sg, self_sg, rank);
@@ -232,7 +232,7 @@ __global__ void __launch_bounds__(512, 1)
     for (int i = 0; i < ngpus; i++) {
       int gather_from_rank = ((rank + i) % ngpus);
       if (gather_from_rank == ngpus - 1 || idx < part) {
-        int dst_idx           = gather_from_rank * part + idx;
+        int dst_idx = gather_from_rank * part + idx;
         ((P*)result)[dst_idx] = tmps[i][idx];
       }
     }
@@ -245,17 +245,17 @@ static_assert(alignof(IPC_KEY) == alignof(cudaIpcMemHandle_t));
 
 class CustomAllreduce {
  public:
-  int  rank_;
-  int  world_size_;
+  int rank_;
+  int world_size_;
   bool full_nvlink_;
 
   // below are device pointers
-  RankSignals                          sg_;
+  RankSignals sg_;
   std::unordered_map<void*, RankData*> buffers_;
-  Signal*                              self_sg_;
+  Signal* self_sg_;
 
   // stores the registered device pointers from all ranks
-  RankData *         d_rank_data_base_, *d_rank_data_end_;
+  RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
@@ -303,12 +303,12 @@ class CustomAllreduce {
   }
 
   std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
-    auto                 num_buffers = graph_unreg_buffers_.size();
-    auto                 handle_sz   = sizeof(cudaIpcMemHandle_t);
+    auto num_buffers = graph_unreg_buffers_.size();
+    auto handle_sz = sizeof(cudaIpcMemHandle_t);
     std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
-      auto  ptr = graph_unreg_buffers_[i];
+      auto ptr = graph_unreg_buffers_[i];
       void* base_ptr;
       // note: must share the base address of each allocation, or we get wrong
       // address
@@ -352,14 +352,14 @@ class CustomAllreduce {
   // rank 1 may get the same input address for the second allreduce, but rank 2
   // got a different address. IPC handles have internal reference counting
   // mechanism so overhead should be small.
-  void register_graph_buffers(const std::vector<std::string>&          handles,
+  void register_graph_buffers(const std::vector<std::string>& handles,
                               const std::vector<std::vector<int64_t>>& offsets) {
     auto num_buffers = graph_unreg_buffers_.size();
     check_rank_data_capacity(num_buffers);
     std::vector<RankData> rank_data(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
-      auto  self_ptr = graph_unreg_buffers_[i];
-      auto& rd       = rank_data[i];
+      auto self_ptr = graph_unreg_buffers_[i];
+      auto& rd = rank_data[i];
       for (int j = 0; j < world_size_; j++) {
         if (j != rank_) {
           char* handle = open_ipc_handle(&handles[j][i * sizeof(cudaIpcMemHandle_t)]);
@@ -396,7 +396,7 @@ class CustomAllreduce {
       throw std::runtime_error("max supported block limit is " + std::to_string(kMaxBlocks) +
                                ". Got " + std::to_string(block_limit));
 
-    RankData*               ptrs;
+    RankData* ptrs;
     cudaStreamCaptureStatus status;
     CUDACHECK(cudaStreamIsCapturing(stream, &status));
     if (status == cudaStreamCaptureStatusActive) {
@@ -412,8 +412,8 @@ class CustomAllreduce {
     }
 
     size /= d;
-    auto bytes  = size * sizeof(typename packed_t<T>::P);
-    int  blocks = std::min(block_limit, (size + threads - 1) / threads);
+    auto bytes = size * sizeof(typename packed_t<T>::P);
+    int blocks = std::min(block_limit, (size + threads - 1) / threads);
 #define KL(ngpus, name) \
   name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, rank_, size);
 #define REDUCE_CASE(ngpus)                                                                        \

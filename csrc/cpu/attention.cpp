@@ -5,9 +5,9 @@ namespace {
 template <typename scalar_t>
 struct KernelVecType {
   using q_load_vec_type = void;
-  using q_vec_type      = void;
+  using q_vec_type = void;
   using k_load_vec_type = void;
-  using k_vec_type      = void;
+  using k_vec_type = void;
   using qk_acc_vec_type = void;
   using v_load_vec_type = void;
 };
@@ -15,9 +15,9 @@ struct KernelVecType {
 template <>
 struct KernelVecType<float> {
   using q_load_vec_type = vec_op::FP32Vec4;
-  using q_vec_type      = vec_op::FP32Vec16;
+  using q_vec_type = vec_op::FP32Vec16;
   using k_load_vec_type = vec_op::FP32Vec16;
-  using k_vec_type      = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
   using qk_acc_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::FP32Vec16;
 };
@@ -26,9 +26,9 @@ struct KernelVecType<float> {
 template <>
 struct KernelVecType<c10::BFloat16> {
   using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type      = vec_op::BF16Vec32;
+  using q_vec_type = vec_op::BF16Vec32;
   using k_load_vec_type = vec_op::BF16Vec32;
-  using k_vec_type      = vec_op::BF16Vec32;
+  using k_vec_type = vec_op::BF16Vec32;
   using qk_acc_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::BF16Vec16;
 };
@@ -36,9 +36,9 @@ struct KernelVecType<c10::BFloat16> {
 template <>
 struct KernelVecType<c10::BFloat16> {
   using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type      = vec_op::FP32Vec16;
+  using q_vec_type = vec_op::FP32Vec16;
   using k_load_vec_type = vec_op::BF16Vec16;
-  using k_vec_type      = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
   using qk_acc_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::BF16Vec16;
 };
@@ -76,9 +76,9 @@ FORCE_INLINE std::pair<T, T> reduceSoftmaxAlibi(T* data, const int size, const i
   data[0] += alibi_slope * (start_index - seq_len + 1);
   T max = data[0];
   for (int i = 1; i < size; ++i) {
-    T qk    = data[i] + alibi_slope * (start_index + i - seq_len + 1);
+    T qk = data[i] + alibi_slope * (start_index + i - seq_len + 1);
     data[i] = qk;
-    max     = max >= qk ? max : qk;
+    max = max >= qk ? max : qk;
   }
 
   T sum = 0;
@@ -120,13 +120,13 @@ FORCE_INLINE void reducePartitonSoftmax(const T* max_data, T* sum_data, const in
 template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int x>
 struct reduceQKBlockKernel {
   using q_load_vec_type = typename KernelVecType<scalar_t>::q_load_vec_type;
-  using q_vec_type      = typename KernelVecType<scalar_t>::q_vec_type;
+  using q_vec_type = typename KernelVecType<scalar_t>::q_vec_type;
   using k_load_vec_type = typename KernelVecType<scalar_t>::k_load_vec_type;
-  using k_vec_type      = typename KernelVecType<scalar_t>::k_vec_type;
+  using k_vec_type = typename KernelVecType<scalar_t>::k_vec_type;
   using qk_acc_vec_type = typename KernelVecType<scalar_t>::qk_acc_vec_type;
 
-  constexpr static int TOKEN_PER_GROUP  = k_load_vec_type::get_elem_num() / x;
-  constexpr static int MAX_GROUP_NUM    = 16 / TOKEN_PER_GROUP;
+  constexpr static int TOKEN_PER_GROUP = k_load_vec_type::get_elem_num() / x;
+  constexpr static int MAX_GROUP_NUM = 16 / TOKEN_PER_GROUP;
   constexpr static int UNROLL_GROUP_NUM = MAX_GROUP_NUM / 4;
 
   static_assert(MAX_GROUP_NUM == 8 || MAX_GROUP_NUM == 4);
@@ -142,12 +142,12 @@ struct reduceQKBlockKernel {
     if (token_num == BLOCK_SIZE) {
       for (int q_offset = 0; q_offset < HEAD_SIZE; q_offset += x, k_block += x * BLOCK_SIZE) {
         q_load_vec_type q_load_group_vec(q + q_offset);
-        q_vec_type      q_group_vec(q_load_group_vec);
+        q_vec_type q_group_vec(q_load_group_vec);
 
         vec_op::unroll_loop<int, MAX_GROUP_NUM>(
             [k_block, &q_group_vec, &group_accums](int token_group_idx) {
               k_load_vec_type k_load_group_vec(k_block + token_group_idx * x * TOKEN_PER_GROUP);
-              k_vec_type      k_group_vec(k_load_group_vec);
+              k_vec_type k_group_vec(k_load_group_vec);
               vec_op::fma(group_accums[token_group_idx], q_group_vec, k_group_vec);
               vec_op::prefetch(k_block + x * BLOCK_SIZE + token_group_idx * x * TOKEN_PER_GROUP);
             });
@@ -155,14 +155,14 @@ struct reduceQKBlockKernel {
     } else {
       for (int q_offset = 0; q_offset < HEAD_SIZE; q_offset += x, k_block += x * BLOCK_SIZE) {
         q_load_vec_type q_load_group_vec(q + q_offset);
-        q_vec_type      q_group_vec(q_load_group_vec);
+        q_vec_type q_group_vec(q_load_group_vec);
         for (int token_group_start = 0; token_group_start < group_num;
              token_group_start += UNROLL_GROUP_NUM) {
           vec_op::unroll_loop<int, UNROLL_GROUP_NUM>(
               [token_group_start, k_block, &q_group_vec, &group_accums](int token_group_idx) {
                 token_group_idx += token_group_start;
                 k_load_vec_type k_load_group_vec(k_block + token_group_idx * x * TOKEN_PER_GROUP);
-                k_vec_type      k_group_vec(k_load_group_vec);
+                k_vec_type k_group_vec(k_load_group_vec);
                 vec_op::fma(group_accums[token_group_idx], q_group_vec, k_group_vec);
                 vec_op::prefetch(k_block + x * BLOCK_SIZE + token_group_idx * x * TOKEN_PER_GROUP);
               });
@@ -185,13 +185,13 @@ struct reduceQKBlockKernel {
 
 template <typename scalar_t, int HEAD_SIZE, int BLOCK_SIZE, int HEAD_PARTITION_SIZE, typename acc_t>
 FORCE_INLINE void reduceValueBlock(const float* prob, const scalar_t* v_block, acc_t&& acc) {
-  using v_load_vec_type  = typename KernelVecType<scalar_t>::v_load_vec_type;
+  using v_load_vec_type = typename KernelVecType<scalar_t>::v_load_vec_type;
   constexpr int ELEM_NUM = v_load_vec_type::get_elem_num();
   static_assert(BLOCK_SIZE == ELEM_NUM);
   vec_op::FP32Vec16 prob_vec(prob);
 
   vec_op::unroll_loop<int, HEAD_PARTITION_SIZE>([&](int head_elem_idx) {
-    v_load_vec_type   v_vec(v_block + BLOCK_SIZE * head_elem_idx);
+    v_load_vec_type v_vec(v_block + BLOCK_SIZE * head_elem_idx);
     vec_op::FP32Vec16 fp32_v_vec(v_vec);
     acc[head_elem_idx] = acc[head_elem_idx] + prob_vec * fp32_v_vec;
   });
@@ -215,31 +215,31 @@ struct paged_attention_v1_impl {
                    const float* __restrict__ alibi_slopes,  // [num_heads]
                    const int q_stride, const int kv_block_stride, const int kv_head_stride,
                    const int num_seqs, const int num_heads) {
-    constexpr int x                  = 16 / sizeof(scalar_t);
-    const int     num_queries_per_kv = num_heads / num_kv_heads;
+    constexpr int x = 16 / sizeof(scalar_t);
+    const int num_queries_per_kv = num_heads / num_kv_heads;
 
     static_assert(BLOCK_SIZE == 16);
 
-    int max_seq_len        = max_num_blocks_per_seq * BLOCK_SIZE;
+    int max_seq_len = max_num_blocks_per_seq * BLOCK_SIZE;
     int max_seq_len_padded = (max_seq_len + 15) & 0xFFFFFFF0;
     TORCH_CHECK((max_seq_len_padded * sizeof(float)) % 64 == 0);
 
     const int parallel_work_item_num = omp_get_max_threads();
 
     size_t logits_bytes = parallel_work_item_num * max_seq_len_padded * sizeof(float);
-    float* logits       = (float*)std::aligned_alloc(
+    float* logits = (float*)std::aligned_alloc(
         64, logits_bytes);  // Cacheline alignment for each context token.
-                                  // [parallel_work_item_num, max_seq_len_padded]
+                            // [parallel_work_item_num, max_seq_len_padded]
 
 #pragma omp parallel for collapse(2) schedule(dynamic, 1)
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-        int           seq_len                  = seq_lens[seq_idx];
-        const int*    seq_block_table          = block_tables + max_num_blocks_per_seq * seq_idx;
-        const int     block_num                = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        const int64_t kv_head_idx              = head_idx / num_queries_per_kv;
+        int seq_len = seq_lens[seq_idx];
+        const int* seq_block_table = block_tables + max_num_blocks_per_seq * seq_idx;
+        const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        const int64_t kv_head_idx = head_idx / num_queries_per_kv;
         const scalar_t* __restrict__ q_vec_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
-        const int last_block_token_num         = seq_len - (block_num - 1) * BLOCK_SIZE;
+        const int last_block_token_num = seq_len - (block_num - 1) * BLOCK_SIZE;
         float* __restrict__ thread_block_logits =
             logits + omp_get_thread_num() * max_seq_len_padded;
 
@@ -265,14 +265,14 @@ struct paged_attention_v1_impl {
 
         // Compute value
         constexpr int head_elem_num_per_partition = 16;
-        constexpr int head_partition_num          = HEAD_SIZE / head_elem_num_per_partition;
+        constexpr int head_partition_num = HEAD_SIZE / head_elem_num_per_partition;
         for (int head_part_idx = 0; head_part_idx < head_partition_num; ++head_part_idx) {
           vec_op::FP32Vec16 accums[head_elem_num_per_partition];
           scalar_t* __restrict__ out_ptr = out + seq_idx * num_heads * HEAD_SIZE +
                                            head_idx * HEAD_SIZE +
                                            head_part_idx * head_elem_num_per_partition;
           for (int block_idx = 0; block_idx < block_num; ++block_idx) {
-            const int64_t physical_block_idx       = seq_block_table[block_idx];
+            const int64_t physical_block_idx = seq_block_table[block_idx];
             const float* __restrict__ prob_vec_ptr = thread_block_logits + block_idx * BLOCK_SIZE;
             const scalar_t* __restrict__ v_block_cache_ptr =
                 v_cache + physical_block_idx * kv_block_stride + kv_head_idx * kv_head_stride +
@@ -317,24 +317,24 @@ void paged_attention_v1_impl_launcher(torch::Tensor& out, torch::Tensor& query,
                                       int num_kv_heads, float scale, torch::Tensor& block_tables,
                                       torch::Tensor& seq_lens, int max_seq_len,
                                       const c10::optional<torch::Tensor>& alibi_slopes) {
-  int num_seqs               = query.size(0);
-  int num_heads              = query.size(1);
-  int head_size              = query.size(2);
+  int num_seqs = query.size(0);
+  int num_heads = query.size(1);
+  int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
-  int q_stride               = query.stride(0);
-  int kv_block_stride        = key_cache.stride(0);
-  int kv_head_stride         = key_cache.stride(1);
+  int q_stride = query.stride(0);
+  int kv_block_stride = key_cache.stride(0);
+  int kv_head_stride = key_cache.stride(1);
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
       alibi_slopes ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr()) : nullptr;
 
-  T*   out_ptr          = reinterpret_cast<T*>(out.data_ptr());
-  T*   query_ptr        = reinterpret_cast<T*>(query.data_ptr());
-  T*   key_cache_ptr    = reinterpret_cast<T*>(key_cache.data_ptr());
-  T*   value_cache_ptr  = reinterpret_cast<T*>(value_cache.data_ptr());
+  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
+  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
+  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
+  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* seq_lens_ptr     = seq_lens.data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
     case 64:
@@ -411,8 +411,8 @@ struct paged_attention_v2_impl {
                    const float* __restrict__ alibi_slopes,  // [num_heads]
                    const int q_stride, const int kv_block_stride, const int kv_head_stride,
                    const int num_seqs, const int num_heads, const int max_num_partitions) {
-    constexpr int x                  = 16 / sizeof(scalar_t);
-    const int     num_queries_per_kv = num_heads / num_kv_heads;
+    constexpr int x = 16 / sizeof(scalar_t);
+    const int num_queries_per_kv = num_heads / num_kv_heads;
 
     static_assert(BLOCK_SIZE == 16);
     static_assert(PARTITION_SIZE * sizeof(float) % 64 == 0);
@@ -422,20 +422,20 @@ struct paged_attention_v2_impl {
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int partition_idx = 0; partition_idx < max_num_partitions; ++partition_idx) {
         for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-          const int seq_len         = seq_lens[seq_idx];
+          const int seq_len = seq_lens[seq_idx];
           const int start_token_idx = partition_idx * PARTITION_SIZE;
 
           if (start_token_idx >= seq_len) continue;
 
-          const int  partition_num = (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
-          const bool no_reduce     = (partition_num == 1);
-          const int  token_num =
+          const int partition_num = (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
+          const bool no_reduce = (partition_num == 1);
+          const int token_num =
               (std::min(seq_len, start_token_idx + PARTITION_SIZE) - start_token_idx);
-          const int  block_num            = (token_num + BLOCK_SIZE - 1) / BLOCK_SIZE;
-          const int  last_block_token_num = token_num - (block_num - 1) * BLOCK_SIZE;
+          const int block_num = (token_num + BLOCK_SIZE - 1) / BLOCK_SIZE;
+          const int last_block_token_num = token_num - (block_num - 1) * BLOCK_SIZE;
           const int* seq_block_table =
               block_tables + max_num_blocks_per_seq * seq_idx + start_token_idx / BLOCK_SIZE;
-          const int64_t kv_head_idx              = head_idx / num_queries_per_kv;
+          const int64_t kv_head_idx = head_idx / num_queries_per_kv;
           const scalar_t* __restrict__ q_vec_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 
           float logits[PARTITION_SIZE] __attribute__((aligned(64))) = {0};
@@ -467,8 +467,8 @@ struct paged_attention_v2_impl {
             auto idx = seq_idx * num_heads * max_num_partitions + head_idx * max_num_partitions +
                        partition_idx;
             max_logits[idx] = max_logit;
-            exp_sums[idx]   = exp_sum;
-            output_buffer   = tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
+            exp_sums[idx] = exp_sum;
+            output_buffer = tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
                             head_idx * max_num_partitions * HEAD_SIZE + partition_idx * HEAD_SIZE;
           } else {
             output_buffer = out + seq_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE;
@@ -476,13 +476,13 @@ struct paged_attention_v2_impl {
 
           // Compute value
           constexpr int head_elem_num_per_partition = 16;
-          constexpr int head_partition_num          = HEAD_SIZE / head_elem_num_per_partition;
+          constexpr int head_partition_num = HEAD_SIZE / head_elem_num_per_partition;
           for (int head_part_idx = 0; head_part_idx < head_partition_num; ++head_part_idx) {
             vec_op::FP32Vec16 accums[head_elem_num_per_partition];
             scalar_t* __restrict__ out_ptr =
                 output_buffer + head_part_idx * head_elem_num_per_partition;
             for (int block_idx = 0; block_idx < block_num; ++block_idx) {
-              const int64_t physical_block_idx       = seq_block_table[block_idx];
+              const int64_t physical_block_idx = seq_block_table[block_idx];
               const float* __restrict__ prob_vec_ptr = logits + block_idx * BLOCK_SIZE;
               const scalar_t* __restrict__ v_block_cache_ptr =
                   v_cache + physical_block_idx * kv_block_stride + kv_head_idx * kv_head_stride +
@@ -517,7 +517,7 @@ struct paged_attention_v2_impl {
 #pragma omp parallel for collapse(2) schedule(static, 1)
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-        const int seq_len       = seq_lens[seq_idx];
+        const int seq_len = seq_lens[seq_idx];
         const int partition_num = (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
 
         if (partition_num == 1) continue;
@@ -535,13 +535,13 @@ struct paged_attention_v2_impl {
     constexpr int head_elem_num_per_group = 16;  // Note: didn't align with the cacheline size, due
                                                  // to some HEAD_SIZE didn't align with 64 bytes
     static_assert(HEAD_SIZE % head_elem_num_per_group == 0);
-    constexpr int head_group_num              = HEAD_SIZE / head_elem_num_per_group;
+    constexpr int head_group_num = HEAD_SIZE / head_elem_num_per_group;
     const float* __restrict__ rescale_factors = exp_sums;
 #pragma omp parallel for collapse(3) schedule(static, 1)
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
         for (int group_idx = 0; group_idx < head_group_num; ++group_idx) {
-          const int seq_len       = seq_lens[seq_idx];
+          const int seq_len = seq_lens[seq_idx];
           const int partition_num = (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
 
           if (partition_num == 1) continue;
@@ -559,7 +559,7 @@ struct paged_attention_v2_impl {
           vec_op::FP32Vec16 acc;
           for (int i = 0; i < partition_num; ++i) {
             vec_op::FP32Vec16 rescale_factor(seq_head_rescale_factors[i]);
-            v_load_vec_type   value(seq_head_tmp_out + i * HEAD_SIZE);
+            v_load_vec_type value(seq_head_tmp_out + i * HEAD_SIZE);
             vec_op::FP32Vec16 fp32_value(value);
             acc = acc + fp32_value * rescale_factor;
           }
@@ -586,28 +586,28 @@ void paged_attention_v2_impl_launcher(torch::Tensor& out, torch::Tensor& exp_sum
                                       torch::Tensor& block_tables, torch::Tensor& seq_lens,
                                       int block_size, int max_seq_len,
                                       const c10::optional<torch::Tensor>& alibi_slopes) {
-  int num_seqs               = query.size(0);
-  int num_heads              = query.size(1);
-  int head_size              = query.size(2);
+  int num_seqs = query.size(0);
+  int num_heads = query.size(1);
+  int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
-  int q_stride               = query.stride(0);
-  int kv_block_stride        = key_cache.stride(0);
-  int kv_head_stride         = key_cache.stride(1);
-  int max_num_partitions     = exp_sums.size(-1);
+  int q_stride = query.stride(0);
+  int kv_block_stride = key_cache.stride(0);
+  int kv_head_stride = key_cache.stride(1);
+  int max_num_partitions = exp_sums.size(-1);
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
       alibi_slopes ? reinterpret_cast<const float*>(alibi_slopes.value().data_ptr()) : nullptr;
 
-  T*     out_ptr          = reinterpret_cast<T*>(out.data_ptr());
-  float* exp_sums_ptr     = reinterpret_cast<float*>(exp_sums.data_ptr());
-  float* max_logits_ptr   = reinterpret_cast<float*>(max_logits.data_ptr());
-  T*     tmp_out_ptr      = reinterpret_cast<T*>(tmp_out.data_ptr());
-  T*     query_ptr        = reinterpret_cast<T*>(query.data_ptr());
-  T*     key_cache_ptr    = reinterpret_cast<T*>(key_cache.data_ptr());
-  T*     value_cache_ptr  = reinterpret_cast<T*>(value_cache.data_ptr());
-  int*   block_tables_ptr = block_tables.data_ptr<int>();
-  int*   seq_lens_ptr     = seq_lens.data_ptr<int>();
+  T* out_ptr = reinterpret_cast<T*>(out.data_ptr());
+  float* exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
+  float* max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
+  T* tmp_out_ptr = reinterpret_cast<T*>(tmp_out.data_ptr());
+  T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
+  T* key_cache_ptr = reinterpret_cast<T*>(key_cache.data_ptr());
+  T* value_cache_ptr = reinterpret_cast<T*>(value_cache.data_ptr());
+  int* block_tables_ptr = block_tables.data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
     case 64:

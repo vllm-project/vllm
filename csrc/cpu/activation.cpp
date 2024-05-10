@@ -4,7 +4,7 @@ namespace {
 template <typename scalar_t, vec_op::FP32Vec8 (*func)(const vec_op::FP32Vec8&), bool is_gated>
 void activation_kernel(int num_tokens, int d, scalar_t* __restrict__ input,
                        scalar_t* __restrict__ output) {
-  using scalar_vec_t         = vec_op::vec_t<scalar_t>;
+  using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
 
   TORCH_CHECK(d % VEC_ELEM_NUM == 0);
@@ -17,12 +17,12 @@ void activation_kernel(int num_tokens, int d, scalar_t* __restrict__ input,
         start *= 2;
       }
 
-      const scalar_vec_t     x(input + start + j);
+      const scalar_vec_t x(input + start + j);
       const vec_op::FP32Vec8 f32_x(x);
-      vec_op::FP32Vec8       f32_ans = func(f32_x);
+      vec_op::FP32Vec8 f32_ans = func(f32_x);
 
       if constexpr (is_gated) {
-        const scalar_vec_t     y(input + start + d + j);
+        const scalar_vec_t y(input + start + d + j);
         const vec_op::FP32Vec8 f32_y(y);
         f32_ans = f32_y * f32_ans;
       }
@@ -45,7 +45,7 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_new_act(const vec_op::FP32Vec8& x) {
   const vec_op::FP32Vec8 w2(0.044715f);
   const vec_op::FP32Vec8 w3(0.5);
   const vec_op::FP32Vec8 x3 = x * x * x;
-  const vec_op::FP32Vec8 t  = (w1 * (x + w2 * x3)).tanh();
+  const vec_op::FP32Vec8 t = (w1 * (x + w2 * x3)).tanh();
   return w3 * x * (ones + t);
 }
 
@@ -70,7 +70,7 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_tanh_act(const vec_op::FP32Vec8& x) {
   const vec_op::FP32Vec8 w1(M_SQRT2 * M_2_SQRTPI * 0.5);
   const vec_op::FP32Vec8 w2(0.5);
   const vec_op::FP32Vec8 w3(0.044715);
-  const vec_op::FP32Vec8 x_3   = x * x * x;
+  const vec_op::FP32Vec8 x_3 = x * x * x;
   const vec_op::FP32Vec8 inner = w1 * (x + x_3 * w3);
   return x * w2 * (ones + inner.tanh());
 }
@@ -78,7 +78,7 @@ FORCE_INLINE vec_op::FP32Vec8 gelu_tanh_act(const vec_op::FP32Vec8& x) {
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
   int num_tokens = input.numel() / input.size(-1);
-  int d          = input.size(-1) / 2;
+  int d = input.size(-1) / 2;
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul_impl", [&] {
     CPU_KERNEL_GUARD_IN(silu_and_mul_impl)
@@ -92,7 +92,7 @@ void gelu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
   int num_tokens = input.numel() / input.size(-1);
-  int d          = input.size(-1) / 2;
+  int d = input.size(-1) / 2;
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_and_mul_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_and_mul_impl)
@@ -106,7 +106,7 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
                        torch::Tensor& input)  // [..., 2 * d]
 {
   int num_tokens = input.numel() / input.size(-1);
-  int d          = input.size(-1) / 2;
+  int d = input.size(-1) / 2;
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_and_mul_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_tanh_and_mul_impl)
@@ -118,7 +118,7 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input) {
   int num_tokens = input.numel() / input.size(-1);
-  int d          = input.size(-1);
+  int d = input.size(-1);
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_new_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_new_impl)
@@ -130,7 +130,7 @@ void gelu_new(torch::Tensor& out, torch::Tensor& input) {
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input) {
   int num_tokens = input.numel() / input.size(-1);
-  int d          = input.size(-1);
+  int d = input.size(-1);
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_fast_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_fast_impl)

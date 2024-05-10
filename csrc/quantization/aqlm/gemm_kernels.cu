@@ -31,11 +31,11 @@ __global__ void Code1x16MatVec(
     const int4* __restrict__ A, const int4* __restrict__ B, int4* __restrict__ C,
     const int4* __restrict__ codebook, const int prob_m, const int prob_k,
     const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
-    const int  codebook_stride    // as int4.
+    const int codebook_stride     // as int4.
 ) {
-  int  a_gl_stride = prob_k / 8 / 8;
-  int  a_gl_rd     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  bool pred        = a_gl_rd < prob_m;
+  int a_gl_stride = prob_k / 8 / 8;
+  int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  bool pred = a_gl_rd < prob_m;
 
   if (pred) {
     // advance to the correct codebook, this easy because we only multiply one column of the
@@ -47,13 +47,13 @@ __global__ void Code1x16MatVec(
     }
   }
 
-  int b_gl_rd  = 0;
-  int c_gl_wr  = a_gl_rd;
-  a_gl_rd      = a_gl_stride * a_gl_rd + threadIdx.x % 32;
+  int b_gl_rd = 0;
+  int c_gl_wr = a_gl_rd;
+  a_gl_rd = a_gl_stride * a_gl_rd + threadIdx.x % 32;
   int a_gl_end = a_gl_rd + a_gl_stride - threadIdx.x % 32;
 
   __shared__ int4 sh_b[32 * 9];
-  float           res = 0;
+  float res = 0;
 
   int iters = (prob_k / 8 + 8 * 32 - 1) / (8 * 32);
   while (iters--) {
@@ -76,9 +76,9 @@ __global__ void Code1x16MatVec(
         asm volatile("ld.cg.global.v4.u32 {%0, %1, %2, %3}, [%4];"
                      : "=r"(dec[0]), "=r"(dec[1]), "=r"(dec[2]), "=r"(dec[3])
                      : "l"((void*)&codebook[enc[i]]));
-        half2* a    = reinterpret_cast<half2*>(&dec);
-        half2* b    = reinterpret_cast<half2*>(&sh_b[b_sh_rd]);
-        half2  res2 = {};
+        half2* a = reinterpret_cast<half2*>(&dec);
+        half2* b = reinterpret_cast<half2*>(&sh_b[b_sh_rd]);
+        half2 res2 = {};
 #pragma unroll
         for (int j = 0; j < 4; j++) res2 = __hfma2(a[j], b[j], res2);
         res += __half2float(res2.x) + __half2float(res2.y);
@@ -99,12 +99,12 @@ __global__ void Code2x8MatVec(
     const int4* __restrict__ A, const int4* __restrict__ B, int4* __restrict__ C,
     const int4* __restrict__ codebook, int prob_m, int prob_k,
     const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
-    const int  codebook_stride    // as int4.
+    const int codebook_stride     // as int4.
 
 ) {
-  int  a_gl_stride = prob_k / 8 / 8;
-  int  a_gl_rd     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  bool pred        = a_gl_rd < prob_m;
+  int a_gl_stride = prob_k / 8 / 8;
+  int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  bool pred = a_gl_rd < prob_m;
 
   if (pred) {
     // advance to the correct codebook, this easy because we only multiply one column of the
@@ -116,17 +116,17 @@ __global__ void Code2x8MatVec(
     }
   }
 
-  int b_gl_rd  = 0;
-  int c_gl_wr  = a_gl_rd;
-  a_gl_rd      = a_gl_stride * a_gl_rd + threadIdx.x % 32;
+  int b_gl_rd = 0;
+  int c_gl_wr = a_gl_rd;
+  a_gl_rd = a_gl_stride * a_gl_rd + threadIdx.x % 32;
   int a_gl_end = a_gl_rd + a_gl_stride - threadIdx.x % 32;
-  int lane     = threadIdx.x % 8;
+  int lane = threadIdx.x % 8;
 
   extern __shared__ int4 sh[];
-  int4*                  sh_b     = sh;
-  int4*                  sh_code  = sh_b + 32 * 9;
-  int4*                  sh_code0 = sh_code;
-  int4*                  sh_code1 = sh_code + 256 * 8;
+  int4* sh_b = sh;
+  int4* sh_code = sh_b + 32 * 9;
+  int4* sh_code0 = sh_code;
+  int4* sh_code1 = sh_code + 256 * 8;
 
   for (int i = threadIdx.x; i < 2 * 256; i += blockDim.x) {
     int4 dec = codebook[i];
@@ -152,10 +152,10 @@ __global__ void Code2x8MatVec(
       const uint8_t* enc = reinterpret_cast<const uint8_t*>(&A[a_gl_rd]);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        half2* a0   = reinterpret_cast<half2*>(&sh_code0[8 * enc[2 * i + 0] + lane]);
-        half2* a1   = reinterpret_cast<half2*>(&sh_code1[8 * enc[2 * i + 1] + lane]);
-        half2* b    = reinterpret_cast<half2*>(&sh_b[b_sh_rd]);
-        half2  res2 = {};
+        half2* a0 = reinterpret_cast<half2*>(&sh_code0[8 * enc[2 * i + 0] + lane]);
+        half2* a1 = reinterpret_cast<half2*>(&sh_code1[8 * enc[2 * i + 1] + lane]);
+        half2* b = reinterpret_cast<half2*>(&sh_b[b_sh_rd]);
+        half2 res2 = {};
 #pragma unroll
         for (int j = 0; j < 4; j++) res2 = __hfma2(__hadd2(a0[j], a1[j]), b[j], res2);
         res += __half2float(res2.x) + __half2float(res2.y);
@@ -174,14 +174,14 @@ __global__ void Code2x8MatVec(
 
 __global__ void Code1x16Dequant(
     const int4* __restrict__ A, int4* __restrict__ C, const int4* __restrict__ codebook, int prob_m,
-    int        prob_k,
-    const int4 codebook_a_sizes,  // cumulative sizes of A spanning each
-                                  // codebook, at most 3 long, sums to m.
+    int prob_k,
+    const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long,
+                                  // sums to m.
     const int codebook_stride     // as int4
 ) {
-  int  a_gl_stride = prob_k / 8 / 8;
-  int  a_gl_rd     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  bool pred        = a_gl_rd < prob_m;
+  int a_gl_stride = prob_k / 8 / 8;
+  int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  bool pred = a_gl_rd < prob_m;
 
   if (pred) {
     // advance to the correct codebook, this easy because we only multiply one column of the
@@ -193,12 +193,12 @@ __global__ void Code1x16Dequant(
     }
   }
 
-  a_gl_rd      = a_gl_stride * a_gl_rd + threadIdx.x % 32;
+  a_gl_rd = a_gl_stride * a_gl_rd + threadIdx.x % 32;
   int a_gl_end = a_gl_rd + a_gl_stride - threadIdx.x % 32;
 
   int c_gl_stride = prob_k / 8;
-  int c_gl_wr     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  c_gl_wr         = c_gl_stride * c_gl_wr + (threadIdx.x % 32) * 8;
+  int c_gl_wr = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  c_gl_wr = c_gl_stride * c_gl_wr + (threadIdx.x % 32) * 8;
 
   int iters = (prob_k / 8 - 1) / (8 * 32) + 1;
   while (iters--) {
@@ -223,14 +223,14 @@ __global__ void Code1x16Dequant(
 
 __global__ void Code2x8Dequant(
     const int4* __restrict__ A, int4* __restrict__ C, const int4* __restrict__ codebook, int prob_m,
-    int        prob_k,
-    const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most
-                                  // 3 long, corresponds to cols.
+    int prob_k,
+    const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long,
+                                  // corresponds to cols.
     const int codebook_stride     // as int4
 ) {
-  int  a_gl_stride = prob_k / 8 / 8;
-  int  a_gl_rd     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  bool pred        = a_gl_rd < prob_m;
+  int a_gl_stride = prob_k / 8 / 8;
+  int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  bool pred = a_gl_rd < prob_m;
 
   if (pred) {
     // advance to the correct codebook, this easy because we only multiply one column of the
@@ -242,18 +242,18 @@ __global__ void Code2x8Dequant(
     }
   }
 
-  a_gl_rd      = a_gl_stride * a_gl_rd + threadIdx.x % 32;
+  a_gl_rd = a_gl_stride * a_gl_rd + threadIdx.x % 32;
   int a_gl_end = a_gl_rd + a_gl_stride - threadIdx.x % 32;
-  int lane     = threadIdx.x % 8;
+  int lane = threadIdx.x % 8;
 
   int c_gl_stride = prob_k / 8;
-  int c_gl_wr     = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
-  c_gl_wr         = c_gl_stride * c_gl_wr + (threadIdx.x % 32) * 8;
+  int c_gl_wr = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
+  c_gl_wr = c_gl_stride * c_gl_wr + (threadIdx.x % 32) * 8;
 
   extern __shared__ int4 sh[];
-  int4*                  sh_code  = sh;
-  int4*                  sh_code0 = sh_code;
-  int4*                  sh_code1 = sh_code + 256 * 8;
+  int4* sh_code = sh;
+  int4* sh_code0 = sh_code;
+  int4* sh_code1 = sh_code + 256 * 8;
 
   for (int i = threadIdx.x; i < 2 * 256; i += blockDim.x) {
     int4 dec = codebook[i];
@@ -270,7 +270,7 @@ __global__ void Code2x8Dequant(
       const uint8_t* enc = reinterpret_cast<const uint8_t*>(&A[a_gl_rd]);
 #pragma unroll
       for (int i = 0; i < 8; i++) {
-        int4   chunk;
+        int4 chunk;
         half2* a0 = reinterpret_cast<half2*>(&sh_code0[8 * enc[2 * i + 0] + lane]);
         half2* a1 = reinterpret_cast<half2*>(&sh_code1[8 * enc[2 * i + 1] + lane]);
 #pragma unroll
@@ -298,9 +298,9 @@ void code1x16_matvec_cuda(const void* __restrict__ A, const void* __restrict__ B
     thread_m = ceildiv(prob_m, waves * sms);
   } while (thread_m > THREAD_M);
 
-  int          blocks  = ceildiv(prob_m, thread_m);
-  int          threads = 32 * thread_m;
-  cudaStream_t stream  = at::cuda::getCurrentCUDAStream().stream();
+  int blocks = ceildiv(prob_m, thread_m);
+  int threads = 32 * thread_m;
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   Code1x16MatVec<<<blocks, threads, 16 * 32 * 9, stream>>>((const int4*)A, (const int4*)B, (int4*)C,
                                                            (const int4*)codebook, prob_m, prob_k,
                                                            codebook_a_sizes, codebook_stride);
@@ -318,9 +318,9 @@ void code2x8_matvec_cuda(const void* __restrict__ A, const void* __restrict__ B,
     thread_m = ceildiv(prob_m, waves * sms);
   } while (thread_m > THREAD_M);
 
-  int blocks  = ceildiv(prob_m, thread_m);
+  int blocks = ceildiv(prob_m, thread_m);
   int threads = 32 * thread_m;
-  int shared  = 16 * (2 * 256 * 8 + 32 * 9);
+  int shared = 16 * (2 * 256 * 8 + 32 * 9);
   cudaFuncSetAttribute(Code2x8MatVec, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   Code2x8MatVec<<<blocks, threads, shared, stream>>>((const int4*)A, (const int4*)B, (int4*)C,
@@ -330,9 +330,9 @@ void code2x8_matvec_cuda(const void* __restrict__ A, const void* __restrict__ B,
 
 void code1x16_dequant_cuda(
     const void* __restrict__ A, void* __restrict__ C, const void* __restrict__ codebook, int prob_m,
-    int        prob_k,
+    int prob_k,
     const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
-    const int  codebook_stride    // as int4.
+    const int codebook_stride     // as int4.
 ) {
   int sms;
   cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, 0);
@@ -343,9 +343,9 @@ void code1x16_dequant_cuda(
     thread_m = ceildiv(prob_m, waves * sms);
   } while (thread_m > THREAD_M);
 
-  int          blocks  = ceildiv(prob_m, thread_m);
-  int          threads = 32 * thread_m;
-  cudaStream_t stream  = at::cuda::getCurrentCUDAStream().stream();
+  int blocks = ceildiv(prob_m, thread_m);
+  int threads = 32 * thread_m;
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
   Code1x16Dequant<<<blocks, threads, 0, stream>>>(
       (const int4*)A, (int4*)C, (const int4*)codebook, prob_m, prob_k,
       codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long.
@@ -356,7 +356,7 @@ void code1x16_dequant_cuda(
 // Dequantizes the code and codebook into weights.
 void code2x8_dequant_cuda(
     const void* __restrict__ A, void* __restrict__ C, const void* __restrict__ codebook, int prob_m,
-    int        prob_k,
+    int prob_k,
     const int4 codebook_a_sizes,  // cumulative sizes of A spanning each codebook, at most 3 long,
                                   // corresponds to cols.
     const int codebook_stride     // as int4
@@ -370,10 +370,10 @@ void code2x8_dequant_cuda(
     thread_m = ceildiv(prob_m, waves * sms);
   } while (thread_m > THREAD_M);
 
-  int          blocks  = ceildiv(prob_m, thread_m);
-  int          threads = 32 * thread_m;
-  int          shared  = 16 * (2 * 256 * 8 + 32 * 9);
-  cudaStream_t stream  = at::cuda::getCurrentCUDAStream().stream();
+  int blocks = ceildiv(prob_m, thread_m);
+  int threads = 32 * thread_m;
+  int shared = 16 * (2 * 256 * 8 + 32 * 9);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
   cudaFuncSetAttribute(Code2x8Dequant, cudaFuncAttributeMaxDynamicSharedMemorySize, shared);
   Code2x8Dequant<<<blocks, threads, shared, stream>>>((const int4*)A, (int4*)C,
@@ -390,8 +390,8 @@ void code1x16_matvec(
     const int4 codebook_a_sizes  // cumulative sizes of A spanning each codebook, at most 3 long.
 ) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
-  int                               prob_m = C.size(0);
-  int                               prob_k = B.size(0);
+  int prob_m = C.size(0);
+  int prob_k = B.size(0);
 
   code1x16_matvec_cuda(A.data_ptr(), B.data_ptr(), C.data_ptr(), codebook.data_ptr(), prob_m,
                        prob_k, codebook_a_sizes, codebook_stride(codebook));
@@ -399,17 +399,17 @@ void code1x16_matvec(
 
 torch::Tensor code1x16_matmat(const torch::Tensor& input, const torch::Tensor& codes,
                               const torch::Tensor& codebooks, const torch::Tensor& scales,
-                              const int4                          codebook_a_sizes,
+                              const int4 codebook_a_sizes,
                               const std::optional<torch::Tensor>& bias) {
-  auto input_sizes  = input.sizes();
+  auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
-  auto flat_input   = input.reshape({-1, input.size(-1)});
+  auto flat_input = input.reshape({-1, input.size(-1)});
   auto flat_output =
       torch::empty({flat_input.size(0), out_features},
                    torch::TensorOptions().dtype(input.dtype()).device(input.device()));
 
   for (int i = 0; i < flat_input.size(0); ++i) {
-    auto input_vec  = flat_input.index({i});
+    auto input_vec = flat_input.index({i});
     auto output_vec = flat_output.index({i});
     code1x16_matvec(codes.squeeze(2), input_vec, output_vec, codebooks, codebook_a_sizes);
   }
@@ -429,25 +429,25 @@ torch::Tensor code1x16_matmat(const torch::Tensor& input, const torch::Tensor& c
 void code2x8_matvec(const torch::Tensor& A, const torch::Tensor& B, torch::Tensor& C,
                     const torch::Tensor& codebook, const int4 codebook_a_sizes) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(A));
-  int                               prob_m = C.size(0);
-  int                               prob_k = B.size(0);
+  int prob_m = C.size(0);
+  int prob_k = B.size(0);
   code2x8_matvec_cuda(A.data_ptr(), B.data_ptr(), C.data_ptr(), codebook.data_ptr(), prob_m, prob_k,
                       codebook_a_sizes, 2 * codebook_stride(codebook));
 }
 
 torch::Tensor code2x8_matmat(const torch::Tensor& input, const torch::Tensor& codes,
                              const torch::Tensor& codebooks, const torch::Tensor& scales,
-                             const int4                          codebook_a_sizes,
+                             const int4 codebook_a_sizes,
                              const std::optional<torch::Tensor>& bias) {
-  auto input_sizes  = input.sizes();
+  auto input_sizes = input.sizes();
   auto out_features = codes.size(0) * codebooks.size(2);
-  auto flat_input   = input.reshape({-1, input.size(-1)});
+  auto flat_input = input.reshape({-1, input.size(-1)});
   auto flat_output =
       torch::empty({flat_input.size(0), out_features},
                    torch::TensorOptions().dtype(input.dtype()).device(input.device()));
 
   for (int i = 0; i < flat_input.size(0); ++i) {
-    auto input_vec  = flat_input.index({i});
+    auto input_vec = flat_input.index({i});
     auto output_vec = flat_output.index({i});
     code2x8_matvec(codes.squeeze(2), input_vec, output_vec, codebooks, codebook_a_sizes);
   }
@@ -467,12 +467,12 @@ torch::Tensor code2x8_matmat(const torch::Tensor& input, const torch::Tensor& co
 int4 accumulate_sizes(const torch::Tensor& codebook_partition_sizes) {
   int4 cumulative_sizes;
   auto cumulative_size = &cumulative_sizes.x;
-  int  i               = 0;
-  int  last            = 0;
+  int i = 0;
+  int last = 0;
   assert(codebook_partition_sizes.size(0) <= 4);
   for (; i < codebook_partition_sizes.size(0); ++i, ++cumulative_size) {
     *cumulative_size = codebook_partition_sizes[i].item<int>() + last;
-    last             = *cumulative_size;
+    last = *cumulative_size;
   }
   // fill in the rest with unreachable.
   for (; i < 4; ++i, ++cumulative_size) {
@@ -486,11 +486,11 @@ int4 accumulate_sizes(const torch::Tensor& codebook_partition_sizes) {
 
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks, const torch::Tensor& scales,
-                        const torch::Tensor&                codebook_partition_sizes,
+                        const torch::Tensor& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias) {
   int4 cumulative_sizes = vllm::aqlm::accumulate_sizes(codebook_partition_sizes);
 
-  int const nbooks  = codebooks.size(0) / codebook_partition_sizes.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
   int const entries = codebooks.size(1);
 
   if (nbooks == 1 && entries == (1 << 16)) {
@@ -509,14 +509,14 @@ torch::Tensor aqlm_dequant(const torch::Tensor& codes, const torch::Tensor& code
                            const torch::Tensor& codebook_partition_sizes) {
   int4 cumulative_sizes = vllm::aqlm::accumulate_sizes(codebook_partition_sizes);
 
-  int const nbooks  = codebooks.size(0) / codebook_partition_sizes.size(0);
+  int const nbooks = codebooks.size(0) / codebook_partition_sizes.size(0);
   int const entries = codebooks.size(1);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(codes));
-  int                               rows = codes.size(1);
-  int                               cols = codes.size(0);
+  int rows = codes.size(1);
+  int cols = codes.size(0);
 
-  auto in_features  = codes.size(1) * 8;
+  auto in_features = codes.size(1) * 8;
   auto out_features = codes.size(0);
 
   assert(out_features = codebook_partition_sizes.sum().item<int>());

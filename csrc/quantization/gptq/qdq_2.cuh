@@ -31,24 +31,24 @@ __forceinline__ __device__ void shuffle_2bit_16(uint32_t* q, int stride) {
 
 __forceinline__ __device__ void dequant_2bit_16(const uint32_t q_0, half2 (&dq)[8], int stride,
                                                 const uint32_t zero) {
-  const uint32_t c0   = 0x64006400;
-  const half     y4_  = __float2half_rn(1.0f / 4.0f);
-  const half     y16_ = __float2half_rn(1.0f / 16.0f);
-  const half     y64_ = __float2half_rn(1.0f / 64.0f);
-  const half2    y4   = __halves2half2(y4_, y4_);
-  const half2    y16  = __halves2half2(y16_, y16_);
-  const half2    y64  = __halves2half2(y64_, y64_);
+  const uint32_t c0 = 0x64006400;
+  const half y4_ = __float2half_rn(1.0f / 4.0f);
+  const half y16_ = __float2half_rn(1.0f / 16.0f);
+  const half y64_ = __float2half_rn(1.0f / 64.0f);
+  const half2 y4 = __halves2half2(y4_, y4_);
+  const half2 y16 = __halves2half2(y16_, y16_);
+  const half2 y64 = __halves2half2(y64_, y64_);
 
   const half_uint16 z1_(0xe400 | zero);  // half(-1024.0f - zero);
-  const half        z4_  = __hsub(__int2half_rn(-256), __int2half_rn(zero));
-  const half        z16_ = __hsub(__int2half_rn(-64), __int2half_rn(zero));
-  const half        z64_ = __hsub(__int2half_rn(-16), __int2half_rn(zero));
-  const half2       z1   = __half2half2(z1_.as_half);
-  const half2       z4   = __half2half2(z4_);
-  const half2       z16  = __half2half2(z16_);
-  const half2       z64  = __half2half2(z64_);
+  const half z4_ = __hsub(__int2half_rn(-256), __int2half_rn(zero));
+  const half z16_ = __hsub(__int2half_rn(-64), __int2half_rn(zero));
+  const half z64_ = __hsub(__int2half_rn(-16), __int2half_rn(zero));
+  const half2 z1 = __half2half2(z1_.as_half);
+  const half2 z4 = __half2half2(z4_);
+  const half2 z16 = __half2half2(z16_);
+  const half2 z64 = __half2half2(z64_);
 
-  uint32_t     qa = q_0;
+  uint32_t qa = q_0;
   half2_uint32 q0((qa & 0x00030003) | c0);  // half2(q[ 0], q[ 1])      + 1024
   half2_uint32 q1((qa & 0x000c000c) | c0);  // half2(q[ 2], q[ 3]) *  4 + 1024
   half2_uint32 q2((qa & 0x00300030) | c0);  // half2(q[ 4], q[ 5]) * 16 + 1024

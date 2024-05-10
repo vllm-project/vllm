@@ -23,7 +23,7 @@ __inline__ __device__ Tout scaled_vec_conversion(const Tin& x, const float scale
 // fp8 -> half
 template <>
 __inline__ __device__ uint16_t vec_conversion<uint16_t, uint8_t>(const uint8_t& a) {
-  hip_fp8    f8{a, hip_fp8::from_bits()};
+  hip_fp8 f8{a, hip_fp8::from_bits()};
   __half_raw res;
   res.data = static_cast<float>(f8);
   return res.x;
@@ -36,7 +36,7 @@ __inline__ __device__ uint32_t vec_conversion<uint32_t, uint16_t>(const uint16_t
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
   union {
     __half2_raw h2r;
-    uint32_t    ui32;
+    uint32_t ui32;
   } tmp;
   tmp.h2r.x.data = f2[0];
   tmp.h2r.y.data = f2[1];
@@ -57,7 +57,7 @@ __inline__ __device__ uint32_t vec_conversion<uint32_t, uint16_t>(const uint16_t
 template <>
 __inline__ __device__ uint2 vec_conversion<uint2, uint32_t>(const uint32_t& a) {
   union {
-    uint2    u32x2;
+    uint2 u32x2;
     uint32_t u32[2];
   } tmp;
   tmp.u32[0] = vec_conversion<uint32_t, uint16_t>((uint16_t)a);
@@ -83,7 +83,7 @@ using __nv_bfloat16 = __hip_bfloat16;
 template <>
 __inline__ __device__ __nv_bfloat16 vec_conversion<__nv_bfloat16, uint8_t>(const uint8_t& a) {
   hip_fp8 f8{a, hip_fp8::from_bits()};
-  float   f{f8};
+  float f{f8};
   return __float2bfloat16(f);
 }
 
@@ -132,10 +132,10 @@ __inline__ __device__ float vec_conversion<float, uint8_t>(const uint8_t& a) {
 template <>
 __inline__ __device__ float2 vec_conversion<float2, uint16_t>(const uint16_t& a) {
 #if defined(__HIP__MI300__) && defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
-  float2      res;
+  float2 res;
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
-  res.x          = f2[0];
-  res.y          = f2[1];
+  res.x = f2[0];
+  res.y = f2[1];
   return res;
 #else
   float2 res;
@@ -196,7 +196,7 @@ __inline__ __device__ uint8_t vec_conversion<uint8_t, float>(const float& a) {
 template <>
 __inline__ __device__ float4 vec_conversion<float4, uint32_t>(const uint32_t& a) {
   Float4_ tmp = vec_conversion<Float4_, uint32_t>(a);
-  float4  res = make_float4(tmp.x.x, tmp.x.y, tmp.y.x, tmp.y.y);
+  float4 res = make_float4(tmp.x.x, tmp.x.y, tmp.y.x, tmp.y.y);
   return res;
 }
 
@@ -204,7 +204,7 @@ __inline__ __device__ float4 vec_conversion<float4, uint32_t>(const uint32_t& a)
 template <>
 __inline__ __device__ uint32_t vec_conversion<uint32_t, float2>(const float2& a) {
   union {
-    half2    float16;
+    half2 float16;
     uint32_t uint32;
   };
 
@@ -215,15 +215,15 @@ __inline__ __device__ uint32_t vec_conversion<uint32_t, float2>(const float2& a)
 // Float4 -> half2x2
 template <>
 __inline__ __device__ uint2 vec_conversion<uint2, Float4_>(const Float4_& a) {
-  uint2  b;
+  uint2 b;
   float2 val;
   val.x = a.x.x;
   val.y = a.x.y;
-  b.x   = vec_conversion<uint32_t, float2>(val);
+  b.x = vec_conversion<uint32_t, float2>(val);
 
   val.x = a.y.x;
   val.y = a.y.y;
-  b.y   = vec_conversion<uint32_t, float2>(val);
+  b.y = vec_conversion<uint32_t, float2>(val);
   return b;
 }
 
@@ -288,8 +288,8 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(const Float8_& 
 // fp8 -> half
 template <>
 __inline__ __device__ uint16_t scaled_vec_conversion<uint16_t, uint8_t>(const uint8_t& a,
-                                                                        const float    scale) {
-  hip_fp8    f8{a, hip_fp8::from_bits()};
+                                                                        const float scale) {
+  hip_fp8 f8{a, hip_fp8::from_bits()};
   __half_raw res;
   res.data = static_cast<float>(f8) * scale;
   return res.x;
@@ -298,12 +298,12 @@ __inline__ __device__ uint16_t scaled_vec_conversion<uint16_t, uint8_t>(const ui
 // fp8x2 -> half2
 template <>
 __inline__ __device__ uint32_t scaled_vec_conversion<uint32_t, uint16_t>(const uint16_t& a,
-                                                                         const float     scale) {
+                                                                         const float scale) {
 #if defined(__HIP__MI300__) && defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
   union {
     __half2_raw h2r;
-    uint32_t    ui32;
+    uint32_t ui32;
   } tmp;
   tmp.h2r.x.data = f2[0] * scale;
   tmp.h2r.y.data = f2[1] * scale;
@@ -323,9 +323,9 @@ __inline__ __device__ uint32_t scaled_vec_conversion<uint32_t, uint16_t>(const u
 // fp8x4 -> half2x2
 template <>
 __inline__ __device__ uint2 scaled_vec_conversion<uint2, uint32_t>(const uint32_t& a,
-                                                                   const float     scale) {
+                                                                   const float scale) {
   union {
-    uint2    u32x2;
+    uint2 u32x2;
     uint32_t u32[2];
   } tmp;
   tmp.u32[0] = scaled_vec_conversion<uint32_t, uint16_t>((uint16_t)a, scale);
@@ -352,7 +352,7 @@ template <>
 __inline__ __device__ __nv_bfloat16
 scaled_vec_conversion<__nv_bfloat16, uint8_t>(const uint8_t& a, const float scale) {
   hip_fp8 f8{a, hip_fp8::from_bits()};
-  float   f{f8};
+  float f{f8};
   return __float2bfloat16(f * scale);
 }
 
@@ -371,7 +371,7 @@ scaled_vec_conversion<__nv_bfloat162, uint16_t>(const uint16_t& a, const float s
 // fp8x4 -> bf16_4_t
 template <>
 __inline__ __device__ bf16_4_t scaled_vec_conversion<bf16_4_t, uint32_t>(const uint32_t& a,
-                                                                         const float     scale) {
+                                                                         const float scale) {
   bf16_4_t res;
   res.x = scaled_vec_conversion<__nv_bfloat162, uint16_t>((uint16_t)a, scale);
   res.y = scaled_vec_conversion<__nv_bfloat162, uint16_t>((uint16_t)(a >> 16U), scale);
@@ -381,7 +381,7 @@ __inline__ __device__ bf16_4_t scaled_vec_conversion<bf16_4_t, uint32_t>(const u
 // fp8x8 -> bf16_8_t
 template <>
 __inline__ __device__ bf16_8_t scaled_vec_conversion<bf16_8_t, uint2>(const uint2& a,
-                                                                      const float  scale) {
+                                                                      const float scale) {
   bf16_4_t tmp1, tmp2;
   tmp1 = scaled_vec_conversion<bf16_4_t, uint32_t>(a.x, scale);
   tmp2 = scaled_vec_conversion<bf16_4_t, uint32_t>(a.y, scale);
@@ -396,7 +396,7 @@ __inline__ __device__ bf16_8_t scaled_vec_conversion<bf16_8_t, uint2>(const uint
 // fp8 -> float
 template <>
 __inline__ __device__ float scaled_vec_conversion<float, uint8_t>(const uint8_t& a,
-                                                                  const float    scale) {
+                                                                  const float scale) {
   hip_fp8 fp8{a, hip_fp8::from_bits()};
   return static_cast<float>(fp8) * scale;
 }
@@ -404,12 +404,12 @@ __inline__ __device__ float scaled_vec_conversion<float, uint8_t>(const uint8_t&
 // fp8x2 -> float2
 template <>
 __inline__ __device__ float2 scaled_vec_conversion<float2, uint16_t>(const uint16_t& a,
-                                                                     const float     scale) {
+                                                                     const float scale) {
 #if defined(__HIP__MI300__) && defined(__HIP_FP8_EXPERIMENTAL_BULK_CONVERT__)
-  float2      res;
+  float2 res;
   const auto& f2 = __builtin_amdgcn_cvt_pk_f32_fp8(a, 0);
-  res.x          = f2[0] * scale;
-  res.y          = f2[1] * scale;
+  res.x = f2[0] * scale;
+  res.y = f2[1] * scale;
   return res;
 #else
   float2 res;
@@ -422,7 +422,7 @@ __inline__ __device__ float2 scaled_vec_conversion<float2, uint16_t>(const uint1
 // fp8x4 -> float4
 template <>
 __inline__ __device__ Float4_ scaled_vec_conversion<Float4_, uint32_t>(const uint32_t& a,
-                                                                       const float     scale) {
+                                                                       const float scale) {
   Float4_ res;
   res.x = scaled_vec_conversion<float2, uint16_t>((uint16_t)a, scale);
   res.y = scaled_vec_conversion<float2, uint16_t>((uint16_t)(a >> 16U), scale);
@@ -432,7 +432,7 @@ __inline__ __device__ Float4_ scaled_vec_conversion<Float4_, uint32_t>(const uin
 // fp8x8 -> float8
 template <>
 __inline__ __device__ Float8_ scaled_vec_conversion<Float8_, uint2>(const uint2& a,
-                                                                    const float  scale) {
+                                                                    const float scale) {
   Float4_ tmp1, tmp2;
   tmp1 = scaled_vec_conversion<Float4_, uint32_t>(a.x, scale);
   tmp2 = scaled_vec_conversion<Float4_, uint32_t>(a.y, scale);
@@ -451,7 +451,7 @@ __inline__ __device__ Float8_ scaled_vec_conversion<Float8_, uint2>(const uint2&
 // half -> fp8
 template <>
 __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, uint16_t>(const uint16_t& a,
-                                                                       const float     scale) {
+                                                                       const float scale) {
   __half_raw tmp;
   tmp.x = a;
 
@@ -470,7 +470,7 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(cons
 // float -> fp8
 template <>
 __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, float>(const float& a,
-                                                                    const float  scale) {
+                                                                    const float scale) {
   hip_fp8 f8(a / scale);
   return f8.data;
 }
@@ -478,9 +478,9 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, float>(const float&
 // fp8x4 -> float4
 template <>
 __inline__ __device__ float4 scaled_vec_conversion<float4, uint32_t>(const uint32_t& a,
-                                                                     const float     scale) {
+                                                                     const float scale) {
   Float4_ tmp = scaled_vec_conversion<Float4_, uint32_t>(a, scale);
-  float4  res = make_float4(tmp.x.x, tmp.x.y, tmp.y.x, tmp.y.y);
+  float4 res = make_float4(tmp.x.x, tmp.x.y, tmp.y.x, tmp.y.y);
   return res;
 }
 

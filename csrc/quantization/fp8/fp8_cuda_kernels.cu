@@ -20,7 +20,7 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
 
 template <typename scalar_t>
 __device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(const scalar_t val,
-                                                                    const float    scale) {
+                                                                    const float scale) {
   float x = static_cast<float>(val) / scale;
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
   return static_cast<c10::Float8_e4m3fn>(r);
@@ -36,14 +36,14 @@ template <typename scalar_t>
 __global__ void segmented_max_reduction(float* __restrict__ scale,
                                         const scalar_t* __restrict__ input, int64_t num_elems) {
   __shared__ float cache[1024];
-  int              i = blockDim.x * blockIdx.x + threadIdx.x;
+  int i = blockDim.x * blockIdx.x + threadIdx.x;
 
   // First store maximum for all values processes by
   // the current thread in cache[threadIdx.x]
   scalar_t tmp = 0.0;
   while (i < num_elems) {
     float x = static_cast<float>(input[i]);
-    tmp     = max(tmp, fabs(x));
+    tmp = max(tmp, fabs(x));
     i += blockDim.x * gridDim.x;
   }
   cache[threadIdx.x] = tmp;
@@ -83,12 +83,12 @@ void static_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
                              torch::Tensor& input,  // [..., d]
                              torch::Tensor& scale)  // [1]
 {
-  int64_t                           num_tokens = input.numel() / input.size(-1);
-  int64_t                           num_elems  = input.numel();
-  dim3                              grid(num_tokens);
-  dim3                              block(1024);
+  int64_t num_tokens = input.numel() / input.size(-1);
+  int64_t num_elems = input.numel();
+  dim3 grid(num_tokens);
+  dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t                stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
     vllm::scaled_fp8_quant_kernel<scalar_t>
         <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fn>(), input.data_ptr<scalar_t>(),
@@ -100,12 +100,12 @@ void dynamic_scaled_fp8_quant(torch::Tensor& out,    // [..., d]
                               torch::Tensor& input,  // [..., d]
                               torch::Tensor& scale)  // [1]
 {
-  int64_t                           num_tokens = input.numel() / input.size(-1);
-  int64_t                           num_elems  = input.numel();
-  dim3                              grid(num_tokens);
-  dim3                              block(1024);
+  int64_t num_tokens = input.numel() / input.size(-1);
+  int64_t num_elems = input.numel();
+  dim3 grid(num_tokens);
+  dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t                stream = at::cuda::getCurrentCUDAStream();
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
     vllm::segmented_max_reduction<scalar_t><<<grid, block, 0, stream>>>(
         scale.data_ptr<float>(), input.data_ptr<scalar_t>(), num_elems);
