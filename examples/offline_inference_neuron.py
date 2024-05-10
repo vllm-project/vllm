@@ -26,9 +26,8 @@ llm = LLM(
     # or explicitly assigned.
     device="neuron",
     tensor_parallel_size=2)
-# Generate texts from the prompts. The output is a list of
-# RequestOutput objects that contain the prompt, generated text, and
-# other information.
+# Generate texts from the prompts. The output is a list of RequestOutput objects
+# that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
 # Print the outputs.
 for output in outputs:
