@@ -172,6 +172,8 @@ class PagedAttention:
         max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
         sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        kv_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -189,6 +191,8 @@ class PagedAttention:
             max_query_len,
             alibi_slopes,
             sliding_window,
+            kv_cache_dtype,
+            kv_scale,
         )
         return output
 

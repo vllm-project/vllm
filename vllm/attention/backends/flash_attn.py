@@ -254,6 +254,8 @@ class FlashAttentionImpl(AttentionImpl):
                     prefill_meta.max_query_len,
                     self.alibi_slopes,
                     self.sliding_window[0],
+                    attn_metadata.kv_cache_dtype,
+                    kv_scale,
                 )
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.

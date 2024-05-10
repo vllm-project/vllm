@@ -1,9 +1,24 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+from typing import Optional
+from enum import IntEnum
+
 import torch
 import triton
 import triton.language as tl
+
+class Fp8KVCacheDataType(IntEnum):
+    AUTO = 0
+    Fp8E4M3 = 1
+    Fp8E5M2 = 2
+
+    @classmethod
+    def from_str(cls, s: str) -> "Fp8KVCacheDataType":
+        if s == "auto":
+            return cls.AUTO
+        if s == "fp8":
+            return cls.Fp8E5M2
 
 if triton.__version__ >= "2.1.0":
 
@@ -46,11 +61,13 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        kv_scale: float,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
         SLIDING_WINDOW: tl.constexpr,
+        KV_CACHE_TYPE: tl.constexpr,
     ):
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
@@ -119,6 +136,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                k = k.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)  # [M,N]
             qk += tl.dot(q, k)
@@ -163,6 +186,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)  # [N,D]
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                v = v.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                v = v.to(tl.float8e5, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
 
             p = p.to(v.dtype)
             acc += tl.dot(p, v)
@@ -279,9 +308,11 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        kv_scale:float,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        KV_CACHE_TYPE: tl.constexpr,
     ):
         cur_batch = tl.program_id(0)
         cur_head = tl.program_id(1)
@@ -334,6 +365,12 @@ if triton.__version__ >= "2.1.0":
             k = tl.load(K_cache + off_k,
                         mask=(start_n + offs_n[None, :]) < cur_batch_ctx_len,
                         other=0.0)
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                k = k.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -360,6 +397,12 @@ if triton.__version__ >= "2.1.0":
             v = tl.load(V_cache + off_v,
                         mask=(start_n + offs_n[:, None]) < cur_batch_ctx_len,
                         other=0.0)
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                v = v.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                v = v.to(tl.float8e5, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
 
             p = p.to(v.dtype)
             acc += tl.dot(p, v)
@@ -471,10 +514,12 @@ if triton.__version__ >= "2.1.0":
         stride_v_cache_d,
         stride_v_cache_bl,
         num_queries_per_kv: int,
+        kv_scale:float,
         BLOCK_M: tl.constexpr,
         BLOCK_DMODEL: tl.constexpr,  # head size
         BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
         BLOCK_N: tl.constexpr,
+        KV_CACHE_TYPE: tl.constexpr,
     ):
         # attn_bias[]
         cur_batch = tl.program_id(0)
@@ -539,6 +584,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[:, None] &
                         ((start_n + offs_n[None, :]) < cur_batch_ctx_len),
                         other=0.0)  # [D,N]
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                k = k.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                k = k.to(tl.float8e5, bitcast=True).to(q.dtype)
+                k *= kv_scale.to(q.dtype)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
             qk += tl.dot(q, k)
@@ -575,6 +626,12 @@ if triton.__version__ >= "2.1.0":
                         mask=dim_mask[None, :] &
                         ((start_n + offs_n[:, None]) < cur_batch_ctx_len),
                         other=0.0)
+            if KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E4M3:
+                v = v.to(tl.float8e4nv, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
+            elif KV_CACHE_TYPE == Fp8KVCacheDataType.Fp8E5M2:
+                v = v.to(tl.float8e5, bitcast=True).to(q.dtype)
+                v *= kv_scale.to(q.dtype)
 
             p = p.to(v.dtype)
             acc += tl.dot(p, v, allow_tf32=False)
@@ -681,7 +738,9 @@ if triton.__version__ >= "2.1.0":
                               b_ctx_len,
                               max_input_len,
                               alibi_slopes=None,
-                              sliding_window=None):
+                              sliding_window=None,
+                                kv_cache_dtype: str="auto",
+                                kv_scale: float=1.0):
 
         cap = torch.cuda.get_device_capability()
         BLOCK = 128 if cap[0] >= 8 else 64
@@ -741,12 +800,14 @@ if triton.__version__ >= "2.1.0":
                 v_cache.stride(
                     3),  #[num_blocks, num_kv_heads, head_size, block_size]
                 num_queries_per_kv=num_queries_per_kv,
+                kv_scale=kv_scale or 1,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
                 BLOCK_N=BLOCK,
                 num_warps=num_warps,
                 num_stages=1,
+                KV_CACHE_TYPE=int(Fp8KVCacheDataType.from_str(kv_cache_dtype)),
             )
             return
 
@@ -790,6 +851,7 @@ if triton.__version__ >= "2.1.0":
             v_cache.stride(
                 3),  #[num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
+            kv_scale=kv_scale or 1,
             BLOCK_M=BLOCK,
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,
@@ -797,5 +859,6 @@ if triton.__version__ >= "2.1.0":
             SLIDING_WINDOW=sliding_window if sliding_window is not None else 0,
             num_warps=num_warps,
             num_stages=1,
+            KV_CACHE_TYPE=int(Fp8KVCacheDataType.from_str(kv_cache_dtype)),
         )
         return
