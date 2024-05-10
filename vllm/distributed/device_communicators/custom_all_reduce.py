@@ -1,8 +1,9 @@
 from contextlib import contextmanager
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -76,15 +77,30 @@ class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
     # max_size: max supported allreduce size
-    def __init__(self, max_size=8192 * 1024) -> None:
-
+    def __init__(self,
+                 group: Optional[ProcessGroup] = None,
+                 device: Optional[Union[int, str, torch.device]] = None,
+                 max_size=8192 * 1024) -> None:
+        """
+        Args:
+            group: the process group to work on. If None, it will use the
+                default process group.
+            device: the device to bind the CustomAllreduce to. If None,
+                it will be bind to f"cuda:{local_rank}".
+        It is the caller's responsibility to make sure each communicator
+        is bind to a unique device, and all communicators in this group
+        are in the same node.
+        """
         self._IS_CAPTURING = False
         self.disabled = True
 
-        from vllm.distributed import (get_tensor_model_parallel_rank,
-                                      get_tensor_model_parallel_world_size)
-        rank = get_tensor_model_parallel_rank()
-        world_size = get_tensor_model_parallel_world_size()
+        from vllm.distributed.parallel_state import (
+            get_tensor_model_parallel_cpu_group)
+        group = group or get_tensor_model_parallel_cpu_group()
+        self.group = group
+
+        rank = dist.get_rank(group=self.group)
+        world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
             # No need to initialize custom allreduce for single GPU case.
             return
@@ -96,29 +112,37 @@ class CustomAllreduce:
                 "warning, specify disable_custom_all_reduce=True explicitly.",
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
-        num_dev = torch.cuda.device_count()
-        # note: num dev can be larger than world_size if we're only using
-        # first few GPUs
-        if num_dev < world_size:
-            logger.warning(
-                "Cannot test GPU P2P because not all GPUs are visible to the "
-                "current process. This might be the case if "
-                "'CUDA_VISIBLE_DEVICES' is set.")
-            return
 
-        # we only use a subset of GPUs here
-        # so we only need to check the nvlink connectivity of these GPUs
-        num_dev = world_size
+        from vllm.distributed.parallel_state import get_local_rank
+        if device is None:
+            local_rank = get_local_rank()
+            device = torch.device(f"cuda:{local_rank}")
+        elif isinstance(device, int):
+            device = torch.device(f"cuda:{device}")
+        elif isinstance(device, str):
+            device = torch.device(device)
+        # now `device` is a `torch.device` object
+        assert isinstance(device, torch.device)
+        self.device = device
 
-        # test nvlink first, this will filter out most of the cases
-        # where custom allreduce is not supported
         cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
         if cuda_visible_devices:
             device_ids = list(map(int, cuda_visible_devices.split(",")))
         else:
-            device_ids = list(range(num_dev))
+            device_ids = list(range(torch.cuda.device_count()))
+
+        physical_device_id = device_ids[device.index]
+        tensor = torch.tensor([physical_device_id], dtype=torch.int)
+        gather_list = [
+            torch.tensor([0], dtype=torch.int) for _ in range(world_size)
+        ]
+        dist.all_gather(gather_list, tensor, group=self.group)
+        physical_device_ids = [t.item() for t in gather_list]
+
+        # test nvlink first, this will filter out most of the cases
+        # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = _is_full_nvlink(device_ids)
+        full_nvlink = _is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -142,10 +166,12 @@ class CustomAllreduce:
         # allreduce results.
         self.meta = torch.zeros(custom_ar.meta_size() + max_size,
                                 dtype=torch.uint8,
-                                device="cuda")
+                                device=self.device)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.buffer = torch.empty(max_size, dtype=torch.uint8, device="cuda")
+        self.buffer = torch.empty(max_size,
+                                  dtype=torch.uint8,
+                                  device=self.device)
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
@@ -153,7 +179,7 @@ class CustomAllreduce:
         # needs less than 10000 of registered tuples.
         self.rank_data = torch.empty(8 * 1024 * 1024,
                                      dtype=torch.uint8,
-                                     device="cuda")
+                                     device=self.device)
         self.max_size = max_size
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
@@ -189,7 +215,7 @@ class CustomAllreduce:
 
     def _gather_ipc_meta(self, shard_data):
         all_data: List[Optional[Any]] = [None] * self.world_size
-        dist.all_gather_object(all_data, shard_data)
+        dist.all_gather_object(all_data, shard_data, group=self.group)
 
         handles = []
         offsets = []
