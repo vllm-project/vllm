@@ -293,16 +293,20 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         prompt_token_ids = seq_data.get_prompt_token_ids()
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
 
+        new_seq_data_dict = {
+            target_seq_id:
+            SequenceData(
+                prompt_token_ids=prompt_token_ids,
+                output_token_ids=new_output_token_ids,
+            ),
+        }
+        for data in new_seq_data_dict.values():
+            data.update_num_computed_tokens(seq_data.get_num_computed_tokens())
+
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
             is_prompt=seq_group_metadata.is_prompt,
-            seq_data={
-                target_seq_id:
-                SequenceData(
-                    prompt_token_ids=prompt_token_ids,
-                    output_token_ids=new_output_token_ids,
-                ),
-            },
+            seq_data=new_seq_data_dict,
             sampling_params=seq_group_metadata.sampling_params,
             block_tables={
                 target_seq_id: seq_group_metadata.block_tables[seq_id],

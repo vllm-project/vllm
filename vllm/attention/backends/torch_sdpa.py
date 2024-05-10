@@ -210,7 +210,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 value_cache,
                 attn_metadata.block_tables,
                 attn_metadata.seq_lens_tensor,
-                attn_metadata.max_seq_len,
+                attn_metadata.max_decode_seq_len,
                 attn_metadata.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
