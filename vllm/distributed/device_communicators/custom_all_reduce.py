@@ -169,9 +169,6 @@ class CustomAllreduce:
     def end_capture(self) -> None:
         self._IS_CAPTURING = False
 
-    def is_capturing(self) -> bool:
-        return self._IS_CAPTURING and not self.disabled
-
     @contextmanager
     def capture(self):
         try:
@@ -234,7 +231,7 @@ class CustomAllreduce:
         # when custom allreduce is disabled, this will be None
         if self.disabled:
             return None
-        if self.is_capturing():
+        if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 if self.should_custom_ar(input):
                     return self.all_reduce_reg(input)
