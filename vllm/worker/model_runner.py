@@ -236,6 +236,7 @@ class ModelRunner:
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
+            is_prompt = seq_group_metadata.is_prompt
 
             for seq_id in seq_ids:
                 computed_block_nums = seq_group_metadata.computed_block_nums
@@ -247,17 +248,19 @@ class ModelRunner:
                         "chunked prefill cannot be used with prefix caching "
                         "now.")
 
-                token_chunk_size = seq_group_metadata.token_chunk_size
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                context_len = seq_data.get_num_computed_tokens()
-                # We should use get_len here because in case of preemption
-                # it contains output tokens.
-                seq_len = min(seq_data.get_len(),
-                              context_len + token_chunk_size)
+                query_len = seq_group_metadata.token_chunk_size
+                if is_prompt:
+                    context_len = seq_data.get_num_computed_tokens()
+                else:
+                    # get_num_computed_tokens is incorrect for spec decoding.
+                    # So, we should have a special logic here.
+                    # TODO(sang): Fix it.
+                    context_len = seq_data.get_len() - 1
+                seq_len = min(seq_data.get_len(), context_len + query_len)
                 # Do not change seq_len for prefill because prefill should
                 # not have window.
-                if (self.sliding_window is not None
-                        and not seq_group_metadata.is_prompt):
+                if (self.sliding_window is not None and not is_prompt):
                     seq_len = min(seq_len, self.sliding_window)
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 seq_lens.append(seq_len)
@@ -267,7 +270,7 @@ class ModelRunner:
                 prefix_cache_hit = (computed_block_nums is not None
                                     and len(computed_block_nums) > 0
                                     and self.sliding_window is None
-                                    and seq_group_metadata.is_prompt)
+                                    and is_prompt)
 
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
@@ -278,7 +281,7 @@ class ModelRunner:
                     tokens = tokens[context_len:]
                     block_tables.append(computed_block_nums)
                 elif (self.scheduler_config.chunked_prefill_enabled
-                      or not seq_group_metadata.is_prompt):
+                      or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
@@ -308,22 +311,21 @@ class ModelRunner:
                     block_tables.append([])
 
                 context_lens.append(context_len)
-                query_len = seq_len - context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
 
-                if seq_group_metadata.is_prompt:
+                if is_prompt:
                     assert len(seq_ids) == 1
                     num_prefills += 1
                     num_prefill_tokens += len(tokens)
                     decode_only = False
                     prefill_seq_lens.append(seq_len)
                 else:
-                    num_decode_tokens += 1
+                    assert query_len == 1
+                    num_decode_tokens += query_len
                     decode_seq_lens.append(seq_len)
-                    assert token_chunk_size == 1
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
@@ -355,7 +357,7 @@ class ModelRunner:
                 # [-1, -1, 2, 3, 4, 5, 6, 7, 0, 1].
                 start_idx = 0
                 if self.sliding_window is not None:
-                    if seq_group_metadata.is_prompt:
+                    if is_prompt:
                         assert context_len == 0, (
                             "Prefix caching is currently not supported with "
                             "sliding window attention")

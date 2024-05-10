@@ -300,8 +300,12 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 output_token_ids=new_output_token_ids,
             ),
         }
+        # This is a hack. Technically, spec decoding should compute
+        # num_lookahead slots at one shot, but instead, it expands the batch
+        # and evaluate one by one right now. context_len is seq_len - 1 because
+        # the kv cache is filled by a previous batch in the batch expansion.
         for data in new_seq_data_dict.values():
-            data.update_num_computed_tokens(seq_data.get_num_computed_tokens())
+            data.update_num_computed_tokens(data.get_len() - 1)
 
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
@@ -312,6 +316,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 target_seq_id: seq_group_metadata.block_tables[seq_id],
             },
             lora_request=None,
+            token_chunk_size=1,
         )
 
     def _split_scoring_output(
