@@ -4,6 +4,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
+from pyaici.comms import AiciRunner
+
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
@@ -261,6 +263,7 @@ class Scheduler:
             version="v2" if self.scheduler_config.
             use_v2_block_manager else "v1")
 
+        self.aici_runner: AiciRunner = None
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
@@ -296,6 +299,11 @@ class Scheduler:
         return 1
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
+        if seq_group.sampling_params.has_aici:
+            seq = seq_group.get_seqs()[0]
+            seq.has_aici = True
+            self.aici_runner.assign_seq_id(seq_group.request_id, seq.seq_id)
+
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
@@ -884,6 +892,8 @@ class Scheduler:
         )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
+        runner = self.aici_runner
+
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.
@@ -905,6 +915,8 @@ class Scheduler:
 
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
+                if seq_group.sampling_params.has_aici:
+                    runner.add_mid(seq_id)
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
@@ -935,6 +947,12 @@ class Scheduler:
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
+        if runner:
+            if scheduler_outputs.is_empty():
+                assert not runner.needs_exec_mid()
+            else:
+                runner.exec_mid()
+
         # Now that the batch has been created, we can assume all blocks in the
         # batch will have been computed before the next scheduling invocation.
         # This is because the engine assumes that a failure in model execution
@@ -950,6 +968,8 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
+        if seq.has_aici:
+            self.aici_runner.seq_freed(seq.seq_id)
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:
@@ -979,7 +999,10 @@ class Scheduler:
         num_lookahead_slots = self._get_num_lookahead_slots(is_prefill=False)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows = self.block_manager.append_slots(seq,
+                                                   num_lookahead_slots,
+                                                   backtrack=seq.backtrack)
+            seq.backtrack = 0
 
             for src, dests in cows.items():
                 if src not in blocks_to_copy:

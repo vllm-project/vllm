@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import fastapi
+import pyaici
 import uvicorn
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
@@ -19,7 +20,9 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
-                                              CompletionRequest, ErrorResponse)
+                                              CompletionRequest, ErrorResponse,
+                                              RunRequest, SetTagsRequest)
+from vllm.entrypoints.openai.serving_aici import AiciRunnerCompletion
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
@@ -29,6 +32,8 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
+pyaici_runner_completion: AiciRunnerCompletion
+
 logger = init_logger(__name__)
 
 
@@ -51,6 +56,7 @@ app = fastapi.FastAPI(lifespan=lifespan)
 
 def parse_args():
     parser = make_arg_parser()
+    parser = pyaici.add_cli_args(parser)
     return parser.parse_args()
 
 
@@ -114,6 +120,51 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+def _no_aici():
+    return JSONResponse({"error": "AICI runtime is not enabled"},
+                        status_code=501)
+
+
+@app.post("/v1/controllers")
+async def upload_aici_module(request: Request):
+    if not pyaici_runner_completion:
+        return _no_aici()
+    contents = await request.body()
+    return JSONResponse(
+        await
+        pyaici_runner_completion.aici_runner.upload_module_async(contents))
+
+
+@app.post("/v1/run")
+async def aici_run(request: RunRequest, raw_request: Request):
+    if not pyaici_runner_completion:
+        return _no_aici()
+    request_id, inst_res = \
+        await pyaici_runner_completion.prep_completion(request)
+    generator = pyaici_runner_completion.create_completion(
+        request_id, inst_res, request, raw_request)
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@app.post("/v1/controllers/tags")
+async def aici_set_tags(request: SetTagsRequest):
+    if not pyaici_runner_completion:
+        return _no_aici()
+    # non-admin users can only set tags that start with their username
+    auto_info = {"user": "vllm", "is_admin": True}
+    r = await pyaici_runner_completion.aici_runner.set_tags(
+        request.module_id, request.tags, auth_info=auto_info)
+    return JSONResponse(r)
+
+
+@app.get("/v1/controllers/tags")
+async def aici_get_tags():
+    if not pyaici_runner_completion:
+        return _no_aici()
+    r = await pyaici_runner_completion.aici_runner.get_tags()
+    return JSONResponse(r)
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -158,6 +209,14 @@ if __name__ == "__main__":
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
+    if args.aici_rt:
+        config = asyncio.run(engine.get_model_config())
+        dtype = str(config.dtype).replace("torch.", "").replace("float", "f")
+        pyaici_runner = pyaici.runner_from_cli(args, dtype=dtype)
+        pyaici_runner.fast_api()
+        assert len(served_model_names) == 1
+        pyaici_runner_completion = AiciRunnerCompletion(
+            pyaici_runner, engine, served_model_names[0])
     openai_serving_chat = OpenAIServingChat(engine, served_model_names,
                                             args.response_role,
                                             args.lora_modules,

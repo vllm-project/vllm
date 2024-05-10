@@ -85,6 +85,22 @@ class BlockTable:
                                                            device=device)
         self._num_full_slots = len(token_ids)
 
+    def backtrack(self, num_slots: int) -> None:
+        """Remove the specified number of slots from the end of the table.
+
+        Args:
+            num_slots (int): The number of slots to backtrack by.
+        """
+        assert self._is_allocated
+        assert num_slots <= self._num_full_slots
+        if num_slots == 0:
+            return
+        self._num_full_slots -= num_slots
+        blocks = self._blocks[self._num_full_slots // self._block_size:]
+        blocks[0].trim(self._num_full_slots % self._block_size)
+        for b in blocks[1:]:
+            b.trim(0)
+
     def append_token_ids(self,
                          token_ids: List[int],
                          num_lookahead_slots: int = 0) -> None:

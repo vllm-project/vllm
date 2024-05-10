@@ -166,6 +166,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
+        self.has_aici = False
         self.truncate_prompt_tokens = truncate_prompt_tokens
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
@@ -274,6 +275,9 @@ class SamplingParams:
     def update_from_generation_config(
             self, generation_config: Dict[str, Any]) -> None:
         """Update if there are non-default values from generation_config"""
+        # For AICI, we want the controller to control stopping.
+        if self.has_aici:
+            return
         # Update eos_token_id for generation
         if eos_ids := generation_config.get("eos_token_id"):
             # it can be either int or list of int

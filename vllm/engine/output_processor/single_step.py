@@ -79,6 +79,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
+        aici_runner = self.scheduler.aici_runner
+
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
             child_samples: List[SequenceOutput] = parent_child_dict[
@@ -102,9 +104,26 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
+            child_seqs.append((parent, parent))
+            if seq_group.sampling_params.has_aici:
+                sid = parent.seq_id
+                sampled_token = last_child_sample.output_token
+                r = aici_runner.mid_status(sid)
+                assert len(r.branches) <= 1
+                if r.branches:
+                    splice = r.branches[0].find_splice(sampled_token)
+                    if splice:
+                        parent.splice_tokens(splice.backtrack,
+                                             splice.ff_tokens)
+                        aici_runner.tokens_generated(
+                            sid, splice.ff_tokens, backtrack=splice.backtrack)
+                        continue  # don't call append_token_id()
+                    else:
+                        aici_runner.tokens_generated(sid, [sampled_token])
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
-            child_seqs.append((parent, parent))
+
+        to_stop = aici_runner.get_seqs_to_stop() if aici_runner else set()
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize and self.detokenizer:
@@ -114,6 +133,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 new_char_count = 0
             self.stop_checker.maybe_stop_sequence(seq, new_char_count,
                                                   seq_group.sampling_params)
+            if seq.seq_id in to_stop:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = "<AICI>"
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

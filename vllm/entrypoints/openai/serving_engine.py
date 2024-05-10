@@ -32,7 +32,7 @@ class OpenAIServing:
     def __init__(self,
                  engine: AsyncLLMEngine,
                  served_model_names: List[str],
-                 lora_modules=Optional[List[LoRA]]):
+                 lora_modules: Optional[List[LoRA]] = None):
         self.engine = engine
         self.served_model_names = served_model_names
         if lora_modules is None:

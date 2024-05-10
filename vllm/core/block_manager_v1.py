@@ -375,10 +375,13 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int = 0,
+        backtrack: int = 0,
     ) -> Dict[int, List[int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
+        assert backtrack == 0, \
+            "Backtrack not supported; consider --use-v2-block-manager"
         # If we need to allocate a new physical block
         if len(block_table) < len(logical_blocks):
             # Currently this code only supports adding one physical block
