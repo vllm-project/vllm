@@ -337,8 +337,6 @@ class ModelRunner:
                 block_offset = i % self.block_size
                 slot = block_number * self.block_size + block_offset
                 slot_mapping.append(slot)
-            print("SLOT_MAPPING", len(slot_mapping), slot_mapping[0:3], slot_mapping[-3:])
-            print("BL_TBL", len(block_table),  block_table[0:50],block_table[-20:])
 
         max_query_len = max(query_lens)
         max_seq_len = max(seq_lens)
@@ -464,7 +462,6 @@ class ModelRunner:
                     if self.scheduler_config.use_v2_block_manager:
                         # number of elements in last block
                         suff_len = seq_len % self.block_size
-                        print(seq_len, block_aligned_sliding_window, suff_len)
                         seq_len = min(seq_len, block_aligned_sliding_window + suff_len)
                         if suff_len > 0:
                             curr_sliding_window_blocks += 1
@@ -482,9 +479,7 @@ class ModelRunner:
                 lora_prompt_mapping.append(lora_id)
 
                 if self.sliding_window is not None:
-                    print("B", len(block_table),  block_table[0:3],block_table[-3:])
                     block_table = block_table[-curr_sliding_window_blocks:]
-                    print("B2", len(block_table),  block_table[0:3],block_table[-3:], slot)
                 block_tables.append(block_table)
 
         # vLLM uses cuda graph only for decoding requests.
