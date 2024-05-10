@@ -100,6 +100,11 @@ class Metrics:
             name="vllm:tokens_total",
             documentation="Number of prefill plus generation tokens processed.",
             labelnames=labelnames)
+        self.histogram_iteration_tokens = self._histogram_cls(
+            name="vllm:iteration_tokens_total",
+            documentation="Histogram of number of tokens per engine_step.",
+            labelnames=labelnames,
+            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -489,7 +494,8 @@ class PrometheusStatLogger(StatLoggerBase):
                           stats.num_prompt_tokens_iter)
         self._log_counter(self.metrics.counter_generation_tokens,
                           stats.num_generation_tokens_iter)
-        self._log_counter(self.metrics.counter_tokens, stats.num_tokens_iter)
+        self._log_histogram(self.metrics.histogram_iteration_tokens,
+                            [stats.num_tokens_iter])
         self._log_histogram(self.metrics.histogram_time_to_first_token,
                             stats.time_to_first_tokens_iter)
         self._log_histogram(self.metrics.histogram_time_per_output_token,
