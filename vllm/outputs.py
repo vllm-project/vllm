@@ -84,7 +84,7 @@ class RequestOutput:
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
-        self.prompt_token_ids = list(prompt_token_ids)
+        self.prompt_token_ids = tuple(prompt_token_ids)
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
