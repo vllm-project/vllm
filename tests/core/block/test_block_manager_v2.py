@@ -101,3 +101,72 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
                 range(prompt_len + num_slots_to_append + num_lookahead_slots)),
             block_size)) - len(chunk_list(list(range(prompt_len)), block_size))
     assert num_consumed_blocks == expected_consumed_blocks
+
+
+@pytest.mark.parametrize("block_size", [8, 16])
+@pytest.mark.parametrize("prompt_len", [10, 300, 1000])
+@pytest.mark.parametrize("num_slots_to_append", [50])
+@pytest.mark.parametrize("sliding_window", [20, 32, 200, 512])
+def test_sliding_window(block_size, prompt_len, num_slots_to_append,
+                        sliding_window):
+    """Verify append_slots consumes the correct number of blocks from the block
+    table.
+    """
+
+    num_gpu_blocks = 1024
+    watermark = 0.1
+    block_manager = BlockSpaceManagerV2(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        num_cpu_blocks=0,
+        watermark=watermark,
+        sliding_window=sliding_window,
+    )
+
+    def check_used(min_n, max_n=None):
+        if max_n is None:
+            max_n = min_n
+        used = num_gpu_blocks - block_manager.get_num_free_gpu_blocks()
+        #print("check", min_n, used, max_n)
+        assert min_n <= used
+        assert used <= max_n
+
+    def num_blocks(num_tokens):
+        return (num_tokens + block_size - 1) // block_size
+
+    check_used(0)
+
+    seq_group = create_seq_group(
+        seq_prompt_len=prompt_len,
+        seq_output_lens=[0],
+    )
+
+    check_used(0)
+
+    # Allocate seq
+    assert block_manager.can_allocate(seq_group)
+    block_manager.allocate(seq_group)
+
+    check_used(num_blocks(prompt_len))
+
+    # Seq seq to RUNNING
+    seq = seq_group.get_seqs()[0]
+    seq.status = SequenceStatus.RUNNING
+
+    seq.data.update_num_computed_tokens(prompt_len)
+    check_used(num_blocks(prompt_len))
+
+    # this is how we compute it in BlockSpaceManagerV2.__init__
+    sliding_blocks = (sliding_window // block_size) + 2
+    # plus one block for null block
+    sliding_blocks += 1
+
+    # Append tokens to the sequeqnce
+    for token_id in range(num_slots_to_append):
+        seq.append_token_id(token_id, {token_id: Logprob(0.0)})
+        seq.data.update_num_computed_tokens(1)
+        block_manager.append_slots(seq, num_lookahead_slots=0)
+        if prompt_len < sliding_window + 10:
+            check_used(0, sliding_blocks + 1)
+        else:
+            check_used(sliding_blocks, sliding_blocks + 1)
