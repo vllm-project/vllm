@@ -445,12 +445,14 @@ class EngineArgs:
             action='store_true',
             help='If set, the prefill requests can be chunked based on the '
             'max_num_batched_tokens.')
+
         parser.add_argument(
             '--speculative-model',
             type=nullable_str,
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
+
         parser.add_argument(
             '--num-speculative-tokens',
             type=int,
@@ -495,6 +497,7 @@ class EngineArgs:
                             'corresponding to the chosen load_format. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
+
         parser.add_argument(
             "--served-model-name",
             nargs="+",
@@ -509,6 +512,7 @@ class EngineArgs:
             "will also be used in `model_name` tag content of "
             "prometheus metrics, if multiple names provided, metrics"
             "tag will take the first one.")
+
         return parser
 
     @classmethod
