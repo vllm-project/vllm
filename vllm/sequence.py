@@ -499,7 +499,8 @@ class SequenceGroup:
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error.
-        if self.is_prefill():
+        # With AICI, the request may go from decode to prefill, so ignore.
+        if self.is_prefill() and not self.sampling_params.has_aici:
             raise ValueError(
                 "seq_group.get_last_latency() should not be called "
                 "if the seq_group is in prefill phase.")
