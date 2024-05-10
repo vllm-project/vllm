@@ -84,6 +84,8 @@ def test_guided_logits_processors():
 @pytest.mark.parametrize("backend", ["outlines", "lm-format-enforcer"])
 async def test_guided_logits_processor_black_box(backend: str):
     tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
+    
+    # guided_regex
     token_ids = tokenizer.encode(
         f"Give an example IPv4 address with this regex: {TEST_REGEX}")
     regex_request = CompletionRequest(model='test',
@@ -98,6 +100,7 @@ async def test_guided_logits_processor_black_box(backend: str):
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
+    # guided_json
     token_ids = tokenizer.encode(
         f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
     json_request = CompletionRequest(model='test',
@@ -111,3 +114,34 @@ async def test_guided_logits_processor_black_box(backend: str):
     tensor = json_lp(token_ids, tensor)
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
+
+    # ToDo: guided_type
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
+    json_request = CompletionRequest(model='test',
+                                     prompt=token_ids,
+                                     guided_json=TEST_SCHEMA)
+    json_lp = await get_guided_decoding_logits_processor(
+        backend, json_request, tokenizer)
+    assert json_lp is not None
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = json_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert not torch.allclose(tensor, original_tensor)
+
+    # ToDo: guided_grammar
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {TEST_SCHEMA}")
+    json_request = CompletionRequest(model='test',
+                                     prompt=token_ids,
+                                     guided_json=TEST_SCHEMA)
+    json_lp = await get_guided_decoding_logits_processor(
+        backend, json_request, tokenizer)
+    assert json_lp is not None
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = json_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert not torch.allclose(tensor, original_tensor)
+
