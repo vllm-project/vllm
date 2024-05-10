@@ -10,8 +10,7 @@ def sample_outputs():
     return [
         CompletionSequenceGroupOutput(samples=[
             SequenceOutput(parent_seq_id=0, output_token=i, logprobs={})
-        ],
-                                      prompt_logprobs=None) for i in range(5)
+        ], prompt_logprobs=None) for i in range(5)
     ]
 
 
