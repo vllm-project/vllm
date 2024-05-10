@@ -1,4 +1,3 @@
-import contextlib
 import functools
 import time
 from enum import IntEnum
@@ -165,7 +164,7 @@ class ModelRunner:
         attn_impl = self.attn_backend.get_impl_cls()
         attn_impl = functools.partial(attn_impl,
                                       kv_cache_dtype=self.kv_cache_dtype)
-        with set_attn_impl(attn_impl):
+        with set_attn_impl(attn_impl):  # noqa: SIM117
             with CudaMemoryProfiler() as m:
                 self.model = get_model(
                     model_config=self.model_config,

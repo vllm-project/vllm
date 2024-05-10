@@ -4,7 +4,6 @@ from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
                     TypeVar)
 
 import torch
-import torch.nn as nn
 
 
 class AttentionBackend(ABC):
@@ -104,8 +103,9 @@ class AttentionMetadata(Generic[T]):
             assert self.decode_metadata is not None
 
 
-class AttentionImpl(nn.Module):
+class AttentionImpl(ABC):
 
+    @abstractmethod
     def __init__(
         self,
         num_heads: int,
@@ -116,20 +116,9 @@ class AttentionImpl(nn.Module):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
     ) -> None:
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.alibi_slopes = alibi_slopes
-        self.sliding_window = sliding_window
-        self.kv_cache_dtype = kv_cache_dtype
+        raise NotImplementedError
 
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
+    @abstractmethod
     def forward(
         self,
         query: torch.Tensor,

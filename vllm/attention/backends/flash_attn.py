@@ -142,10 +142,19 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
     ) -> None:
-        super().__init__(num_heads, head_size, scale, num_kv_heads,
-                         alibi_slopes, sliding_window, kv_cache_dtype)
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
+        self.alibi_slopes = alibi_slopes
         self.sliding_window = ((sliding_window, sliding_window)
                                if sliding_window is not None else (-1, -1))
+        self.kv_cache_dtype = kv_cache_dtype
+
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
