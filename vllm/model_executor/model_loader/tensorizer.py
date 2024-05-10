@@ -342,10 +342,8 @@ class TensorizerAgent:
         logger_data = {"total_bytes_str": total_bytes_str}
         logger.info("Deserialized %s in %0.2fs, %s/s", total_bytes_str,
                     end - start, per_second, extra=logger_data)
-        logger_data = {"before_mem": before_mem}
-        logger.info("Memory usage before: %s", before_mem, extra=logger_data)
-        logger_data = {"after_mem": after_mem}
-        logger.info("Memory usage after: %s", after_mem, extra=logger_data)
+        logger.info("Memory usage before: %s", before_mem)
+        logger.info("Memory usage after: %s", after_mem)
 
         self._check_tensors_on_meta_device()
         self._resize_lora_embeddings()
