@@ -106,7 +106,7 @@ class AttentionImpl(ABC):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
+        blocksparse_params: Optional[Type["BlocksparseParams"]] = None,
     ) -> None:
         raise NotImplementedError
 

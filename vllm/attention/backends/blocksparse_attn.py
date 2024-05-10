@@ -1,7 +1,7 @@
 # from vllm.attention import Attention, AttentionMetadata
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from torch import nn
@@ -13,23 +13,60 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
-from .blocksparse_attention.interface import (LocalStridedBlockSparseAttn,
-                                              LocalStridedBlockSparsePagedAttn)
-from .blocksparse_attention.utils import get_head_sliding_step
+from vllm.attention.ops.blocksparse_attention.interface import (
+    get_head_sliding_step,
+    LocalStridedBlockSparseAttn,
+    LocalStridedBlockSparsePagedAttn)
 
 
 @dataclass
-class BlocksparseParams(object):
+class BlocksparseParams:
     max_seqlen: int
+
+    # Num q heads per tensor-parallel rank/partition
     num_heads: int  # per TP partition
-    num_kv_heads: int  # per TP partition
+    # Num kv heads per tensor-parallel rank/partition
+    num_kv_heads: int
+
+    # block size used for blocksparse attention. 
+    # This is the block_size used in `local_blocks`, `vert_stride`.
     block_size: int
+
+    # Nmber of blocks for local attention, i.e., number of 
+    # local attended tokens / `sparse_block_size`
     local_blocks: int
+
+    # Attend to one block per every `vert_stride` blocks.
+    # Controlling the sparsity
     vert_stride: int
+
+    """
+    If to use the same vertical stride offset for all heads, 
+    i.e., attend to the same block of tokens on all heads.
+    By default, it is False, i.e., attention on the non-local 
+    blocks depends on the `head_idx`, that is on
+    blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % \
+        vert_stride == 0`
+    where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
+            `block_idx = position_id // sparse_block_size`.
+    See `..ops.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
+    """
     homo_head: bool = False
+    
+    # If within a group, the kv offsets that each q attends is the same or no.
     homo_head_group: bool = False
+
+    """
+    If to use customized Triton paged attn kernel
+    for blocksparse-attention during decoding phase.
+    By default it is False, but you can activate this by setting 
+    environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
+    """
     use_triton_paged_attn: Optional[bool] = None
+
+    # Decided by homo_head and homo_head group
     head_sliding_step: bool = field(init=False)
+
     # range of q heads to for a TP rank
     active_head_range: Tuple = field(init=False)
 
@@ -63,91 +100,6 @@ class BlocksparseParams(object):
             tp_rank * self.num_heads,
             (tp_rank + 1) * self.num_heads,
         )
-
-
-class BlockSparseFlashAttention(nn.Module):
-    """Attention layer.
-
-    This class takes query, key, and value tensors as input. The input tensors
-    can either contain prompt tokens or generation tokens.
-    The class does the following:
-
-    1. Store the input key and value tensors in the KV cache.
-    2. Perform (multi-head/multi-query/grouped-query) attention.
-    3. Return the output tensor.
-
-    NOTE: You can use set PHI3SMALL_USE_TRITON_PAGED_ATTN=1 to use the 
-    Triton paged attn instead of vllm cuda paged attn.
-
-    Arguments
-    =========
-
-    local_blocks: number of blocks for local attention, i.e., number of 
-    local attended tokens / `sparse_block_size`
-    vert_stride: attend to one block per every `vert_stride` blocks.
-    num_heads: num of heads per tensor-paralllel rank, i.e., 
-    total num of heads / TP_SIZE.
-    head_size:
-    scale: softmax scale.
-    num_kv_heads: num of kv heads per tensor-parallel rank, i.e., 
-        total num of KV heads / TP_SIZE
-    max_seqlen: target sequence length. Used to construct attention mask
-    sparse_block_size: block size used for blocksparse attention. 
-        This is the block_size used in `local_blocks`, `vert_stride`.
-    layer_idx: idx starts from 0
-    use_triton_paged_attn: If to use customized Triton paged attn kernel
-        for blocksparse-attention during decoding phase.
-        By default it is False, but you can activate this by setting 
-        environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
-    homo_head: if to use the same vertical stride offset for all heads, 
-        i.e., attend to the same block of tokens on all heads.
-        By default, it is False, i.e., attention on the non-local 
-        blocks depends on the `head_idx`, that is on
-        blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % \
-            vert_stride == 0`
-        where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
-                `block_idx = position_id // sparse_block_size`.
-        See `.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
-    head_sliding_step: see info on `homo_head`.
-    **kwargs: not used, only for API compatibility.
-    """
-
-    def __init__(
-        self,
-        local_blocks: int,
-        vert_stride: int,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: Optional[int] = None,
-        max_seqlen: int = 8192,
-        sparse_block_size: int = 64,
-        homo_head: bool = False,
-    ) -> None:
-        super().__init__()
-        self.backend = BlocksparseFlashAttentionBackend
-
-        bs_params = BlocksparseParams(max_seqlen, num_heads, num_kv_heads,
-                                      sparse_block_size, local_blocks,
-                                      vert_stride, homo_head)
-        impl_cls = self.backend.get_impl_cls()
-        self.impl = impl_cls(num_heads,
-                             head_size,
-                             scale,
-                             num_kv_heads,
-                             blocksparse_params=bs_params)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        kv_scale: float = 1.0,
-    ) -> torch.Tensor:
-        return self.impl.forward(query, key, value, kv_cache, attn_metadata,
-                                 kv_scale)
 
 
 class BlocksparseFlashAttentionBackend(AttentionBackend):
@@ -267,13 +219,20 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_params: Optional[BlocksparseParams] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
             "Alibi not support for blocksparse flash attention.")
         assert sliding_window is None, ValueError(
             "sliding_window is invalid for blocksparse attention.")
+        
+        if "num_heads" not in blocksparse_params:
+            blocksparse_params["num_heads"] = num_heads
+        if "num_kv_heads" not in blocksparse_params:
+            blocksparse_params["num_kv_heads"] = num_kv_heads or num_heads
+        blocksparse_params = BlocksparseParams(**blocksparse_params)
+
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)

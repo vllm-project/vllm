@@ -20,8 +20,8 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.phi3small.phi3small_attention import (
-    BlockSparseFlashAttention)
+# from vllm.model_executor.models.phi3small.phi3small_attention import (
+#     BlockSparseFlashAttention)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
@@ -120,7 +120,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self.config = config
         self.sparse_block_size = config.blocksparse_block_size
         self.homo_heads = config.blocksparse_homo_head_pattern
-        self.lcoal_blocks = config.blocksparse_num_local_blocks
+        self.local_blocks = config.blocksparse_num_local_blocks
         self.vert_stride = config.blocksparse_vert_stride
 
         assert (config.blocksparse_block_size ==
@@ -199,24 +199,24 @@ class Phi3SmallSelfAttention(nn.Module):
                           and (self.layer_idx + 1) %
                           self.config.dense_attention_every_n_layers == 0)
 
-        if use_dense_attn:
-            self.attn = Attention(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                num_kv_heads=self.num_kv_heads_per_partion,
-            )
-        else:
-            self.attn = BlockSparseFlashAttention(
-                self.lcoal_blocks,
-                self.vert_stride,
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                max_seqlen=self.max_position_embeddings,
-                sparse_block_size=self.sparse_block_size,
-                num_kv_heads=self.num_kv_heads_per_partion,
-            )
+        bs_params = None
+        if not use_dense_attn:
+            bs_params = {'max_seqlen': self.max_position_embeddings,
+                        'num_heads': self.num_heads_per_partition,
+                        "num_kv_heads": self.num_kv_heads_per_partion,
+                        "block_size": self.sparse_block_size,
+                        "local_blocks": self.local_blocks,
+                        "vert_stride": self.vert_stride,
+                        "homo_head": self.homo_heads}
+    
+        self.attn = Attention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads_per_partion,
+            blocksparse_params=bs_params
+        )
+        print(f'>> {self.attn=}')
 
     def forward(
         self,
