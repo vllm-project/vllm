@@ -161,7 +161,6 @@ class HfRunner:
                 torch_dtype=torch_dtype,
             )
         elif model_name in _EMBEDDING_MODELS:
-            print("using sentence transformer")
             self.model = SentenceTransformer(
                 model_name,
                 device="cpu",
