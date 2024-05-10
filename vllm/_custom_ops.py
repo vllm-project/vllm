@@ -270,8 +270,11 @@ def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
     vllm_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
-def convert_fp8(output: torch.Tensor, input: torch.Tensor) -> None:
-    vllm_cache_ops.convert_fp8(output, input)
+def convert_fp8(output: torch.Tensor,
+                input: torch.Tensor,
+                scale: float = 1.0,
+                kv_dtype: str = "fp8") -> None:
+    vllm_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
 #TODO: cuda_utils, custom_ar
