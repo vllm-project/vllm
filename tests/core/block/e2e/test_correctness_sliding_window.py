@@ -40,7 +40,7 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
     Additionally, we compare the results of the v1 and v2 managers.
     """
     sampling_params = SamplingParams(
-        max_tokens=512,
+        max_tokens=1024,
         ignore_eos=True,
         temperature=0.0,
     )
