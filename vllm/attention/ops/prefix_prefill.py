@@ -803,7 +803,7 @@ if triton.__version__ >= "2.1.0":
                 v_cache.stride(
                     3),  #[num_blocks, num_kv_heads, head_size, block_size]
                 num_queries_per_kv=num_queries_per_kv,
-                kv_scale=kv_scale or 1,
+                kv_scale=kv_scale,
                 BLOCK_M=BLOCK,
                 BLOCK_DMODEL=Lk,
                 BLOCK_DMODEL_PADDED=Lk_padded,
@@ -854,7 +854,7 @@ if triton.__version__ >= "2.1.0":
             v_cache.stride(
                 3),  #[num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
-            kv_scale=kv_scale or 1,
+            kv_scale=kv_scale,
             BLOCK_M=BLOCK,
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,
