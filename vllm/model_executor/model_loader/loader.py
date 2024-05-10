@@ -367,6 +367,31 @@ class ShardedStateLoader(BaseModelLoader):
                              f"{load_config.load_format}: "
                              f"{load_config.model_loader_extra_config.keys()}")
 
+    @staticmethod
+    def _filter_subtensors(tensors: Dict[str, torch.Tensor]):
+        """
+        Filter out all tensors that share the same memory or a subset of the
+        memory of another tensor.
+        """
+        from safetensors.torch import storage_ptr, storage_size
+        result = {}
+        for key1, tensor1 in tensors.items():
+            a1 = storage_ptr(tensor1)  # tensor1 start
+            b1 = a1 + storage_size(tensor1)  # tensor1 end
+            for key2, tensor2 in tensors.items():
+                a2 = storage_ptr(tensor2)  # tensor2 start
+                b2 = a2 + storage_size(tensor2)  #tensor2 end
+                if (a1, b1) == (a2, b2):
+                    # Same memory, take only the first key (lexicographically).
+                    if key2 < key1:
+                        break
+                elif a1 <= a2 and b2 <= b1:
+                    # tensor1 is a subtensor of tensor2.
+                    break
+            else:
+                result[key1] = tensor1
+        return result
+
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
@@ -392,18 +417,14 @@ class ShardedStateLoader(BaseModelLoader):
                     f"Could not find checkpoint files '{pattern}', only "
                     f"pre-sharded checkpoints are currently supported!"
                 )
-            state_dict = dict(model.state_dict())
-            data_ptrs = {}
+            state_dict = self._filter_subtensors(model.state_dict())
             for path in filepaths:
-                for key, val in load_file(path).items():
-                    data_ptrs[state_dict[key].data_ptr()] = key
-                    state_dict[key].copy_(val)
+                for key, tensor in load_file(path).items():
+                    state_dict[key].copy_(tensor)
                     state_dict.pop(key)
-            for key, val in state_dict.items():
-                if val.data_ptr() in data_ptrs:
-                    logger.warning("Skipping loading shared tensor '%s'", key)
-                else:
-                    raise ValueError(f"Missing key '{key}' in loaded state!")
+            if state_dict:
+                raise ValueError(
+                    f"Missing keys {tuple(state_dict)} in loaded state!")
         return model.eval()
 
     @staticmethod
@@ -419,30 +440,26 @@ class ShardedStateLoader(BaseModelLoader):
         if pattern is None:
             pattern = ShardedStateLoader.DEFAULT_PATTERN
         rank = get_tensor_model_parallel_rank()
-        part = 0
+        part_idx = 0
         total_size = 0
-        state_dict: Dict[str, torch.Tensor] = {}
-        data_ptrs = {}
-        for name, tensor in model.state_dict().items():
-            if tensor.data_ptr() in data_ptrs:
-                logger.warning("Skipping saving shared tensor '%s'", name)
-                continue
-            data_ptrs[tensor.data_ptr()] = name
+        state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
+        state_dict_part: Dict[str, torch.Tensor] = {}
+        for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
                 save_file(
-                    state_dict,
-                    os.path.join(path, pattern.format(rank=rank, part=part)),
+                    state_dict_part,
+                    os.path.join(path, pattern.format(rank=rank, part=part_idx)),
                 )
-                part += 1
+                part_idx += 1
                 total_size = 0
-                state_dict = {}
-            state_dict[name] = tensor
+                state_dict_part = {}
+            state_dict_part[key] = tensor
             total_size += param_size
-        if len(state_dict) > 0:
+        if len(state_dict_part) > 0:
             save_file(
-                state_dict,
-                os.path.join(path, pattern.format(rank=rank, part=part)),
+                state_dict_part,
+                os.path.join(path, pattern.format(rank=rank, part=part_idx)),
             )
 
 

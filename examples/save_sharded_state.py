@@ -36,9 +36,13 @@ parser.add_argument("--output",
                     required=True,
                     type=str,
                     help="path to output checkpoint")
-parser.add_argument("--pattern",
+parser.add_argument("--file-pattern",
                     type=str,
                     help="string pattern of saved filenames")
+parser.add_argument("--max-file-size",
+                    type=str,
+                    default=5 * 1024 ** 3,
+                    help="max size (in bytes) of each safetensors file")
 
 
 def main(args):
@@ -53,12 +57,11 @@ def main(args):
     # Dump worker states to output directory
     model_executor = llm.llm_engine.model_executor
     model_executor.save_sharded_state(path=args.output,
-                                      pattern=args.pattern,
-                                      max_size=5 * 1024**3)
+                                      pattern=args.file_pattern,
+                                      max_size=args.max_file_size)
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
-        if not any(
-                file.endswith(ext) for ext in (".bin", ".pt", ".safetensors")):
+        if os.path.splitext(file)[1] not in (".bin", ".pt", ".safetensors"):
             shutil.copy(f"{model_path}/{file}", args.output)
 
 
