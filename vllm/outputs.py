@@ -1,5 +1,5 @@
 import time
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
@@ -75,7 +75,7 @@ class RequestOutput:
         self,
         request_id: str,
         prompt: str,
-        prompt_token_ids: Union[List[int], Tuple[int, ...]],
+        prompt_token_ids: List[int],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,

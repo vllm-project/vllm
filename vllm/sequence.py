@@ -112,13 +112,14 @@ class SequenceData:
 
     def __init__(
         self,
-        prompt_token_ids: Union[List[int], Tuple[int, ...]],
+        prompt_token_ids: List[int],
         output_token_ids: Optional[List[int]] = None,
     ) -> None:
         if output_token_ids is None:
             output_token_ids = []
 
-        self.prompt_token_ids: Tuple[int, ...] = tuple(prompt_token_ids)
+        self.prompt_token_ids = prompt_token_ids
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -147,10 +148,10 @@ class SequenceData:
         """Get prefix tokens, and make the return value hashable"""
         prompt_length = len(self.prompt_token_ids)
         if num_tokens > prompt_length:
-            return (self.prompt_token_ids,
+            return (self._prompt_token_ids_tuple,
                     tuple(self.output_token_ids[:num_tokens - prompt_length]))
         else:
-            return (self.prompt_token_ids[:num_tokens], None)
+            return (self._prompt_token_ids_tuple[:num_tokens], None)
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -185,7 +186,7 @@ class SequenceData:
             return self.prompt_token_ids[-1]
         return self.output_token_ids[-1]
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.prompt_token_ids
 
     def get_output_token_ids(self) -> List[int]:
@@ -256,6 +257,11 @@ class Sequence:
             self.output_text)
 
     def hash_of_block(self, logical_idx: int) -> int:
+        # TODO This can produce incorrect hash when block size > prompt size
+
+        # Compute the number of tokens in the sequence
+        # TODO: The current hashing function is O(L^2). We should optimize
+        # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
         hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
         return hash((hashed_tokens, self.lora_int_id))
@@ -312,7 +318,7 @@ class Sequence:
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()
 
-    def get_prompt_token_ids(self) -> Tuple[int, ...]:
+    def get_prompt_token_ids(self) -> List[int]:
         return self.data.get_prompt_token_ids()
 
     def get_last_token_id(self) -> int:
@@ -439,7 +445,7 @@ class SequenceGroup:
         return next(iter(self.seqs_dict.values())).prompt
 
     @property
-    def prompt_token_ids(self) -> Tuple[int, ...]:
+    def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).data.prompt_token_ids
