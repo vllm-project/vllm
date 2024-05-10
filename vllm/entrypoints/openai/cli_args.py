@@ -10,7 +10,7 @@ import ssl
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.openai.serving_engine import LoRAModulePath
-
+from vllm.model_executor.model_loader.tensorizer import TensorizerArgs
 
 class LoRAParserAction(argparse.Action):
 
@@ -112,4 +112,5 @@ def make_arg_parser():
         "using app.add_middleware(). ")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+    parser = TensorizerArgs.add_cli_args(parser)
     return parser
