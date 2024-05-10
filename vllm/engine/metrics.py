@@ -330,7 +330,6 @@ class StatLogger:
                 prompt_throughput=prompt_throughput,
                 generation_throughput=generation_throughput)
 
-            # Log to stdout.
             logger_data = {
                 "avg_generation_throughput": generation_throughput,
                 "avg_prompt_throughput": prompt_throughput,
