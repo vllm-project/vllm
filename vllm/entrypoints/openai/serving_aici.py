@@ -3,6 +3,7 @@ from typing import List, Union
 from fastapi import Request
 from pyaici.comms import AiciRunner
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.utils import random_uuid
@@ -15,8 +16,9 @@ from .protocol import RunRequest
 class AiciRunnerCompletion(OpenAIServing):
 
     def __init__(self, aici_runner: AiciRunner, engine: AsyncLLMEngine,
-                 served_model_names: List[str]):
+                 model_config: ModelConfig, served_model_names: List[str]):
         super().__init__(engine=engine,
+                         model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=None)
         self.aici_runner = aici_runner
@@ -67,7 +69,7 @@ class AiciRunnerCompletion(OpenAIServing):
                                          request_id=request_id,
                                          prompt_token_ids=inst_res)
 
-        previous_texts = []
+        previous_texts: List[str] = []
         ff_tokens = len(inst_res)
         sampled_tokens = 0
 

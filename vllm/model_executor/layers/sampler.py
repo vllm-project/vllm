@@ -152,6 +152,7 @@ def _get_bin_counts_and_mask(
 
     return bin_counts, mask
 
+
 def _apply_aici_logit_bias(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
@@ -166,9 +167,9 @@ def _apply_aici_logit_bias(
         return logits
 
     logits_row_idx = 0
-    for seq_ids, sampling_params in sampling_metadata.seq_groups:
-        if sampling_params.has_aici:
-            for id in seq_ids:
+    for sg in sampling_metadata.seq_groups:
+        if sg.sampling_params.has_aici:
+            for id in sg.seq_ids:
                 r = mid_results.get(id)
                 if r and len(r.branches) >= 1:
                     # this is actually also enforced by AICIrt since
@@ -179,10 +180,10 @@ def _apply_aici_logit_bias(
                         logits[logits_row_idx] += bias[mask, 0:logits.shape[1]]
                     temp = r.branches[0].temperature
                     if temp is not None:
-                        sampling_params.temperature = temp
+                        sg.sampling_params.temperature = temp
                 logits_row_idx += 1
         else:
-            logits_row_idx += len(seq_ids)
+            logits_row_idx += len(sg.seq_ids)
 
     return logits
 
