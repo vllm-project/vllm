@@ -112,7 +112,7 @@ def test_preemption(
     # generated
     preemption_metrics = None
     for m in REGISTRY.collect():
-        if m.name == "vllm:num_preemptions_total":
+        if m.name == "vllm:num_preemptions":
             preemption_metrics = m
     assert preemption_metrics is not None
     total_recorded_preemption = 0
@@ -142,11 +142,18 @@ def test_swap(
                                                max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype, swap_space=10)
+    vllm_model = vllm_runner(
+        model,
+        dtype=dtype,
+        swap_space=10,
+        disable_log_stats=False,
+    )
     vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
     assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
+    total_preemption = (
+        vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -160,6 +167,18 @@ def test_swap(
 
     assert ("is preempted by PreemptionMode.SWAP mode because there "
             "is not enough KV cache space." in caplog_vllm.text)
+    # Ensure the count bucket of request-level histogram metrics matches
+    # the number of requests as a simple sanity check to ensure metrics are
+    # generated
+    preemption_metrics = None
+    for m in REGISTRY.collect():
+        if m.name == "vllm:num_preemptions":
+            preemption_metrics = m
+    assert preemption_metrics is not None
+    total_recorded_preemption = 0
+    for sample in preemption_metrics.samples:
+        total_recorded_preemption += sample.value
+    assert total_preemption == total_recorded_preemption
 
 
 @pytest.mark.parametrize("model", MODELS)
