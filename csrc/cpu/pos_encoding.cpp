@@ -19,7 +19,6 @@ void rotary_embedding_impl(
     const int num_tokens) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
   constexpr int VEC_ELEM_NUM = scalar_vec_t::get_elem_num();
-  constexpr int ELEM_SIZE = sizeof(scalar_t);
 
   const int embed_dim = rot_dim / 2;
   TORCH_CHECK(embed_dim % VEC_ELEM_NUM == 0);

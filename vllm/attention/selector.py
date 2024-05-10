@@ -1,17 +1,32 @@
 import enum
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Optional, Type
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
 
-_ATTN_BACKEND: Optional[Type[AttentionBackend]] = None
+_CACHED_ATTN_IMPL: Optional[Type[AttentionImpl]] = None
+
+
+@contextmanager
+def set_attn_impl(attn_impl: Optional[Type[AttentionImpl]]):
+    global _CACHED_ATTN_IMPL
+    prev = _CACHED_ATTN_IMPL
+    _CACHED_ATTN_IMPL = attn_impl
+    yield
+    _CACHED_ATTN_IMPL = prev
+
+
+def get_cached_attn_impl() -> Optional[Type[AttentionImpl]]:
+    global _CACHED_ATTN_IMPL
+    return _CACHED_ATTN_IMPL
 
 
 class _Backend(enum.Enum):
@@ -22,31 +37,19 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
 
 
+@lru_cache(maxsize=None)
 def get_attn_backend(
-    dtype: Optional[torch.dtype] = None,
-    kv_cache_dtype: Optional[str] = None,
-) -> Type[AttentionBackend]:
-    """Returns the attention backend to use.
-
-    For the first call, the backend is selected based on the dtype and
-    kv_cache_dtype. The selected backend is cached for subsequent calls.
-    """
-    global _ATTN_BACKEND
-    if dtype is None:
-        assert kv_cache_dtype is None, "KV cache dtype should be None."
-        assert _ATTN_BACKEND is not None, "Attention backend is not set."
-        return _ATTN_BACKEND
-    else:
-        assert kv_cache_dtype is not None, "KV cache dtype is not set."
-        _ATTN_BACKEND = select_attn_backend(dtype, kv_cache_dtype)
-        return _ATTN_BACKEND
-
-
-def select_attn_backend(
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    sliding_window: Optional[int],
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: Optional[str],
+    block_size: int,
 ) -> Type[AttentionBackend]:
-    backend = _which_attn_to_use(dtype, kv_cache_dtype)
+    backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
+                                 sliding_window, dtype, kv_cache_dtype,
+                                 block_size)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
@@ -75,10 +78,14 @@ def select_attn_backend(
         raise ValueError("Invalid attention backend.")
 
 
-@lru_cache(maxsize=None)
 def _which_attn_to_use(
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    sliding_window: Optional[int],
     dtype: torch.dtype,
-    kv_cache_dtype: str,
+    kv_cache_dtype: Optional[str],
+    block_size: int,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
     if is_cpu():

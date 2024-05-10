@@ -1,4 +1,4 @@
-import contextlib
+import functools
 import time
 from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
@@ -8,13 +8,13 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
-                            get_attn_backend)
+                            get_attn_backend, set_attn_impl)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
-from vllm.distributed.device_communicators import (custom_all_reduce,
-                                                   pynccl_utils)
+from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed.communication_op import graph_capture_mode
+from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -143,26 +143,38 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization
-        self.model: torch.nn.Module  # Set after load_model
+        self.model: nn.Module  # Set after load_model
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
     def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-            )
+        attn_impl = self.attn_backend.get_impl_cls()
+        attn_impl = functools.partial(attn_impl,
+                                      kv_cache_dtype=self.kv_cache_dtype)
+        with set_attn_impl(attn_impl):  # noqa: SIM117
+            with CudaMemoryProfiler() as m:
+                self.model = get_model(
+                    model_config=self.model_config,
+                    device_config=self.device_config,
+                    load_config=self.load_config,
+                    lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                )
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -758,7 +770,6 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         return (input_tokens, input_positions, attn_metadata,
@@ -920,10 +931,6 @@ class ModelRunner:
         Since it is used for decoding-only, it assumes there's only 1 token
         per sequence in the batch.
         """
-        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
-        # deleted before the CUDA graphs.
-        self.pynccl_backend = pynccl_utils.get_nccl_backend()
-
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
@@ -981,7 +988,6 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
-                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
                 if self.lora_config:
@@ -1049,7 +1055,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_pynccl():
+        with graph_capture_mode():
             self.model(
                 input_ids,
                 positions,
@@ -1064,7 +1070,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_pynccl():
+            with graph_capture_mode():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -1114,16 +1120,6 @@ class CUDAGraphRunner:
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
-
-
-@contextlib.contextmanager
-def _maybe_pynccl():
-    if pynccl_utils.is_initialized(
-    ) and not custom_all_reduce.is_initialized():
-        with with_pynccl_for_all_reduce():
-            yield
-    else:
-        yield
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
