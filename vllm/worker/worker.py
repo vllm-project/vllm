@@ -75,6 +75,7 @@ class Worker(WorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
@@ -184,7 +185,6 @@ class Worker(WorkerBase):
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:

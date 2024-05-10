@@ -4,8 +4,9 @@ import torch
 from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -26,6 +27,7 @@ class CPUModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
@@ -39,27 +41,22 @@ class CPUModelRunner:
         self.scheduler_config = scheduler_config
         # Currently, CPU worker doesn't support chunked prefill.
         assert self.scheduler_config.chunked_prefill_enabled is False
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.vision_language_config = vision_language_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
-
-        self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.attn_backend = get_attn_backend(self.model_config.dtype)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-        self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
         self.model = get_model(
