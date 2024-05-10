@@ -374,23 +374,16 @@ class ShardedStateLoader(BaseModelLoader):
         memory of another tensor.
         """
         from safetensors.torch import storage_ptr, storage_size
-        result = {}
-        for key1, tensor1 in tensors.items():
-            a1 = storage_ptr(tensor1)  # tensor1 start
-            b1 = a1 + storage_size(tensor1)  # tensor1 end
-            for key2, tensor2 in tensors.items():
-                a2 = storage_ptr(tensor2)  # tensor2 start
-                b2 = a2 + storage_size(tensor2)  #tensor2 end
-                if (a1, b1) == (a2, b2):
-                    # Same memory, take only the first key (lexicographically).
-                    if key2 < key1:
-                        break
-                elif a1 <= a2 and b2 <= b1:
-                    # tensor1 is a subtensor of tensor2.
+        tensors = tensors.copy()
+        starts = sorted([(storage_ptr(t), k) for k, t in tensors.items()])
+        stops = sorted([(start + storage_size(tensors[key]), start_idx)
+                        for start_idx, (start, key) in enumerate(starts)])
+        for stop, start_idx in stops:
+            for i in range(start_idx + 1, len(starts)):
+                if starts[i][0] >= stop:
                     break
-            else:
-                result[key1] = tensor1
-        return result
+                tensors.pop(starts[i][1], None)
+        return tensors
 
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
@@ -398,7 +391,7 @@ class ShardedStateLoader(BaseModelLoader):
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig) -> nn.Module:
-        from safetensors.torch import load_file
+        from safetensors import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
@@ -419,9 +412,10 @@ class ShardedStateLoader(BaseModelLoader):
                 )
             state_dict = self._filter_subtensors(model.state_dict())
             for path in filepaths:
-                for key, tensor in load_file(path).items():
-                    state_dict[key].copy_(tensor)
-                    state_dict.pop(key)
+                with safe_open(path, framework="pt") as f:
+                    for key in f.keys():
+                        state_dict[key].copy_(f.get_tensor(key))
+                        state_dict.pop(key)
             if state_dict:
                 raise ValueError(
                     f"Missing keys {tuple(state_dict)} in loaded state!")
