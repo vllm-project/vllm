@@ -33,7 +33,7 @@ class PoolingMetadata:
         return ("PoolingMetadata("
                 f"seq_groups={self.seq_groups}, "
                 f"seq_data={self.seq_data}, "
-                f"prompt_lens={self.prompt_lens}, ")
+                f"prompt_lens={self.prompt_lens})")
 
 
 @dataclass

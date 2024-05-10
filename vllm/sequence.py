@@ -787,6 +787,27 @@ class SamplerOutput:
 
 
 @dataclass
+class PoolerOutput:
+    """The output from a pooling operation in the embedding model."""
+    outputs: List[EmbeddingSequenceGroupOutput]
+
+    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs
+
+
+@dataclass
 class ExecuteModelRequest:
     """The model execution request."""
     # The sequence group metadata list.
@@ -814,24 +835,3 @@ class ExecuteModelRequest:
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,
         )
-
-
-@dataclass
-class PoolerOutput:
-    """The output from a pooling operation in the embedding model."""
-    outputs: List[EmbeddingSequenceGroupOutput]
-
-    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
-
-    def __getitem__(self, idx: int):
-        return self.outputs[idx]
-
-    def __setitem__(self, idx: int, value):
-        self.outputs[idx] = value
-
-    def __len__(self):
-        return len(self.outputs)
-
-    def __eq__(self, other: object):
-        return isinstance(other,
-                          self.__class__) and self.outputs == other.outputs
