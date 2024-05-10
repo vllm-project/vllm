@@ -142,11 +142,8 @@ def test_append_slot_cow():
     child = prompt.fork(new_seq_id=2)
 
     # Allocate space for the sequence group.
-    seq_group = SequenceGroup(request_id="1",
-                              seqs=[prompt, child],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(),
-                              lora_request=time.perf_counter)
+    seq_group = SequenceGroup("1", [prompt, child], SamplingParams(),
+                              time.time(), time.perf_counter)
     block_manager.allocate(seq_group)
 
     # Fork and append a new token id. We expect a COW to be scheduled.
