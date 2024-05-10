@@ -1,0 +1,74 @@
+# Llama 2 7B: FP16, FP16 sparse, marlin
+- model_name: "NousResearch/Llama-2-7b-chat-hf"
+  tasks:
+  - name: "gsm8k"
+    metrics:
+    - name: "exact_match,strict-match"
+      value: 0.2266868840030326
+    - name: "exact_match,flexible-extract"
+      value: 0.22820318423047764
+- model_name: "neuralmagic/Llama-2-7b-pruned50-retrained-ultrachat"
+  tasks:
+  - name: "gsm8k"
+    metrics:
+    - name: "exact_match,strict-match"
+      value: 0.09855951478392722
+    - name: "exact_match,flexible-extract"
+      value: 0.10083396512509477
+# - model_name: "neuralmagic/llama-2-7b-chat-marlin"
+#   tasks:
+#   - name: "gsm8k"
+#     metrics:
+#     - name: "exact_match,strict-match"
+#       value: 0.14101592115238817
+#     - name: "exact_match,flexible-extract"
+#       value: 0.1652767247915087
+
+# Mistral 7B: FP16, FP16 sparse, marlin
+- model_name: "teknium/OpenHermes-2.5-Mistral-7B"
+  tasks:
+  - name: "gsm8k"
+    metrics:
+    - name: "exact_match,strict-match"
+      value: 0.6004548900682335
+    - name: "exact_match,flexible-extract"
+      value: 0.6482183472327521
+- model_name: "neuralmagic/OpenHermes-2.5-Mistral-7B-pruned50"
+  tasks:
+  - name: "gsm8k"
+    metrics:
+    - name: "exact_match,strict-match"
+      value: 0.4935557240333586
+    - name: "exact_match,flexible-extract"
+      value: 0.5269143290371494
+  extra_args:
+    --sparsity: "sparse_w16a16"
+# - model_name: "neuralmagic/OpenHermes-2.5-Mistral-7B-marlin"
+#   tasks:
+#   - name: "gsm8k"
+#     metrics:
+#     - name: "exact_match,strict-match"
+#       value: 0.4935557240333586
+#     - name: "exact_match,flexible-extract"
+#       value: 0.5868081880212282
+
+# Phi 2: marlin
+# - model_name: "neuralmagic/phi-2-super-marlin"
+#   tasks:
+#   - name: "gsm8k"
+#     metrics:
+#     - name: "exact_match,strict-match"
+#       value: 0.49962092494313876
+#     - name: "exact_match,flexible-extract"
+#       value: 0.5041698256254739
+
+# Mixtral: FP16
+- model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+  tasks:
+  - name: "gsm8k"
+    metrics:
+    - name: "exact_match,strict-match"
+      value: 0.6550416982562547
+    - name: "exact_match,flexible-extract"
+      value: 0.6603487490523123
+  enable_tensor_parallel: true

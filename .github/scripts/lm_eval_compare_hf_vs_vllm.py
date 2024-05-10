@@ -38,7 +38,7 @@ def print_results(data_to_print: List = None,
 def check_passing_score(results_dict: Dict = None,
                         alpha: float = None) -> bool:
     for task in results_dict:
-        p_value = task["p_value"]
+        p_value = results_dict[task]["p_value"]
         if p_value <= alpha:
             return False
     return True
@@ -120,6 +120,6 @@ if __name__ == "__main__":
         all_res[task1[0]] = {"z": z, "p_value": p_value}
     print_results([results_hf["results"], results_vllm["results"]], all_res,
                   args.alpha)
-    if not check_passing_score:
+    if not check_passing_score(all_res, args.alpha):
         print("Accuracy test failed!")
         exit(1)

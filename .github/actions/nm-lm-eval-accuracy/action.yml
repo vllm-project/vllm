@@ -12,6 +12,10 @@ runs:
   steps:
   - id: lm-eval
     run: |
+      # move source directories
+      mv vllm vllm-ignore || echo "no 'vllm' folder to move"
+      mv csrc csrc-ignore || echo "no 'csrc' folder to move"
+
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
@@ -20,7 +24,7 @@ runs:
       pip3 install pytest openai==1.3.9
 
       SUCCESS=0
-      pytest .github/scripts/test_lm_eval_sweep.py -s -v || SUCCESS=$?
+      pytest -v tests/accuracy/test_lm_eval_correctness.py || SUCCESS=$?
       echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash

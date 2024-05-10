@@ -12,6 +12,10 @@ runs:
   steps:
   - id: lm-eval
     run: |
+      # move source directories
+      mv vllm vllm-ignore || echo "no 'vllm' folder to move"
+      mv csrc csrc-ignore || echo "no 'csrc' folder to move"
+
       COMMIT=${{ github.sha }}
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
