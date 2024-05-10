@@ -634,8 +634,6 @@ class LLMEngine:
         num_running_sys = len(self.scheduler.running)
         num_swapped_sys = len(self.scheduler.swapped)
         num_waiting_sys = len(self.scheduler.waiting)
-        num_preemption_sys = (0 if scheduler_outputs is None else
-                              scheduler_outputs.preempted)
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -654,6 +652,8 @@ class LLMEngine:
         num_generation_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
+        num_preemption_iter = (0 if scheduler_outputs is None else
+                               scheduler_outputs.preempted)
 
         # Request stats
         #   Latency
@@ -750,7 +750,6 @@ class LLMEngine:
             num_running_sys=num_running_sys,
             num_swapped_sys=num_swapped_sys,
             num_waiting_sys=num_waiting_sys,
-            num_preemption_sys=num_preemption_sys,
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
             cpu_cache_usage_sys=cpu_cache_usage_sys,
@@ -761,6 +760,7 @@ class LLMEngine:
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
+            num_preemption_iter=num_preemption_iter,
 
             # Request stats
             #   Latency

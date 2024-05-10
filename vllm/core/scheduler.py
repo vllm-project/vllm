@@ -1057,7 +1057,7 @@ class Scheduler:
             else:
                 preemption_mode = PreemptionMode.SWAP
 
-        if self.num_cumulative_preemption % 500 == 0:
+        if self.num_cumulative_preemption % 50 == 0:
             logger.warning(
                 "Sequence group %s is preempted by %s mode because there is "
                 "not enough KV cache space. This can affect the end-to-end "

@@ -62,7 +62,7 @@ class Metrics:
 
         # Iteration stats
         self.counter_num_preemption = Counter(
-            name="vllm:num_preemption",
+            name="vllm:num_preemptions_total",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames)
         self.counter_prompt_tokens = Counter(
@@ -176,8 +176,6 @@ class Stats:
     num_running_sys: int
     num_waiting_sys: int
     num_swapped_sys: int
-    # Number of preemptions including both recompute and swap.
-    num_preemption_sys: int
     #   KV Cache Usage in %
     gpu_cache_usage_sys: float
     cpu_cache_usage_sys: float
@@ -187,6 +185,7 @@ class Stats:
     num_generation_tokens_iter: int
     time_to_first_tokens_iter: List[float]
     time_per_output_tokens_iter: List[float]
+    num_preemption_iter: int
 
     # Request stats (should have _requests suffix)
     #   Latency
@@ -251,7 +250,7 @@ class StatLogger:
 
         # Iteration level data
         self._log_counter(self.metrics.counter_num_preemption,
-                          stats.num_preemption_sys)
+                          stats.num_preemption_iter)
         self._log_counter(self.metrics.counter_prompt_tokens,
                           stats.num_prompt_tokens_iter)
         self._log_counter(self.metrics.counter_generation_tokens,
@@ -344,8 +343,7 @@ class StatLogger:
                 "Avg generation throughput: %.1f tokens/s, "
                 "Running: %d reqs, Swapped: %d reqs, "
                 "Pending: %d reqs, GPU KV cache usage: %.1f%%, "
-                "CPU KV cache usage: %.1f%%, "
-                "Preempted : %d",
+                "CPU KV cache usage: %.1f%%.",
                 prompt_throughput,
                 generation_throughput,
                 stats.num_running_sys,
@@ -353,7 +351,6 @@ class StatLogger:
                 stats.num_waiting_sys,
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
-                stats.num_preemption_sys,
             )
 
             # Reset tracked stats for next interval.
