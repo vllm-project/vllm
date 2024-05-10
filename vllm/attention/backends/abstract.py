@@ -4,6 +4,7 @@ from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
                     TypeVar)
 
 import torch
+import torch.nn as nn
 
 
 class AttentionBackend(ABC):
@@ -94,8 +95,6 @@ class AttentionMetadata(Generic[T]):
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    # The kv cache's data type.
-    kv_cache_dtype: str
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:
@@ -105,9 +104,8 @@ class AttentionMetadata(Generic[T]):
             assert self.decode_metadata is not None
 
 
-class AttentionImpl(ABC):
+class AttentionImpl(nn.Module):
 
-    @abstractmethod
     def __init__(
         self,
         num_heads: int,
@@ -116,10 +114,22 @@ class AttentionImpl(ABC):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
-        raise NotImplementedError
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
+        self.alibi_slopes = alibi_slopes
+        self.sliding_window = sliding_window
+        self.kv_cache_dtype = kv_cache_dtype
 
-    @abstractmethod
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+
     def forward(
         self,
         query: torch.Tensor,
@@ -127,6 +137,6 @@ class AttentionImpl(ABC):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError

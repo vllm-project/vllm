@@ -1,3 +1,5 @@
+import contextlib
+import functools
 import time
 from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
@@ -7,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
-                            get_attn_backend)
+                            get_attn_backend, set_attn_impl)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
@@ -142,26 +144,38 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization
-        self.model: torch.nn.Module  # Set after load_model
+        self.model: nn.Module  # Set after load_model
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
     def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                vision_language_config=self.vision_language_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-            )
+        attn_impl = self.attn_backend.get_impl_cls()
+        attn_impl = functools.partial(attn_impl,
+                                      kv_cache_dtype=self.kv_cache_dtype)
+        with set_attn_impl(attn_impl):
+            with CudaMemoryProfiler() as m:
+                self.model = get_model(
+                    model_config=self.model_config,
+                    device_config=self.device_config,
+                    load_config=self.load_config,
+                    lora_config=self.lora_config,
+                    vision_language_config=self.vision_language_config,
+                    parallel_config=self.parallel_config,
+                    scheduler_config=self.scheduler_config,
+                )
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -258,20 +272,23 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                prefix_block_tables.append(computed_block_nums)
+                if self.attn_backend.get_name() == "flash-attn":
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                else:
+                    block_table = computed_block_nums
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
                 else:
                     # The first prefill.
-                    prefix_block_tables.append([])
+                    block_table = []
             else:
-                prefix_block_tables.append([])
+                block_table = []
                 # Right now, prefill start is always 0. However, this
                 # assumption can be changed once chunked prefill is introduced.
                 assert context_len == 0
+            prefix_block_tables.append(block_table)
 
             # actual prompt lens
             context_lens.append(context_len)
@@ -754,7 +771,6 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         return (input_tokens, input_positions, attn_metadata,
@@ -973,7 +989,6 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
-                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
                 if self.lora_config:

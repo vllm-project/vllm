@@ -149,20 +149,31 @@ class FlashInferImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+        )
         if sliding_window is not None:
             raise ValueError("Sliding window is not supported in FlashInfer.")
         self.sliding_window = (-1, -1)
-        self.alibi_slopes = alibi_slopes
-        self.scale = scale
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
 
-    def forward(self, query: torch.Tensor, key: torch.Tensor,
-                value: torch.Tensor, kv_cache: Optional[torch.Tensor],
-                attn_metadata: AttentionMetadata[FlashInferMetadata],
-                kv_scale: float):
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: Optional[torch.Tensor],
+        attn_metadata: AttentionMetadata[FlashInferMetadata],
+        kv_scale: float = 1.0,
+    ):
+        assert kv_scale == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
@@ -183,7 +194,7 @@ class FlashInferImpl(AttentionImpl):
                 kv_cache[:, 0],
                 kv_cache[:, 1],
                 attn_metadata.slot_mapping.flatten(),
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
             )
 
         if prefill_meta := attn_metadata.prefill_metadata:
