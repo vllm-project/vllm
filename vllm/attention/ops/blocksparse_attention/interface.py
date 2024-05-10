@@ -5,6 +5,7 @@ import torch
 
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
+from vllm.utils import is_cpu, is_hip
 
 IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
                          and torch.cuda.get_device_capability()[0] >= 8)
@@ -32,8 +33,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
     ):
         super().__init__()
         if use_spda is None:
-            use_spda = not (torch.cuda.is_available()
-                            and torch.cuda.get_device_capability()[0] >= 8)
+            use_spda = is_hip() or is_cpu() or \
+                       torch.cuda.get_device_capability()[0] < 8
         device = device or (torch.cuda.current_device()
                             if torch.cuda.is_available() else "cpu")
         device = torch.device(device)

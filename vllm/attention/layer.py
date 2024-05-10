@@ -1,5 +1,5 @@
 """Attention layer."""
-from typing import List, Optional, Type
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,7 @@ class Attention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
-        blocksparse_params: Optional[Type["BlocksparseParams"]] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.backend = get_attn_backend(torch.get_default_dtype(),
