@@ -22,10 +22,13 @@ def create_dummy_prompt(
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
-    seq_group = SequenceGroup(
-        request_id, [prompt],
-        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        time.time(), lora_request)
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[prompt],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(
+                                  use_beam_search=use_beam_search,
+                                  best_of=best_of),
+                              lora_request=lora_request)
 
     return prompt, seq_group
 
