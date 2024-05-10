@@ -1,8 +1,6 @@
-import time
-from typing import Optional
-
 import pytest
 
+from tests.core.utils import create_dummy_prompt
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
@@ -33,10 +31,9 @@ def create_dummy_prompt(
                                   use_beam_search=use_beam_search,
                                   best_of=best_of),
                               lora_request=lora_request)
-
     return seq_group
 
-
+ 
 @pytest.fixture
 def sample_outputs():
     return [
@@ -106,7 +103,7 @@ def test_sequence_data_prefill():
 
 
 def test_sequence_group_stage():
-    seq_group = create_dummy_prompt("1", 12)
+    _, seq_group = create_dummy_prompt("1", 12)
     assert seq_group.is_prefill() is True
     seq_group.update_num_computed_tokens(6)
     assert seq_group.is_prefill() is True
