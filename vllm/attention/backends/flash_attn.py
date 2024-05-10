@@ -5,10 +5,10 @@ XFormers backend. The duplicated code will be removed once we use flash-attn or
 flashinfer for all the attention operations.
 """
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
-from flash_attn import flash_attn_varlen_func
+from vllm_flash_attn import flash_attn_varlen_func
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
@@ -18,6 +18,10 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 
 
 class FlashAttentionBackend(AttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "flash-attn"
 
     @staticmethod
     def get_impl_cls() -> Type["FlashAttentionImpl"]:
@@ -41,14 +45,14 @@ class FlashAttentionBackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 

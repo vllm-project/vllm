@@ -236,14 +236,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
                                             device=device)
-        ops.convert_fp8(key_cache, dequantized_key_cache)
+        ops.convert_fp8(dequantized_key_cache, key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
                                               device=device)
-        ops.convert_fp8(value_cache, dequantized_value_cache)
+        ops.convert_fp8(dequantized_value_cache, value_cache)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)

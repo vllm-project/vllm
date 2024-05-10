@@ -2,6 +2,7 @@
 from itertools import chain
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -168,7 +169,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
@@ -279,7 +280,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                                        gpu_block_id)
             for cpu_block_id, gpu_block_id in current_swap_mapping.items()
         }
-        return block_number_mapping
+        # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         """Returns whether we can swap out the given sequence_group 
@@ -320,7 +322,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                                                        cpu_block_id)
             for gpu_block_id, cpu_block_id in current_swap_mapping.items()
         }
-        return block_number_mapping
+         # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.GPU)
