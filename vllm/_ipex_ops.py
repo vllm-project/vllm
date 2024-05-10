@@ -227,24 +227,10 @@ class ipex_cache_ops:
     @staticmethod
     def copy_blocks(key_caches: List[torch.Tensor],
                     value_caches: List[torch.Tensor],
-                    block_mapping: Dict[int, List[int]]) -> None:
-        block_mapping_tensor = []
-        for key, values in block_mapping.items():
-            if hasattr(values, "__iter__"):
-                for value in values:
-                    block_mapping_tensor.append([key, value])
-        block_mapping = torch.tensor(block_mapping_tensor,
-                                     device=key_caches[0].device,
-                                     dtype=torch.int64)
+                    block_mapping: torch.Tensor) -> None:
         torch.xpu.copy_blocks(key_caches, value_caches, block_mapping)
 
     @staticmethod
     def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                    block_mapping: Dict[int, int]) -> None:
-        keys = list(block_mapping.keys())
-        values = list(block_mapping.values())
-        key_tensor = torch.tensor(keys, dtype=torch.int64)
-        value_tensor = torch.tensor(values, dtype=torch.int64)
-        block_mapping_tensor = torch.stack([key_tensor, value_tensor], dim=1)
-
-        torch.xpu.swap_blocks(src, dst, block_mapping_tensor)
+                    block_mapping: torch.Tensor) -> None:
+        torch.xpu.swap_blocks(src, dst, block_mapping)
