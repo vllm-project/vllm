@@ -139,7 +139,7 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
-    
+
     def _verify_embedding_mode(self) -> None:
         architectures = getattr(self.hf_config, "architectures", [])
         self.embedding_mode = any(
