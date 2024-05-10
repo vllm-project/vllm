@@ -70,6 +70,9 @@ class LLM:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
+            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
             to eager mode.
         disable_custom_all_reduce: See ParallelConfig
     """
@@ -90,7 +93,8 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: int = 4,
         enforce_eager: bool = False,
-        max_context_len_to_capture: int = 8192,
+        max_context_len_to_capture: Optional[int] = None,
+        max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         **kwargs,
     ) -> None:
@@ -112,6 +116,7 @@ class LLM:
             swap_space=swap_space,
             enforce_eager=enforce_eager,
             max_context_len_to_capture=max_context_len_to_capture,
+            max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             **kwargs,
         )
@@ -233,17 +238,25 @@ class LLM:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests,
-                        desc="Processed prompts",
-                        dynamic_ncols=True)
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=f"Generation Speed: {0:.2f} toks/s",
+            )
         # Run the engine.
         outputs: List[RequestOutput] = []
+        total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
+                        total_toks += (sum(
+                            len(stp.token_ids) for stp in output.outputs))
+                        spd = total_toks / pbar.format_dict["elapsed"]
+                        pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()

@@ -1,12 +1,11 @@
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <torch/extension.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cstdint>
 
+#include "type_convert.h"
+#include "../cuda_compat.h"
 #include "bgmv/bgmv_config.h"
 
-namespace {
 
 //====== utils ======
 
@@ -79,12 +78,12 @@ inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
   CASE_ONESIDE(in_T, out_T, W_T, wide, narrow)
 
     FOR_BGMV_WIDE_NARROW(CASE, _, _, _)
+    FOR_INST_BGMV_WIDE_NARROW(CASE_ONESIDE, _, _, _)
 #undef CASE
 #undef CASE_ONESIDE
   default:
     return false;
   }
-
   return true;
 }
 
@@ -567,16 +566,4 @@ void dispatch_bgmv_low_level(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   }
   TORCH_CHECK(ok, "No suitable kernel.", " h_in=", h_in, " h_out=", h_out,
               " dtype=", x.scalar_type(), " out_dtype=", y.scalar_type());
-}
-
-} // namespace
-
-//====== pybind ======
-
-#define DEFINE_pybind(name) m.def(#name, &name, #name);
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
-  m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level,
-        "dispatch_bgmv_low_level");
 }

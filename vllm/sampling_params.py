@@ -139,7 +139,10 @@ class SamplingParams:
         self.top_p = top_p
         self.top_k = top_k
         self.min_p = min_p
-        self.seed = seed
+        if seed == -1:
+            self.seed = None
+        else:
+            self.seed = seed
         self.use_beam_search = use_beam_search
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
@@ -185,8 +188,8 @@ class SamplingParams:
                 self.top_k = -1
                 self.min_p = 0.0
                 self._verify_greedy_sampling()
-        # injected by the engine
-        self.eos_token_id = None
+        # eos_token_id is added to this by the engine
+        self.all_stop_token_ids = set(self.stop_token_ids)
 
     def _verify_args(self) -> None:
         if self.n < 1:
@@ -275,7 +278,8 @@ class SamplingParams:
             self, generation_config: Dict[str, Any]) -> None:
         """Update if there are non-default values from generation_config"""
         # Update eos_token_id for generation
-        if eos_ids := generation_config.get("eos_token_id"):
+        if (not self.ignore_eos) and (eos_ids :=
+                                      generation_config.get("eos_token_id")):
             # it can be either int or list of int
             if isinstance(eos_ids, int):
                 eos_ids = [eos_ids]
