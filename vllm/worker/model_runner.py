@@ -254,32 +254,43 @@ class ModelRunner:
                 # it contains output tokens.
                 seq_len = min(seq_data.get_len(),
                               context_len + token_chunk_size)
-                if self.sliding_window is not None:
+                # Do not change seq_len for prefill because prefill should
+                # not have window.
+                if (self.sliding_window is not None
+                        and not seq_group_metadata.is_prompt):
                     seq_len = min(seq_len, self.sliding_window)
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
                 seq_lens.append(seq_len)
 
+                # Prefix cache was hit.
+                # Prefix is not supported with sliding_window
+                prefix_cache_hit = (computed_block_nums is not None
+                                    and len(computed_block_nums) > 0
+                                    and self.sliding_window is None
+                                    and seq_group_metadata.is_prompt)
+
+                # TODO(sang): Combine chunked prefill and prefix caching by
+                # only allowing multiple of block_size chunk size.
                 # NOTE: This only works for oooooooxxx style attention.
-                if (computed_block_nums is not None
-                        and len(computed_block_nums) > 0
-                        and self.sliding_window is None
-                        and seq_group_metadata.is_prompt):
-                    # Prefix is not supported with sliding_window
+                if prefix_cache_hit:
+                    assert computed_block_nums is not None
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
                     block_tables.append(computed_block_nums)
                 elif (self.scheduler_config.chunked_prefill_enabled
                       or not seq_group_metadata.is_prompt):
-                    # For cases where it needs to lookup kv caches (decode or
-                    # chunked prefill)
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
                         if self.sliding_window is not None:
+                            # chunked prefill doesn't support sliding window.
+                            assert (not self.scheduler_config.
+                                    chunked_prefill_enabled)
                             sliding_window_blocks = (self.sliding_window //
                                                      self.block_size)
                             block_table = block_table[-sliding_window_blocks:]
                         block_tables.append(block_table)
+
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
                             paged_kv_indptr.append(paged_kv_indptr[-1] +
@@ -290,15 +301,15 @@ class ModelRunner:
                                 last_page_len = self.block_size
                             paged_kv_last_page_len.append(last_page_len)
                     else:
-                        # It is profiling only.
+                        # Only happens when memory profiling runs.
                         block_tables.append([])
                 else:
-                    # This is a regular prefill.
+                    # Prefill without chunked prefill or memory profiling.
                     block_tables.append([])
-                    assert context_len == 0
 
                 context_lens.append(context_len)
-                query_lens.append(seq_len - context_len)
+                query_len = seq_len - context_len
+                query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
                 lora_id = seq_group_metadata.lora_int_id
@@ -348,7 +359,10 @@ class ModelRunner:
                         assert context_len == 0, (
                             "Prefix caching is currently not supported with "
                             "sliding window attention")
-                    start_idx = max(0, seq_len - self.sliding_window)
+                    # It is an optimization. When it is decoding, it is always
+                    # 0. When prefill, we use it to not write slots to kv cache
+                    # to save memory.
+                    start_idx = max(0, query_len - self.sliding_window)
 
                 for i in range(context_len, seq_len):
                     if i < start_idx:
@@ -360,7 +374,6 @@ class ModelRunner:
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
 
-        # Consolidate inputs.
         batch_size = len(input_tokens)
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
