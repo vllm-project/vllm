@@ -413,7 +413,7 @@ class ShardedStateLoader(BaseModelLoader):
             state_dict = self._filter_subtensors(model.state_dict())
             for path in filepaths:
                 with safe_open(path, framework="pt") as f:
-                    for key in f.keys():
+                    for key in f:  # noqa: SIM118
                         state_dict[key].copy_(f.get_tensor(key))
                         state_dict.pop(key)
             if state_dict:
