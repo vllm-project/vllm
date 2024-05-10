@@ -10,8 +10,7 @@ prompts = [
 
 # Create an LLM.
 model = LLM(model="intfloat/e5-mistral-7b-instruct", enforce_eager=True)
-# Generate texts from the prompts. The output is a list of RequestOutput objects
-# that contain the prompt, generated text, and other information.
+# Generate texts from the prompts. The output is a list of EmbeddingRequestOutputs.
 outputs = model.encode(prompts)
 # Print the outputs.
 for output in outputs:
