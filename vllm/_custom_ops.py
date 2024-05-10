@@ -410,9 +410,10 @@ def reshape_and_cache_flash(
                                                    kv_cache_dtype)
 
 
-def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
+def copy_blocks(key_caches: List[torch.Tensor],
+                value_caches: List[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
-    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    vllm_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,

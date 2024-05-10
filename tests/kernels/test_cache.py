@@ -27,6 +27,7 @@ CUDA_DEVICES = [
 ] if torch.cuda.is_available() else []
 SYCL_DEVICES = ["xpu:0"] if is_xpu() else []
 DEVICES = CUDA_DEVICES + SYCL_DEVICES
+# We assume fp8 is always enabled for testing.
 KV_CACHE_DTYPE = ["auto", "fp8"]
 
 
@@ -38,7 +39,7 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", SYCL_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_copy_blocks(
@@ -111,7 +112,7 @@ def test_copy_blocks(
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", SYCL_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @torch.inference_mode()
 def test_reshape_and_cache(
