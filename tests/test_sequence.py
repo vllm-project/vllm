@@ -1,39 +1,10 @@
 import pytest
 
 from tests.core.utils import create_dummy_prompt
-from vllm import SamplingParams
-from vllm.lora.request import LoRARequest
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
-                           Sequence, SequenceData, SequenceGroup,
-                           SequenceOutput)
+                           SequenceData, SequenceOutput)
 
 
-def create_dummy_prompt(
-    request_id: str,
-    prompt_length: int,
-    block_size: Optional[int] = None,
-    lora_request: Optional[LoRARequest] = None,
-    use_beam_search: bool = False,
-    best_of: int = 1,
-) -> SequenceGroup:
-    if not block_size:
-        block_size = prompt_length
-
-    # Create dummy prompt sequence with tokens 0...block_size-1
-    # and prompt "0 ... block_size".
-    prompt_tokens = list(range(prompt_length))
-    prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=[prompt],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(
-                                  use_beam_search=use_beam_search,
-                                  best_of=best_of),
-                              lora_request=lora_request)
-    return seq_group
-
- 
 @pytest.fixture
 def sample_outputs():
     return [

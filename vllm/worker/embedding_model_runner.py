@@ -3,8 +3,9 @@ from typing import Dict, List, Optional, Set, Tuple
 import torch
 
 from vllm.attention import AttentionMetadata
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
@@ -25,6 +26,7 @@ class EmbeddingModelRunner(ModelRunner):
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
@@ -35,6 +37,7 @@ class EmbeddingModelRunner(ModelRunner):
                          parallel_config,
                          scheduler_config,
                          device_config,
+                         cache_config,
                          load_config,
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
