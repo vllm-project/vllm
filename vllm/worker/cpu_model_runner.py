@@ -237,8 +237,6 @@ class CPUModelRunner:
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=block_tables,
             kv_cache_dtype=self.kv_cache_dtype,
         )

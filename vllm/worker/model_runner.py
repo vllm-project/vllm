@@ -40,7 +40,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 class ModelInput(NamedTuple):
     input_tokens: torch.Tensor
     input_positions: torch.Tensor
-    attn_metadata: AttentionMetadata
+    attn_metadata: Optional[AttentionMetadata]
     seq_lens: List[int]
     query_lens: List[int]
     lora_mapping: Optional[LoRAMapping]
@@ -50,6 +50,23 @@ class ModelInput(NamedTuple):
     num_prefill_tokens: int
     num_decode_tokens: int
     num_prefills: int
+
+    @classmethod
+    def empty(cls):
+        return ModelInput(
+            input_tokens=torch.empty(0),
+            input_positions=torch.empty(0),
+            attn_metadata=None,
+            seq_lens=[],
+            query_lens=[],
+            lora_mapping=None,
+            lora_requests=set(),
+            multi_modal_input=None,
+            slot_mapping=torch.empty(0),
+            num_prefill_tokens=0,
+            num_decode_tokens=0,
+            num_prefills=0,
+        )
 
 
 class ModelRunner:
@@ -196,6 +213,9 @@ class ModelRunner:
         num_prefills = 0
         num_prefill_tokens = 0
         num_decode_tokens = 0
+
+        if len(seq_group_metadata_list) == 0:
+            return ModelInput.empty()
 
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
@@ -521,7 +541,6 @@ class ModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, SamplingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
-        assert len(seq_group_metadata_list) > 0
         if self.is_driver_worker:
             # Prepare input tensors.
             (
@@ -555,7 +574,8 @@ class ModelRunner:
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
             }
-            metadata_dict.update(attn_metadata.asdict_zerocopy())
+            if attn_metadata:
+                metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
@@ -568,7 +588,11 @@ class ModelRunner:
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_input = metadata_dict.pop("multi_modal_input")
-            attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
+            if metadata_dict:
+                attn_metadata = self.attn_backend.make_metadata(
+                    **metadata_dict)
+            else:
+                attn_metadata = None
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
                 selected_token_indices=selected_token_indices,
@@ -586,9 +610,6 @@ class ModelRunner:
         seq_group_metadata_list: List[SequenceGroupMetadata],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        if len(seq_group_metadata_list) == 0:
-            return None
-
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)

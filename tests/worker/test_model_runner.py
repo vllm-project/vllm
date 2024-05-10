@@ -257,15 +257,27 @@ def test_empty_seq_group():
         enforce_eager=False,
     )
     seq_group_metadata_list = []
-    input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
-        model_runner._prepare_decode(seq_group_metadata_list))
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    input_tokens, input_positions, attn_metadata, slot_mapping = (
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+        model_input.slot_mapping,
+    )
     assert len(input_tokens) == 0
     assert len(input_positions) == 0
     assert attn_metadata is None
     assert len(slot_mapping) == 0
 
-    (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _, _,
-     _, slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
+    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    (input_tokens, input_positions, attn_metadata, slot_mapping,
+     return_seq_lens) = (
+         model_input.input_tokens,
+         model_input.input_positions,
+         model_input.attn_metadata,
+         model_input.slot_mapping,
+         model_input.seq_lens,
+     )
     assert len(input_tokens) == 0
     assert len(input_positions) == 0
     assert attn_metadata is None
