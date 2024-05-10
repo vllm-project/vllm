@@ -102,18 +102,19 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
-        self.prompt_token_ids = prompt_token_ids
-        self.finished = finished
         self.prompt = prompt
+        self.prompt_token_ids = prompt_token_ids
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
+        self.finished = finished
         self.metrics = metrics
         self.lora_request = lora_request
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
         if seq_group.sampling_params is None:
-            raise ValueError("Sampling parameters are missing in seq_group.")
+            raise ValueError(
+                "Sampling parameters are missing for a CompletionRequest.")
         seqs = seq_group.get_seqs()
         if len(seqs) == 1:
             top_n_seqs = seqs
@@ -193,7 +194,8 @@ class EmbeddingRequestOutput:
     def from_seq_group(cls,
                        seq_group: 'SequenceGroup') -> "EmbeddingRequestOutput":
         if seq_group.embeddings is None:
-            raise ValueError("Embeddings are missing in seq_group.")
+            raise ValueError(
+                "Embeddings are missing in seq_group for EmbeddingRequest.")
         output = EmbeddingOutput(seq_group.embeddings)
         prompt_token_ids = seq_group.prompt_token_ids
         finished = seq_group.is_finished()

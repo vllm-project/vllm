@@ -404,8 +404,10 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data associated with the request.
-        embeddings: The embeddings vectors of the prompt of the sequence group.
-        pooling_params: The pooling parameters used to generate the pooling.
+        embeddings: The embeddings vectors of the prompt of the sequence group
+            for an embedding model.
+        pooling_params: The pooling parameters used to generate the pooling
+            for an embedding model.
     """
 
     def __init__(
