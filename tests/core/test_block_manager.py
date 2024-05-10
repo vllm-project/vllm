@@ -306,11 +306,8 @@ def test_sliding_window_multi_seq():
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
     parent = Sequence(1, "one two three", [0, 1, 2], block_size)
-    seq_group = SequenceGroup(request_id="1",
-                              seqs=[parent],
-                              arrival_time=time.time(),
-                              sampling_params=SamplingParams(),
-                              lora_request=None)
+    seq_group = SequenceGroup("1", [parent], SamplingParams(), time.time(),
+                              None)
     block_manager.allocate(seq_group)
 
     # assert the number of blocks allocated is correct
