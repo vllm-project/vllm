@@ -1,4 +1,5 @@
 import copy
+import weakref
 from typing import List, Tuple
 
 import torch
@@ -32,7 +33,7 @@ class MultiStepWorker(Worker):
         super().init_device()
 
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             self.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,

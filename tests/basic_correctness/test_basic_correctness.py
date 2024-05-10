@@ -3,14 +3,27 @@
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 """
 import os
+import weakref
 
 import pytest
+
+from vllm import LLM
 
 MODELS = [
     "facebook/opt-125m",
     "meta-llama/Llama-2-7b-hf",
 ]
 VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
+
+
+def test_vllm_gc_ed():
+    """Verify vllm instance is GC'ed when it is deleted"""
+    llm = LLM("facebook/opt-125m")
+    weak_llm = weakref.ref(llm)
+    del llm
+    # If there's any circular reference to vllm, this fails
+    # because llm instance is not GC'ed.
+    assert weak_llm() is None
 
 
 @pytest.mark.parametrize("model", MODELS)
