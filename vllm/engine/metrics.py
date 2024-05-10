@@ -62,7 +62,7 @@ class Metrics:
 
         # Iteration stats
         self.counter_num_preemption = Counter(
-            name="vllm:num_cumulative_preemption",
+            name="vllm:num_preemption",
             documentation="Cumulative number of preemption from the engine.",
             labelnames=labelnames)
         self.counter_prompt_tokens = Counter(

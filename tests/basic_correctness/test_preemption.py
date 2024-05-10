@@ -6,6 +6,7 @@ Run `VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1
 pytest tests/basic_correctness/test_preemption.py`.
 """
 import pytest
+from prometheus_client import REGISTRY
 
 from vllm import SamplingParams
 from vllm.core.scheduler import (ARTIFICIAL_PREEMPTION_MAX_CNT,
@@ -88,10 +89,12 @@ def test_preemption(
     vllm_model = vllm_runner(
         model,
         dtype=dtype,
+        disable_log_stats=False,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
+    total_preemption = vllm_model.model.llm_engine.scheduler.num_cumulative_preemption
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -103,6 +106,18 @@ def test_preemption(
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
     assert ("is preempted by PreemptionMode.RECOMPUTE mode because there "
             "is not enough KV cache space." in caplog_vllm.text)
+    # Ensure the count bucket of request-level histogram metrics matches
+    # the number of requests as a simple sanity check to ensure metrics are
+    # generated
+    preemption_metrics = None
+    for m in REGISTRY.collect():
+        if m.name == "vllm:num_preemption":
+            preemption_metrics = m
+    assert preemption_metrics is not None
+    total_recorded_preemption = 0
+    for sample in preemption_metrics.samples:
+        total_recorded_preemption += sample.value
+    assert total_preemption == total_recorded_preemption
 
 
 @pytest.mark.parametrize("model", MODELS)
