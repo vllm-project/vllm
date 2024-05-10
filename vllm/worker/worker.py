@@ -11,9 +11,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              get_tensor_model_parallel_cpu_group,
                               init_distributed_environment)
-from vllm.distributed.device_communicators import pynccl_utils
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
@@ -75,6 +73,7 @@ class Worker(WorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
@@ -184,7 +183,6 @@ class Worker(WorkerBase):
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
 
     def _warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -306,28 +304,9 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
-    if pynccl_utils.is_initialized():
-        pynccl_world_size = pynccl_utils.get_world_size()
-        if pynccl_world_size != parallel_config.world_size:
-            raise RuntimeError(
-                "pynccl is already initialized but the pynccl world "
-                "size does not match parallel_config.world_size "
-                f"({pynccl_world_size} vs. {parallel_config.world_size}).")
-    elif parallel_config.world_size > 1:
-        # NOTE(woosuk): We don't initialize pynccl process group when world size
-        # is 1.
-        # NOTE(kaichao): By default, pynccl is initialized for tp group.
-        pynccl_utils.init_process_group(
-            group=get_tensor_model_parallel_cpu_group())
-
     # Initialize a custom fast all-reduce implementation.
     if not parallel_config.disable_custom_all_reduce:
         init_custom_ar()
-
-    # A small all_reduce for warmup.
-    torch.distributed.all_reduce(torch.zeros(1).cuda())
-    if pynccl_utils.is_initialized():
-        pynccl_utils.all_reduce(torch.zeros(1).cuda())
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
