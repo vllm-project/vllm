@@ -249,7 +249,6 @@ class ModelRunner:
                         "now.")
 
                 seq_data = seq_group_metadata.seq_data[seq_id]
-                query_len = seq_group_metadata.token_chunk_size
                 if is_prompt:
                     context_len = seq_data.get_num_computed_tokens()
                 else:
@@ -257,7 +256,9 @@ class ModelRunner:
                     # So, we should have a special logic here.
                     # TODO(sang): Fix it.
                     context_len = seq_data.get_len() - 1
-                seq_len = min(seq_data.get_len(), context_len + query_len)
+                seq_len = min(
+                    seq_data.get_len(),
+                    context_len + seq_group_metadata.token_chunk_size)
                 # Do not change seq_len for prefill because prefill should
                 # not have window.
                 if (self.sliding_window is not None and not is_prompt):
@@ -311,6 +312,7 @@ class ModelRunner:
                     block_tables.append([])
 
                 context_lens.append(context_len)
+                query_len = seq_len - context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
@@ -377,6 +379,7 @@ class ModelRunner:
                     slot_mapping.append(slot)
 
         batch_size = len(input_tokens)
+        print(f"SANG-TODO {query_lens=}")
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
