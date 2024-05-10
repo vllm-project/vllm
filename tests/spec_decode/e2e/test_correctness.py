@@ -44,8 +44,10 @@ from .conftest import get_output_from_llm_generator
         # Use a small model for a fast test.
         # Note this is repeated in the test body; to initialize a tokenizer.
         "model": "JackFram/llama-68m",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -112,8 +114,10 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -164,8 +168,10 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -213,6 +219,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -258,10 +265,13 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
     [{
         # A "real" model (not tiny).
         "model": "meta-llama/Llama-2-7b-chat-hf",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -299,10 +309,13 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
     [{
         # A "real" model (not tiny).
         "model": "meta-llama/Llama-2-7b-chat-hf",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -342,8 +355,10 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -384,8 +399,10 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
     "common_llm_kwargs",
     [{
         "model": "JackFram/llama-160m",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -435,8 +452,10 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
     "common_llm_kwargs",
     [{
         "model": "JackFram/llama-160m",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -448,6 +467,7 @@ def test_spec_decode_different_block_size(baseline_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": 5,
+
             # Artificially limit the draft model max model len; this forces vLLM
             # to skip speculation once the sequences grow beyond 32-k tokens.
             "speculative_max_model_len": 32,
@@ -481,8 +501,10 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
     "common_llm_kwargs",
     [{
         "model": "JackFram/llama-68m",
+
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
@@ -494,7 +516,8 @@ def test_skip_speculation(baseline_llm_generator, test_llm_generator,
         {
             "speculative_model": "JackFram/llama-68m",
             "num_speculative_tokens": k,
-        }  # Try a range of common k, as well as large speculation.
+        }
+        # Try a range of common k, as well as large speculation.
         for k in [1, 2, 3, 4, 5, 6, 7, 8, 9, 63]
     ])
 @pytest.mark.parametrize("batch_size", [2])

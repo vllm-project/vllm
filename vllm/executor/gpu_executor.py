@@ -54,7 +54,6 @@ class GPUExecutor(ExecutorBase):
         """Initialize a SpecDecodeWorker, using a draft model for proposals.
         """
         assert self.speculative_config is not None
-        self.speculative_length = self.speculative_config.num_speculative_tokens
 
         from vllm.spec_decode.multi_step_worker import MultiStepWorker
         from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
@@ -76,7 +75,7 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
-            speculative_length=self.speculative_length)
+        )
 
         draft_worker = MultiStepWorker(
             model_config=self.speculative_config.draft_model_config,
@@ -92,7 +91,7 @@ class GPUExecutor(ExecutorBase):
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
             is_driver_worker=True,
-            speculative_length=self.speculative_length)
+        )
 
         spec_decode_worker = SpecDecodeWorker.from_workers(
             proposer_worker=draft_worker, scorer_worker=target_worker)
