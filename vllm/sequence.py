@@ -818,7 +818,7 @@ class ExecuteModelRequest:
 
 @dataclass
 class PoolerOutput:
-    """The output from a pooling operation in the Llama model."""
+    """The output from a pooling operation in the embedding model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
     spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
