@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -39,17 +39,17 @@ def paged_attention_v1(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v1(out, query, key_cache, value_cache,
-                                num_kv_heads, scale, block_tables,
-                                context_lens, block_size, max_context_len,
-                                alibi_slopes, kv_cache_dtype, kv_scale)
+                                num_kv_heads, scale, block_tables, seq_lens,
+                                block_size, max_seq_len, alibi_slopes,
+                                kv_cache_dtype, kv_scale)
 
 
 def paged_attention_v2(
@@ -63,17 +63,17 @@ def paged_attention_v2(
     num_kv_heads: int,
     scale: float,
     block_tables: torch.Tensor,
-    context_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
     block_size: int,
-    max_context_len: int,
+    max_seq_len: int,
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
     vllm_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out, query,
                                 key_cache, value_cache, num_kv_heads, scale,
-                                block_tables, context_lens, block_size,
-                                max_context_len, alibi_slopes, kv_cache_dtype,
+                                block_tables, seq_lens, block_size,
+                                max_seq_len, alibi_slopes, kv_cache_dtype,
                                 kv_scale)
 
 
@@ -169,26 +169,54 @@ def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
 
 # gptq_marlin
 def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
-                       size_k: int, size_n: int) -> torch.Tensor:
-    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n)
+                       size_k: int, size_n: int,
+                       num_bits: int) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+                                       num_bits)
 
 
 def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                      b_scales: torch.Tensor, g_idx: torch.Tensor,
-                     perm: torch.Tensor, workspace: torch.Tensor, size_m: int,
-                     size_n: int, size_k: int,
+                     perm: torch.Tensor, workspace: torch.Tensor,
+                     num_bits: int, size_m: int, size_n: int, size_k: int,
                      is_k_full: bool) -> torch.Tensor:
     return vllm_ops.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                     workspace, size_m, size_n, size_k,
-                                     is_k_full)
+                                     workspace, num_bits, size_m, size_n,
+                                     size_k, is_k_full)
 
 
 # fp8
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
+    batch_dim_padding: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    """
+    Quantize input tensor to FP8 and return quantized tensor and scale.
+
+    This function supports both static and dynamic quantization: If you
+    provide the scale, it will use static scaling and if you omit it,
+    the scale will be determined dynamically. The function also allows
+    optional padding of the output tensor for downstream kernels that
+    will benefit from padding.
+
+    Args:
+        input: The input tensor to be quantized to FP8
+        scale: Optional scaling factor for the FP8 quantization
+        batch_dim_padding: If specified, pad the first dimension
+            of the output to at least this value.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
+            scaling factor.
+    """
+    if batch_dim_padding:
+        shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
+        output = torch.empty(shape,
+                             device=input.device,
+                             dtype=torch.float8_e4m3fn)
+    else:
+        output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
         vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
@@ -220,18 +248,33 @@ def reshape_and_cache(
                                      slot_mapping, kv_cache_dtype, kv_scale)
 
 
+def reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+) -> None:
+    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                           slot_mapping, kv_cache_dtype)
+
+
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     vllm_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                block_mapping: Dict[int, int]) -> None:
+                block_mapping: torch.Tensor) -> None:
     vllm_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
-def convert_fp8(output: torch.Tensor, input: torch.Tensor) -> None:
-    vllm_cache_ops.convert_fp8(output, input)
+def convert_fp8(output: torch.Tensor,
+                input: torch.Tensor,
+                scale: float = 1.0,
+                kv_dtype: str = "fp8") -> None:
+    vllm_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
 #TODO: cuda_utils, custom_ar

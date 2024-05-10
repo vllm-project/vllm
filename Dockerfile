@@ -7,7 +7,7 @@
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS dev
 
 RUN apt-get update -y \
     && apt-get install -y python3-pip git
@@ -16,7 +16,7 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.1/compat/
+RUN ldconfig /usr/local/cuda-12.4/compat/
 
 WORKDIR /workspace
 
@@ -75,6 +75,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     python3 setup.py bdist_wheel --dist-dir=dist
 
+# check the size of the wheel, we cannot upload wheels larger than 100MB
+COPY .buildkite/check-wheel-size.py check-wheel-size.py
+RUN python3 check-wheel-size.py dist
+
 # the `vllm_nccl` package must be installed from source distribution
 # pip is too smart to store a wheel in the cache, and other CI jobs
 # will directly use the wheel from the cache, which is not what we want.
@@ -83,26 +87,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
 
-#################### FLASH_ATTENTION Build IMAGE ####################
-FROM dev as flash-attn-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# flash attention version
-ARG flash_attn_version=v2.5.8
-ENV FLASH_ATTN_VERSION=${flash_attn_version}
-
-WORKDIR /usr/src/flash-attention-v2
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### FLASH_ATTENTION Build IMAGE ####################
-
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:12.1.0-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
@@ -112,16 +99,12 @@ RUN apt-get update -y \
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.1/compat/
+RUN ldconfig /usr/local/cuda-12.4/compat/
 
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
-
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 #################### vLLM installation IMAGE ####################
 
 
