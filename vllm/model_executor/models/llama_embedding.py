@@ -5,8 +5,7 @@ from torch import nn
 
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
