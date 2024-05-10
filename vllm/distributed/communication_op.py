@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 from torch.distributed import ProcessGroup
 
-from .parallel_state import (get_tensor_model_parallel_group,
+from .parallel_state import (get_cpu_world_group,
+                             get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
                              is_pynccl_enabled_for_all_reduce)
@@ -33,7 +34,6 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     if out is not None:
         return out
     if is_pynccl_enabled_for_all_reduce():
-        # TODO: support multiple parallel groups.
         pynccl_utils.all_reduce(input_)
     else:
         torch.distributed.all_reduce(input_,
@@ -137,16 +137,47 @@ def broadcast_object_list(obj_list: List[Any],
     return obj_list
 
 
-TensorMetadata = namedtuple("TensorMetadata", ["dtype", "size"])
+TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
+
+
+def _split_tensor_dict(
+    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
+) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+    """Split the tensor dictionary into two parts:
+    1. A list of (key, value) pairs. If the value is a tensor, it is replaced
+         by its metadata.
+    2. A list of tensors.
+    """
+    metadata_list = []
+    tensor_list = []
+    for key, value in tensor_dict.items():
+        if isinstance(value, torch.Tensor):
+            # Note: we cannot use `value.device` here,
+            # because it contains not only the device type but also the device
+            # index (e.g. "cuda:0"). We only need the device type.
+            # receiving side will set the device index.
+            device = "cpu" if value.is_cpu else "cuda"
+            metadata_list.append(
+                (key, TensorMetadata(device, value.dtype, value.size())))
+            tensor_list.append(value)
+        else:
+            metadata_list.append((key, value))
+    return metadata_list, tensor_list
 
 
 def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
+    metadata_group: Optional[ProcessGroup] = None
 ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
-    """Broadcast the input tensor dictionary."""
+    """Broadcast the input tensor dictionary.
+    `group` is used to broadcast the tensors, while `metadata_group` is used
+     to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
+     dtypes).
+    """
     group = group or torch.distributed.group.WORLD
+    metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
 
@@ -161,27 +192,31 @@ def broadcast_tensor_dict(
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
-        for key, value in tensor_dict.items():
-            if isinstance(value, torch.Tensor):
-                assert value.is_cuda, (
-                    f"Tensor {key}: {value} is not on cuda. Currently we only "
-                    f"support broadcasting tensors on cuda.")
-                metadata_list.append(
-                    (key, TensorMetadata(value.dtype, value.size())))
-            else:
-                metadata_list.append((key, value))
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        # `metadata_list` lives in CPU memory.
+        # `broadcast_object_list` involves serialization and deserialization,
+        # all happening on CPU. Therefore, we can use the CPU group.
         torch.distributed.broadcast_object_list([metadata_list],
                                                 src=src,
-                                                group=group)
+                                                group=metadata_group)
         async_handles = []
-        for key, value in metadata_list:
-            if isinstance(value, TensorMetadata):
-                tensor = tensor_dict[key]
-                async_handles.append(
-                    torch.distributed.broadcast(tensor,
-                                                src=src,
-                                                group=group,
-                                                async_op=True))
+        for tensor in tensor_list:
+            if tensor.numel() == 0:
+                # Skip broadcasting empty tensors.
+                continue
+            if tensor.is_cpu:
+                # use metadata_group for CPU tensors
+                handle = torch.distributed.broadcast(tensor,
+                                                     src=src,
+                                                     group=metadata_group,
+                                                     async_op=True)
+            else:
+                # use group for GPU tensors
+                handle = torch.distributed.broadcast(tensor,
+                                                     src=src,
+                                                     group=group,
+                                                     async_op=True)
+            async_handles.append(handle)
         for async_handle in async_handles:
             async_handle.wait()
 
@@ -189,7 +224,7 @@ def broadcast_tensor_dict(
         recv_metadata_list = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
-                                                group=group)
+                                                group=metadata_group)
         assert recv_metadata_list[0] is not None
         tensor_dict = {}
         async_handles = []
@@ -197,12 +232,24 @@ def broadcast_tensor_dict(
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
-                                     device="cuda")
-                async_handle = torch.distributed.broadcast(tensor,
-                                                           src=src,
-                                                           async_op=True,
-                                                           group=group)
-                async_handles.append(async_handle)
+                                     device=value.device)
+                if tensor.numel() == 0:
+                    # Skip broadcasting empty tensors.
+                    tensor_dict[key] = tensor
+                    continue
+                if tensor.is_cpu:
+                    # use metadata_group for CPU tensors
+                    handle = torch.distributed.broadcast(tensor,
+                                                         src=src,
+                                                         group=metadata_group,
+                                                         async_op=True)
+                else:
+                    # use group for GPU tensors
+                    handle = torch.distributed.broadcast(tensor,
+                                                         src=src,
+                                                         group=group,
+                                                         async_op=True)
+                async_handles.append(handle)
                 tensor_dict[key] = tensor
             else:
                 tensor_dict[key] = value

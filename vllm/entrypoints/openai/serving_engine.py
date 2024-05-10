@@ -1,13 +1,12 @@
-import asyncio
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import Dict, List, Optional, Tuple, Union
 
 from pydantic import Field
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Annotated
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest, ErrorResponse,
@@ -22,19 +21,31 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class LoRA:
+class LoRAModulePath:
     name: str
     local_path: str
 
 
 class OpenAIServing:
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
+    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
-                 lora_modules: Optional[List[LoRA]] = None):
+                 lora_modules: Optional[List[LoRAModulePath]]):
+        super().__init__()
+
         self.engine = engine
+        self.max_model_len = model_config.max_model_len
+
+        # A separate tokenizer to map token IDs to strings.
+        self.tokenizer = get_tokenizer(
+            model_config.tokenizer,
+            tokenizer_mode=model_config.tokenizer_mode,
+            tokenizer_revision=model_config.tokenizer_revision,
+            trust_remote_code=model_config.trust_remote_code,
+            truncation_side="left")
+
         self.served_model_names = served_model_names
+
         if lora_modules is None:
             self.lora_requests = []
         else:
@@ -45,35 +56,6 @@ class OpenAIServing:
                     lora_local_path=lora.local_path,
                 ) for i, lora in enumerate(lora_modules, start=1)
             ]
-
-        self.max_model_len = 0
-        # Lazy initialized
-        self.tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast]
-
-        try:
-            event_loop = asyncio.get_running_loop()
-        except RuntimeError:
-            event_loop = None
-
-        if event_loop is not None and event_loop.is_running():
-            # If the current is instanced by Ray Serve,
-            # there is already a running event loop
-            event_loop.create_task(self._post_init())
-        else:
-            # When using single vLLM without engine_use_ray
-            asyncio.run(self._post_init())
-
-    async def _post_init(self):
-        engine_model_config = await self.engine.get_model_config()
-        self.max_model_len = engine_model_config.max_model_len
-
-        # A separate tokenizer to map token IDs to strings.
-        self.tokenizer = get_tokenizer(
-            engine_model_config.tokenizer,
-            tokenizer_mode=engine_model_config.tokenizer_mode,
-            tokenizer_revision=engine_model_config.tokenizer_revision,
-            trust_remote_code=engine_model_config.trust_remote_code,
-            truncation_side="left")
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
@@ -158,7 +140,9 @@ class OpenAIServing:
         })
         return json_str
 
-    async def _check_model(self, request) -> Optional[ErrorResponse]:
+    async def _check_model(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
@@ -168,14 +152,16 @@ class OpenAIServing:
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND)
 
-    def _maybe_get_lora(self, request) -> Optional[LoRARequest]:
+    def _maybe_get_lora(
+        self, request: Union[CompletionRequest, ChatCompletionRequest]
+    ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
         for lora in self.lora_requests:
             if request.model == lora.lora_name:
                 return lora
         # if _check_model has been called earlier, this will be unreachable
-        raise ValueError("The model `{request.model}` does not exist.")
+        raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
         self,

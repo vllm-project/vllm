@@ -1,10 +1,10 @@
-import os
 from contextlib import contextmanager
 from typing import Any, List, Optional
 
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 try:
@@ -37,7 +37,7 @@ def init_custom_ar() -> None:
         return
 
     if world_size not in _SUPPORTED_WORLD_SIZES:
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled due to an unsupported world size: "
             "%d. Supported world sizes: %s. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.", world_size,
@@ -47,22 +47,22 @@ def init_custom_ar() -> None:
     # note: num dev can be larger than world_size if we're only using
     # first few GPUs
     if num_dev < world_size:
-        logger.warn(
+        logger.warning(
             "Cannot test GPU P2P because not all GPUs are visible to the "
             "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
             " is set.")
         return
     # test nvlink first, this will filter out most of the cases
     # where custom allreduce is not supported
-    if "CUDA_VISIBLE_DEVICES" in os.environ:
-        device_ids = list(
-            map(int, os.environ["CUDA_VISIBLE_DEVICES"].split(",")))
+    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+    if cuda_visible_devices:
+        device_ids = list(map(int, cuda_visible_devices.split(",")))
     else:
         device_ids = list(range(num_dev))
     # this checks hardware and driver support for NVLink
     full_nvlink = _is_full_nvlink(device_ids)
     if world_size > 2 and not full_nvlink:
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled because it's not supported on more"
             " than two PCIe-only GPUs. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")
@@ -71,7 +71,7 @@ def init_custom_ar() -> None:
     # this is expensive to compute at the first time
     # then we cache the result
     if not _can_p2p(rank, world_size):
-        logger.warn(
+        logger.warning(
             "Custom allreduce is disabled because your platform lacks GPU P2P"
             " capability or P2P test failed. To silence this warning, specify"
             " disable_custom_all_reduce=True explicitly.")

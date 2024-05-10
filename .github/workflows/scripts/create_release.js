@@ -8,7 +8,7 @@ module.exports = async (github, context, core) => {
 			generate_release_notes: true,
 			name: process.env.RELEASE_TAG,
 			owner: context.repo.owner,
-			prerelease: false,
+			prerelease: true,
 			repo: context.repo.repo,
 			tag_name: process.env.RELEASE_TAG,
 		});
