@@ -6,7 +6,7 @@ from vllm.lora.request import LoRARequest
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
-from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.worker.worker import Worker
 
 logger = init_logger(__name__)
 
@@ -19,10 +19,11 @@ class GPUExecutor(ExecutorBase):
         If speculative decoding is enabled, we instead create the speculative
         worker.
         """
-        if self.speculative_config is None:
-            self._init_non_spec_worker()
-        else:
-            self._init_spec_worker()
+        self._init_non_spec_worker()
+        # if self.speculative_config is None:
+        #     self._init_non_spec_worker()
+        # else:
+        #     self._init_spec_worker()
 
     def _get_worker_kwargs(
             self,
@@ -52,21 +53,22 @@ class GPUExecutor(ExecutorBase):
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
-        wrapper = WorkerWrapperBase(
-            worker_module_name="vllm.worker.worker",
-            worker_class_name="Worker",
-        )
-        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
-                                                      distributed_init_method))
-        return wrapper.worker
+        # wrapper = WorkerWrapperBase(
+        #     worker_module_name="vllm.worker.worker",
+        #     worker_class_name="Worker",
+        # )
+        # return Worker(**self._get_worker_kwargs(local_rank, rank, distributed_init_method))
+        # return wrapper.worker
+        pass
+
 
     def _init_non_spec_worker(self):
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
 
         self.driver_worker = self._create_worker()
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        # self.driver_worker.init_device()
+        # self.driver_worker.load_model()
 
     def _init_spec_worker(self):
         """Initialize a SpecDecodeWorker, using a draft model for proposals.

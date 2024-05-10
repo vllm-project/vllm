@@ -126,9 +126,9 @@ class WorkerWrapperBase:
         """
         enable_trace_function_call_for_thread()
 
-        mod = importlib.import_module(self.worker_module_name)
-        worker_class = getattr(mod, self.worker_class_name)
-        self.worker = worker_class(*args, **kwargs)
+        # mod = importlib.import_module(self.worker_module_name)
+        # worker_class = getattr(mod, self.worker_class_name)
+        # self.worker = worker_class(*args, **kwargs)
 
     def execute_method(self, method, *args, **kwargs):
         try:

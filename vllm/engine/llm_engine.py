@@ -169,75 +169,75 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        self._initialize_kv_caches()
+        # self._initialize_kv_caches()
 
-        # If usage stat is enabled, collect relevant info.
-        if is_usage_stats_enabled():
-            from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
-            usage_message.report_usage(
-                get_architecture_class_name(model_config),
-                usage_context,
-                extra_kvs={
-                    # Common configuration
-                    "dtype":
-                    str(model_config.dtype),
-                    "tensor_parallel_size":
-                    parallel_config.tensor_parallel_size,
-                    "block_size":
-                    cache_config.block_size,
-                    "gpu_memory_utilization":
-                    cache_config.gpu_memory_utilization,
+        # # If usage stat is enabled, collect relevant info.
+        # if is_usage_stats_enabled():
+        #     from vllm.model_executor.model_loader import (
+        #         get_architecture_class_name)
+        #     usage_message.report_usage(
+        #         get_architecture_class_name(model_config),
+        #         usage_context,
+        #         extra_kvs={
+        #             # Common configuration
+        #             "dtype":
+        #             str(model_config.dtype),
+        #             "tensor_parallel_size":
+        #             parallel_config.tensor_parallel_size,
+        #             "block_size":
+        #             cache_config.block_size,
+        #             "gpu_memory_utilization":
+        #             cache_config.gpu_memory_utilization,
 
-                    # Quantization
-                    "quantization":
-                    model_config.quantization,
-                    "kv_cache_dtype":
-                    cache_config.cache_dtype,
+        #             # Quantization
+        #             "quantization":
+        #             model_config.quantization,
+        #             "kv_cache_dtype":
+        #             cache_config.cache_dtype,
 
-                    # Feature flags
-                    "enable_lora":
-                    bool(lora_config),
-                    "enable_prefix_caching":
-                    cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    model_config.enforce_eager,
-                    "disable_custom_all_reduce":
-                    parallel_config.disable_custom_all_reduce,
-                })
+        #             # Feature flags
+        #             "enable_lora":
+        #             bool(lora_config),
+        #             "enable_prefix_caching":
+        #             cache_config.enable_prefix_caching,
+        #             "enforce_eager":
+        #             model_config.enforce_eager,
+        #             "disable_custom_all_reduce":
+        #             parallel_config.disable_custom_all_reduce,
+        #         })
 
-        if self.tokenizer:
-            # Ping the tokenizer to ensure liveness if it runs in a
-            # different process.
-            self.tokenizer.ping()
+        # if self.tokenizer:
+        #     # Ping the tokenizer to ensure liveness if it runs in a
+        #     # different process.
+        #     self.tokenizer.ping()
 
-        # Create the scheduler.
-        # NOTE: the cache_config here have been updated with the numbers of
-        # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        # # Create the scheduler.
+        # # NOTE: the cache_config here have been updated with the numbers of
+        # # GPU and CPU blocks, which are profiled in the distributed executor.
+        # self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
-        # Metric Logging.
-        if self.log_stats:
-            self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
-                labels=dict(model_name=model_config.served_model_name),
-                max_model_len=self.model_config.max_model_len)
-            self.stat_logger.info("cache_config", self.cache_config)
+        # # Metric Logging.
+        # if self.log_stats:
+        #     self.stat_logger = StatLogger(
+        #         local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+        #         labels=dict(model_name=model_config.served_model_name),
+        #         max_model_len=self.model_config.max_model_len)
+        #     self.stat_logger.info("cache_config", self.cache_config)
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
-        self.output_processor = (
-            SequenceGroupOutputProcessor.create_output_processor(
-                self.scheduler_config,
-                self.detokenizer,
-                self.scheduler,
-                self.seq_counter,
-                self.get_tokenizer_for_seq,
-                stop_checker=StopChecker(
-                    self.scheduler_config.max_model_len,
-                    self.get_tokenizer_for_seq,
-                ),
-            ))
+        # self.output_processor = (
+        #     SequenceGroupOutputProcessor.create_output_processor(
+        #         self.scheduler_config,
+        #         self.detokenizer,
+        #         self.scheduler,
+        #         self.seq_counter,
+        #         self.get_tokenizer_for_seq,
+        #         stop_checker=StopChecker(
+        #             self.scheduler_config.max_model_len,
+        #             self.get_tokenizer_for_seq,
+        #         ),
+        #     ))
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).

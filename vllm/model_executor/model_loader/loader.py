@@ -16,19 +16,24 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+# from vllm.model_executor.model_loader.tensorizer import (
+#     TensorizerConfig, is_vllm_serialized_tensorizer, load_with_tensorizer,
+#     tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, is_vllm_serialized_tensorizer, load_with_tensorizer,
+    TensorizerConfig,
+    is_vllm_serialized_tensorizer,
+    load_with_tensorizer,
     tensorizer_weights_iterator)
-from vllm.model_executor.model_loader.utils import (get_model_architecture,
-                                                    set_default_torch_dtype)
-from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
-from vllm.model_executor.models.llava import LlavaForConditionalGeneration
+# from vllm.model_executor.model_loader.utils import (get_model_architecture,
+#                                                     set_default_torch_dtype)
+# from vllm.model_executor.model_loader.weight_utils import (
+#     download_weights_from_hf, filter_files_not_needed_for_inference,
+#     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
+#     pt_weights_iterator, safetensors_weights_iterator)
+# from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 
 _VISION_MODEL_CLASSES = [
-    LlavaForConditionalGeneration,
+    # LlavaForConditionalGeneration,
 ]
 
 logger = init_logger(__name__)

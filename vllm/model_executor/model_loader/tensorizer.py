@@ -28,7 +28,9 @@ try:
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
 except ImportError as e:
-    tensorizer_load_fail = e
+    tensorizer_load_fail = True
+    # We should not store error here.
+    pass
 
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
@@ -258,7 +260,7 @@ class TensorizerAgent:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
                 "to use this feature with `pip install vllm[tensorizer]`."
-            ) from tensorizer_load_fail
+            )
 
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (

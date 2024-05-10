@@ -15,13 +15,14 @@ def get_model(
         device_config: DeviceConfig, parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig, lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig]) -> nn.Module:
-    loader = get_model_loader(load_config)
-    return loader.load_model(model_config=model_config,
-                             device_config=device_config,
-                             lora_config=lora_config,
-                             vision_language_config=vision_language_config,
-                             parallel_config=parallel_config,
-                             scheduler_config=scheduler_config)
+    pass
+    # loader = get_model_loader(load_config)
+    # return loader.load_model(model_config=model_config,
+    #                          device_config=device_config,
+    #                          lora_config=lora_config,
+    #                          vision_language_config=vision_language_config,
+    #                          parallel_config=parallel_config,
+    #                          scheduler_config=scheduler_config)
 
 
 __all__ = [

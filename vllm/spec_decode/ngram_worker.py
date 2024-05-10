@@ -6,6 +6,7 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+import weakref
 
 
 class NGramWorker(LoraNotSupportedWorkerBase):
@@ -37,7 +38,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
         # Current only support Top1Proposer
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             device=self.device,
             vocab_size=self.vocab_size,
         )

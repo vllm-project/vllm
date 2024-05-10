@@ -171,17 +171,27 @@ def create_llm_generator(baseline_or_test, request, common_llm_kwargs,
         print(f'Creating {baseline_or_test=} LLM for {test_name=}. {kwargs=}')
         llm = AsyncLLM(**kwargs) if use_async else LLM(**kwargs)
         set_random_seed(seed)
-
+        print("SANG-TODO inner yield")
         yield llm
+        import weakref
+        a = weakref.ref(llm)
+        print("SANG-TODO inner deleted")
         del llm
         cleanup()
+        breakpoint()
 
-    def generator_outer():
-        for llm in generator_inner():
-            yield llm
-            del llm
+    # def generator_outer():
+    #     a = None
+    #     for llm in generator_inner():
+    #         print("SANG-TODO outer yield")
+    #         yield llm
+    #         print("SANG-TODO outer deleted")
+    #         import weakref
+    #         a = weakref.ref(llm)
+    #         del llm
+    #     breakpoint()
 
-    return generator_outer
+    return generator_inner
 
 
 def maybe_assert_ngram_worker(llm):
@@ -200,13 +210,17 @@ def get_output_from_llm_generator(
         sampling_params) -> Tuple[List[str], List[List[int]]]:
     tokens = []
     token_ids = []
+    a = None
     for llm in llm_generator():
         maybe_assert_ngram_worker(llm)
 
         outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
         token_ids = [output.outputs[0].token_ids for output in outputs]
         tokens = [output.outputs[0].text for output in outputs]
+        import weakref
+        a = weakref.ref(llm)
         del llm
+    breakpoint()
 
     return tokens, token_ids
 
@@ -260,8 +274,14 @@ def run_greedy_equality_correctness_test(baseline_llm_generator,
         temperature=temperature,
     )
 
+    print("SANG-TODO run test generator")
     spec_batch_tokens, spec_batch_token_ids = get_output_from_llm_generator(
         test_llm_generator, prompts, sampling_params)
+    print("SANG-TODO run test generator done")
+    del test_llm_generator
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
 
     (baseline_batch_tokens,
      baseline_batch_token_ids) = get_output_from_llm_generator(
@@ -290,6 +310,11 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
     nvmlInit()
     start_time = time.time()
     while True:
+        import gc
+        import torch
+        gc.collect()
+        torch.cuda.empty_cache()
+
         output = {}
         output_raw = {}
         for device in devices:
