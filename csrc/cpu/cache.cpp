@@ -84,7 +84,7 @@ void reshape_and_cache_cpu_impl(
 void copy_blocks(std::vector<torch::Tensor> &key_caches,
                  std::vector<torch::Tensor> &value_caches,
                  const torch::Tensor& block_mapping) {
-  int num_layers = key_caches.size();
+  unsigned num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
     return;
