@@ -24,6 +24,7 @@ def init_test_distributed_environment(
 
 def multi_process_tensor_parallel(
     tensor_parallel_size: int,
+    pipeline_parallel_size: int,
     test_target,
 ) -> None:
     # Using ray helps debugging the error when it failed
@@ -32,10 +33,10 @@ def multi_process_tensor_parallel(
 
     distributed_init_port = get_open_port()
     refs = []
-    for rank in range(tensor_parallel_size):
+    for rank in range(tensor_parallel_size * pipeline_parallel_size):
         refs.append(
-            test_target.remote(tensor_parallel_size, rank,
-                               distributed_init_port))
+            test_target.remote(tensor_parallel_size, pipeline_parallel_size,
+                               rank, distributed_init_port))
     ray.get(refs)
 
     ray.shutdown()

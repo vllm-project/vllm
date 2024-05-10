@@ -19,11 +19,12 @@ for i, v in enumerate(test_sizes):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def graph_allreduce(world_size, rank, distributed_init_port):
+def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
+    assert pp_size == 1
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(1, world_size, rank,
+    init_test_distributed_environment(pp_size, tp_size, rank,
                                       distributed_init_port)
 
     for sz in test_sizes:
@@ -53,22 +54,32 @@ def graph_allreduce(world_size, rank, distributed_init_port):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def eager_allreduce(world_size, rank, distributed_init_port):
+def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(1, world_size, rank,
+    init_test_distributed_environment(pp_size, tp_size, rank,
                                       distributed_init_port)
 
+    # we use the first group to communicate once
+    # and the second group to communicate twice
+    # and so on
+    # this is used to demonstrate that each group can
+    # communicate independently
+    num_communication = rank // tp_size + 1
     sz = 1024
     fa = get_tp_ca_communicator()
     inp = torch.ones(sz, dtype=torch.float32, device=device)
-    out = fa.all_reduce_unreg(inp)
-    assert torch.allclose(out, inp * world_size)
+    out = inp
+    for _ in range(num_communication):
+        out = fa.all_reduce_unreg(out)
+    assert torch.allclose(out, inp * (tp_size**num_communication))
 
     inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
-    out = fa.all_reduce_unreg(inp)
-    assert torch.allclose(out, inp * world_size)
+    out = inp
+    for _ in range(num_communication):
+        out = fa.all_reduce_unreg(out)
+    assert torch.allclose(out, inp * (tp_size**num_communication))
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -76,8 +87,15 @@ def eager_allreduce(world_size, rank, distributed_init_port):
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
-    multi_process_tensor_parallel(tensor_parallel_size, test_target)
+    multi_process_tensor_parallel(tensor_parallel_size, 1, test_target)
 
 
-if __name__ == "__main__":
-    multi_process_tensor_parallel(2, graph_allreduce)
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("pipeline_parallel_size", [2])
+@pytest.mark.parametrize("test_target", [eager_allreduce])
+def test_custom_allreduce_multiple_groups(tensor_parallel_size,
+                                          pipeline_parallel_size, test_target):
+    multi_process_tensor_parallel(tensor_parallel_size, pipeline_parallel_size,
+                                  test_target)
