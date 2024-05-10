@@ -447,9 +447,10 @@ class ShardedStateLoader(BaseModelLoader):
         for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()
             if max_size is not None and total_size + param_size > max_size:
+                filename = pattern.format(rank=rank, part=part_idx)
                 save_file(
                     state_dict_part,
-                    os.path.join(path, pattern.format(rank=rank, part=part_idx)),
+                    os.path.join(path, filename),
                 )
                 part_idx += 1
                 total_size = 0
@@ -457,9 +458,10 @@ class ShardedStateLoader(BaseModelLoader):
             state_dict_part[key] = tensor
             total_size += param_size
         if len(state_dict_part) > 0:
+            filename = pattern.format(rank=rank, part=part_idx)
             save_file(
                 state_dict_part,
-                os.path.join(path, pattern.format(rank=rank, part=part_idx)),
+                os.path.join(path, filename),
             )
 
 
