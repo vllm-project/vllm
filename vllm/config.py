@@ -128,7 +128,7 @@ class ModelConfig:
                                                        served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
-        self.embedding_mode = self._check_embedding_mode()
+        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -139,6 +139,11 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+    
+    def _verify_embedding_mode(self) -> None:
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.embedding_mode = any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
@@ -213,11 +218,6 @@ class ModelConfig:
             self.max_seq_len_to_capture = self.max_model_len
         self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
                                           self.max_model_len)
-
-    def _check_embedding_mode(self) -> bool:
-        architectures = getattr(self.hf_config, "architectures", [])
-        return any(
-            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def verify_with_parallel_config(
         self,
