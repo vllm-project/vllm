@@ -330,7 +330,7 @@ class VllmRunner:
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
-            prompt_ids = list(req_output.prompt_token_ids)
+            prompt_ids = req_output.prompt_token_ids
             req_sample_output_ids = []
             req_sample_output_strs = []
             for sample in req_output.outputs:
