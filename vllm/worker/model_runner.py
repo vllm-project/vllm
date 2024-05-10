@@ -1,4 +1,3 @@
-import contextlib
 import time
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
@@ -10,9 +9,9 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
-from vllm.distributed.device_communicators import (custom_all_reduce,
-                                                   pynccl_utils)
+from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed.communication_op import graph_capture_mode
+from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -759,10 +758,6 @@ class ModelRunner:
         Since it is used for decoding-only, it assumes there's only 1 token
         per sequence in the batch.
         """
-        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
-        # deleted before the CUDA graphs.
-        self.pynccl_backend = pynccl_utils.get_nccl_backend()
-
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
@@ -884,7 +879,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_pynccl():
+        with graph_capture_mode():
             self.model(
                 input_ids,
                 positions,
@@ -899,7 +894,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_pynccl():
+            with graph_capture_mode():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -949,16 +944,6 @@ class CUDAGraphRunner:
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
-
-
-@contextlib.contextmanager
-def _maybe_pynccl():
-    if pynccl_utils.is_initialized(
-    ) and not custom_all_reduce.is_initialized():
-        with with_pynccl_for_all_reduce():
-            yield
-    else:
-        yield
 
 
 def _get_graph_batch_size(batch_size: int) -> int:
