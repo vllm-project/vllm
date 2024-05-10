@@ -621,7 +621,6 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
 
         # Verify equality when cuda graphs allowed.
         "enforce_eager": False,
-
         "model": "JackFram/llama-68m",
     }])
 @pytest.mark.parametrize(
