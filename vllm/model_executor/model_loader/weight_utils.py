@@ -337,7 +337,6 @@ def kv_cache_scales_loader(
     logger.warning(
         "Defaulting to KV cache scaling factors = 1.0 for all "
         "layers in TP rank %d as an error occurred during loading.", tp_rank)
-    
     return []
 
 
