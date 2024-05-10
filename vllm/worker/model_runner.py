@@ -436,7 +436,8 @@ class ModelRunner:
         if self.sliding_window is not None:
             sliding_window_blocks = (self.sliding_window + self.block_size -
                                      1) // self.block_size
-            block_aligned_sliding_window = sliding_window_blocks * self.block_size
+            block_aligned_sliding_window = \
+                sliding_window_blocks * self.block_size
 
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
@@ -462,7 +463,8 @@ class ModelRunner:
                     if self.scheduler_config.use_v2_block_manager:
                         # number of elements in last block
                         suff_len = seq_len % self.block_size
-                        seq_len = min(seq_len, block_aligned_sliding_window + suff_len)
+                        seq_len = min(seq_len,
+                                      block_aligned_sliding_window + suff_len)
                         if suff_len > 0:
                             curr_sliding_window_blocks += 1
                     else:
