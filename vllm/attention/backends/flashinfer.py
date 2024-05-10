@@ -174,7 +174,7 @@ class FlashInferImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata[FlashInferMetadata],
         kv_scale: float = 1.0,
-    ):
+    ) -> torch.Tensor:
         assert kv_scale == 1.0
         num_tokens, hidden_size = query.shape
         query = query.view(-1, self.num_heads, self.head_size)
