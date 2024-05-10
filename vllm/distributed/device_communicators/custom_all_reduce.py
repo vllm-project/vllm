@@ -52,6 +52,10 @@ def init_custom_ar() -> None:
             "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
             " is set.")
         return
+
+    # we only use a subset of GPUs here
+    # so we only need to check the nvlink connectivity of these GPUs
+    num_dev = world_size
     # test nvlink first, this will filter out most of the cases
     # where custom allreduce is not supported
     cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
