@@ -9,6 +9,7 @@ from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
+                             get_tp_ca_communicator,
                              get_tp_pynccl_communicator)
 
 
@@ -25,9 +26,12 @@ def graph_capture_mode():
     # Note that custom allreduce will have a runtime check, if the tensor size
     # is too large, it will fallback to the next available option.
     pynccl_comm = get_tp_pynccl_communicator()
+    ca_comm = get_tp_ca_communicator()
     assert pynccl_comm is not None
+    assert ca_comm is not None
     with pynccl_comm.change_state(enable=True,
-                                  stream=torch.cuda.current_stream()):
+                                  stream=torch.cuda.current_stream()), \
+                                  ca_comm.capture():
         yield
 
 
@@ -43,15 +47,15 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     TLDR: always assume this function modifies its input, but use the return
     value as the output.
     """
-    from vllm.distributed.device_communicators.custom_all_reduce import (
-        custom_all_reduce)
+    ca_comm = get_tp_ca_communicator()
 
     # Bypass the function if we are using only 1 GPU.
     if get_tensor_model_parallel_world_size() == 1:
         return input_
-    out = custom_all_reduce(input_)
-    if out is not None:
-        return out
+    if ca_comm is not None:
+        out = ca_comm.custom_all_reduce(input_)
+        if out is not None:
+            return out
     pynccl_comm = get_tp_pynccl_communicator()
     if (pynccl_comm is not None and not pynccl_comm.disabled):
         pynccl_comm.all_reduce(input_)

@@ -11,144 +11,29 @@ try:
     import pynvml
 
     from vllm._C import custom_ar
+
+    @contextmanager
+    def _nvml():
+        try:
+            pynvml.nvmlInit()
+            yield
+        finally:
+            pynvml.nvmlShutdown()
+
 except ImportError:
     # For AMD GPUs
     custom_ar = None
     pynvml = None
 
+    @contextmanager
+    def _nvml():
+        try:
+            yield
+        finally:
+            pass
+
+
 logger = init_logger(__name__)
-
-_CA_HANDLE: Optional["CustomAllreduce"] = None
-_IS_CAPTURING = False
-_SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
-
-
-def init_custom_ar() -> None:
-    from vllm.distributed import (get_tensor_model_parallel_rank,
-                                  get_tensor_model_parallel_world_size)
-
-    global _CA_HANDLE
-    if _CA_HANDLE is not None:
-        return
-    rank = get_tensor_model_parallel_rank()
-    world_size = get_tensor_model_parallel_world_size()
-    if world_size == 1:
-        # No need to initialize custom allreduce for single GPU case.
-        return
-
-    if world_size not in _SUPPORTED_WORLD_SIZES:
-        logger.warning(
-            "Custom allreduce is disabled due to an unsupported world size: "
-            "%d. Supported world sizes: %s. To silence this warning, specify"
-            " disable_custom_all_reduce=True explicitly.", world_size,
-            str(_SUPPORTED_WORLD_SIZES))
-        return
-    num_dev = torch.cuda.device_count()
-    # note: num dev can be larger than world_size if we're only using
-    # first few GPUs
-    if num_dev < world_size:
-        logger.warning(
-            "Cannot test GPU P2P because not all GPUs are visible to the "
-            "current process. This might be the case if 'CUDA_VISIBLE_DEVICES'"
-            " is set.")
-        return
-
-    # we only use a subset of GPUs here
-    # so we only need to check the nvlink connectivity of these GPUs
-    num_dev = world_size
-    # test nvlink first, this will filter out most of the cases
-    # where custom allreduce is not supported
-    cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-    if cuda_visible_devices:
-        device_ids = list(map(int, cuda_visible_devices.split(",")))
-    else:
-        device_ids = list(range(num_dev))
-    # this checks hardware and driver support for NVLink
-    full_nvlink = _is_full_nvlink(device_ids)
-    if world_size > 2 and not full_nvlink:
-        logger.warning(
-            "Custom allreduce is disabled because it's not supported on more"
-            " than two PCIe-only GPUs. To silence this warning, specify"
-            " disable_custom_all_reduce=True explicitly.")
-        return
-    # test P2P capability, this checks software/cudaruntime support
-    # this is expensive to compute at the first time
-    # then we cache the result
-    if not _can_p2p(rank, world_size):
-        logger.warning(
-            "Custom allreduce is disabled because your platform lacks GPU P2P"
-            " capability or P2P test failed. To silence this warning, specify"
-            " disable_custom_all_reduce=True explicitly.")
-        return
-    _CA_HANDLE = CustomAllreduce(rank, world_size, full_nvlink)
-
-
-def begin_capture() -> None:
-    global _IS_CAPTURING
-    _IS_CAPTURING = True
-
-
-def end_capture() -> None:
-    global _IS_CAPTURING
-    _IS_CAPTURING = False
-
-
-def is_capturing() -> bool:
-    return _IS_CAPTURING and _CA_HANDLE is not None
-
-
-def get_handle() -> Optional["CustomAllreduce"]:
-    return _CA_HANDLE
-
-
-def is_initialized() -> bool:
-    return _CA_HANDLE is not None
-
-
-@contextmanager
-def capture():
-    try:
-        begin_capture()
-        yield
-    finally:
-        end_capture()
-        handle = get_handle()
-        if handle is not None:
-            handle.register_graph_buffers()
-
-
-def custom_all_reduce(input: torch.Tensor) -> Optional[torch.Tensor]:
-    ca_handle = get_handle()
-    # when custom allreduce is disabled, this will be None
-    if ca_handle is None:
-        return None
-    if is_capturing():
-        if torch.cuda.is_current_stream_capturing():
-            if ca_handle.should_custom_ar(input):
-                return ca_handle.all_reduce_reg(input)
-        else:
-            if ca_handle.should_custom_ar(input):
-                # if warm up, mimic the allocation pattern
-                # since custom allreduce is out-of-place
-                return torch.empty_like(input)
-    else:
-        # note: outside of cuda graph context,
-        # custom allreduce incurs a cost of cudaMemcpy, which should
-        # be small(<=1% of overall latency) compared to the performance
-        # gains of using custom kernels
-        if ca_handle.should_custom_ar(input):
-            return ca_handle.all_reduce_unreg(input)
-
-    return None
-
-
-@contextmanager
-def _nvml():
-    try:
-        pynvml.nvmlInit()
-        yield
-    finally:
-        pynvml.nvmlShutdown()
 
 
 @_nvml()
@@ -188,12 +73,65 @@ def _can_p2p(rank: int, world_size: int) -> bool:
 
 class CustomAllreduce:
 
+    _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
+
     # max_size: max supported allreduce size
-    def __init__(self,
-                 rank,
-                 world_size,
-                 full_nvlink,
-                 max_size=8192 * 1024) -> None:
+    def __init__(self, max_size=8192 * 1024) -> None:
+
+        self._IS_CAPTURING = False
+        self.disabled = True
+
+        from vllm.distributed import (get_tensor_model_parallel_rank,
+                                      get_tensor_model_parallel_world_size)
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        if world_size == 1:
+            # No need to initialize custom allreduce for single GPU case.
+            return
+
+        if world_size not in CustomAllreduce._SUPPORTED_WORLD_SIZES:
+            logger.warning(
+                "Custom allreduce is disabled due to an unsupported world"
+                " size: %d. Supported world sizes: %s. To silence this "
+                "warning, specify disable_custom_all_reduce=True explicitly.",
+                world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
+            return
+        num_dev = torch.cuda.device_count()
+        # note: num dev can be larger than world_size if we're only using
+        # first few GPUs
+        if num_dev < world_size:
+            logger.warning(
+                "Cannot test GPU P2P because not all GPUs are visible to the "
+                "current process. This might be the case if "
+                "'CUDA_VISIBLE_DEVICES' is set.")
+            return
+
+        # test nvlink first, this will filter out most of the cases
+        # where custom allreduce is not supported
+        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
+        if cuda_visible_devices:
+            device_ids = list(map(int, cuda_visible_devices.split(",")))
+        else:
+            device_ids = list(range(num_dev))
+        # this checks hardware and driver support for NVLink
+        full_nvlink = _is_full_nvlink(device_ids)
+        if world_size > 2 and not full_nvlink:
+            logger.warning(
+                "Custom allreduce is disabled because it's not supported on"
+                " more than two PCIe-only GPUs. To silence this warning, "
+                "specify disable_custom_all_reduce=True explicitly.")
+            return
+        # test P2P capability, this checks software/cudaruntime support
+        # this is expensive to compute at the first time
+        # then we cache the result
+        if not _can_p2p(rank, world_size):
+            logger.warning(
+                "Custom allreduce is disabled because your platform lacks "
+                "GPU P2P capability or P2P test failed. To silence this "
+                "warning, specify disable_custom_all_reduce=True explicitly.")
+            return
+
+        self.disabled = False
         # buffers memory are owned by this Python class and passed to C++
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
@@ -220,6 +158,25 @@ class CustomAllreduce:
                                              handles, offsets, rank,
                                              self.full_nvlink)
         self.register_buffer(self.buffer)
+
+    def begin_capture(self) -> None:
+        self._IS_CAPTURING = True
+
+    def end_capture(self) -> None:
+        self._IS_CAPTURING = False
+
+    def is_capturing(self) -> bool:
+        return self._IS_CAPTURING and not self.disabled
+
+    @contextmanager
+    def capture(self):
+        try:
+            self.begin_capture()
+            yield
+        finally:
+            self.end_capture()
+            if not self.disabled:
+                self.register_graph_buffers()
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
@@ -268,6 +225,29 @@ class CustomAllreduce:
             out = torch.empty_like(inp)
         custom_ar.all_reduce_unreg(self._ptr, inp, self.buffer, out)
         return out
+
+    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
+        # when custom allreduce is disabled, this will be None
+        if self.disabled:
+            return None
+        if self.is_capturing():
+            if torch.cuda.is_current_stream_capturing():
+                if self.should_custom_ar(input):
+                    return self.all_reduce_reg(input)
+            else:
+                if self.should_custom_ar(input):
+                    # if warm up, mimic the allocation pattern
+                    # since custom allreduce is out-of-place
+                    return torch.empty_like(input)
+        else:
+            # note: outside of cuda graph context,
+            # custom allreduce incurs a cost of cudaMemcpy, which should
+            # be small(<=1% of overall latency) compared to the performance
+            # gains of using custom kernels
+            if self.should_custom_ar(input):
+                return self.all_reduce_unreg(input)
+
+        return None
 
     def close(self):
         if self._ptr:

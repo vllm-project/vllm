@@ -7,7 +7,8 @@ import torch
 import torch.distributed as dist
 
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.distributed.device_communicators import custom_all_reduce
+from vllm.distributed.communication_op import graph_capture_mode
+from vllm.distributed.parallel_state import get_tp_ca_communicator
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
@@ -25,10 +26,9 @@ def graph_allreduce(world_size, rank, distributed_init_port):
     init_test_distributed_environment(1, world_size, rank,
                                       distributed_init_port)
 
-    custom_all_reduce.init_custom_ar()
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with custom_all_reduce.capture():
+            with graph_capture_mode():
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -61,8 +61,7 @@ def eager_allreduce(world_size, rank, distributed_init_port):
                                       distributed_init_port)
 
     sz = 1024
-    custom_all_reduce.init_custom_ar()
-    fa = custom_all_reduce.get_handle()
+    fa = get_tp_ca_communicator()
     inp = torch.ones(sz, dtype=torch.float32, device=device)
     out = fa.all_reduce_unreg(inp)
     assert torch.allclose(out, inp * world_size)
