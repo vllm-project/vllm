@@ -287,14 +287,14 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def cow_block_if_not_appendable(self, block: Block) -> Optional[BlockId]:
         raise NotImplementedError
 
-    def get_and_reset_swaps(self) -> Dict[int, int]:
+    def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default.
 
         Returns:
-            Dict[int, int]: A mapping of source to destination block IDs.
+            List[Tuple[int, int]]: A mapping of source to destination block IDs.
         """
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
-        return mapping
+        return list(mapping.items())
