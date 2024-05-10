@@ -98,16 +98,17 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                 proposal_start_idx = None
                 if ngram_size == 1:
                     # Do not match itself
-                    matches = (input_ids[:-1] == ngram_tensor).max(dim=-1)
+                    matches = (input_ids[:-1] == ngram_tensor)
                 else:
                     windows = input_ids.unfold(dimension=0,
                                                size=ngram_size,
                                                step=1)
-                    matches = (windows[:-1] == ngram_tensor).all(dim=1).max(
-                        dim=-1)
+                    # Do not match itself
+                    matches = (windows[:-1] == ngram_tensor).all(dim=-1)
 
-                if matches.values.item():
-                    proposal_start_idx = matches.indices.add_(ngram_size)
+                first_match = matches.max(dim=-1)
+                if first_match.values.item():
+                    proposal_start_idx = first_match.indices.add_(ngram_size)
                     spec_indices = (
                         proposal_start_idx).repeat(sample_len) + torch.arange(
                             sample_len, device=self.device)
