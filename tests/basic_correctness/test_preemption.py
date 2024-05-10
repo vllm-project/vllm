@@ -94,7 +94,8 @@ def test_preemption(
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
-    total_preemption = vllm_model.model.llm_engine.scheduler.num_cumulative_preemption
+    total_preemption = (
+        vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
     del vllm_model
 
     for i in range(len(example_prompts)):
