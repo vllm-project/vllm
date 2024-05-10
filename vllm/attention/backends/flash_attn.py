@@ -194,8 +194,6 @@ class FlashAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
-        assert not attn_metadata.kv_cache_dtype.startswith("fp8"), (
-            "FlashAttention does not support FP8 KV cache.")
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
