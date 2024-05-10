@@ -120,7 +120,7 @@ Alongside each architecture, we include some popular models that use it.
     - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
     -
   * - :code:`Phi3SmallForCausalLM`
-    - Phi-3
+    - Phi-3-Small
     - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
     -
   * - :code:`QWenLMHeadModel`
