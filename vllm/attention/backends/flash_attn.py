@@ -121,11 +121,11 @@ class FlashAttentionMetadata(AttentionMetadataPerStage):
 class FlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|	
+    |<--------------- num_prefill_tokens ----------------->|
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:	
-    |<----------------- num_decode_tokens ------------------>|	
+    Otherwise, the layout is as follows:
+    |<----------------- num_decode_tokens ------------------>|
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -152,24 +152,21 @@ class FlashAttentionImpl(AttentionImpl):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        super().__init__(num_heads, head_size, scale, num_kv_heads,
+                         alibi_slopes, sliding_window, kv_cache_dtype)
         self.sliding_window = ((sliding_window, sliding_window)
                                if sliding_window is not None else (-1, -1))
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.alibi_slopes = alibi_slopes
-
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         if head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
                 f"Supported head sizes are: {_SUPPORTED_HEAD_SIZES}.")
+        if kv_cache_dtype != "auto":
+            raise NotImplementedError(
+                "FlashAttention backend does not support FP8 KV cache. "
+                "Please use xFormers backend instead.")
 
     def forward(
         self,
@@ -178,7 +175,7 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata[FlashAttentionMetadata],
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -192,8 +189,6 @@ class FlashAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
-        assert not attn_metadata.kv_cache_dtype.startswith("fp8"), (
-            "FlashAttention does not support FP8 KV cache.")
 
         num_tokens, hidden_size = query.shape
         # Reshape the query, key, and value tensors.
@@ -214,7 +209,7 @@ class FlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
