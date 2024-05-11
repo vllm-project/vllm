@@ -1,8 +1,8 @@
 """Sequence and its related classes."""
 import copy
 import enum
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
@@ -579,8 +579,10 @@ class SequenceGroupMetadata:
             query tokens for prefill, we don't need sampling.
         token_chunk_size: The number of tokens to be processed (per sequence).
             None if chunking is not required.
-        state: Internal state tied to this sequence group.
         lora_request: LoRA request.
+        computed_block_nums: The block numbers that are already computed,
+            used in prefix caching.
+        state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
     """
 
@@ -609,6 +611,12 @@ class SequenceGroupMetadata:
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
+
+        # The number of speculative tokens adopted in this request.
+        # None means specuative decoding is not used.
+        # Zero means speculative decoding is disabled for some reasons.
+        # TODO: We should maintain this states out of the sequence group.
+        self.num_speculative_tokens = None
 
         if self._token_chunk_size is None:
             if is_prompt:
@@ -698,6 +706,9 @@ class SamplerOutput:
     # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional["torch.Tensor"] = None
 
+    # On-device tensor containing the logprobs of each token.
+    logprobs: Optional["torch.Tensor"] = None
+
     # On-device tensor containing the sampled token ids.
     sampled_token_ids: Optional["torch.Tensor"] = None
 
@@ -729,3 +740,33 @@ class SamplerOutput:
             f"sampled_token_probs={sampled_token_probs_repr}, "
             f"sampled_token_ids={sampled_token_ids_repr}, "
             f"spec_decode_worker_metrics={self.spec_decode_worker_metrics})")
+
+
+@dataclass
+class ExecuteModelRequest:
+    """The model execution request."""
+    # The sequence group metadata list.
+    seq_group_metadata_list: List[SequenceGroupMetadata]
+    # Blocks to swap in. List of CPU -> GPU block number.
+    blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to swap out. List of GPU -> CPU block number.
+    blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to copy. Source to dest block.
+    blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
+    # The number of slots for lookahead decoding.
+    num_lookahead_slots: int = 0
+    # The number of requests in the running queue.
+    running_queue_size: int = 0
+
+    def clone(
+        self, seq_group_metadata_list: List[SequenceGroupMetadata]
+    ) -> "ExecuteModelRequest":
+        """Clone the request with a new sequence group metadata list."""
+        return ExecuteModelRequest(
+            seq_group_metadata_list=seq_group_metadata_list,
+            blocks_to_swap_in=self.blocks_to_swap_in.copy(),
+            blocks_to_swap_out=self.blocks_to_swap_out.copy(),
+            blocks_to_copy=self.blocks_to_copy.copy(),
+            num_lookahead_slots=self.num_lookahead_slots,
+            running_queue_size=self.running_queue_size,
+        )

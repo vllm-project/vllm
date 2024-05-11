@@ -1,8 +1,14 @@
 #pragma once
 
 #include <ATen/cuda/CUDAContext.h>
+#ifndef USE_ROCM
 #include <cooperative_groups.h>
+#else
+#include <hip/hip_cooperative_groups.h>
+#endif
+#ifndef USE_ROCM
 #include <cuda/pipeline>
+#endif
 #include <cuda_runtime.h>
 #include <iostream>
 #include <stdio.h>
@@ -10,6 +16,24 @@
 #include "vec_dtypes.cuh"
 
 namespace cg = cooperative_groups;
+
+#ifdef USE_ROCM
+template <size_t len>
+__host__ __device__
+inline void* memcpy_blocking(void *dst, const void *src) {
+  // Does not handle the case of long datatypes
+  char *d = reinterpret_cast<char *>(dst);
+  const char *s = reinterpret_cast<const char *>(src);
+  size_t i = 0;
+#pragma unroll
+  for (i = 0; i < len; ++i) {
+    d[i] = s[i];
+  }
+  return dst;
+}
+#endif
+
+#ifndef USE_ROCM
 
 // nthrs = (32, 4)
 template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
@@ -141,6 +165,81 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   }
 }
 
+#else
+
+template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
+          size_t W_copy_size, int tx, int ty, int tz, typename in_T,
+          typename out_T, typename W_T>
+__global__ void
+bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
+                   const W_T *__restrict__ W,
+                   const int64_t *__restrict__ indicies, int64_t y_offset,
+                   int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
+                   float scale) {
+  size_t batch_idx = blockIdx.y;
+  int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
+  if (idx < 0) {
+    return;
+  }
+
+  size_t j = blockIdx.x;
+  constexpr size_t tile_size = tx * ty * vec_size;
+  constexpr size_t num_tiles = (feat_in + tile_size - 1) / tile_size;
+  __shared__ float y_warpwise[ty];
+
+  float y = 0;
+  vec_t<in_T, vec_size> x_vec;
+  vec_t<W_T, vec_size> w_vec;
+  size_t tile_idx;
+
+#pragma unroll
+  for (tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      x_vec.load(X + (batch_idx * feat_in) +
+                     tile_idx * tile_size +
+                     (threadIdx.y * tx + threadIdx.x) * vec_size);
+      w_vec.load(W + (idx * feat_out + j) * feat_in +
+                     tile_idx * tile_size +
+                     (threadIdx.y * tx + threadIdx.x) * vec_size);
+    }
+
+    float sum = 0.f;
+#pragma unroll
+    for (size_t i = 0; i < vec_size; ++i) {
+      sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+    }
+#pragma unroll
+    for (size_t offset = tx / 2; offset > 0; offset /= 2) {
+      sum += VLLM_SHFL_DOWN_SYNC(sum, offset);
+    }
+
+    __syncthreads();
+
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+      y += sum;
+    }
+  }
+
+  if (threadIdx.x == 0) {
+    y_warpwise[threadIdx.y] = y;
+  }
+  __syncthreads();
+
+  float y_write = 0.f;
+#pragma unroll
+  for (size_t i = 0; i < ty; ++i) {
+    y_write += y_warpwise[i];
+  }
+ 
+  // write Y;
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    size_t y_idx = batch_idx * full_y_size + y_offset + j;
+    Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(y_write));
+  }
+}
+
+#endif
+
 // nthrs = (2, 16, 4)
 template <int feat_in, int feat_out, size_t vec_size, int tx, int ty, int tz,
           typename in_T, typename out_T, typename W_T>
@@ -172,7 +271,11 @@ bgmv_expand_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   float sum = 0.f;
 #pragma unroll
   for (size_t i = 0; i < vec_size; ++i) {
+#ifndef USE_ROCM
     sum += float(w_vec[i]) * float(x_vec[i]) * scale;
+#else
+    sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+#endif
   }
 
   cg::thread_block_tile g = cg::tiled_partition<tx>(block);
@@ -183,8 +286,14 @@ bgmv_expand_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   sum = g.shfl(sum, 0);
 
   if (threadIdx.x == 0) {
+#ifndef USE_ROCM
     Y[batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
       threadIdx.z * ty + threadIdx.y] += static_cast<out_T>(sum);
+#else
+    size_t y_idx = batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
+                   threadIdx.z * ty + threadIdx.y;
+    Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(sum));
+#endif
   }
 }
 
@@ -236,6 +345,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         scale);
     }
   } else {
+#ifndef USE_ROCM
     static_assert(feat_in % (vec_size * 32) == 0 ||
                   feat_in % (vec_size * 16) == 0 ||
                   feat_in % (vec_size * 8) == 0);
@@ -279,6 +389,50 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                                         full_y_size, num_layers, layer_idx,
                                         scale);
     }
+#else
+    constexpr size_t rocm_warp_size = warpSize;
+
+#define CHECK_INPUT_TILEABLE_BY(vec_size_) \
+    feat_in % (rocm_warp_size * vec_size_) == 0
+
+#define LAUNCH_BGMV_SHRINK_KERNELS_ROCM(factor_, vec_size_, tx_, ty_)       \
+    if constexpr (CHECK_INPUT_TILEABLE_BY(factor_)) {                       \
+      constexpr size_t vec_size_shrink = vec_size_;                         \
+      constexpr int tx = tx_;                                               \
+      constexpr int ty = ty_;                                               \
+      dim3 nblks(feat_out, batch_size);                                     \
+      dim3 nthrs(tx, ty);                                                   \
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                \
+                          vec_size_shrink * sizeof(in_T),                   \
+                          vec_size_shrink * sizeof(W_T),                    \
+                          tx, ty, tz>                                       \
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,        \
+                                        full_y_size, num_layers, layer_idx, \
+                                        scale);                             \
+    }
+
+    static_assert(CHECK_INPUT_TILEABLE_BY(32) ||
+                  CHECK_INPUT_TILEABLE_BY(16) ||
+                  CHECK_INPUT_TILEABLE_BY( 8) ||
+                  CHECK_INPUT_TILEABLE_BY( 4) ||
+                  CHECK_INPUT_TILEABLE_BY( 2) ||
+                  CHECK_INPUT_TILEABLE_BY( 1));
+    
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM(32, vec_size, rocm_warp_size, 32/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM(16, vec_size, rocm_warp_size, 16/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 8, vec_size, rocm_warp_size,  8/vec_size)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 4, vec_size, rocm_warp_size/(vec_size/4), vec_size/4)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 2, vec_size, rocm_warp_size/(vec_size/2), vec_size/2)
+    else
+    LAUNCH_BGMV_SHRINK_KERNELS_ROCM( 1, vec_size, rocm_warp_size/(vec_size/1), vec_size/1)
+
+#undef CHECK_INPUT_TILEABLE_BY
+#undef LAUNCH_BGMV_SHRINK_KERNELS_ROCM
+#endif
   }
 }
 

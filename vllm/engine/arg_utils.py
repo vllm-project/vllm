@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -21,6 +21,7 @@ def nullable_str(val: str):
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -82,6 +83,7 @@ class EngineArgs:
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
+    speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
 
@@ -467,6 +469,13 @@ class EngineArgs:
             'speculation.')
 
         parser.add_argument(
+            '--speculative-disable-by-batch-size',
+            type=int,
+            default=EngineArgs.speculative_disable_by_batch_size,
+            help='Disable speculative decoding for new incoming requests '
+            'if the number of enqueue requests is larger than this value.')
+
+        parser.add_argument(
             '--ngram-prompt-lookup-max',
             type=int,
             default=EngineArgs.ngram_prompt_lookup_max,
@@ -489,10 +498,25 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
 
+        parser.add_argument(
+            "--served-model-name",
+            nargs="+",
+            type=str,
+            default=None,
+            help="The model name(s) used in the API. If multiple "
+            "names are provided, the server will respond to any "
+            "of the provided names. The model name in the model "
+            "field of a response will be the first name in this "
+            "list. If not specified, the model name will be the "
+            "same as the `--model` argument. Noted that this name(s)"
+            "will also be used in `model_name` tag content of "
+            "prometheus metrics, if multiple names provided, metrics"
+            "tag will take the first one.")
+
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
+    def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -508,7 +532,7 @@ class EngineArgs:
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
             self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init)
+            self.skip_tokenizer_init, self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -531,6 +555,8 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_disable_by_batch_size=self.
+            speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,
