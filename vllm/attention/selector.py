@@ -1,12 +1,11 @@
 import enum
-from contextlib import contextmanager
 from functools import lru_cache
 from typing import Optional, Type
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
