@@ -113,6 +113,13 @@ class CustomData(FastBroadcastTensorDict):
 
     fields = ["a", "b"]
 
+    @classmethod
+    def get_example_data(cls):
+        return {
+            "a": torch.tensor([], dtype=torch.float32, device="cpu"),
+            "b": torch.tensor([], dtype=torch.int8, device="cpu"),
+        }
+
 
 @ray.remote(num_gpus=1, max_calls=1)
 def fast_broadcast_tensor_dict_test_worker(tensor_parallel_size: int,
