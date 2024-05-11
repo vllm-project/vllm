@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.sequence_controller import SequenceController
 
 if TYPE_CHECKING:
     import torch
@@ -221,8 +222,8 @@ class Sequence:
         self.data: SequenceData = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
-        self.has_aici = False
         self.backtrack = 0
+        self.controller: Optional[SequenceController] = None
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -498,9 +499,9 @@ class SequenceGroup:
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, raise Error.
-        # With AICI, the request may go from decode to prefill, so ignore.
-        if self.is_prefill() and not self.sampling_params.has_aici:
+        # If still in prefill phase, raise Error (unless using controllers,
+        # where the request may go from decode to prefill).
+        if self.is_prefill() and not self.sampling_params.controller:
             raise ValueError(
                 "seq_group.get_last_latency() should not be called "
                 "if the seq_group is in prefill phase.")

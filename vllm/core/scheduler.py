@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceStatus)
+from vllm.sequence_controller import SequenceController
 
 logger = init_logger(__name__)
 
@@ -934,10 +935,11 @@ class Scheduler:
             # seq_id -> physical block numbers
             block_tables: Dict[int, List[int]] = {}
 
+            ctrl = seq_group.sampling_params.controller
             for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
                 seq_id = seq.seq_id
-                if seq_group.sampling_params.has_aici:
-                    runner.add_mid(seq_id)
+                if ctrl:
+                    ctrl.scheduled(seq)
                 seq_data[seq_id] = seq.data
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
@@ -983,11 +985,8 @@ class Scheduler:
             )
             seq_group_metadata_list.append(seq_group_metadata)
 
-        if runner:
-            if scheduler_outputs.is_empty():
-                assert not runner.needs_exec_mid()
-            else:
-                runner.exec_mid()
+        if not scheduler_outputs.is_empty():
+            SequenceController.forward_started()
 
         # Now that the batch has been created, we can assume all blocks in the
         # batch will have been computed before the next scheduling invocation.
@@ -1004,8 +1003,8 @@ class Scheduler:
 
     def free_seq(self, seq: Sequence) -> None:
         """Free a sequence from a block table."""
-        if seq.has_aici:
-            self.aici_runner.seq_freed(seq.seq_id)
+        if seq.controller:
+            seq.controller.free(seq)
         self.block_manager.free(seq)
 
     def free_finished_seq_groups(self) -> None:

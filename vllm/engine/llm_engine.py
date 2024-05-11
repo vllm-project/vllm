@@ -431,6 +431,7 @@ class LLMEngine:
                            "not initialized")
         seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
                        eos_token_id, lora_request)
+        seq.controller = sampling_params.controller
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
