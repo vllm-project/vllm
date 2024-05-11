@@ -25,6 +25,11 @@ def graph_capture_mode():
     #
     # Note that custom allreduce will have a runtime check, if the tensor size
     # is too large, it will fallback to the next available option.
+    # In summary: When using CUDA graph, we use
+    # either custom all-reduce kernel or pynccl. When not using CUDA
+    # graph, we use either custom all-reduce kernel or PyTorch NCCL.
+    # We always prioritize using custom all-reduce kernel but fall back
+    # to PyTorch or pynccl if it is disabled or not supported.
     pynccl_comm = get_tp_pynccl_communicator()
     ca_comm = get_tp_ca_communicator()
     assert pynccl_comm is not None

@@ -13,7 +13,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.communication_op import graph_capture_mode
-from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -943,13 +942,7 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or pynccl. When not using CUDA
-        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
-        # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or pynccl if it is disabled or not supported.
-        with custom_all_reduce.capture():
+        with graph_capture_mode():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
