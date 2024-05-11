@@ -399,13 +399,16 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         if config.hidden_size == 4096:  # baichuan2 7b
-            super().__init__(config, "ROPE", quant_config, lora_config)
+            super().__init__(config, "ROPE", cache_config, quant_config,
+                             lora_config)
         else:  # baichuan 13b, baichuan2 13b
-            super().__init__(config, "ALIBI", quant_config, lora_config)
+            super().__init__(config, "ALIBI", cache_config, quant_config,
+                             lora_config)
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
@@ -414,7 +417,9 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        super().__init__(config, "ROPE", quant_config, lora_config)
+        super().__init__(config, "ROPE", cache_config, quant_config,
+                         lora_config)
