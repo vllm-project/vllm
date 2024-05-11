@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch import nn
 
-from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention import AttentionMetadata, get_attn_backend, set_attn_impl
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
@@ -67,14 +67,16 @@ class CPUModelRunner:
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        self.model = get_model(
-            model_config=self.model_config,
-            load_config=self.load_config,
-            device_config=self.device_config,
-            vision_language_config=self.vision_language_config,
-            lora_config=self.lora_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config)
+        attn_impl = self.attn_backend.get_impl_cls()
+        with set_attn_impl(attn_impl):
+            self.model = get_model(
+                model_config=self.model_config,
+                load_config=self.load_config,
+                device_config=self.device_config,
+                vision_language_config=self.vision_language_config,
+                lora_config=self.lora_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config)
 
     def _prepare_prompt(
         self,
