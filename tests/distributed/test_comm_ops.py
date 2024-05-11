@@ -133,16 +133,14 @@ def fast_broadcast_tensor_dict_test_worker(tensor_parallel_size: int,
         # CPU tensor
         "b": torch.arange(0, dtype=torch.int8, device="cpu"),
     }
-
+    obj = CustomData(**test_dict)
     if rank == 0:
-        obj = CustomData(**test_dict)
         broadcast_tensor_dict(obj.__dict__, src=0, cls=CustomData)
     else:
         obj = broadcast_tensor_dict(src=0, cls=CustomData)
-        recv_dict = obj.__dict__
-        assert len(recv_dict) == len(test_dict)
-        assert torch.allclose(recv_dict["a"], test_dict["a"])
-        assert torch.allclose(recv_dict["b"], test_dict["b"])
+    assert len(obj.__dict__) == len(test_dict)
+    assert torch.allclose(obj.a, test_dict["a"])
+    assert torch.allclose(obj.b, test_dict["b"])
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
