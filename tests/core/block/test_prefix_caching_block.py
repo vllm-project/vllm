@@ -427,6 +427,7 @@ class TestPrefixCachingBlockAllocator:
         block = allocator.allocate_immutable(prev_block=None,
                                              token_ids=token_ids)
 
+        assert allocator._refcounter.get(block.block_id) == 1
         m = allocator.allocate_mutable(prev_block=None)
 
         block_id = m.block_id
@@ -435,8 +436,10 @@ class TestPrefixCachingBlockAllocator:
         # After block get promoted to immutable from mutable, if there is
         # already same content hash block, then it shall be released into
         # hashless_allocator
+        # And first immutable block's ref get increased by 1
         assert m.block_id == block.block_id
         assert block_id in allocator._hashless_allocator._free_block_indices
+        assert allocator._refcounter.get(block.block_id) == 2
 
     # Test case when eviction and allocation are mixed,
     # make sure they work as expected
