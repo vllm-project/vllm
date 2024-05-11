@@ -168,7 +168,6 @@ class CPUModelRunner:
             decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_input)
@@ -252,7 +251,6 @@ class CPUModelRunner:
             prefill_metadata=None,
             decode_metadata=None,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,
