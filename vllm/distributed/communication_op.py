@@ -159,25 +159,31 @@ def broadcast_object_list(obj_list: List[Any],
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+    tensor_dict: Dict[str, Union[torch.Tensor, Any]],
+    keys: Optional[List[str]] = None,
+) -> Tuple[List[Any], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
-         by its metadata.
+         by its metadata. If keys are provided, only return the value.
     2. A list of tensors.
+
+    `keys` is used to specify the keys to be included in the metadata list,
+    which can make sure the order of the metadata list is consistent across
+    different ranks.
     """
     from vllm import TensorMeta  # import here to avoid circular import
     metadata_list = []
     tensor_list = []
-    for key, value in tensor_dict.items():
+    used_keys = keys or tensor_dict.keys()
+    for key in used_keys:
+        value = tensor_dict[key]
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,
             # because it contains not only the device type but also the device
             # index (e.g. "cuda:0"). We only need the device type.
             # receiving side will set the device index.
             device = "cpu" if value.is_cpu else "cuda"
-            metadata_list.append(
-                (key, TensorMeta(device, value.dtype, value.size())))
+            metadata_list.append(TensorMeta(device, value.dtype, value.size()))
             tensor_list.append(value)
         else:
             metadata_list.append((key, value))
@@ -282,13 +288,15 @@ def broadcast_tensor_dict(
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
-        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
         if cls is not None:
+            metadata_list, tensor_list = _split_tensor_dict(tensor_dict,
+                                                            keys=cls.fields)
             s = pickle.dumps(metadata_list)
             cls.buffer_tensor[:len(s)].copy_(
                 torch.frombuffer(s, dtype=torch.uint8))
             dist.broadcast(cls.buffer_tensor, src=src, group=metadata_group)
         else:
+            metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
             # `metadata_list` lives in CPU memory.
             # `broadcast_object_list` involves serialization and
             # deserialization, all happening on CPU. Therefore,
@@ -327,7 +335,8 @@ def broadcast_tensor_dict(
             assert recv_metadata_list is not None
         else:
             dist.broadcast(cls.buffer_tensor, src=src, group=metadata_group)
-            recv_metadata_list = pickle.loads(memoryview(cls.buffer))
+            recv_value_list = pickle.loads(memoryview(cls.buffer))
+            recv_metadata_list = list(zip(cls.fields, recv_value_list))
         tensor_dict = {}
         async_handles = []
         for key, value in recv_metadata_list:
