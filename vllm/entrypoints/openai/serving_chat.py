@@ -1,7 +1,7 @@
 import codecs
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
-                    Optional, Tuple, TypedDict, Union, final)
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable,
+                    List, Optional, Tuple, TypedDict, Union, final)
 
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartParam,
@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
+from vllm.plugins import LogitsProcessorPlugin
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -38,13 +39,14 @@ class OpenAIServingChat(OpenAIServing):
                  model_config: ModelConfig,
                  served_model_names: List[str],
                  response_role: str,
+                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
                  lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
+                         logits_processor_plugins=logits_processor_plugins,
                          lora_modules=lora_modules)
-
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
@@ -136,18 +138,19 @@ class OpenAIServingChat(OpenAIServing):
 
         request_id = f"cmpl-{random_uuid()}"
         try:
-            # Tokenize/detokenize depending on prompt format (string/token list)
             prompt_ids, prompt_text = self._validate_prompt_and_tokenize(
                 request, prompt=prompt)
-            sampling_params = request.to_sampling_params()
+            tokenizer = await self.engine.get_tokenizer()
+            sampling_params = request.to_sampling_params(
+                self.logits_processor_plugins, tokenizer)
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logits_processor = (
-                await get_guided_decoding_logits_processor(
-                    guided_decoding_backend, request, await
-                    self.engine.get_tokenizer()))
+                await
+                get_guided_decoding_logits_processor(guided_decoding_backend,
+                                                     request, tokenizer))
             if guided_decode_logits_processor:
                 if sampling_params.logits_processors is None:
                     sampling_params.logits_processors = []

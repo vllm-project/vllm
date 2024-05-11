@@ -5,9 +5,12 @@ from typing import Dict, List, Literal, Optional, Union
 
 import torch
 from openai.types.chat import ChatCompletionMessageParam
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError,
+                      model_validator)
+from transformers import PreTrainedTokenizer
 from typing_extensions import Annotated
 
+from vllm.plugins import LogitsProcessorPlugin
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -153,10 +156,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    logits_processors: Optional[Dict[str, dict]] = Field(
+        default=None,
+        description=("If specified, will use custom logit processor plugins"))
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(self) -> SamplingParams:
+    def to_sampling_params(self, logits_processor_plugins: Dict[
+        str, LogitsProcessorPlugin],
+                           tokenizer: PreTrainedTokenizer) -> SamplingParams:
         if self.logprobs and not self.top_logprobs:
             raise ValueError("Top logprobs must be set when logprobs is.")
 
@@ -174,6 +182,26 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
+
+        if self.logits_processors is not None:
+            logits_processors = logits_processors or []
+            for lp_name, lp_parameters in self.logits_processors.items():
+                lp_plugin = logits_processor_plugins.get(lp_name, None)
+                if lp_plugin is None:
+                    available_lps = list(logits_processor_plugins.keys())
+                    raise ValueError(
+                        f"Logits processor {lp_name} not found in available"
+                        f"logits processors ({available_lps}).")
+
+                try:
+                    lp_parameters = lp_plugin.parameters_model.parse_obj(
+                        lp_parameters)
+                    logits_processor = lp_plugin.logits_processor_class(
+                        tokenizer, lp_parameters)
+                    logits_processors.append(logits_processor)
+                except ValidationError as e:
+                    raise ValueError(f"Invalid parameters for logits processor"
+                                     f"{lp_name}: {e}") from e
 
         return SamplingParams(
             n=self.n,
@@ -299,10 +327,15 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    logits_processors: Optional[Dict[str, dict]] = Field(
+        default=None,
+        description=("If specified, will use custom logit processor plugins"))
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(self):
+    def to_sampling_params(
+            self, logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
+            tokenizer: PreTrainedTokenizer):
         echo_without_generation = self.echo and self.max_tokens == 0
 
         logits_processors = None
@@ -319,6 +352,27 @@ class CompletionRequest(OpenAIBaseModel):
                 return logits
 
             logits_processors = [logit_bias_logits_processor]
+
+        if self.logits_processors is not None:
+            logits_processors = logits_processors or []
+            for lp_name, lp_parameters in self.logits_processors.items():
+                lp_plugin = logits_processor_plugins.get(lp_name, None)
+                if lp_plugin is None:
+                    available_lps = list(logits_processor_plugins.keys())
+                    raise ValueError(
+                        f"Logits processor {lp_name} not found in available"
+                        f"logits processors ({available_lps}).")
+
+                try:
+                    lp_parameters = lp_plugin.parameters_model.parse_obj(
+                        lp_parameters)
+                    logits_processor = lp_plugin.logits_processor_class(
+                        tokenizer, lp_parameters)
+                    logits_processors.append(logits_processor)
+                except ValidationError as e:
+                    raise ValueError(
+                        f"Invalid parameters for logits processor "
+                        f"{lp_name}: {e}") from e
 
         return SamplingParams(
             n=self.n,

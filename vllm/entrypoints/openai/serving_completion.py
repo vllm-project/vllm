@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
+from vllm.plugins import LogitsProcessorPlugin
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -55,10 +56,12 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
+                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
                  lora_modules: Optional[List[LoRAModulePath]]):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
+                         logits_processor_plugins=logits_processor_plugins,
                          lora_modules=lora_modules)
 
     async def create_completion(self, request: CompletionRequest,
@@ -88,7 +91,9 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: List[AsyncIterator[RequestOutput]] = []
         try:
-            sampling_params = request.to_sampling_params()
+            tokenizer = await self.engine.get_tokenizer()
+            sampling_params = request.to_sampling_params(
+                self.logits_processor_plugins, tokenizer)
             lora_request = self._maybe_get_lora(request)
             decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \

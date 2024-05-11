@@ -5,6 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Optional, Set
+from importlib.metadata import entry_points
 
 import fastapi
 import uvicorn
@@ -13,6 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
+from pydantic import ValidationError
 from starlette.routing import Mount
 
 import vllm
@@ -26,6 +28,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
+from vllm.plugins import LogitsProcessorPlugin
 from vllm.usage.usage_lib import UsageContext
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -134,6 +137,24 @@ if __name__ == "__main__":
         allow_headers=args.allowed_headers,
     )
 
+    logits_processors_plugins = {}
+    for entry_point in entry_points().\
+            select(group='vllm.logits_processors'):  # type: ignore
+        logits_processor_plugin = entry_point.load()
+        try:
+            logits_processor_plugin = LogitsProcessorPlugin(
+                **logits_processor_plugin)
+        except ValidationError as e:
+            raise ValueError(
+                f"Invalid logits processor plugin {entry_point.name}. "
+                f"Please check the configuration. {e}") from e
+
+        logits_processors_plugins[entry_point.name] = logits_processor_plugin
+
+    logger.info('Loaded %d logits processor plugins (%s)',
+                len(logits_processors_plugins),
+                ", ".join(logits_processors_plugins.keys()))
+
     if token := envs.VLLM_API_KEY or args.api_key:
 
         @app.middleware("http")
@@ -186,10 +207,12 @@ if __name__ == "__main__":
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
                                             args.response_role,
+                                            logits_processors_plugins,
                                             args.lora_modules,
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
+        engine, model_config, served_model_names, logits_processors_plugins,
+        args.lora_modules)
 
     app.root_path = args.root_path
     uvicorn.run(app,

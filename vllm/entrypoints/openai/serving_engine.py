@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ModelPermission)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.plugins import LogitsProcessorPlugin
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -30,9 +31,9 @@ class OpenAIServing:
 
     def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
                  served_model_names: List[str],
+                 logits_processor_plugins: Dict[str, LogitsProcessorPlugin],
                  lora_modules: Optional[List[LoRAModulePath]]):
         super().__init__()
-
         self.engine = engine
         self.max_model_len = model_config.max_model_len
 
@@ -45,6 +46,7 @@ class OpenAIServing:
             truncation_side="left")
 
         self.served_model_names = served_model_names
+        self.logits_processor_plugins = logits_processor_plugins
 
         if lora_modules is None:
             self.lora_requests = []
