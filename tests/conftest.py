@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 from PIL import Image
-from sentence_transformers import SentenceTransformer
 from transformers import (AutoModelForCausalLM, AutoProcessor,
                           LlavaForConditionalGeneration)
 
@@ -161,6 +160,8 @@ class HfRunner:
                 torch_dtype=torch_dtype,
             )
         elif model_name in _EMBEDDING_MODELS:
+            # Lazy init required for AMD CI
+            from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(
                 model_name,
                 device="cpu",
