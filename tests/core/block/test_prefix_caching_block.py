@@ -490,7 +490,7 @@ class TestPrefixCachingBlockAllocator:
         assert allocator._refcounter.get(0) == 1
         assert 0 not in allocator.evictor
 
-        # allocate mutable block again, it shall be poped from evictor
+        # allocate mutable block again, it shall be popped from evictor
         mutable = allocator.allocate_mutable(prev_block=None)
         assert len(allocator._hashless_allocator._free_block_indices) == 0
         assert mutable.block_id not in allocator.evictor.free_table
