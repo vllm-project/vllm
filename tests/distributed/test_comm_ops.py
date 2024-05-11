@@ -11,7 +11,7 @@ import torch
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.communication_op import (FastBroadcastTensorDict,
+from vllm.distributed.communication_op import (TensorDictWithBoundedMetadata,
                                                TensorMetadata)
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
@@ -106,7 +106,7 @@ def broadcast_tensor_dict_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(recv_dict["f"], test_dict["f"])
 
 
-class CustomData(FastBroadcastTensorDict):
+class CustomData(TensorDictWithBoundedMetadata):
 
     def __init__(self, a, b):
         self.a = a

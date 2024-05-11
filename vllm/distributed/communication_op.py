@@ -187,7 +187,24 @@ def _split_tensor_dict(
     return metadata_list, tensor_list
 
 
-class FastBroadcastTensorDict:
+class TensorDictWithBoundedMetadata:
+    """
+    In the normal case, when we broadcast Python objects, we need two
+    collective operations: one to broadcast the length of the object after
+    serialization, and one to broadcast the serialized object.
+
+    This class represents a dictionary of tensors with bounded metadata.
+    The upperbound of the buffer size is known a priori. Therefore, we can
+    pre-allocate a buffer for the metadata, and invoke only one collective
+    operation to broadcast the metadata.
+
+    The main benefit is we can save one broadcast call.
+
+    Note: it depends on the feature of Python pickle that the serialized
+    data contains a marker for the end of the data. Therefore, as long as
+    the buffer size is larger than the serialized data, we can guarantee
+    the deserialization is correct.
+    """
 
     @classmethod
     def get_max_buffer_size_for_metadata(cls):
@@ -231,7 +248,7 @@ class FastBroadcastTensorDict:
                                                   dtype=torch.uint8)
 
 
-T = TypeVar("T", bound=FastBroadcastTensorDict)
+T = TypeVar("T", bound=TensorDictWithBoundedMetadata)
 
 
 def broadcast_tensor_dict(

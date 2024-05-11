@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.communication_op import (FastBroadcastTensorDict,
+from vllm.distributed.communication_op import (TensorDictWithBoundedMetadata,
                                                TensorMetadata)
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
@@ -25,7 +25,7 @@ from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
 
-class BlockMetaData(FastBroadcastTensorDict):
+class BlockMetaData(TensorDictWithBoundedMetadata):
     """
     Use BlockMetaData to save one broadcasted in broadcast Python object.
     """
