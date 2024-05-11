@@ -183,10 +183,13 @@ def _split_tensor_dict(
             # index (e.g. "cuda:0"). We only need the device type.
             # receiving side will set the device index.
             device = "cpu" if value.is_cpu else "cuda"
-            metadata_list.append(TensorMeta(device, value.dtype, value.size()))
+            metadata_list.append(
+                (key, TensorMeta(device, value.dtype, value.size())))
             tensor_list.append(value)
         else:
             metadata_list.append((key, value))
+    if keys is not None:
+        metadata_list = [value for key, value in metadata_list]
     return metadata_list, tensor_list
 
 
