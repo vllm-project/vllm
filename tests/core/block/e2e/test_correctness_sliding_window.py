@@ -62,7 +62,9 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
     cmp = [expected_text == actual_text for expected_text, actual_text in zip(baseline_texts, test_texts)]
     print(cmp)
-    # make sure it's mostly OK
+    # make sure it's mostly OK; this is possibly because https://github.com/vllm-project/vllm/pull/4768
+    # however, https://github.com/vllm-project/vllm/issues/3385#issuecomment-1995924290
+    # states that xformers and flash_attn have different ideas about the window size anyways
     assert sum(cmp) > 0.7 * len(cmp)
 
 
