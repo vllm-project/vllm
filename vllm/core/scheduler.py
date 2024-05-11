@@ -270,9 +270,14 @@ class Scheduler:
                 self.scheduler_config.max_model_len,
                 self.scheduler_config.max_num_batched_tokens)
 
+        version = "v1"
+        if self.scheduler_config.use_v2_block_manager:
+            version = "v2"
+        if self.scheduler_config.embedding_mode:
+            version = "embedding"
+
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
-            version="v2" if self.scheduler_config.
-            use_v2_block_manager else "v1")
+            version)
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
@@ -968,6 +973,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 do_sample=do_sample,
+                pooling_params=seq_group.pooling_params,
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,

@@ -1,6 +1,6 @@
 import time
 from enum import IntEnum
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -287,18 +287,18 @@ class ModelRunner:
                 lora_requests.add(seq_group_metadata.lora_request)
 
             lora_index_mapping += [lora_id] * (seq_len - context_len)
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (seq_len - context_len
-                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+            lora_prompt_mapping.extend([lora_id] * (
+                seq_len - context_len if seq_group_metadata.sampling_params
+                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.multi_modal_data:
                 multi_modal_input_list.append(
                     seq_group_metadata.multi_modal_data.data)
 
-            if seq_group_metadata.block_tables is None:
+            if _is_block_tables_empty(seq_group_metadata.block_tables):
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
+                # In embeddings, the block tables are {seq_id: None}.
                 slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                 continue
 
@@ -813,7 +813,6 @@ class ModelRunner:
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
-
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
@@ -1139,3 +1138,15 @@ def _prepare_fake_inputs(
         prompt_tokens = [0] * seq_len
         fake_image_input = None
     return SequenceData(prompt_tokens), fake_image_input
+
+
+def _is_block_tables_empty(block_tables: Union[None, Dict]):
+    """
+    Check if block_tables is None or a dictionary with all None values.
+    """
+    if block_tables is None:
+        return True
+    if isinstance(block_tables, dict) and all(
+            value is None for value in block_tables.values()):
+        return True
+    return False
