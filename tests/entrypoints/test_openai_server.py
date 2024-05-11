@@ -890,7 +890,3 @@ async def test_long_seed(server, client: openai.AsyncOpenAI):
 
         assert ("greater_than_equal" in exc_info.value.message
                 or "less_than_equal" in exc_info.value.message)
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
