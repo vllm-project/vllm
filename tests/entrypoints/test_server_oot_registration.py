@@ -36,6 +36,7 @@ def test_oot_registration_for_api_server():
     port = get_open_port()
     ctx = multiprocessing.get_context("spawn")
     server = ctx.Process(target=server_function, args=(port, ))
+    server.start()
     client = OpenAI(
         base_url=f"http://localhost:{port}/v1",
         api_key="token-abc123",
