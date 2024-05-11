@@ -82,6 +82,10 @@ class GPUExecutor(ExecutorBase):
         draft_worker_kwargs.update(
             model_config=self.speculative_config.draft_model_config,
             parallel_config=self.speculative_config.draft_parallel_config,
+            ngram_prompt_lookup_max=self.speculative_config.
+            ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min=self.speculative_config.
+            ngram_prompt_lookup_min,
             # TODO allow draft-model specific load config.
             #load_config=self.load_config,
         )
@@ -89,6 +93,8 @@ class GPUExecutor(ExecutorBase):
         spec_decode_worker = SpecDecodeWorker.create_worker(
             scorer_worker=target_worker,
             draft_worker_kwargs=draft_worker_kwargs,
+            disable_by_batch_size=self.speculative_config.
+            speculative_disable_by_batch_size,
         )
 
         assert self.parallel_config.world_size == 1, (

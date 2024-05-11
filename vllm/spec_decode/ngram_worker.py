@@ -1,3 +1,4 @@
+import weakref
 from typing import List, Optional, Tuple
 
 import torch
@@ -37,7 +38,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
         # Current only support Top1Proposer
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             device=self.device,
             vocab_size=self.vocab_size,
         )
@@ -138,7 +139,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                 SamplerOutput(
                     outputs=None,
                     sampled_token_probs=token_probs[i],
-                    logprobs=token_logprobs,
+                    logprobs=token_logprobs[i],
                     sampled_token_ids=token_ids[i],
                 ))
         return outputs, False
