@@ -341,7 +341,10 @@ class LlamaForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.model = LlamaModel(config, cache_config, quant_config, lora_config=lora_config)
+        self.model = LlamaModel(config,
+                                cache_config,
+                                quant_config,
+                                lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

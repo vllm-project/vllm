@@ -2,8 +2,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataPerStage)
 from vllm.attention.layer import Attention
-from vllm.attention.selector import (get_attn_backend, get_cached_attn_impl,
-                                     set_attn_impl)
+from vllm.attention.selector import get_attn_backend
 
 __all__ = [
     "Attention",
@@ -12,6 +11,4 @@ __all__ = [
     "AttentionMetadata",
     "AttentionMetadataPerStage",
     "get_attn_backend",
-    "get_cached_attn_impl",
-    "set_attn_impl",
 ]

@@ -12,22 +12,6 @@ from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
 
-_CACHED_ATTN_IMPL: Optional[Type[AttentionImpl]] = None
-
-
-@contextmanager
-def set_attn_impl(attn_impl: Optional[Type[AttentionImpl]]):
-    global _CACHED_ATTN_IMPL
-    prev = _CACHED_ATTN_IMPL
-    _CACHED_ATTN_IMPL = attn_impl
-    yield
-    _CACHED_ATTN_IMPL = prev
-
-
-def get_cached_attn_impl() -> Optional[Type[AttentionImpl]]:
-    global _CACHED_ATTN_IMPL
-    return _CACHED_ATTN_IMPL
-
 
 class _Backend(enum.Enum):
     FLASH_ATTN = enum.auto()
@@ -50,8 +34,6 @@ def get_attn_backend(
     backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
                                  sliding_window, dtype, kv_cache_dtype,
                                  block_size)
-    logger.info(num_heads, head_size, num_kv_heads, sliding_window, dtype,
-                kv_cache_dtype, block_size)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
