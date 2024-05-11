@@ -202,17 +202,26 @@ class FastBroadcastTensorDict:
 
     # ===== subclass overrides starts =====
     # subclass should implement the `__init__` method, and set the `fields`
-    # attribute to a list of field names. Then repeat the following code
-    # snippet in the subclass to set the buffer size and buffer tensor.
+    # attribute to a list of field names.
     def __init__(self):
         pass
 
-    fields: List[str] = []
-    size_upper_bound = get_max_buffer_size_for_metadata(fields)
-    buffer = bytearray(size_upper_bound)
-    buffer_tensor = torch.frombuffer(memoryview(buffer), dtype=torch.uint8)
+    fields: List[str]
 
     # ===== subclass overrides ends =====
+    # for type annotation
+    size_upper_bound: int
+    buffer: bytearray
+    buffer_tensor: torch.Tensor
+
+    def __init_subclass__(subclass):
+        assert hasattr(subclass, "fields"), (
+            f"Expecting a `fields` attribute in the subclass {subclass}")
+        subclass.size_upper_bound = subclass.get_max_buffer_size_for_metadata(
+            subclass.fields)
+        subclass.buffer = bytearray(subclass.size_upper_bound)
+        subclass.buffer_tensor = torch.frombuffer(memoryview(subclass.buffer),
+                                                  dtype=torch.uint8)
 
     @staticmethod
     def __new__(cls, tensor_dict: Dict[str, torch.Tensor]):
