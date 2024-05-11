@@ -235,10 +235,13 @@ class Starcoder2ForCausalLM(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.model = Starcoder2Model(config, quant_config=quant_config)
+        self.model = Starcoder2Model(config,
+                                     cache_config,
+                                     quant_config=quant_config)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:

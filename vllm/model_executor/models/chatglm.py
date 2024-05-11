@@ -341,13 +341,14 @@ class ChatGLMForCausalLM(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config: ChatGLMConfig = config
         self.quant_config = quant_config
-        self.transformer = ChatGLMModel(config, quant_config)
+        self.transformer = ChatGLMModel(config, cache_config, quant_config)
         self.lm_head_weight = self.transformer.output_layer.weight
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
         self.sampler = Sampler()
