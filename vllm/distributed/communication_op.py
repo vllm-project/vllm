@@ -189,12 +189,10 @@ def _split_tensor_dict(
 
 class FastBroadcastTensorDict:
 
-    @staticmethod
-    def get_max_buffer_size_for_metadata(fields: List[str]):
-        metadata_list = [(f,
-                          TensorMetadata("cuda", torch.float32,
-                                         torch.Size((1, 2, 3, 4, 5))))
-                         for f in fields]
+    @classmethod
+    def get_max_buffer_size_for_metadata(cls):
+        data = cls.get_example_data()
+        metadata_list, _ = _split_tensor_dict(data)
         metadata_list_bytes = pickle.dumps(metadata_list)
         ALIGN_BYTES = 256
         return ((len(metadata_list_bytes) + ALIGN_BYTES - 1) //
@@ -202,11 +200,22 @@ class FastBroadcastTensorDict:
 
     # ===== subclass overrides starts =====
     # subclass should implement the `__init__` method, and set the `fields`
-    # attribute to a list of field names.
+    # attribute to a list of field names, and implement the
+    # `get_example_metadata` class method to provide an example metadata for
+    # the fields. This is used to calculate the buffer size.
+    fields: List[str]
+
     def __init__(self):
         pass
 
-    fields: List[str]
+    @classmethod
+    def get_example_data(cls):
+        # Note: in general, if the example data contains cuda tensor,
+        # use cpu tensor here to avoid creating cuda context during
+        # the initialization of the class. The estimation of the buffer size
+        # might be inaccurate (by one byte per field), but it is fine because
+        # the buffer size will be aligned to 256 bytes.
+        return {}
 
     # ===== subclass overrides ends =====
     # for type annotation
@@ -217,8 +226,7 @@ class FastBroadcastTensorDict:
     def __init_subclass__(subclass):
         assert hasattr(subclass, "fields"), (
             f"Expecting a `fields` attribute in the subclass {subclass}")
-        subclass.size_upper_bound = subclass.get_max_buffer_size_for_metadata(
-            subclass.fields)
+        subclass.size_upper_bound = subclass.get_max_buffer_size_for_metadata()
         subclass.buffer = bytearray(subclass.size_upper_bound)
         subclass.buffer_tensor = torch.frombuffer(memoryview(subclass.buffer),
                                                   dtype=torch.uint8)
