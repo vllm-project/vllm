@@ -697,6 +697,10 @@ if triton.__version__ >= "2.1.0":
 
         grid = (batch, head, triton.cdiv(max_input_len, BLOCK))  # batch, head,
 
+        # 0 means "disable"
+        if sliding_window is None or sliding_window <= 0:
+            sliding_window = 0
+
         num_warps = 8 if Lk <= 64 else 8
         if alibi_slopes is not None:
             _fwd_kernel_alibi[grid](
@@ -794,7 +798,7 @@ if triton.__version__ >= "2.1.0":
             BLOCK_DMODEL=Lk,
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
-            SLIDING_WINDOW=sliding_window if sliding_window is not None else 0,
+            SLIDING_WINDOW=sliding_window,
             num_warps=num_warps,
             num_stages=1,
         )
