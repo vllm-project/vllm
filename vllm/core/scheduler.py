@@ -6,8 +6,6 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
 
-from pyaici.comms import AiciRunner
-
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.core.policy import Policy, PolicyFactory
@@ -276,7 +274,6 @@ class Scheduler:
             version="v2" if self.scheduler_config.
             use_v2_block_manager else "v1")
 
-        self.aici_runner: AiciRunner = None
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
             block_size=self.cache_config.block_size,
@@ -319,11 +316,6 @@ class Scheduler:
         return 1
 
     def add_seq_group(self, seq_group: SequenceGroup) -> None:
-        if seq_group.sampling_params.has_aici:
-            seq = seq_group.get_seqs()[0]
-            seq.has_aici = True
-            self.aici_runner.assign_seq_id(seq_group.request_id, seq.seq_id)
-
         # Add sequence groups to the waiting queue.
         self.waiting.append(seq_group)
 
@@ -923,8 +915,6 @@ class Scheduler:
         )
 
     def schedule(self) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs]:
-        runner = self.aici_runner
-
         # Schedule sequence groups.
         # This function call changes the internal states of the scheduler
         # such as self.running, self.swapped, and self.waiting.

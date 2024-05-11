@@ -85,8 +85,6 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
-        aici_runner = self.scheduler.aici_runner
-
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
             child_samples: List[SequenceOutput] = parent_child_dict[

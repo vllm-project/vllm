@@ -4,7 +4,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from pyaici.comms import AiciRunner
 
 from vllm.model_executor.layers.ops.sample import sample as sample_triton
 from vllm.model_executor.sampling_metadata import (SamplingMetadata,
@@ -59,9 +58,6 @@ class Sampler(nn.Module):
         """
         assert logits is not None
         _, vocab_size = logits.shape
-
-        # Start with constrained decoding
-        logits = _apply_aici_logit_bias(logits, sampling_metadata)
 
         logits = _apply_min_tokens_penalty(logits, sampling_metadata)
 
@@ -151,41 +147,6 @@ def _get_bin_counts_and_mask(
     mask = bin_counts > 0
 
     return bin_counts, mask
-
-
-def _apply_aici_logit_bias(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-):
-    aici_runner = AiciRunner.instance
-    if not aici_runner:
-        return logits
-    mid_results, arr = aici_runner.recv_logit_bias_torch()
-    # logits.dtype should generally match arr.dtype
-    bias = arr.to(logits.device).to(logits.dtype)
-    if bias.shape[0] == 0:
-        return logits
-
-    logits_row_idx = 0
-    for sg in sampling_metadata.seq_groups:
-        if sg.sampling_params.has_aici:
-            for id in sg.seq_ids:
-                r = mid_results.get(id)
-                if r and len(r.branches) >= 1:
-                    # this is actually also enforced by AICIrt since
-                    # we don't pass --cap-fork
-                    assert len(r.branches) <= 1, "Only one branch is supported"
-                    mask = r.branches[0].mask
-                    if mask is not None:
-                        logits[logits_row_idx] += bias[mask, 0:logits.shape[1]]
-                    temp = r.branches[0].temperature
-                    if temp is not None:
-                        sg.sampling_params.temperature = temp
-                logits_row_idx += 1
-        else:
-            logits_row_idx += len(sg.seq_ids)
-
-    return logits
 
 
 def _apply_min_tokens_penalty(

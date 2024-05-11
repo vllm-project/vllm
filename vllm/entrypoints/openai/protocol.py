@@ -363,32 +363,6 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class RunRequest(BaseModel):
-    prompt: str
-    controller: str
-    controller_arg: Union[str, dict]
-    temperature: Optional[float] = 0.0
-    top_p: Optional[float] = 1.0
-    top_k: Optional[int] = -1
-    max_tokens: Optional[int] = None
-
-    def to_sampling_params(self):
-        r = SamplingParams(
-            temperature=self.temperature,
-            top_p=self.top_p,
-            top_k=self.top_k,
-            max_tokens=self.max_tokens,
-            ignore_eos=True,
-        )
-        r.has_aici = True
-        return r
-
-
-class SetTagsRequest(BaseModel):
-    module_id: str
-    tags: List[str]
-
-
 class LogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
