@@ -39,11 +39,12 @@ class Attention(nn.Module):
         else:
             kv_cache_dtype = "auto"
             block_size = 16
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(
-            num_heads, head_size,
-            num_kv_heads if num_kv_heads is not None else num_heads,
-            sliding_window, dtype, kv_cache_dtype, block_size)
+        attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
+                                        sliding_window, dtype, kv_cache_dtype,
+                                        block_size)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window)
