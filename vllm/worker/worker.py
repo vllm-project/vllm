@@ -47,11 +47,11 @@ class BlockMetaData(FastBroadcastTensorDict):
             "num_seq_groups":
             0,
             "blocks_to_swap_in":
-            torch.randn((3, 2), dtype=torch.int64, device="cpu"),
+            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
             "blocks_to_swap_out":
-            torch.randn((3, 2), dtype=torch.int64, device="cpu"),
+            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
             "blocks_to_copy":
-            torch.randn((3, 2), dtype=torch.int64, device="cpu"),
+            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
         }
 
 
