@@ -11,6 +11,7 @@ import torch
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.communication_op import FastBroadcastTensorDict
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
@@ -104,12 +105,54 @@ def broadcast_tensor_dict_test_worker(tensor_parallel_size: int, rank: int,
         assert torch.allclose(recv_dict["f"], test_dict["f"])
 
 
+class CustomData(FastBroadcastTensorDict):
+
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+    fields = ["a", "b"]
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def fast_broadcast_tensor_dict_test_worker(tensor_parallel_size: int,
+                                           rank: int,
+                                           distributed_init_port: str):
+    # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
+    # so that each worker can see all the GPUs
+    # they will be able to set the device to the correct GPU
+    del os.environ["CUDA_VISIBLE_DEVICES"]
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+    init_test_distributed_environment(1, tensor_parallel_size, rank,
+                                      distributed_init_port)
+
+    test_dict = {
+        # device tensor
+        "a": torch.arange(0, dtype=torch.float32, device="cuda"),
+        # CPU tensor
+        "b": torch.arange(0, dtype=torch.int8, device="cpu"),
+    }
+
+    if rank == 0:
+        obj = CustomData(**test_dict)
+        broadcast_tensor_dict(obj.__dict__, src=0, cls=CustomData)
+    else:
+        obj = broadcast_tensor_dict(src=0, cls=CustomData)
+        recv_dict = obj.__dict__
+        assert len(recv_dict) == len(test_dict)
+        assert torch.allclose(recv_dict["a"], test_dict["a"])
+        assert torch.allclose(recv_dict["b"], test_dict["b"])
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tensor_parallel_size", [2])
 @pytest.mark.parametrize("test_target", [
-    all_reduce_test_worker, all_gather_test_worker,
-    broadcast_tensor_dict_test_worker
+    all_reduce_test_worker,
+    all_gather_test_worker,
+    broadcast_tensor_dict_test_worker,
+    fast_broadcast_tensor_dict_test_worker,
 ])
 def test_multi_process_tensor_parallel(tensor_parallel_size, test_target):
     multi_process_tensor_parallel(tensor_parallel_size, test_target)

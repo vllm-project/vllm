@@ -239,7 +239,7 @@ def broadcast_tensor_dict(
     group: Optional[ProcessGroup] = None,
     metadata_group: Optional[ProcessGroup] = None,
     cls: Optional[Type[T]] = None,
-) -> Union[Dict[Any, Union[torch.Tensor, Any]], FastBroadcastTensorDict]:
+) -> Union[Dict[Any, Union[torch.Tensor, Any]], T]:
     """Broadcast the input tensor dictionary.
     `group` is used to broadcast the tensors, while `metadata_group` is used
      to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
