@@ -543,6 +543,7 @@ __inline__ __device__ Tout scaled_convert(const Tin &x, const float scale) {
 // data type of the key and value cache. The FN is a macro that calls a function
 // with template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>.
 #define DISPATCH_BY_KV_CACHE_DTYPE(SRC_DTYPE, KV_DTYPE, FN)                    \
+  if (sliding_window <= 0) sliding_window = INT32_MAX;                         \
   if (KV_DTYPE == "auto") {                                                    \
     if (SRC_DTYPE == at::ScalarType::Float) {                                  \
       FN(float, float, vllm::Fp8KVCacheDataType::kAuto);                       \
