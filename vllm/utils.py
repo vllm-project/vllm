@@ -601,9 +601,8 @@ def find_library(lib_name: str) -> str:
     env_ld_library_path = envs.LD_LIBRARY_PATH
     if not locs and env_ld_library_path:
         locs = [
-            os.path.join(dir, lib_name)
-            for dir in env_ld_library_path.split(":")
-            if os.path.exists(os.path.join(dir, lib_name))
+            file for dir in env_ld_library_path.split(":")
+            for file in glob.glob(os.path.join(dir, lib_name))
         ]
     if not locs:
         raise ValueError(f"Cannot find {lib_name} in the system.")
@@ -630,9 +629,9 @@ def find_nccl_library():
             so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+            so_file = vllm_nccl_path or find_library("libnccl.so.2*")
         elif torch.version.hip is not None:
-            so_file = find_library("librccl.so.1")
+            so_file = find_library("librccl.so.1*")
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
