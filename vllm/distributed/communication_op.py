@@ -1,8 +1,10 @@
+import pickle
 from collections import namedtuple
 from contextlib import contextmanager
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from .parallel_state import (get_cpu_world_group,
@@ -185,16 +187,57 @@ def _split_tensor_dict(
     return metadata_list, tensor_list
 
 
+class FastBroadcastTensorDict:
+
+    @staticmethod
+    def get_max_buffer_size_for_metadata(fields: List[str]):
+        metadata_list = [(f,
+                          TensorMetadata("cuda", torch.float32,
+                                         torch.Size((1, 2, 3, 4, 5))))
+                         for f in fields]
+        metadata_list_bytes = pickle.dumps(metadata_list)
+        ALIGN_BYTES = 256
+        return ((len(metadata_list_bytes) + ALIGN_BYTES - 1) //
+                ALIGN_BYTES) * ALIGN_BYTES
+
+    # ===== subclass overrides starts =====
+    # subclass should implement the `__init__` method, and set the `fields`
+    # attribute to a list of field names. Then repeat the following code
+    # snippet in the subclass to set the buffer size and buffer tensor.
+    def __init__(self):
+        pass
+
+    fields: List[str] = []
+    size_upper_bound = get_max_buffer_size_for_metadata(fields)
+    buffer = bytearray(size_upper_bound)
+    buffer_tensor = torch.frombuffer(memoryview(buffer), dtype=torch.uint8)
+
+    # ===== subclass overrides ends =====
+
+    @staticmethod
+    def __new__(cls, tensor_dict: Dict[str, torch.Tensor]):
+        obj = object.__new__(cls)
+        obj.__dict__.update(tensor_dict)
+        return obj
+
+
+T = TypeVar("T", bound=FastBroadcastTensorDict)
+
+
 def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
-    metadata_group: Optional[ProcessGroup] = None
-) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
+    metadata_group: Optional[ProcessGroup] = None,
+    cls: Optional[Type[T]] = None,
+) -> Union[Dict[Any, Union[torch.Tensor, Any]], FastBroadcastTensorDict]:
     """Broadcast the input tensor dictionary.
     `group` is used to broadcast the tensors, while `metadata_group` is used
      to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
-     dtypes).
+     dtypes). If `cls` is provided, we can know the length of the metadata
+     roughly and allocate a buffer for it, then broadcasting metadata requires
+     only one broadcast call. Otherwise, we need to broadcast the metadata
+     length first, then broadcast the metadata.
     """
     group = group or torch.distributed.group.WORLD
     metadata_group = metadata_group or get_cpu_world_group()
@@ -204,6 +247,7 @@ def broadcast_tensor_dict(
     # Bypass the function if we are using only 1 GPU.
     world_size = torch.distributed.get_world_size(group=group)
     if world_size == 1:
+        assert tensor_dict is not None
         return tensor_dict
 
     rank = torch.distributed.get_rank()
@@ -213,12 +257,19 @@ def broadcast_tensor_dict(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        # `metadata_list` lives in CPU memory.
-        # `broadcast_object_list` involves serialization and deserialization,
-        # all happening on CPU. Therefore, we can use the CPU group.
-        torch.distributed.broadcast_object_list([metadata_list],
-                                                src=src,
-                                                group=metadata_group)
+        if cls is not None:
+            s = pickle.dumps(metadata_list)
+            cls.buffer_tensor[:len(s)].copy_(
+                torch.frombuffer(s, dtype=torch.uint8))
+            dist.broadcast(cls.buffer_tensor, src=src, group=metadata_group)
+        else:
+            # `metadata_list` lives in CPU memory.
+            # `broadcast_object_list` involves serialization and
+            # deserialization, all happening on CPU. Therefore,
+            # we can use the CPU group.
+            dist.broadcast_object_list([metadata_list],
+                                       src=src,
+                                       group=metadata_group)
         async_handles = []
         for tensor in tensor_list:
             if tensor.numel() == 0:
@@ -226,29 +277,34 @@ def broadcast_tensor_dict(
                 continue
             if tensor.is_cpu:
                 # use metadata_group for CPU tensors
-                handle = torch.distributed.broadcast(tensor,
-                                                     src=src,
-                                                     group=metadata_group,
-                                                     async_op=True)
+                handle = dist.broadcast(tensor,
+                                        src=src,
+                                        group=metadata_group,
+                                        async_op=True)
             else:
                 # use group for GPU tensors
-                handle = torch.distributed.broadcast(tensor,
-                                                     src=src,
-                                                     group=group,
-                                                     async_op=True)
+                handle = dist.broadcast(tensor,
+                                        src=src,
+                                        group=group,
+                                        async_op=True)
             async_handles.append(handle)
         for async_handle in async_handles:
             async_handle.wait()
 
     else:
-        recv_metadata_list = [None]
-        torch.distributed.broadcast_object_list(recv_metadata_list,
-                                                src=src,
-                                                group=metadata_group)
-        assert recv_metadata_list[0] is not None
+        if cls is None:
+            container = [None]
+            dist.broadcast_object_list(container,
+                                       src=src,
+                                       group=metadata_group)
+            recv_metadata_list = container[0]
+            assert recv_metadata_list is not None
+        else:
+            dist.broadcast(cls.buffer_tensor, src=src, group=metadata_group)
+            recv_metadata_list = pickle.loads(memoryview(cls.buffer))
         tensor_dict = {}
         async_handles = []
-        for key, value in recv_metadata_list[0]:
+        for key, value in recv_metadata_list:
             if isinstance(value, TensorMetadata):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
@@ -259,20 +315,22 @@ def broadcast_tensor_dict(
                     continue
                 if tensor.is_cpu:
                     # use metadata_group for CPU tensors
-                    handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
-                                                         group=metadata_group,
-                                                         async_op=True)
+                    handle = dist.broadcast(tensor,
+                                            src=src,
+                                            group=metadata_group,
+                                            async_op=True)
                 else:
                     # use group for GPU tensors
-                    handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
-                                                         group=group,
-                                                         async_op=True)
+                    handle = dist.broadcast(tensor,
+                                            src=src,
+                                            group=group,
+                                            async_op=True)
                 async_handles.append(handle)
                 tensor_dict[key] = tensor
             else:
                 tensor_dict[key] = value
         for async_handle in async_handles:
             async_handle.wait()
+    if cls is not None:
+        return cls.__new__(cls, tensor_dict)
     return tensor_dict
