@@ -418,11 +418,8 @@ class TestPrefixCachingBlockAllocator:
     @pytest.mark.parametrize("block_size", [16])
     @pytest.mark.parametrize("seed", list(range(10)))
     def test_alloc_promotion(num_blocks: int, block_size: int, seed: int):
-        num_tokens = block_size * num_blocks
         random.seed(seed)
 
-        all_blocks_list = [i for i in range(num_blocks)]
-        zero_ref = {i: 0 for i in range(num_blocks)}
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
         token_ids = list(range(block_size))
