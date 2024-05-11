@@ -271,7 +271,7 @@ class CustomAllreduce:
         return None
 
     def close(self):
-        if self._ptr:
+        if not self.disabled and self._ptr:
             custom_ar.dispose(self._ptr)
             self._ptr = 0
 
