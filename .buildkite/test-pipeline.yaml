@@ -53,9 +53,7 @@ steps:
 
 - label: Entrypoints Test
   commands:
-  # these tests have to be separated, because each one will allocate all posible GPU memory
-  - pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py
-  - pytest -v -s entrypoints/test_server_oot_registration.py
+  - pytest -v -s entrypoints
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"

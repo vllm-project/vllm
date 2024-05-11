@@ -7,7 +7,9 @@ def test_multiple_sampling_params():
 
     llm = LLM(model="facebook/opt-125m",
               max_num_batched_tokens=4096,
-              tensor_parallel_size=1)
+              tensor_parallel_size=1,
+              gpu_memory_utilization=0.10,
+              enforce_eager=True)
 
     prompts = [
         "Hello, my name is",
