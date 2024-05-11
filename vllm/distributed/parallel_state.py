@@ -176,6 +176,16 @@ def initialize_model_parallel(
             _TP_DEVICE_GROUP = group
             _TP_CPU_GROUP = cpu_group
 
+    # A small all_reduce for warmup.
+    # this is needed because device communicators might be created lazily
+    # (e.g. NCCL). This will ensure that the communicator is initialized
+    # before any communication happens, so that this group can be used for
+    # graph capture immediately.
+    data = torch.zeros(1)
+    if torch.cuda.is_available():
+        data = data.to(device=f"cuda:{_LOCAL_RANK}")
+    torch.distributed.all_reduce(data, group=_TP_DEVICE_GROUP)
+
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
         group=_TP_CPU_GROUP,
