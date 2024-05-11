@@ -153,8 +153,8 @@ class StablelmDecoderLayer(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config)
-        self.mlp = StablelmMLP(config, cache_config, quant_config)
+        self.self_attn = StablelmAttention(config, cache_config, quant_config)
+        self.mlp = StablelmMLP(config, quant_config)
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
