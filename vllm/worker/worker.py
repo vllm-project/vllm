@@ -12,7 +12,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.communication_op import FastBroadcastTensorDict
+from vllm.distributed.communication_op import (FastBroadcastTensorDict,
+                                               TensorMetadata)
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
@@ -42,17 +43,16 @@ class BlockMetaData(FastBroadcastTensorDict):
     ]
 
     @classmethod
-    def get_example_data(cls):
-        return {
-            "num_seq_groups":
-            0,
-            "blocks_to_swap_in":
-            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
-            "blocks_to_swap_out":
-            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
-            "blocks_to_copy":
-            torch.zeros((3, 2), dtype=torch.int64, device="cpu"),
-        }
+    def get_example_metadata_list(cls):
+        return [
+            ("num_seq_groups", 1),
+            ("blocks_to_swap_in",
+             TensorMetadata("cpu", torch.int64, torch.Size([1, 2]))),
+            ("blocks_to_swap_out",
+             TensorMetadata("cpu", torch.int64, torch.Size([1, 2]))),
+            ("blocks_to_copy",
+             TensorMetadata("cuda", torch.int64, torch.Size([1, 2]))),
+        ]
 
 
 class Worker(WorkerBase):

@@ -191,8 +191,7 @@ class FastBroadcastTensorDict:
 
     @classmethod
     def get_max_buffer_size_for_metadata(cls):
-        data = cls.get_example_data()
-        metadata_list, _ = _split_tensor_dict(data)
+        metadata_list = cls.get_example_metadata_list()
         metadata_list_bytes = pickle.dumps(metadata_list)
         ALIGN_BYTES = 256
         return ((len(metadata_list_bytes) + ALIGN_BYTES - 1) //
@@ -209,7 +208,7 @@ class FastBroadcastTensorDict:
         pass
 
     @classmethod
-    def get_example_data(cls):
+    def get_example_metadata_list(cls):
         # Note: in general, if the example data contains cuda tensor,
         # use cpu tensor here to avoid creating cuda context during
         # the initialization of the class. The estimation of the buffer size

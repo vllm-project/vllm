@@ -11,7 +11,8 @@ import torch
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.communication_op import FastBroadcastTensorDict
+from vllm.distributed.communication_op import (FastBroadcastTensorDict,
+                                               TensorMetadata)
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
@@ -114,11 +115,11 @@ class CustomData(FastBroadcastTensorDict):
     fields = ["a", "b"]
 
     @classmethod
-    def get_example_data(cls):
-        return {
-            "a": torch.tensor([], dtype=torch.float32, device="cpu"),
-            "b": torch.tensor([], dtype=torch.int8, device="cpu"),
-        }
+    def get_example_metadata_list(cls):
+        return [
+            ("a", TensorMetadata("cuda", torch.float32, torch.Size([]))),
+            ("b", TensorMetadata("cpu", torch.float32, torch.Size([]))),
+        ]
 
 
 @ray.remote(num_gpus=1, max_calls=1)
