@@ -1,11 +1,12 @@
 import pickle
-from collections import namedtuple
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+
+from vllm import TensorMeta
 
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
@@ -159,9 +160,6 @@ def broadcast_object_list(obj_list: List[Any],
     return obj_list
 
 
-TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
-
-
 def _split_tensor_dict(
     tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
 ) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
@@ -180,7 +178,7 @@ def _split_tensor_dict(
             # receiving side will set the device index.
             device = "cpu" if value.is_cpu else "cuda"
             metadata_list.append(
-                (key, TensorMetadata(device, value.dtype, value.size())))
+                (key, TensorMeta(device, value.dtype, value.size())))
             tensor_list.append(value)
         else:
             metadata_list.append((key, value))
@@ -332,7 +330,7 @@ def broadcast_tensor_dict(
         tensor_dict = {}
         async_handles = []
         for key, value in recv_metadata_list:
-            if isinstance(value, TensorMetadata):
+            if isinstance(value, TensorMeta):
                 tensor = torch.empty(value.size,
                                      dtype=value.dtype,
                                      device=value.device)

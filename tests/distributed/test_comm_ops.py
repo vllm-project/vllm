@@ -8,11 +8,11 @@ import pytest
 import ray
 import torch
 
+from vllm import TensorMeta
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.communication_op import (TensorDictWithBoundedMetadata,
-                                               TensorMetadata)
+from vllm.distributed.communication_op import TensorDictWithBoundedMetadata
 from vllm.test_utils import (init_test_distributed_environment,
                              multi_process_tensor_parallel)
 
@@ -117,8 +117,8 @@ class CustomData(TensorDictWithBoundedMetadata):
     @classmethod
     def get_example_metadata_list(cls):
         return [
-            ("a", TensorMetadata("cuda", torch.float32, torch.Size([]))),
-            ("b", TensorMetadata("cpu", torch.float32, torch.Size([]))),
+            ("a", TensorMeta("cuda", torch.float32, torch.Size([]))),
+            ("b", TensorMeta("cpu", torch.float32, torch.Size([]))),
         ]
 
 

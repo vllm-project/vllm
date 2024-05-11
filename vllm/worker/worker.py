@@ -6,14 +6,14 @@ from typing import List, Optional, Set, Tuple, Union
 import torch
 import torch.distributed
 
+from vllm import TensorMeta
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.communication_op import (TensorDictWithBoundedMetadata,
-                                               TensorMetadata)
+from vllm.distributed.communication_op import TensorDictWithBoundedMetadata
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
@@ -48,11 +48,11 @@ class BlockMetaData(TensorDictWithBoundedMetadata):
         return [
             ("num_seq_groups", 1),
             ("blocks_to_swap_in",
-             TensorMetadata("cpu", torch.int64, torch.Size([1, 2]))),
+             TensorMeta("cpu", torch.int64, torch.Size([1, 2]))),
             ("blocks_to_swap_out",
-             TensorMetadata("cpu", torch.int64, torch.Size([1, 2]))),
+             TensorMeta("cpu", torch.int64, torch.Size([1, 2]))),
             ("blocks_to_copy",
-             TensorMetadata("cuda", torch.int64, torch.Size([1, 2]))),
+             TensorMeta("cuda", torch.int64, torch.Size([1, 2]))),
         ]
 
 
