@@ -355,8 +355,8 @@ def test_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out != []
+    assert out.blocks_to_swap_in == []
 
     # Add 1 more task. Swap should be prioritized over new prefill.
     _, seq_group = create_dummy_prompt("2", prompt_length=60)
@@ -365,8 +365,8 @@ def test_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in != []
+    assert out.blocks_to_swap_out == []
 
 
 def test_running_prefill_prioritized_over_swap():
@@ -406,8 +406,8 @@ def test_running_prefill_prioritized_over_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out != {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out != []
+    assert out.blocks_to_swap_in == []
 
     # Add 1 more task. Swap is not possible, so prefill is running.
     scheduler.block_manager.can_swap_in = MagicMock()
@@ -419,8 +419,8 @@ def test_running_prefill_prioritized_over_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
 
     # Now although swap is possible, running prefill is prioritized.
@@ -429,8 +429,8 @@ def test_running_prefill_prioritized_over_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert not seq_group2.is_prefill()
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
     append_new_token(seq_group2, 1)
@@ -440,8 +440,8 @@ def test_running_prefill_prioritized_over_swap():
     assert len(out.scheduled_seq_groups) == 1
     # 3 decodes. It is swapped in.
     assert out.num_batched_tokens == 1
-    assert out.blocks_to_swap_in == {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in == []
+    assert out.blocks_to_swap_out == []
     assert not seq_group2.is_prefill()
     assert out.scheduled_seq_groups[0].seq_group == seq_group2
     append_new_token(seq_group2, 1)
@@ -451,8 +451,8 @@ def test_running_prefill_prioritized_over_swap():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 1
     assert out.num_batched_tokens == 30
-    assert out.blocks_to_swap_in != {}
-    assert out.blocks_to_swap_out == {}
+    assert out.blocks_to_swap_in != []
+    assert out.blocks_to_swap_out == []
 
 
 def test_chunked_prefill_preempt():
@@ -493,8 +493,8 @@ def test_chunked_prefill_preempt():
     _, out = schedule_and_update_computed_tokens(scheduler)
     assert len(out.scheduled_seq_groups) == 0
     assert out.num_batched_tokens == 0
-    assert out.blocks_to_swap_out == {}
-    assert out.blocks_to_swap_in == {}
+    assert out.blocks_to_swap_out == []
+    assert out.blocks_to_swap_in == []
 
     # Make sure we can reschedule preempted request.
     _, out = schedule_and_update_computed_tokens(scheduler)

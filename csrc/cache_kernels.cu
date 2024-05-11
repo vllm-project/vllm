@@ -4,10 +4,11 @@
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#if defined(ENABLE_FP8_E5M2)
-#include "quantization/fp8_e5m2_kvcache/quant_utils.cuh"
-#elif defined(ENABLE_FP8_E4M3)
-#include "quantization/fp8/amd_detail/quant_utils.cuh"
+
+#ifdef USE_ROCM
+#include "quantization/fp8/amd/quant_utils.cuh"
+#else
+#include "quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
 #include <algorithm>
@@ -23,7 +24,7 @@
 void swap_blocks(
   torch::Tensor& src,
   torch::Tensor& dst,
-  const std::map<int64_t, int64_t>& block_mapping) {
+  const torch::Tensor& block_mapping) {
   torch::Device src_device = src.device();
   torch::Device dst_device = dst.device();
   cudaMemcpyKind memcpy_type;
@@ -40,6 +41,11 @@ void swap_blocks(
     TORCH_CHECK(false, "Invalid device combination");
   }
 
+  // NOTE(youkaichao): keep in mind that `block_mapping` should be 
+  // a cpu tensor, otherwise every `item` call will require a gpu-cpu
+  // synchronization.
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
   char *src_ptr = static_cast<char*>(src.data_ptr());
   char *dst_ptr = static_cast<char*>(dst.data_ptr());
 
@@ -47,9 +53,10 @@ void swap_blocks(
   const at::cuda::OptionalCUDAGuard device_guard(src_device.is_cuda() ? src_device : dst_device);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // NOTE(woosuk): This can be slow if the number of blocks is large.
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    int64_t dst_block_number = pair.second;
+  const int64_t num_blocks = block_mapping.size(0);
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
     int64_t src_offset = src_block_number * block_size_in_bytes;
     int64_t dst_offset = dst_block_number * block_size_in_bytes;
     cudaMemcpyAsync(
@@ -97,7 +104,7 @@ __global__ void copy_blocks_kernel(
 void copy_blocks(
   std::vector<torch::Tensor>& key_caches,
   std::vector<torch::Tensor>& value_caches,
-  const std::map<int64_t, std::vector<int64_t>>& block_mapping) {
+  const torch::Tensor& block_mapping) {
   int num_layers = key_caches.size();
   TORCH_CHECK(num_layers == value_caches.size());
   if (num_layers == 0) {
@@ -114,17 +121,9 @@ void copy_blocks(
     key_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(key_caches[layer_idx].data_ptr());
     value_cache_ptrs[layer_idx] = reinterpret_cast<int64_t>(value_caches[layer_idx].data_ptr());
   }
-  // Create block mapping array.
-  std::vector<int64_t> block_mapping_vec;
-  for (const auto& pair : block_mapping) {
-    int64_t src_block_number = pair.first;
-    for (int64_t dst_block_number : pair.second) {
-      block_mapping_vec.push_back(src_block_number);
-      block_mapping_vec.push_back(dst_block_number);
-    }
-  }
-  int64_t* block_mapping_array = block_mapping_vec.data();
-  int num_pairs = block_mapping_vec.size() / 2;
+
+  // block_mapping is a 2D tensor with shape (num_pairs, 2).
+  int num_pairs = block_mapping.size(0);
 
   // Move the data structures to the GPU.
   // NOTE: This synchronizes the CPU and GPU.
@@ -132,8 +131,6 @@ void copy_blocks(
     key_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
   torch::Tensor value_cache_ptrs_tensor = torch::from_blob(
     value_cache_ptrs, {num_layers}, torch::kInt64).to(cache_device);
-  torch::Tensor block_mapping_tensor = torch::from_blob(
-    block_mapping_array, {2 * num_pairs}, torch::kInt64).to(cache_device);
 
   // Launch the kernel.
   const int numel_per_block = key_caches[0][0].numel();
@@ -146,14 +143,14 @@ void copy_blocks(
       vllm::copy_blocks_kernel<scalar_t><<<grid, block, 0, stream>>>(
         key_cache_ptrs_tensor.data_ptr<int64_t>(),
         value_cache_ptrs_tensor.data_ptr<int64_t>(),
-        block_mapping_tensor.data_ptr<int64_t>(),
+        block_mapping.data_ptr<int64_t>(),
         numel_per_block);
     }));
 }
 
 namespace vllm {
 
-template<typename scalar_t, typename cache_t, bool is_fp8_kv_cache>
+template<typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
@@ -198,19 +195,12 @@ __global__ void reshape_and_cache_kernel(
                                   + block_offset;
     scalar_t tgt_key = key[src_key_idx];
     scalar_t tgt_value = value[src_value_idx];
-    if constexpr (is_fp8_kv_cache) {
-#if defined(ENABLE_FP8_E5M2)
-      key_cache[tgt_key_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_key);
-      value_cache[tgt_value_idx] = fp8_e5m2_unscaled::vec_conversion<uint8_t, scalar_t>(tgt_value);
-#elif defined(ENABLE_FP8_E4M3)
-      key_cache[tgt_key_idx] = fp8_e4m3::scaled_vec_conversion<uint8_t, scalar_t>(tgt_key, kv_scale);
-      value_cache[tgt_value_idx] = fp8_e4m3::scaled_vec_conversion<uint8_t, scalar_t>(tgt_value, kv_scale);
-#else
-      assert(false);
-#endif
-    } else {
+    if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
+    } else {
+      key_cache[tgt_key_idx] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, kv_scale);
+      value_cache[tgt_value_idx] = fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_value, kv_scale);
     }
   }
 }
@@ -252,19 +242,22 @@ __global__ void reshape_and_cache_flash_kernel(
 }
 } // namespace vllm
 
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, IS_FP8_KV_CACHE)                                     \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, IS_FP8_KV_CACHE><<<grid, block, 0, stream>>>(      \
-    reinterpret_cast<KV_T*>(key.data_ptr()),                                                       \
-    reinterpret_cast<KV_T*>(value.data_ptr()),                                                     \
-    reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                              \
-    reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                                            \
-    slot_mapping.data_ptr<int64_t>(),                                                              \
-    key_stride,                                                                                    \
-    value_stride,                                                                                  \
-    num_heads,                                                                                     \
-    head_size,                                                                                     \
-    block_size,                                                                                    \
-    x,                                                                                             \
+// KV_T is the stored data type of kv-cache.
+// CACHE_T is the data type of key and value tensors.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)                                     \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE><<<grid, block, 0, stream>>>(      \
+    reinterpret_cast<KV_T*>(key.data_ptr()),                                                \
+    reinterpret_cast<KV_T*>(value.data_ptr()),                                              \
+    reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                                       \
+    reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                                     \
+    slot_mapping.data_ptr<int64_t>(),                                                       \
+    key_stride,                                                                             \
+    value_stride,                                                                           \
+    num_heads,                                                                              \
+    head_size,                                                                              \
+    block_size,                                                                             \
+    x,                                                                                      \
     kv_scale);
 
 void reshape_and_cache(
@@ -289,25 +282,8 @@ void reshape_and_cache(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  if (kv_cache_dtype == "auto") {
-    if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, float, false);
-    } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint16_t, false);
-    } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, __nv_bfloat16, false);
-    }
-  } else if (kv_cache_dtype == "fp8") {
-    if (key.dtype() == at::ScalarType::Float) {
-      CALL_RESHAPE_AND_CACHE(float, uint8_t, true);
-    } else if (key.dtype() == at::ScalarType::Half) {
-      CALL_RESHAPE_AND_CACHE(uint16_t, uint8_t, true);
-    } else if (key.dtype() == at::ScalarType::BFloat16) {
-      CALL_RESHAPE_AND_CACHE(__nv_bfloat16, uint8_t, true);
-    }
-  } else {
-    TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
-  }
+
+  DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype, CALL_RESHAPE_AND_CACHE)
 }
 
 void reshape_and_cache_flash(
@@ -357,35 +333,34 @@ void reshape_and_cache_flash(
 
 namespace vllm {
 
-template<typename Tout, typename Tin>
+template<typename Tout, typename Tin, Fp8KVCacheDataType kv_dt>
 __global__ void convert_fp8_kernel(
   const Tin* __restrict__ src_cache,
   Tout* __restrict__ dst_cache,
+  const float kv_scale,
   const int64_t block_stride) {
   const int64_t block_idx = blockIdx.x;
   for (int i = threadIdx.x; i < block_stride; i += blockDim.x) {
     int64_t idx = block_idx * block_stride + i;
-#if defined(ENABLE_FP8_E5M2)
-    dst_cache[idx] = fp8_e5m2_unscaled::vec_conversion<Tout, Tin>(src_cache[idx]);
-#elif defined(ENABLE_FP8_E4M3)
-    dst_cache[idx] = fp8_e4m3::vec_conversion<Tout, Tin>(src_cache[idx]);
-#else
-    assert(false);
-#endif
+    dst_cache[idx] = fp8::scaled_convert<Tout, Tin, kv_dt>(src_cache[idx], kv_scale);
   }
 }
 
 } // namespace vllm
 
-#define CALL_CONVERT_FP8(Tout, Tin)                                 \
-  vllm::convert_fp8_kernel<Tout, Tin><<<grid, block, 0, stream>>>(  \
-    reinterpret_cast<Tin*>(src_cache.data_ptr()),                   \
-    reinterpret_cast<Tout*>(dst_cache.data_ptr()),                  \
+#define CALL_CONVERT_FP8(Tout, Tin, KV_DTYPE)                                 \
+  vllm::convert_fp8_kernel<Tout, Tin, KV_DTYPE><<<grid, block, 0, stream>>>(  \
+    reinterpret_cast<Tin*>(src_cache.data_ptr()),                             \
+    reinterpret_cast<Tout*>(dst_cache.data_ptr()),                            \
+    kv_scale, \
     block_stride);
 
+// Only for testing.
 void convert_fp8(
+  torch::Tensor& dst_cache,
   torch::Tensor& src_cache,
-  torch::Tensor& dst_cache)
+  const float kv_scale,
+  const std::string& kv_cache_dtype)
 {
   torch::Device src_device = src_cache.device();
   torch::Device dst_device = dst_cache.device();
@@ -403,17 +378,35 @@ void convert_fp8(
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (src_cache.dtype() == at::ScalarType::Float) {
-    CALL_CONVERT_FP8(uint8_t, float);
-  } else if (src_cache.dtype() == at::ScalarType::Half) {
-    CALL_CONVERT_FP8(uint8_t, uint16_t);
-  } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
-    CALL_CONVERT_FP8(uint8_t, __nv_bfloat16);
-  } else if (dst_cache.dtype() == at::ScalarType::Float) {
-    CALL_CONVERT_FP8(float, uint8_t);
-  } else if (dst_cache.dtype() == at::ScalarType::Half) {
-    CALL_CONVERT_FP8(uint16_t, uint8_t);
-  } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
-    CALL_CONVERT_FP8(__nv_bfloat16, uint8_t);
+  if (kv_cache_dtype == "auto") {
+    if (src_cache.dtype() == at::ScalarType::Float) {
+      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kAuto);
+    } else if (src_cache.dtype() == at::ScalarType::Half) {
+      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto);
+    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kAuto);
+    } else if (dst_cache.dtype() == at::ScalarType::Float) {
+      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+    } else if (dst_cache.dtype() == at::ScalarType::Half) {
+      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
+      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kAuto);
+    }
+  } else if (kv_cache_dtype == "fp8" || kv_cache_dtype == "fp8_e4m3") {
+    if (src_cache.dtype() == at::ScalarType::Float) {
+      CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else if (src_cache.dtype() == at::ScalarType::Half) {
+      CALL_CONVERT_FP8(uint8_t, uint16_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else if (src_cache.dtype() == at::ScalarType::BFloat16) {
+      CALL_CONVERT_FP8(uint8_t, __nv_bfloat16, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else if (dst_cache.dtype() == at::ScalarType::Float) {
+      CALL_CONVERT_FP8(float, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else if (dst_cache.dtype() == at::ScalarType::Half) {
+      CALL_CONVERT_FP8(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    } else if (dst_cache.dtype() == at::ScalarType::BFloat16) {
+      CALL_CONVERT_FP8(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kFp8E4M3);
+    }
+  } else {
+    TORCH_CHECK(false, "Unsupported data type: ", kv_cache_dtype);
   }
 }

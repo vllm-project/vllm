@@ -1,7 +1,7 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
@@ -14,6 +14,10 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 
 
 class TorchSDPABackend(AttentionBackend):
+
+    @staticmethod
+    def get_name() -> str:
+        return "torch-sdpa"
 
     @staticmethod
     def get_impl_cls() -> Type["TorchSDPABackendImpl"]:
@@ -37,14 +41,14 @@ class TorchSDPABackend(AttentionBackend):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         PagedAttention.swap_blocks(src_kv_cache, dst_kv_cache, src_to_dst)
 
     @staticmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
