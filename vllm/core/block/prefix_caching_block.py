@@ -160,21 +160,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If the evictor has blocks available for eviction, evict a block
         # and return it.
         if self.evictor.num_blocks > 0:
+            # here we get an evicted block, which is only added
+            # into evictor if its ref counter is 0
+            # and since its content would be changed, we need
+            # to remove it from _cached_blocks's tracking list
             block_id, content_hash_to_evict = self.evictor.evict()
 
-            # Here we may have scenario that several blocks have
-            # the same content hash, but due to the latter coming block
-            # is coming from mutable to immutable path, their physical
-            # block is added into evictor.
-            # However in this case, we shall not pop the _cached_blocks,
-            # as the same content is still used by others, which means
-            # we need to check ref before decide to pop the list.
-
             _block_id = self._cached_blocks[content_hash_to_evict]
-            refcount = self._refcounter.get(_block_id)
-            if refcount == 1:
-                self._cached_blocks.pop(content_hash_to_evict)
-                assert _block_id == block_id
+            assert self._refcounter.get(_block_id) == 0
+            assert _block_id == block_id
+
+            self._cached_blocks.pop(content_hash_to_evict)
 
             self._refcounter.incr(block_id)
 
