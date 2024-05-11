@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 import torch
 import torch.distributed
@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.distributed.communication_op import FastBroadcastTensorDict
 from vllm.distributed.device_communicators.custom_all_reduce import (
     init_custom_ar)
 from vllm.lora.request import LoRARequest
@@ -20,6 +21,25 @@ from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.model_runner import ModelRunner
 from vllm.worker.worker_base import WorkerBase
+
+
+class BlockMetaData(FastBroadcastTensorDict):
+    """
+    Use BlockMetaData to save one broadcasted in broadcast Python object.
+    """
+
+    def __init__(self, num_seq_groups: int, blocks_to_swap_in: torch.Tensor,
+                 blocks_to_swap_out: torch.Tensor,
+                 blocks_to_copy: torch.Tensor):
+        self.num_seq_groups = num_seq_groups
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+
+    fields = [
+        "num_seq_groups", "blocks_to_swap_in", "blocks_to_swap_out",
+        "blocks_to_copy"
+    ]
 
 
 class Worker(WorkerBase):
@@ -219,6 +239,7 @@ class Worker(WorkerBase):
         blocks_to_swap_in: torch.Tensor
         blocks_to_swap_out: torch.Tensor
         blocks_to_copy: torch.Tensor
+        data: BlockMetaData
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert execute_model_req is not None
@@ -239,19 +260,17 @@ class Worker(WorkerBase):
             blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
                                           device=self.device,
                                           dtype=torch.int64).view(-1, 2)
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
+            data = BlockMetaData(num_seq_groups=num_seq_groups,
+                                 blocks_to_swap_in=blocks_to_swap_in,
+                                 blocks_to_swap_out=blocks_to_swap_out,
+                                 blocks_to_copy=blocks_to_copy)
+            broadcast_tensor_dict(data.__dict__, src=0, cls=BlockMetaData)
         else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
+            data = broadcast_tensor_dict(src=0, cls=BlockMetaData)
+            num_seq_groups = data.num_seq_groups
+            blocks_to_swap_in = data.blocks_to_swap_in
+            blocks_to_swap_out = data.blocks_to_swap_out
+            blocks_to_copy = data.blocks_to_copy
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
