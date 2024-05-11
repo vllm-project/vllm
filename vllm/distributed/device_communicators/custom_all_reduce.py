@@ -189,19 +189,13 @@ class CustomAllreduce:
                                              self.full_nvlink)
         self.register_buffer(self.buffer)
 
-    def begin_capture(self) -> None:
-        self._IS_CAPTURING = True
-
-    def end_capture(self) -> None:
-        self._IS_CAPTURING = False
-
     @contextmanager
     def capture(self):
         try:
-            self.begin_capture()
+            self._IS_CAPTURING = True
             yield
         finally:
-            self.end_capture()
+            self._IS_CAPTURING = False
             if not self.disabled:
                 self.register_graph_buffers()
 
