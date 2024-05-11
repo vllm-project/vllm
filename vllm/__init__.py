@@ -15,12 +15,6 @@ from vllm.outputs import (CompletionOutput, EmbeddingOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
-torch_dtypes = [
-    getattr(torch, attr) for attr in dir(torch)
-    if isinstance(getattr(torch, attr), torch.dtype)
-]
-dtype_map = {dtype: i for i, dtype in enumerate(torch_dtypes)}
-
 
 @dataclasses.dataclass
 class TensorMeta:
@@ -32,12 +26,18 @@ class TensorMeta:
     dtype: torch.dtype
     size: torch.Size
 
+    torch_dtypes = [
+        getattr(torch, attr) for attr in dir(torch)
+        if isinstance(getattr(torch, attr), torch.dtype)
+    ]
+    dtype_map = {dtype: i for i, dtype in enumerate(torch_dtypes)}
+
     def __getstate__(self):
-        return [self.device, dtype_map[self.dtype], tuple(self.size)]
+        return [self.device, self.dtype_map[self.dtype], tuple(self.size)]
 
     def __setstate__(self, state):
         self.device = state[0]
-        self.dtype = torch_dtypes[state[1]]
+        self.dtype = self.torch_dtypes[state[1]]
         self.size = torch.Size(state[2])
 
 
