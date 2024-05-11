@@ -215,7 +215,9 @@ class TensorDictWithBoundedMetadata:
     @classmethod
     def get_max_buffer_size_for_metadata(cls):
         metadata_list = cls.get_example_metadata_list()
-        metadata_list_bytes = pickle.dumps(metadata_list)
+        # Note: we only need the values of the metadata list.
+        values = [value for key, value in metadata_list]
+        metadata_list_bytes = pickle.dumps(values)
         ALIGN_BYTES = 256
         return ((len(metadata_list_bytes) + ALIGN_BYTES - 1) //
                 ALIGN_BYTES) * ALIGN_BYTES
