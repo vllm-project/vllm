@@ -223,12 +223,6 @@ class FastBroadcastTensorDict:
         subclass.buffer_tensor = torch.frombuffer(memoryview(subclass.buffer),
                                                   dtype=torch.uint8)
 
-    @staticmethod
-    def __new__(cls, tensor_dict: Dict[str, torch.Tensor]):
-        obj = object.__new__(cls)
-        obj.__dict__.update(tensor_dict)
-        return obj
-
 
 T = TypeVar("T", bound=FastBroadcastTensorDict)
 
@@ -341,5 +335,5 @@ def broadcast_tensor_dict(
         for async_handle in async_handles:
             async_handle.wait()
     if cls is not None:
-        return cls.__new__(cls, tensor_dict)
+        return cls(**tensor_dict)
     return tensor_dict
