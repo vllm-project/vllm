@@ -24,6 +24,10 @@ dtype_map = {dtype: i for i, dtype in enumerate(torch_dtypes)}
 
 @dataclasses.dataclass
 class TensorMeta:
+    """
+    This class is placed here to reduce the size of qualified name,
+    which will be used in pickle serialization.
+    """
     device: str
     dtype: torch.dtype
     size: torch.Size
