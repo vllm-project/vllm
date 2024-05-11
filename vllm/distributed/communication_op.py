@@ -6,8 +6,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm import TensorMeta
-
 from .parallel_state import (get_cpu_world_group,
                              get_tensor_model_parallel_group,
                              get_tensor_model_parallel_rank,
@@ -168,6 +166,7 @@ def _split_tensor_dict(
          by its metadata.
     2. A list of tensors.
     """
+    from vllm import TensorMeta  # import here to avoid circular import
     metadata_list = []
     tensor_list = []
     for key, value in tensor_dict.items():
@@ -274,6 +273,8 @@ def broadcast_tensor_dict(
     if world_size == 1:
         assert tensor_dict is not None
         return tensor_dict
+
+    from vllm import TensorMeta  # import here to avoid circular import
 
     rank = torch.distributed.get_rank()
     if rank == src:
