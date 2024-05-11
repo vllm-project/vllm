@@ -1,4 +1,3 @@
-import functools
 import time
 from enum import IntEnum
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
@@ -8,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
-                            get_attn_backend, set_attn_impl)
+                            get_attn_backend)
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
@@ -161,20 +160,17 @@ class ModelRunner:
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
     def load_model(self) -> None:
-        attn_impl = self.attn_backend.get_impl_cls()
-        attn_impl = functools.partial(attn_impl,
-                                      kv_cache_dtype=self.kv_cache_dtype)
-        with set_attn_impl(attn_impl):  # noqa: SIM117
-            with CudaMemoryProfiler() as m:
-                self.model = get_model(
-                    model_config=self.model_config,
-                    device_config=self.device_config,
-                    load_config=self.load_config,
-                    lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                )
+        with CudaMemoryProfiler() as m:
+            self.model = get_model(
+                model_config=self.model_config,
+                device_config=self.device_config,
+                load_config=self.load_config,
+                lora_config=self.lora_config,
+                vision_language_config=self.vision_language_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
+            )
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",

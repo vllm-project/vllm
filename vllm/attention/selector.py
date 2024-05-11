@@ -50,6 +50,8 @@ def get_attn_backend(
     backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
                                  sliding_window, dtype, kv_cache_dtype,
                                  block_size)
+    logger.info(num_heads, head_size, num_kv_heads, sliding_window, dtype,
+                kv_cache_dtype, block_size)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401

@@ -6,7 +6,8 @@ import torch.nn as nn
 
 from vllm.attention.backends.abstract import (AttentionMetadata,
                                               AttentionMetadataPerStage)
-from vllm.attention.selector import get_cached_attn_impl
+from vllm.attention.selector import get_attn_backend
+from vllm.config import CacheConfig
 
 
 class Attention(nn.Module):
@@ -29,10 +30,21 @@ class Attention(nn.Module):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        cache_config: Optional[CacheConfig] = None,
     ) -> None:
         super().__init__()
-        impl_cls = get_cached_attn_impl()
-        assert impl_cls is not None
+        if cache_config is not None:
+            kv_cache_dtype = cache_config.cache_dtype
+            block_size = cache_config.block_size
+        else:
+            kv_cache_dtype = "auto"
+            block_size = 16
+        dtype = torch.get_default_dtype()
+        attn_backend = get_attn_backend(
+            num_heads, head_size,
+            num_kv_heads if num_kv_heads is not None else num_heads,
+            sliding_window, dtype, kv_cache_dtype, block_size)
+        impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window)
 
