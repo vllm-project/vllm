@@ -113,6 +113,9 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             data = data.to(device=f"cuda:{local_rank}")
         torch.distributed.all_reduce(data)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        del data
 
 
 def initialize_model_parallel(
@@ -187,6 +190,7 @@ def initialize_model_parallel(
     torch.distributed.all_reduce(data, group=_TP_DEVICE_GROUP)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+    del data
 
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
