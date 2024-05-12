@@ -94,6 +94,11 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self.disabled = True
 
+        if custom_ar is None:
+            # disable because of missing custom allreduce library
+            # e.g. in a non-cuda environment
+            return
+
         from vllm.distributed.parallel_state import (
             get_tensor_model_parallel_cpu_group)
         group = group or get_tensor_model_parallel_cpu_group()
