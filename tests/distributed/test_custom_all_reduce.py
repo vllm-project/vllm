@@ -28,6 +28,18 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
                                       distributed_init_port)
 
     group = get_tensor_model_parallel_group()
+
+    # A small all_reduce for warmup.
+    # this is needed because device communicators might be created lazily
+    # (e.g. NCCL). This will ensure that the communicator is initialized
+    # before any communication happens, so that this group can be used for
+    # graph capture immediately.
+    data = torch.zeros(1)
+    data = data.to(device=device)
+    torch.distributed.all_reduce(data, group=group)
+    torch.cuda.synchronize()
+    del data
+
     # we use the first group to communicate once
     # and the second group to communicate twice
     # and so on
