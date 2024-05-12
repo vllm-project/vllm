@@ -196,6 +196,11 @@ class CustomAllreduce:
 
     @contextmanager
     def capture(self):
+        """
+        The main responsibility of this context manager is the 
+        `register_graph_buffers` call at the end of the context.
+        It records all the buffer addresses used in the CUDA graph.
+        """
         try:
             self._IS_CAPTURING = True
             yield

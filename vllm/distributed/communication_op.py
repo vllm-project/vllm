@@ -31,12 +31,9 @@ def graph_capture_mode():
     # We always prioritize using custom all-reduce kernel but fall back
     # to PyTorch or pynccl if it is disabled or not supported.
     pynccl_comm = get_tp_pynccl_communicator()
-    ca_comm = get_tp_ca_communicator()
     assert pynccl_comm is not None
-    assert ca_comm is not None
     with pynccl_comm.change_state(enable=True,
-                                  stream=torch.cuda.current_stream()), \
-                                  ca_comm.capture():
+                                  stream=torch.cuda.current_stream()):
         yield
 
 
