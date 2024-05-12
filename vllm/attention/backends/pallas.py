@@ -27,7 +27,7 @@ class PallasAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads, head_size)
+        return (num_kv_heads, num_blocks, block_size, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -93,7 +93,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache = [num_blocks, block_size, num_kv_heads, head_size]
+            key_cache = [num_kv_heads, num_blocks, block_size, head_size]
+            value_cache = [num_kv_heads, num_blocks, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -131,8 +132,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
             assert kv_cache is not None
             output = torch.ops.xla.paged_attention(
                 query.squeeze(dim=1),
-                key_cache.permute(2, 0, 1, 3),
-                value_cache.permute(2, 0, 1, 3),
+                key_cache,
+                value_cache,
                 attn_metadata.context_lens,
                 attn_metadata.block_tables,
                 16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
@@ -151,10 +152,10 @@ def write_to_kv_cache(
 ) -> None:
     torch.ops.xla.dynamo_set_buffer_donor_(key_cache, True)
     torch.ops.xla.dynamo_set_buffer_donor_(value_cache, True)
-    slot_mapping = slot_mapping.flatten()
-    key_cache = key_cache.flatten(0, 1)
-    key = key.flatten(0, 1)
+
+    key = key.flatten(0, 2)
+    value = value.flatten(0, 2)
+    key_cache = key_cache.flatten(0, 2)
+    value_cache = value_cache.flatten(0, 2)
     key_cache.index_copy_(0, slot_mapping, key)
-    value_cache = value_cache.flatten(0, 1)
-    value = value.flatten(0, 1)
     value_cache.index_copy_(0, slot_mapping, value)

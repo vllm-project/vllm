@@ -3,7 +3,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch_xla.core.xla_model as xm
+import torch_xla.debug.profiler as xp
 
 from vllm.attention import get_attn_backend
 from vllm.config import (DeviceConfig, ModelConfig, ParallelConfig,
@@ -15,7 +17,7 @@ from vllm.utils import pad_to_max_length
 
 logger = init_logger(__name__)
 
-_PAD_SLOT_ID = -1
+_PAD_SLOT_ID = 0  # FIXME(woosuk)
 _MAX_NUM_SEQS = 256
 _MAX_NUM_BLOCKS_PER_SEQ = 8192 // 16
 
@@ -53,8 +55,10 @@ class TPUModelRunner:
         from vllm.model_executor.models.tpu.gemma import GemmaForCausalLM
         model = GemmaForCausalLM.from_pretrained(
             self.model_config.model, config=self.model_config.hf_config)
-        self.model = model.eval().to(self.device)
-        self.model = torch.compile(self.model,
+        model = model.to(self.device)
+        model = ModelWrapper(model)
+
+        self.model = torch.compile(model,
                                    backend="openxla",
                                    fullgraph=True)
 
@@ -93,10 +97,13 @@ class TPUModelRunner:
                     context_lens=context_lens,
                     is_prompt=True,
                 )
+                input_lens = torch.ones((batch_size, ),
+                                        dtype=torch.int32,
+                                        device=self.device)
                 xm.mark_step()
 
                 # Dummy run.
-                self.model(token_ids, position_ids, kv_caches, attn_metadata)
+                self.model(token_ids, position_ids, kv_caches, attn_metadata, input_lens)
                 xm.mark_step()
                 xm.wait_device_ops()
                 logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
@@ -123,6 +130,9 @@ class TPUModelRunner:
             context_lens = torch.ones((batch_size, ),
                                       dtype=torch.int32,
                                       device=self.device)
+            input_lens = torch.ones((batch_size, ),
+                                      dtype=torch.int32,
+                                      device=self.device)
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=0,
                 num_prefill_tokens=0,
@@ -138,13 +148,18 @@ class TPUModelRunner:
             xm.mark_step()
 
             # Dummy run.
-            self.model(token_ids, position_ids, kv_caches, attn_metadata)
+            self.model(token_ids, position_ids, kv_caches, attn_metadata, input_lens)
             xm.mark_step()
             xm.wait_device_ops()
             logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
         end = time.time()
         logger.info(f"Compilation for decode done in {(end - start):.2f} s.")
+
+        # self.server = xp.start_server(9012)
+        # # Update to your own gs bucket address if you want to profile
+        # profile_logdir = "gs://tpu-pytorch/tmp/woosuk/"
+        # xp.trace_detached('localhost:9012', profile_logdir, duration_ms=120 * 1000)
 
     def _prepare_prompt(
         self,
@@ -303,29 +318,6 @@ class TPUModelRunner:
         else:
             return self._prepare_decode(seq_group_metadata_list)
 
-    def _execute_step(
-        self,
-        token_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-        attn_metadata: Any,
-        input_lens: torch.Tensor,
-    ) -> torch.Tensor:
-        batch_size, seq_len = token_ids.shape
-        base_indicies = torch.arange(batch_size, dtype=torch.int32) * seq_len
-        logits_indices = base_indicies + input_lens - 1
-
-        hidden_states = self.model(
-            token_ids,
-            position_ids,
-            kv_caches,
-            attn_metadata,
-        )
-        logits = self.model.compute_logits(hidden_states, logits_indices)
-        # TODO(woosuk): Support sampling with temperature and top_p.
-        next_token_ids = torch.argmax(logits, axis=-1)
-        return next_token_ids
-
     def execute_model(
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
@@ -337,19 +329,22 @@ class TPUModelRunner:
         inputs = self.prepare_inputs(seq_group_metadata_list)
         xm.mark_step()
         end = time.time()
-        # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
+        phase = "prompt" if inputs[2].is_prompt else "decode"
+        batch_size, seq_len = inputs[0].shape
+        print(f"{phase} inputs: batch_size={batch_size}, seq_len={seq_len}")
+        print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids = self._execute_step(inputs[0], inputs[1], kv_caches,
+        next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                             inputs[2], inputs[3])
         xm.mark_step()
         end = time.time()
-        # print(f"model(): {(end - start) * 1000:.2f} ms")
+        print(f"model(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
         next_token_ids = next_token_ids.cpu()
         end = time.time()
-        # print(f".cpu(): {(end - start) * 1000:.2f} ms")
+        print(f".cpu(): {(end - start) * 1000:.2f} ms")
 
         next_token_ids = next_token_ids.tolist()
         i = 0
@@ -368,6 +363,49 @@ class TPUModelRunner:
 
             sampler_outputs.append(SequenceGroupOutput(seq_outputs, None))
         return [SamplerOutput(sampler_outputs)]
+
+
+class ModelWrapper(nn.Module):
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model.eval()
+
+    def forward(
+        self,
+        token_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        attn_metadata: Any,
+        input_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, seq_len = token_ids.shape
+        base_indicies = torch.arange(batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
+        logits_indices = base_indicies + input_lens - 1
+
+        num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+        slot_mapping = attn_metadata.slot_mapping
+        slot_mapping = slot_mapping.flatten()
+        head_indicies = torch.arange(0,
+                                    num_kv_heads,
+                                    device=slot_mapping.device,
+                                    dtype=slot_mapping.dtype)
+        head_indicies *= block_size * num_blocks
+        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(-1, num_kv_heads)
+        slot_mapping = slot_mapping + head_indicies.view(1, -1)
+        slot_mapping = slot_mapping.flatten()
+        attn_metadata.slot_mapping = slot_mapping
+
+        hidden_states = self.model(
+            token_ids,
+            position_ids,
+            kv_caches,
+            attn_metadata,
+        )
+        logits = self.model.compute_logits(hidden_states, logits_indices)
+        # TODO(woosuk): Support sampling with temperature and top_p.
+        next_token_ids = torch.argmax(logits, axis=-1)
+        return next_token_ids
 
 
 def _make_array_with_pad(
