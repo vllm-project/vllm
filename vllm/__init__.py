@@ -26,12 +26,10 @@ class TensorMeta:
     dtype: torch.dtype
     size: torch.Size
 
-    # this is a hack to make sure that torch.dtype is initialized
-    assert isinstance(torch.dtype, type)
-
     torch_dtypes = [
-        getattr(torch, attr) for attr in dir(torch)
-        if isinstance(getattr(torch, attr), torch.dtype)
+        torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8,
+        torch.uint16, torch.uint32, torch.uint64, torch.float16, torch.float32,
+        torch.float64, torch.bfloat16
     ]
     dtype_map = {dtype: i for i, dtype in enumerate(torch_dtypes)}
 
