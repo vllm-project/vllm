@@ -24,7 +24,7 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(pp_size, tp_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
     num_elements = 8
     all_tensors = [
@@ -46,7 +46,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(pp_size, tp_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
     num_dimensions = 3
     tensor_size = list(range(2, num_dimensions + 2))
@@ -74,7 +74,7 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(pp_size, tp_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
     test_dict = {
         # device tensor

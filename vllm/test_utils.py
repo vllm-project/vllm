@@ -6,8 +6,8 @@ from vllm.utils import get_open_port
 
 
 def init_test_distributed_environment(
-    pp_size: int,
     tp_size: int,
+    pp_size: int,
     rank: int,
     distributed_init_port: str,
     local_rank: int = -1,

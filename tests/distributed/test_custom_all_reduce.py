@@ -24,7 +24,7 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(pp_size, tp_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
 
     group = get_tensor_model_parallel_group()
@@ -67,7 +67,7 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(pp_size, tp_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
 
     # we use the first group to communicate once
