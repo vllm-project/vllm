@@ -1,4 +1,5 @@
 from typing import Dict, List, Tuple
+
 from .sequence import Logprob, Sequence
 
 

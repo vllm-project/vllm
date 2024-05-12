@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 from pydantic import Field
 from typing_extensions import Annotated
+
 from .sequence_controller import SequenceController
 
 _SAMPLING_EPS = 1e-5
