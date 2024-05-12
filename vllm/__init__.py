@@ -26,6 +26,9 @@ class TensorMeta:
     dtype: torch.dtype
     size: torch.Size
 
+    # this is a hack to make sure that torch.dtype is initialized
+    assert isinstance(torch.dtype, type)
+
     torch_dtypes = [
         getattr(torch, attr) for attr in dir(torch)
         if isinstance(getattr(torch, attr), torch.dtype)
