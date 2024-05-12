@@ -104,6 +104,9 @@ class CustomAllreduce:
         group = group or get_tensor_model_parallel_cpu_group()
         self.group = group
 
+        assert dist.get_backend(group) != dist.Backend.NCCL, (
+            "CustomAllreduce should be attached to a non-NCCL group.")
+
         rank = dist.get_rank(group=self.group)
         world_size = dist.get_world_size(group=self.group)
         if world_size == 1:
@@ -137,9 +140,12 @@ class CustomAllreduce:
             device_ids = list(range(torch.cuda.device_count()))
 
         physical_device_id = device_ids[device.index]
-        tensor = torch.tensor([physical_device_id], dtype=torch.int)
+        tensor = torch.tensor([physical_device_id],
+                              dtype=torch.int,
+                              device="cpu")
         gather_list = [
-            torch.tensor([0], dtype=torch.int) for _ in range(world_size)
+            torch.tensor([0], dtype=torch.int, device="cpu")
+            for _ in range(world_size)
         ]
         dist.all_gather(gather_list, tensor, group=self.group)
         physical_device_ids = [t.item() for t in gather_list]
