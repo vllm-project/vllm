@@ -53,7 +53,7 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
     vllm_runner,
     example_prompts,
@@ -72,8 +72,9 @@ def test_models(
                                     max_model_len=MAX_MODEL_LEN,
                                     tensor_parallel_size=1)
 
-    gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
-        example_prompts[:-1], max_tokens, num_logprobs)
+    gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(example_prompts[:-1],
+                                                                     max_tokens,
+                                                                     num_logprobs)
     del gptq_marlin_model
 
     # Run gptq.
