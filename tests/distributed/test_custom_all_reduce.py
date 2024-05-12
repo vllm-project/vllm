@@ -6,7 +6,8 @@ import ray
 import torch
 import torch.distributed as dist
 
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.communication_op import (
+    graph_capture, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_ca_communicator)
 from vllm.test_utils import (init_test_distributed_environment,
@@ -36,10 +37,7 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            from vllm.distributed.communication_op import (
-                get_tp_ca_communicator)
-            ca = get_tp_ca_communicator()
-            with ca.capture():
+            with graph_capture():
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),

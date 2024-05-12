@@ -40,6 +40,20 @@ def graph_mode():
         yield
 
 
+@contextmanager
+def graph_capture():
+    """
+    `graph_capture` is a context manager which should include the code that
+    is capturing the CUDA graph. Its main purpose is to ensure that the
+    some operations will be run after the graph is captured, before the graph
+    is replayed.
+    """
+    ca_comm = get_tp_ca_communicator()
+    context = nullcontext() if ca_comm is None else ca_comm.capture()
+    with context:
+        yield
+
+
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group.
 
