@@ -1,5 +1,5 @@
 from collections import namedtuple
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -14,7 +14,7 @@ from .parallel_state import (get_cpu_world_group,
 
 
 @contextmanager
-def graph_capture_mode():
+def graph_mode():
     # In graph capture, we have to be very careful about the collective
     # operations. The current status is:
     #     allreduce \ Mode   |  Eager  |  Graph  |
@@ -31,9 +31,12 @@ def graph_capture_mode():
     # We always prioritize using custom all-reduce kernel but fall back
     # to PyTorch or pynccl if it is disabled or not supported.
     pynccl_comm = get_tp_pynccl_communicator()
-    assert pynccl_comm is not None
-    with pynccl_comm.change_state(enable=True,
-                                  stream=torch.cuda.current_stream()):
+    if pynccl_comm is None:
+        context = nullcontext()
+    else:
+        context = pynccl_comm.change_state(enable=True,
+                                           stream=torch.cuda.current_stream())
+    with context:
         yield
 
 
