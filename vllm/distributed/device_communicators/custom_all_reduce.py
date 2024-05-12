@@ -6,6 +6,8 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.distributed.parallel_state import (
+    get_local_rank, get_tensor_model_parallel_cpu_group)
 from vllm.logger import init_logger
 
 try:
@@ -99,8 +101,6 @@ class CustomAllreduce:
             # e.g. in a non-cuda environment
             return
 
-        from vllm.distributed.parallel_state import (
-            get_tensor_model_parallel_cpu_group)
         group = group or get_tensor_model_parallel_cpu_group()
         self.group = group
 
@@ -121,7 +121,6 @@ class CustomAllreduce:
                 world_size, str(CustomAllreduce._SUPPORTED_WORLD_SIZES))
             return
 
-        from vllm.distributed.parallel_state import get_local_rank
         if device is None:
             local_rank = get_local_rank()
             device = torch.device(f"cuda:{local_rank}")
