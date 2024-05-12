@@ -15,7 +15,7 @@ from .parallel_state import (get_cpu_world_group,
 
 @contextmanager
 def graph_mode():
-    # In graph capture, we have to be very careful about the collective
+    # In graph mode, we have to be very careful about the collective
     # operations. The current status is:
     #     allreduce \ Mode   |  Eager  |  Graph  |
     # --------------------------------------------
