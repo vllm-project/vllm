@@ -1,27 +1,38 @@
 import pytest
 import torch
 
-from vllm.config import ModelConfig, SchedulerConfig
 from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
 
+def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
+    engine_args = EngineArgs(model, *args, **kwargs)
+    engine_config = engine_args.create_engine_config()
+    model_runner = ModelRunner(
+        model_config=engine_config.model_config,
+        parallel_config=engine_config.parallel_config,
+        scheduler_config=engine_config.scheduler_config,
+        device_config=engine_config.device_config,
+        cache_config=engine_config.cache_config,
+        load_config=engine_config.load_config,
+        lora_config=engine_config.lora_config,
+        is_driver_worker=True,
+    )
+    return model_runner
+
+
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_prompt(batch_size):
-    scheduler_config = SchedulerConfig(100000,
-                                       100000,
-                                       100000,
-                                       enable_chunked_prefill=False)
-    model_runner = ModelRunner(model_config=None,
-                               parallel_config=None,
-                               scheduler_config=scheduler_config,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None)
-    model_runner.set_block_size(16)
+    model_runner = _create_model_runner(
+        "facebook/opt-125m",
+        max_num_batched_tokens=100000,
+        max_num_seqs=100000,
+        enable_chunked_prefill=False,
+    )
 
     seq_lens = []
     seq_group_metadata_list = []
@@ -123,27 +134,15 @@ def test_prepare_prompt(batch_size):
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
-    model_config = ModelConfig(
+    model_runner = _create_model_runner(
         "facebook/opt-125m",
-        "facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
         enforce_eager=False,
+        max_num_batched_tokens=100000,
+        max_num_seqs=100000,
+        enable_chunked_prefill=False,
     )
-    scheduler_config = SchedulerConfig(100000,
-                                       100000,
-                                       100000,
-                                       enable_chunked_prefill=False)
-    model_runner = ModelRunner(model_config=model_config,
-                               parallel_config=None,
-                               scheduler_config=scheduler_config,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None)
-    model_runner.set_block_size(16)
 
     seq_lens = []
     seq_group_metadata_list = []
@@ -214,23 +213,12 @@ def test_prepare_decode_cuda_graph(batch_size):
 
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
-    model_config = ModelConfig(
+    model_runner = _create_model_runner(
         "facebook/opt-125m",
-        "facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
         enforce_eager=False,
     )
-    model_runner = ModelRunner(model_config=model_config,
-                               parallel_config=None,
-                               scheduler_config=None,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None)
-    model_runner.set_block_size(16)
     seq_group_metadata_list = []
     input_tokens, input_positions, attn_metadata, _, _, _, slot_mapping = (
         model_runner._prepare_decode(seq_group_metadata_list))
@@ -260,29 +248,15 @@ def distributed_init():
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
-
-    model_config = ModelConfig(
+    model_runner = _create_model_runner(
         "facebook/opt-125m",
-        "facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
         seed=0,
         dtype="float16",
-        revision=None,
         enforce_eager=enforce_eager,
+        max_num_batched_tokens=100000,
+        max_num_seqs=100000,
+        enable_chunked_prefill=True,
     )
-    scheduler_config = SchedulerConfig(100000,
-                                       100000,
-                                       100000,
-                                       enable_chunked_prefill=True)
-    model_runner = ModelRunner(model_config=model_config,
-                               parallel_config=None,
-                               scheduler_config=scheduler_config,
-                               device_config=None,
-                               load_config=None,
-                               lora_config=None,
-                               is_driver_worker=True)
-    model_runner.set_block_size(16)
 
     # Add prefill requests.
     seq_lens = []
