@@ -218,7 +218,7 @@ class TensorDictWithBoundedMetadata:
         # Note: we only need the values of the metadata list.
         values = [value for key, value in metadata_list]
         metadata_list_bytes = pickle.dumps(values)
-        ALIGN_BYTES = 256
+        ALIGN_BYTES = 128
         return ((len(metadata_list_bytes) + ALIGN_BYTES - 1) //
                 ALIGN_BYTES) * ALIGN_BYTES
 
