@@ -186,6 +186,7 @@ class CustomAllreduce:
                                      dtype=torch.uint8,
                                      device=self.device)
         self.max_size = max_size
+        self.rank = rank
         self.world_size = world_size
         handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = full_nvlink
@@ -218,14 +219,29 @@ class CustomAllreduce:
         return self._gather_ipc_meta(shard_data)
 
     def _gather_ipc_meta(self, shard_data):
-        all_data: List[Optional[Any]] = [None] * self.world_size
-        dist.all_gather_object(all_data, shard_data, group=self.group)
+        # Note: don't use `[[None]] * self.world_size` here
+        # because it will create a list of the same reference
+        all_data: List[Optional[Any]] = [[None]
+                                         for i in range(self.world_size)]
+        all_data[self.rank][0] = shard_data
+
+        ranks = dist.get_process_group_ranks(group=self.group)
+        ranks.sort()
+        for i, rank in enumerate(ranks):
+            dist.broadcast_object_list(all_data[i],
+                                       src=rank,
+                                       group=self.group,
+                                       device="cpu")
+
+        # we cannot directly use `dist.all_gather_object` here
+        # because it is incompatible with `gloo` backend under inference mode.
+        # see https://github.com/pytorch/pytorch/issues/126032 for details.
 
         handles = []
         offsets = []
         for i in range(len(all_data)):
-            handles.append(all_data[i][0])  # type: ignore
-            offsets.append(all_data[i][1])  # type: ignore
+            handles.append(all_data[i][0][0])  # type: ignore
+            offsets.append(all_data[i][0][1])  # type: ignore
         return handles, offsets
 
     def register_buffer(self, inp: torch.Tensor):

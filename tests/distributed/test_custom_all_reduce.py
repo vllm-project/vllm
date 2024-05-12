@@ -36,7 +36,8 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            from vllm.distributed.communication_op import get_tp_ca_communicator
+            from vllm.distributed.communication_op import (
+                get_tp_ca_communicator)
             ca = get_tp_ca_communicator()
             with ca.capture():
                 # use integers so result matches NCCL exactly
