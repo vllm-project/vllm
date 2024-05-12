@@ -91,13 +91,11 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     assert torch.allclose(out, inp * (tp_size**num_communication))
 
 
-@pytest.mark.parametrize("tensor_parallel_size", [2])
+@pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
-def test_custom_allreduce(tensor_parallel_size, pipeline_parallel_size,
-                          test_target):
-    world_size = tensor_parallel_size * pipeline_parallel_size
+def test_custom_allreduce(tp_size, pipeline_parallel_size, test_target):
+    world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_tensor_parallel(tensor_parallel_size, pipeline_parallel_size,
-                                  test_target)
+    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target)
