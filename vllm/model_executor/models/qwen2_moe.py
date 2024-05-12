@@ -55,12 +55,12 @@ from vllm.sequence import SamplerOutput
 class Qwen2MoeMLP(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            quant_config: Optional[QuantizationConfig] = None,
-            reduce_results: bool = True,
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -87,9 +87,9 @@ class Qwen2MoeMLP(nn.Module):
 class Qwen2MoeSparseMoeBlock(nn.Module):
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -180,14 +180,14 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 class Qwen2MoeAttention(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            num_kv_heads: int,
-            rope_theta: float = 10000,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            max_position_embeddings: int = 8192,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -208,7 +208,7 @@ class Qwen2MoeAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -241,11 +241,11 @@ class Qwen2MoeAttention(nn.Module):
                               num_kv_heads=self.num_kv_heads)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -258,10 +258,10 @@ class Qwen2MoeAttention(nn.Module):
 class Qwen2MoeDecoderLayer(nn.Module):
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            layer_idx: int,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        layer_idx: int,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -296,12 +296,12 @@ class Qwen2MoeDecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: torch.Tensor,
-            attn_metadata: AttentionMetadata,
-            residual: Optional[torch.Tensor],
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -327,9 +327,9 @@ class Qwen2MoeDecoderLayer(nn.Module):
 class Qwen2MoeModel(nn.Module):
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -346,11 +346,11 @@ class Qwen2MoeModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
@@ -364,12 +364,13 @@ class Qwen2MoeModel(nn.Module):
 
 
 class Qwen2MoeForCausalLM(nn.Module):
+
     fall_back_to_pt_during_load = False
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -380,11 +381,11 @@ class Qwen2MoeForCausalLM(nn.Module):
         self.sampler = Sampler()
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -397,9 +398,9 @@ class Qwen2MoeForCausalLM(nn.Module):
         return logits
 
     def sample(
-            self,
-            logits: Optional[torch.Tensor],
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: Optional[torch.Tensor],
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
