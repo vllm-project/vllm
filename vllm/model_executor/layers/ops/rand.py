@@ -12,9 +12,12 @@ try:
 except ImportError as e:
     logger.warning(
         "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` (not available on macos)", e)
+        "please install triton with `pip install triton` "
+        "(not available on macos)", e)
+
     def dummy_decorator(*args, **kwargs):
         return args[0]
+
     triton = type("triton", tuple(), {"jit": dummy_decorator})()
     tl = type("tl", tuple(), {"constexpr": None})()
 

@@ -13,7 +13,8 @@ try:
 except ImportError as e:
     logger.warning(
         "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` (not available on macos)", e)
+        "please install triton with `pip install triton` "
+        "(not available on macos)", e)
     triton = type('triton', tuple(), {"__version__": "0.0.0"})()
 
 if triton.__version__ >= "2.1.0":

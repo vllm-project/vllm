@@ -6,7 +6,9 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -16,14 +18,14 @@ try:
 except ImportError as e:
     logger.warning(
         "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` (not available on macos)", e)
+        "please install triton with `pip install triton` "
+        "(not available on macos)", e)
+
     def dummy_decorator(*args, **kwargs):
         return args[0]
+
     triton = type("triton", tuple(), {"jit": dummy_decorator})()
     tl = type("tl", tuple(), {"constexpr": None, "dtype": None})()
-
-from vllm import _custom_ops as ops
-from vllm.utils import is_hip
 
 
 @triton.jit

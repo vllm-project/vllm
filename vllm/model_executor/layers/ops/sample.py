@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.ops.rand import seeded_uniform
 
 logger = init_logger(__name__)
 
@@ -13,13 +14,14 @@ try:
 except ImportError as e:
     logger.warning(
         "Failed to import triton with %r. To enable vllm execution, "
-        "please install triton with `pip install triton` (not available on macos)", e)
+        "please install triton with `pip install triton` "
+        "(not available on macos)", e)
+
     def dummy_decorator(*args, **kwargs):
         return args[0]
+
     triton = type("triton", tuple(), {"jit": dummy_decorator})()
     tl = type("tl", tuple(), {"constexpr": None})()
-
-from vllm.model_executor.layers.ops.rand import seeded_uniform
 
 _EPS = 1e-6
 

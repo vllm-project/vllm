@@ -433,6 +433,7 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer==2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if not (_is_neuron() or PLATFORM_AGNOSTIC_BUILD) else {},
+    cmdclass={"build_ext": cmake_build_ext}
+    if not (_is_neuron() or PLATFORM_AGNOSTIC_BUILD) else {},
     package_data=package_data,
 )
