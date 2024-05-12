@@ -50,6 +50,7 @@ logger = init_logger(__name__)
 class TensorizerConfig:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
+    vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
@@ -63,6 +64,7 @@ class TensorizerConfig:
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
             "tensorizer_uri": self.tensorizer_uri,
+            "vllm_tensorized": self.vllm_tensorized,
             "verify_hash": self.verify_hash,
             "num_readers": self.num_readers,
             "encryption_keyfile": self.encryption_keyfile,
@@ -102,6 +104,7 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
 class TensorizerArgs:
     tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
                           str, bytes, os.PathLike, int]
+    vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
@@ -115,6 +118,13 @@ class TensorizerArgs:
   Args:
       tensorizer_uri: Path to serialized model tensors. Can be a local file 
           path or a S3 URI.
+      vllm_tensorized: If True, indicates that the serialized model is a 
+          vLLM model. This is used to determine the behavior of the 
+          TensorDeserializer when loading tensors from a serialized model.
+          It is far faster to deserialize a vLLM model as it utilizes
+          tensorizer's optimized GPU loading. Note that this is now
+          deprecated, as serialized vLLM models are now automatically
+          inferred as vLLM models.
       verify_hash: If True, the hashes of each tensor will be verified against 
           the hashes stored in the metadata. A `HashMismatchError` will be 
           raised if any of the hashes do not match.
@@ -379,6 +389,12 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
         tensorizer_args.tensorizer_uri, **tensorizer_args.stream_params),
                                       **tensorizer_args.deserializer_params,
                                       lazy_load=True)
+    if tensorizer_config.vllm_tensorized:
+        logger.warning(
+            "Please note that newly serialized vLLM models are automatically "
+            "inferred as vLLM models, so setting vllm_tensorized=True is "
+            "only necessary for models serialized prior to this change. ")
+        return True
     if (".vllm_tensorized_marker" in deserializer):
         return True
     return False
