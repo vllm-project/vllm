@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
     VLLM_TARGET_DEVICE: str = "cuda"
+    PLATFORM_AGNOSTIC_BUILD: bool = False
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
     VLLM_BUILD_WITH_NEURON: bool = False
@@ -48,6 +49,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
     "VLLM_TARGET_DEVICE":
     lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+
+    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
+    "PLATFORM_AGNOSTIC_BUILD":
+    lambda: bool(os.environ.get("PLATFORM_AGNOSTIC_BUILD", False)),
 
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs

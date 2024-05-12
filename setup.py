@@ -36,6 +36,8 @@ VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 assert sys.platform.startswith(
     "linux"), "vLLM only supports Linux platform (including WSL)."
 
+PLATFORM_AGNOSTIC_BUILD = envs.PLATFORM_AGNOSTIC_BUILD
+
 MAIN_CUDA_VERSION = "12.1"
 
 
@@ -398,6 +400,9 @@ if envs.VLLM_USE_PRECOMPILED:
     ext_modules = []
     package_data["vllm"].append("*.so")
 
+if PLATFORM_AGNOSTIC_BUILD:
+    ext_modules = []
+
 setup(
     name="vllm",
     version=get_vllm_version(),
@@ -428,6 +433,6 @@ setup(
     extras_require={
         "tensorizer": ["tensorizer==2.9.0"],
     },
-    cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
+    cmdclass={"build_ext": cmake_build_ext} if not (_is_neuron() or PLATFORM_AGNOSTIC_BUILD) else {},
     package_data=package_data,
 )
