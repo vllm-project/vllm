@@ -393,7 +393,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
         logger.warning(
             "Please note that newly serialized vLLM models are automatically "
             "inferred as vLLM models, so setting vllm_tensorized=True is "
-            "only necessary for models serialized prior to this change. ")
+            "only necessary for models serialized prior to this change.")
         return True
     if (".vllm_tensorized_marker" in deserializer):
         return True
