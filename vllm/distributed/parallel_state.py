@@ -185,6 +185,8 @@ def initialize_model_parallel(
     if torch.cuda.is_available():
         data = data.to(device=f"cuda:{_LOCAL_RANK}")
     torch.distributed.all_reduce(data, group=_TP_DEVICE_GROUP)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
