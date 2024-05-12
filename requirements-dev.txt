@@ -19,12 +19,15 @@ pytest-forked
 pytest-asyncio
 pytest-rerunfailures
 pytest-shard
-httpx
+
+# testing utils
+awscli
 einops # required for MPT
+httpx
+peft
 requests
 ray
-peft
-awscli
+sentence-transformers # required for embedding
 
 # Benchmarking
 aiohttp

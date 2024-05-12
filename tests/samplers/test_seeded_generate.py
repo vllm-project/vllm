@@ -60,7 +60,7 @@ def test_random_sample_with_seed(
             llm._add_request(
                 prompt=prompt,
                 prompt_token_ids=None,
-                sampling_params=params,
+                params=params,
             )
 
     results = llm._run_engine(use_tqdm=False)
