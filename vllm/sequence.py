@@ -511,7 +511,8 @@ class SequenceGroup:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error (unless using controllers,
         # where the request may go from decode to prefill).
-        if self.is_prefill() and not self.sampling_params.controller:
+        if self.is_prefill() and not (self.sampling_params
+                                      and self.sampling_params.controller):
             raise ValueError(
                 "seq_group.get_last_latency() should not be called "
                 "if the seq_group is in prefill phase.")
