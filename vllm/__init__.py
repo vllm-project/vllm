@@ -26,19 +26,21 @@ class TensorMeta:
     dtype: torch.dtype
     size: torch.Size
 
+    # use string to avoid torch lazy import issues
+    # sometimes `torch.int8` is not available at bootstrapping time
     torch_dtypes = [
-        torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8,
-        torch.uint16, torch.uint32, torch.uint64, torch.float16, torch.float32,
-        torch.float64, torch.bfloat16
+        "torch.int8", "torch.int16", "torch.int32", "torch.int64",
+        "torch.uint8", "torch.uint16", "torch.uint32", "torch.uint64",
+        "torch.float16", "torch.float32", "torch.float64", "torch.bfloat16"
     ]
     dtype_map = {dtype: i for i, dtype in enumerate(torch_dtypes)}
 
     def __getstate__(self):
-        return [self.device, self.dtype_map[self.dtype], tuple(self.size)]
+        return [self.device, self.dtype_map[str(self.dtype)], tuple(self.size)]
 
     def __setstate__(self, state):
         self.device = state[0]
-        self.dtype = self.torch_dtypes[state[1]]
+        self.dtype = eval(self.torch_dtypes[state[1]])
         self.size = torch.Size(state[2])
 
 
