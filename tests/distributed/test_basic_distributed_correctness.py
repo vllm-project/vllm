@@ -18,6 +18,7 @@ import torch
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+WORKER_USE_RAY = "WORKER_USE_RAY"
 VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
@@ -26,7 +27,6 @@ VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
-@pytest.mark.parametrize("worker_use_ray", [False, True])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -34,8 +34,9 @@ def test_models(
     model: str,
     dtype: str,
     max_tokens: int,
-    worker_use_ray: bool,
 ) -> None:
+    worker_use_ray = os.getenv(WORKER_USE_RAY, "1") == "1"
+
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
     enforce_eager = backend_by_env_var == "FLASHINFER"
 
