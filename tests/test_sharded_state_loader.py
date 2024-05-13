@@ -2,6 +2,7 @@ import os
 import shutil
 from tempfile import TemporaryDirectory
 
+import pytest
 import torch
 from huggingface_hub import snapshot_download
 
@@ -42,32 +43,41 @@ def test_filter_subtensors():
         assert tensor.equal(state_dict[key])
 
 
-def test_sharded_state_loader():
+@pytest.mark.parametrize("enable_lora", [True])
+def test_sharded_state_loader(enable_lora):
     weights_patterns = ("*.bin", "*.pt", "*.safetensors")
 
     with TemporaryDirectory() as cache_dir, TemporaryDirectory() as output_dir:
         input_dir = snapshot_download("facebook/opt-125m", cache_dir=cache_dir)
 
-        llm_before = LLM(
+        llm = LLM(
             model=input_dir,
             worker_use_ray=True,
-            gpu_memory_utilization=0.1,
+            gpu_memory_utilization=0.3,
         )
-        gen_before = llm_before.generate(prompts, sampling_params)
-        out_before = [gen.outputs[0].__dict__ for gen in gen_before]
 
         # Dump worker states to output directory
-        model_executor = llm_before.llm_engine.model_executor
+        model_executor = llm.llm_engine.model_executor
         model_executor.save_sharded_state(path=output_dir)
         # Copy metadata files to output directory
         for file in os.listdir(input_dir):
             if not any(file.endswith(ext) for ext in weights_patterns):
                 shutil.copy(f"{input_dir}/{file}", output_dir)
 
+        llm_before = LLM(
+            model=input_dir,
+            worker_use_ray=True,
+            enable_lora=enable_lora,
+            gpu_memory_utilization=0.3,
+        )
+        gen_before = llm_before.generate(prompts, sampling_params)
+        out_before = [gen.outputs[0].__dict__ for gen in gen_before]
+
         llm_after = LLM(
             model=output_dir,
             worker_use_ray=True,
-            gpu_memory_utilization=0.1,
+            enable_lora=enable_lora,
+            gpu_memory_utilization=0.3,
             load_format="sharded_state",
         )
         gen_after = llm_after.generate(prompts, sampling_params)

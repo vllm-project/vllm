@@ -434,11 +434,19 @@ class ShardedStateLoader(BaseModelLoader):
                 with safe_open(path, framework="pt") as f:
                     for key in f.keys():  # noqa: SIM118
                         tensor = f.get_tensor(key)
+                        # If loading with LoRA enabled, additional padding may
+                        # be added to certain parameters. We only load into a
+                        # narrowed view of the parameter data.
+                        param_data = state_dict[key].data
+                        param_shape = state_dict[key].shape
                         for dim, size in enumerate(tensor.shape):
-                            state_dict[key].data = (
-                                state_dict[key].data.narrow(dim, 0, size)
-                            )
-                        state_dict[key].data.copy_(tensor)
+                            if size < param_shape[dim]:
+                                param_data = param_data.narrow(dim, 0, size)
+                        if tensor.shape != param_shape:
+                            logger.warning("loading tensor of shape %s into "
+                                           "parameter '%s' of shape %s",
+                                           tensor.shape, key, param_shape)
+                        param_data.copy_(tensor)
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(
