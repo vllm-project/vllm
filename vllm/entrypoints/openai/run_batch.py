@@ -1,5 +1,4 @@
 import asyncio
-from typing import Optional
 from vllm.utils import random_uuid
 from io import StringIO
 import argparse
@@ -9,8 +8,9 @@ import aiohttp
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionResponse, BatchRequestInput, BatchRequestOutput)
+from vllm.entrypoints.openai.protocol import (ChatCompletionResponse,
+                                              BatchRequestInput,
+                                              BatchRequestOutput)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -27,16 +27,18 @@ def parse_args():
         required=True,
         type=str,
         help=
-        "The path or url to a single input file. Currently supports local file paths, or the http protocol (http or https). If a URL is specified, the file should be available via HTTP GET."
-    )
+        "The path or url to a single input file. Currently supports local file "
+        "paths, or the http protocol (http or https). If a URL is specified, "
+        "the file should be available via HTTP GET.")
     parser.add_argument(
         "-o",
         "--output-file",
         required=True,
         type=str,
         help=
-        "The path or url to a single output file. Currently supports local file paths, or web (http or https) urls. If a URL is specified, the file should be available via HTTP PUT."
-    )
+        "The path or url to a single output file. Currently supports local file "
+        "paths, or web (http or https) urls. If a URL is specified, the file"
+        "should be available via HTTP PUT.")
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
@@ -49,19 +51,19 @@ def parse_args():
 
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(path_or_url) as resp:
-                return await resp.text()
+        async with aiohttp.ClientSession() as session, \
+                   session.get(path_or_url) as resp:
+            return await resp.text()
     else:
-        return open(path_or_url, "r").read()
+        with open(path_or_url, "r") as f:
+            return f.read()
 
 
 async def write_file(path_or_url: str, data: str) -> None:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with aiohttp.ClientSession() as session:
-            async with session.put(path_or_url,
-                                   data=data.encode("utf-8")) as resp:
-                pass
+        async with aiohttp.ClientSession() as session, \
+                   session.put(path_or_url, data=data.encode("utf-8")):
+            pass
     else:
         # We should make this async, but as long as this is always run as a
         # standalone program, blocking the event loop won't effect performance
@@ -100,8 +102,6 @@ async def main(args):
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(
         engine_args, usage_context=UsageContext.OPENAI_API_SERVER)
-
-    event_loop: Optional[asyncio.AbstractEventLoop]
 
     # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
