@@ -290,6 +290,5 @@ class FlashAttentionImpl(AttentionImpl):
                 alibi_slopes=self.alibi_slopes,
             ).squeeze(1)
 
-
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
