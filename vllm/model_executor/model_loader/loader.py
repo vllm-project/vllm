@@ -361,9 +361,9 @@ class TensorizerLoader(BaseModelLoader):
                                                vision_language_config,
                                                cache_config)
         return self._load_model_serialized_cpu(model_config, device_config,
-                                             lora_config,
-                                             vision_language_config,
-                                             cache_config)
+                                               lora_config,
+                                               vision_language_config,
+                                               cache_config)
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:

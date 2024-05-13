@@ -18,9 +18,10 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          open_stream,
                                                          serialize_vllm_model)
 
+from ..utils import ServerRunner
+
 # yapf conflicts with isort for this docstring
 
-from ..utils import ServerRunner
 
 prompts = [
     "Hello, my name is",
