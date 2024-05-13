@@ -60,7 +60,7 @@ ARG PYTHON_VERSION=3
 COPY requirements-build.txt requirements-build.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install -r requirements-build.txt
+    python3 -m pip install build -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
 RUN apt-get update -y && apt-get install -y ccache
@@ -104,7 +104,7 @@ ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     if [ "$USE_SCCACHE" != "1" ]; then \
-        python3 setup.py bdist_wheel --dist-dir=dist; \
+        python3 -m build --wheel --outdir=dist --no-isolation -v; \
     fi
 
 # check the size of the wheel, we cannot upload wheels larger than 100MB

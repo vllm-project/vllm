@@ -108,7 +108,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     pip install -U -r requirements-rocm.txt \
     && if [ "$BASE_IMAGE" = "$ROCm_6_0_BASE" ]; then \
        patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch; fi \
-    && python3 setup.py install \
+    && pip3 install -v . \
     && export VLLM_PYTHON_VERSION=$(python -c "import sys; print(str(sys.version_info.major) + str(sys.version_info.minor))") \
     && cp build/lib.linux-x86_64-cpython-${VLLM_PYTHON_VERSION}/vllm/*.so vllm/ \
     && cd ..
