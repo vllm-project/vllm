@@ -5,6 +5,7 @@
 
 steps:
 - label: Regression Test
+  mirror_hardwares: [amd]
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -12,6 +13,7 @@ steps:
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
+  mirror_hardwares: [amd]
   commands:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
@@ -29,6 +31,7 @@ steps:
   num_gpus: 2
 
 - label: Distributed Tests
+  mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests/distributed"
 
   num_gpus: 2 # only support 1 or 2 for now.
@@ -48,7 +51,7 @@ steps:
   - pytest -v -s test_pynccl.py
 
 - label: Engine Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
@@ -79,7 +82,7 @@ steps:
     - pytest -v -s models --ignore=models/test_llava.py
 
 - label: Llava Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models/test_llava.py
@@ -101,7 +104,7 @@ steps:
   command: pytest -v -s worker
 
 - label: Speculative decoding tests
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N
