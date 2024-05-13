@@ -52,8 +52,8 @@ vLLM is flexible and easy to use with:
 - (Experimental) Multi-lora support
 
 vLLM seamlessly supports most popular open-source models on HuggingFace, including:
-- Transformer-like LLMs (e.g., Llama, Mistral, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, Deepseek, DBRX, Arctic)
+- Transformer-like LLMs (e.g., Llama)
+- Mixture-of-Expert LLMs (e.g., Mixtral)
 - Multi-modal LLMs (e.g., LLaVA)
 
 Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).

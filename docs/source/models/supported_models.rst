@@ -19,6 +19,10 @@ Alongside each architecture, we include some popular models that use it.
     - Aquila
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
     - ✅︎
+  * - :code:`ArcticForCausalLM`
+    - Aquila
+    - :code:`Snowflake/snowflake-arctic-base`, :code:`Snowflake/snowflake-arctic-instruct`, etc.
+    - ✅︎
   * - :code:`BaiChuanForCausalLM`
     - Baichuan
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
