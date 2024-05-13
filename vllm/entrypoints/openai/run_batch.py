@@ -22,7 +22,7 @@ import aiohttp
 
 import vllm
 import vllm.envs as envs
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
