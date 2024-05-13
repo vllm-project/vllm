@@ -19,6 +19,7 @@ from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.model_runner import ModelRunner
+from vllm.worker.encoder_decoder_model_runner import EncoderDecoderModelRunner
 from vllm.worker.worker_base import WorkerBase
 
 
@@ -68,8 +69,16 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
+        if self.model_config.embedding_mode:
+            # Embedding model
+            ModelRunnerClass = EmbeddingModelRunner
+        elif getattr(self.model_config.hf_config, "is_encoder_decoder", False):
+            # Encoder/decoder model
+            ModelRunnerClass = EncoderDecoderModelRunner
+        else:
+            # Decoder-only model
+            ModelRunnerClass = ModelRunner
+            
         self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,
