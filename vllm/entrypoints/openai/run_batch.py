@@ -5,7 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Optional, Set
-import shortuuid
+from vllm.utils import random_uuid
 from io import StringIO
 import json
 
@@ -76,7 +76,7 @@ async def run_request(chat_serving : OpenAIServingChat, request : BatchRequestIn
     chat_request = request.body
     chat_response = await chat_serving.create_chat_completion(chat_request)
     batch_output = BatchRequestOutput(
-        id=f"vllm-{shortuuid.uuid()}",
+        id=f"vllm-{random_uuid()}",
         custom_id=request.custom_id,
         response=chat_response,
         error=None,
