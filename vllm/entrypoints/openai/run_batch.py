@@ -8,6 +8,7 @@ from typing import Optional, Set
 from vllm.utils import random_uuid
 from io import StringIO
 import json
+import argparse
 
 import fastapi
 import uvicorn
