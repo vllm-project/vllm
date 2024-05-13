@@ -188,7 +188,8 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         # Validate dtype
         if params_dtype not in [torch.float16, torch.bfloat16]:
             raise ValueError(
-                f"The params dtype must be float16 or bfloat16, but got {params_dtype}")
+                f"The params dtype must be float16 "
+                f"or bfloat16, but got {params_dtype}")
 
         # Validate output_size_per_partition
         output_size_per_partition = sum(output_partition_sizes)
