@@ -1,5 +1,5 @@
 """A CPU worker class."""
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import torch
 import torch.distributed
@@ -12,11 +12,12 @@ from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.worker.cpu_model_runner import CPUModelRunner
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
 
@@ -102,7 +103,7 @@ class CPUCacheEngine:
         return dtype_size * total
 
 
-class CPUWorker(LoraNotSupportedWorkerBase):
+class CPUWorker(WorkerBase):
     """A worker class that executes (a partition of) the model on a CPU socket.
 
     Each worker is associated with a single CPU socket. The worker is 
@@ -296,6 +297,15 @@ class CPUWorker(LoraNotSupportedWorkerBase):
 
         # CPU worker only supports single-step execution.
         return [output]
+    
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        return self.model_runner.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        return self.model_runner.list_loras()
 
     def init_distributed_environment(self) -> None:
         """Initialize the distributed environment."""

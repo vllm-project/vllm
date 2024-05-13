@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 
 import torch
 from torch import nn
@@ -9,6 +9,9 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
@@ -57,6 +60,7 @@ class CPUModelRunner:
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
     def load_model(self) -> None:
         self.model = get_model(
@@ -67,6 +71,22 @@ class CPUModelRunner:
             lora_config=self.lora_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config)
+        
+        if self.lora_config:
+            assert hasattr(self.model, "supported_lora_modules"
+                           ) and self.model.supported_lora_modules, (
+                               "Model does not support LoRA")
+            assert hasattr(
+                self.model,
+                "embedding_modules"), "Model does not have embedding_modules"
+            assert hasattr(self.model, "embedding_padding_modules"
+                           ), "Model does not have embedding_padding_modules"
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens, self.vocab_size,
+                self.lora_config, self.device, self.model.embedding_modules,
+                self.model.embedding_padding_modules)
+            self.model = self.lora_manager.create_lora_manager(self.model)
 
     def _prepare_prompt(
         self,
@@ -341,3 +361,33 @@ class CPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
         return output
+
+    def remove_all_loras(self):
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.remove_all_loras()
+
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.set_active_loras(lora_requests, lora_mapping)
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.add_lora(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.remove_lora(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.list_loras()
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
