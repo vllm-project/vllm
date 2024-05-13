@@ -1,19 +1,19 @@
-import asyncio
-from vllm.utils import random_uuid
-from io import StringIO
 import argparse
+import asyncio
+from io import StringIO
 
 import aiohttp
 
 import vllm
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (ChatCompletionResponse,
-                                              BatchRequestInput,
-                                              BatchRequestOutput)
+from vllm.entrypoints.openai.protocol import (BatchRequestInput,
+                                              BatchRequestOutput,
+                                              ChatCompletionResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -35,10 +35,9 @@ def parse_args():
         "--output-file",
         required=True,
         type=str,
-        help=
-        "The path or url to a single output file. Currently supports local "
-        "file paths, or web (http or https) urls. If a URL is specified, the"
-        "file should be available via HTTP PUT.")
+        help="The path or url to a single output file. Currently supports "
+        "local file paths, or web (http or https) urls. If a URL is specified,"
+        " the file should be available via HTTP PUT.")
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
