@@ -7,7 +7,7 @@ from torch import nn
 from transformers import CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig
+from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -62,6 +62,7 @@ class LlavaForConditionalGeneration(nn.Module):
     def __init__(self,
                  config: "LlavaConfig",
                  vision_language_config: VisionLanguageConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional["QuantizationConfig"] = None) -> None:
         super().__init__()
         self.config = config
@@ -85,7 +86,8 @@ class LlavaForConditionalGeneration(nn.Module):
             projector_hidden_act=config.projector_hidden_act)
 
         self.quant_config = quant_config
-        self.language_model = LlamaModel(config.text_config, quant_config)
+        self.language_model = LlamaModel(config.text_config, cache_config,
+                                         quant_config)
         self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
