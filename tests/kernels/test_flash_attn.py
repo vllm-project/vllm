@@ -164,6 +164,10 @@ def test_varlen_with_paged_kv(
                             head_size,
                             dtype=dtype)
     value_cache = torch.randn_like(key_cache)
+    # Normalize the scale of the key and value caches to mitigate
+    # numerical instability.
+    key_cache /= head_size**0.5
+    value_cache /= head_size**0.5
     cu_query_lens = torch.tensor([0] + query_lens,
                                  dtype=torch.int32).cumsum(dim=0,
                                                            dtype=torch.int32)
