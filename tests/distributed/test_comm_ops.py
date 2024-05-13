@@ -3,7 +3,6 @@
 Run `pytest tests/distributed/test_comm_ops.py`.
 """
 import os
-from typing import Any, List, Tuple
 
 import pytest
 import ray
@@ -128,7 +127,7 @@ def fast_broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int,
         fields = ["a", "b"]
 
         @classmethod
-        def get_example_metadata_list(cls) -> List[Tuple[str, Any]]:
+        def get_example_metadata_list(cls):
             return [
                 ("a", TensorMeta("cuda", torch.float32, torch.Size([]))),
                 ("b", TensorMeta("cpu", torch.float32, torch.Size([]))),
