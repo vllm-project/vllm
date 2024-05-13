@@ -133,6 +133,10 @@ _VISION_LANGUAGE_MODELS = {
     "llava-hf/llava-1.5-7b-hf": LlavaForConditionalGeneration,
 }
 
+_EMBEDDING_MODELS = [
+    "intfloat/e5-mistral-7b-instruct",
+]
+
 
 class HfRunner:
 
@@ -145,14 +149,7 @@ class HfRunner:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
         self.model_name = model_name
-        if model_name not in _VISION_LANGUAGE_MODELS:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
-            self.processor = None
-        else:
+        if model_name in _VISION_LANGUAGE_MODELS:
             self.model = _VISION_LANGUAGE_MODELS[model_name].from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
@@ -162,6 +159,20 @@ class HfRunner:
                 model_name,
                 torch_dtype=torch_dtype,
             )
+        elif model_name in _EMBEDDING_MODELS:
+            # Lazy init required for AMD CI
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(
+                model_name,
+                device="cpu",
+            ).to(dtype=torch_dtype).cuda()
+        else:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            ).cuda()
+            self.processor = None
         if tokenizer_name is None:
             tokenizer_name = model_name
         self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
@@ -334,6 +345,9 @@ class HfRunner:
         return [(output_ids, output_str, output_logprobs)
                 for output_ids, output_str, output_logprobs in outputs]
 
+    def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
+        return self.model.encode(prompts)
+
     def __del__(self):
         del self.model
         cleanup()
@@ -457,6 +471,14 @@ class VllmRunner:
                                             temperature=0.0,
                                             max_tokens=max_tokens)
         outputs = self.generate(prompts, beam_search_params)
+        return outputs
+
+    def encode(self, prompts: List[str]) -> List[List[float]]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
         return outputs
 
     def __del__(self):

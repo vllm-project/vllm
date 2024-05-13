@@ -36,14 +36,14 @@ def test_logits_processor_force_generate(
     # test logits_processors when prompt_logprobs is not None
     vllm_model.model._add_request(
         prompt=example_prompts[0],
-        sampling_params=params_with_logprobs,
+        params=params_with_logprobs,
         prompt_token_ids=None,
     )
 
     # test prompt_logprobs is not None
     vllm_model.model._add_request(
         prompt=example_prompts[1],
-        sampling_params=SamplingParams(
+        params=SamplingParams(
             prompt_logprobs=3,
             max_tokens=max_tokens,
         ),
@@ -53,7 +53,7 @@ def test_logits_processor_force_generate(
     # test grouped requests
     vllm_model.model._add_request(
         prompt=example_prompts[2],
-        sampling_params=SamplingParams(max_tokens=max_tokens),
+        params=SamplingParams(max_tokens=max_tokens),
         prompt_token_ids=None,
     )
 
