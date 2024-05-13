@@ -8,8 +8,7 @@ from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
-from vllm.attention.ops.paged_attn import (PagedAttention,
-                                           PagedAttentionMetadata)
+from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 
 _SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
 
@@ -105,6 +104,13 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+    # (batch_size, max_blocks_per_seq).
+    # Block addresses per sequence. (Seq id -> list of physical block)
+    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
+    # in the kv cache. Each block can contain up to block_size tokens.
+    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
+    # captured.
+    block_tables: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -173,14 +179,6 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
-
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
-    # in the kv cache. Each block can contain up to block_size tokens.
-    # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
-    # captured.
-    block_tables: Optional[torch.Tensor]
 
 
 class FlashAttentionImpl(AttentionImpl):
