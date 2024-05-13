@@ -190,7 +190,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 if lp_plugin is None:
                     available_lps = list(logits_processor_plugins.keys())
                     raise ValueError(
-                        f"Logits processor {lp_name} not found in available"
+                        f"Logits processor {lp_name} not found in available "
                         f"logits processors ({available_lps}).")
 
                 try:
@@ -200,7 +200,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         tokenizer, lp_parameters)
                     logits_processors.append(logits_processor)
                 except ValidationError as e:
-                    raise ValueError(f"Invalid parameters for logits processor"
+                    raise ValueError(f"Invalid parameters for logits processor "
                                      f"{lp_name}: {e}") from e
 
         return SamplingParams(
@@ -360,7 +360,7 @@ class CompletionRequest(OpenAIBaseModel):
                 if lp_plugin is None:
                     available_lps = list(logits_processor_plugins.keys())
                     raise ValueError(
-                        f"Logits processor {lp_name} not found in available"
+                        f"Logits processor {lp_name} not found in available "
                         f"logits processors ({available_lps}).")
 
                 try:
