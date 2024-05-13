@@ -41,7 +41,7 @@ PROMPT_LENS = [32]
 
 def build_causal_mask(q_max_prompt_len, k_max_prompt_len):
     # Create a matrix where entry (i, j) is True if i >= j
-    mask = torch.triu(torch.ones(q_max_prompt_len, k_max_prompt_len), diagonal=1).transpose(0, 1)
+    mask = torch.triu(torch.ones(q_max_prompt_len, k_max_prompt_len), diagonal=1) #.transpose(0, 1)
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1, float('-inf')).masked_fill(mask == 0, 0.0)
     return mask
@@ -66,15 +66,25 @@ def ref_masked_attention(
     #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
     return out
 
-def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True):
-    q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
-    kv_prompt_lens = None
-    if not is_cross_attn:
-        # K,V prompt lens match Q for self-attention
-        kv_prompt_lens = q_prompt_lens
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True, force_max_len=True):
+    if force_max_len:
+        q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
+        kv_prompt_lens = None
+        if not is_cross_attn:
+            # K,V prompt lens match Q for self-attention
+            kv_prompt_lens = q_prompt_lens
+        else:
+            # K,V prompt lens come from K,V operands
+            kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
     else:
-        # K,V prompt lens come from K,V operands
-        kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+        q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+        kv_prompt_lens = None
+        if not is_cross_attn:
+            # K,V prompt lens match Q for self-attention
+            kv_prompt_lens = q_prompt_lens
+        else:
+            # K,V prompt lens come from K,V operands
+            kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
     
     query=torch.rand((batch_size,max_q_prompt_len,head_size))
     key=torch.rand((batch_size,max_kv_prompt_len,head_size))
@@ -359,7 +369,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
 
     # eval correctness of prefill output
-    #assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output)
+    assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
 
     # Put KVs in KV cache
     # Deprecated - handled automatically inside attention
