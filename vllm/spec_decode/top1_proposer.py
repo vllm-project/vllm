@@ -73,6 +73,14 @@ class Top1Proposer(SpeculativeProposer):
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
             )
+            (
+                proposal_lens,
+                maybe_sampler_output,
+                nonzero_proposal_len_indices,
+            ) = self._remove_no_proposal_seqs(proposal_lens,
+                                              maybe_sampler_output,
+                                              nonzero_proposal_len_indices,
+                                              transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
@@ -139,6 +147,61 @@ class Top1Proposer(SpeculativeProposer):
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         )
+
+    def _remove_no_proposal_seqs(self, proposal_lens, maybe_sampler_output,
+                                 nonzero_proposal_len_indices, transposed):
+        """Remove sequences from nonzero_proposal_len_indices and reset
+        their proposal_len to 0 the draft worker does not provide a proposal
+        (maybe_sampler_output=None). This can avoid scoring overheads.
+        """
+
+        # If maybe_sampler_output is None, then the draft worker did not
+        # provide a proposal for any sequence and thus no action needed.
+        # Also we do not support transposed maybe_sampler_output for now
+        # because it seems not straightforward for draft workers outputting
+        # transposed sampler outputs to handle the case of no proposal.
+        if maybe_sampler_output is None or transposed:
+            return (proposal_lens, maybe_sampler_output,
+                    nonzero_proposal_len_indices)
+
+        new_proposal_lens: List[int] = []
+        new_nonzero_proposal_len_indices: List[int] = []
+        new_maybe_sampler_output: List[SamplerOutput] = []
+        nonzero_proposal_len_idx_ptr = 0
+        seq_idx = 0
+        while seq_idx < len(
+                proposal_lens) and nonzero_proposal_len_idx_ptr < len(
+                    nonzero_proposal_len_indices):
+            if seq_idx < nonzero_proposal_len_indices[
+                    nonzero_proposal_len_idx_ptr]:
+                # Sequence is not in the original nonzero_proposal_len_indices,
+                # meaning that it has a proposal length of 0 before sending to
+                # the draft worker.
+                assert proposal_lens[seq_idx] == 0
+                new_proposal_lens.append(0)
+            else:
+                # Sequence is in the original nonzero_proposal_len_indices
+                if maybe_sampler_output[nonzero_proposal_len_idx_ptr] is None:
+                    # but does not have a proposal from the draft worker.
+                    new_proposal_lens.append(0)
+                else:
+                    # and has a proposal from the draft worker. Add it to the
+                    # new nonzero proposal list and keep the sampler output.
+                    new_proposal_lens.append(proposal_lens[seq_idx])
+                    new_nonzero_proposal_len_indices.append(seq_idx)
+                    new_maybe_sampler_output.append(
+                        maybe_sampler_output[nonzero_proposal_len_idx_ptr])
+                nonzero_proposal_len_idx_ptr += 1
+            seq_idx += 1
+
+        # The remaining sequences should have proposal length of 0.
+        new_proposal_lens.extend(proposal_lens[seq_idx:])
+
+        # We assume sampler_output will not be a list of all Nones.
+        # In this case this function should not be called.
+        assert new_maybe_sampler_output
+        return (new_proposal_lens, new_maybe_sampler_output,
+                new_nonzero_proposal_len_indices)
 
     def _merge_outputs(
         self,

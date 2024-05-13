@@ -167,8 +167,8 @@ class EngineArgs:
             '* "dummy" will initialize the weights with random values, '
             'which is mainly for profiling.\n'
             '* "tensorizer" will load the weights using tensorizer from '
-            'CoreWeave which assumes tensorizer_uri is set to the location of '
-            'the serialized weights.')
+            'CoreWeave. See the Tensorize vLLM Model script in the Examples'
+            'section for more information.\n')
         parser.add_argument(
             '--dtype',
             type=str,
@@ -574,6 +574,7 @@ class EngineArgs:
                                  speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            embedding_mode=model_config.embedding_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

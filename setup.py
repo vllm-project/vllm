@@ -426,7 +426,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0"],
+        "tensorizer": ["tensorizer>=2.9.0"],
     },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,
