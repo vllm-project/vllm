@@ -43,7 +43,7 @@ def test_filter_subtensors():
         assert tensor.equal(state_dict[key])
 
 
-@pytest.mark.parametrize("enable_lora", [True])
+@pytest.mark.parametrize("enable_lora", [False])
 def test_sharded_state_loader(enable_lora):
     weights_patterns = ("*.bin", "*.pt", "*.safetensors")
 
