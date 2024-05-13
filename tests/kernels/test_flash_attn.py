@@ -43,10 +43,9 @@ def ref_paged_attn(
         if q.shape[1] != k.shape[1]:
             k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
-        attn = torch.einsum("qhd,khd->hqk", q, k)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
         mask = torch.triu(torch.ones(query_len, kv_len),
                           diagonal=kv_len - query_len + 1).bool()
-        # print(mask)
         if sliding_window is not None:
             sliding_window_mask = torch.triu(torch.ones(query_len, kv_len),
                                              diagonal=kv_len -
@@ -54,7 +53,7 @@ def ref_paged_attn(
                                              1).bool().logical_not()
             mask |= sliding_window_mask
         attn.masked_fill_(mask, float("-inf"))
-        attn = torch.softmax(attn, dim=-1)
+        attn = torch.softmax(attn, dim=-1).to(v.dtype)
         out = torch.einsum("hqk,khd->qhd", attn, v)
 
         outputs.append(out)
