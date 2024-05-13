@@ -53,6 +53,7 @@ def convert_mapping(
                 embeddings.
             indices_len: List of lengths of the above tensors.
     """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
@@ -72,9 +73,9 @@ def convert_mapping(
     indices = torch.tensor(
         [index_mapping_indices, lora_indices, embedding_indices],
         dtype=torch.long,
-        device="cuda")
+        device=device)
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device="cuda",
+                                         device=device,
                                          dtype=torch.long)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
@@ -87,7 +88,7 @@ def convert_mapping(
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = (
         torch.arange(
-            0, len(sampler_indices_padded), device="cuda", dtype=torch.long) +
+            0, len(sampler_indices_padded), device=device, dtype=torch.long) +
         (sampler_indices_padded * len(sampler_indices_padded)))
     indices_len = [
         base_indices.shape[-1], sampler_indices.shape[-1],

@@ -100,6 +100,10 @@ class CPUModelRunner:
         seq_lens: List[int] = []
         multi_modal_input_list: List[torch.Tensor] = []
 
+        lora_index_mapping: List[int] = []
+        lora_prompt_mapping: List[int] = []
+        lora_requests: Set[LoRARequest] = set()
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -118,6 +122,16 @@ class CPUModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, seq_len)))
+
+            lora_id = seq_group_metadata.lora_int_id
+
+            if lora_id > 0:
+                lora_requests.add(seq_group_metadata.lora_request)
+
+            lora_index_mapping += [lora_id] * (seq_len - computed_len)
+            lora_prompt_mapping.extend([lora_id] * (
+                seq_len - computed_len if seq_group_metadata.sampling_params
+                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             if seq_group_metadata.multi_modal_data:
                 multi_modal_input_list.append(
@@ -181,7 +195,7 @@ class CPUModelRunner:
             kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_input)
+                multi_modal_input, lora_index_mapping, lora_prompt_mapping, lora_requests)
 
     def _prepare_decode(
         self,
@@ -283,12 +297,21 @@ class CPUModelRunner:
             # Prepare input tensors.
             if is_prompt:
                 (input_tokens, input_positions, attn_metadata, seq_lens,
-                 multi_modal_input
+                 multi_modal_input, lora_index_mapping, lora_prompt_mapping, lora_requests
                  ) = self._prepare_prompt(seq_group_metadata_list)
             else:
                 (input_tokens, input_positions,
                  attn_metadata) = self._prepare_decode(seq_group_metadata_list)
                 seq_lens = []
+
+            if self.lora_config:
+                lora_mapping = LoRAMapping(
+                    lora_index_mapping,
+                    lora_prompt_mapping,
+                )
+            else:
+                lora_mapping = None
+
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
                 seq_lens,
@@ -304,6 +327,8 @@ class CPUModelRunner:
                 "input_positions": input_positions,
                 "selected_token_indices":
                 sampling_metadata.selected_token_indices,
+                "lora_requests": lora_requests,
+                "lora_mapping": lora_mapping,
             }
             metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
@@ -313,6 +338,8 @@ class CPUModelRunner:
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
+            lora_mapping = metadata_dict.pop("lora_mapping")
+            lora_requests = metadata_dict.pop("lora_requests")
             attn_metadata = self.attn_backend.make_metadata(**metadata_dict)
             sampling_metadata = SamplingMetadata(
                 seq_groups=None,
@@ -324,7 +351,7 @@ class CPUModelRunner:
             )
 
         return (input_tokens, input_positions, attn_metadata,
-                sampling_metadata, multi_modal_input)
+                sampling_metadata, lora_requests, lora_mapping, multi_modal_input)
 
     @torch.inference_mode()
     def execute_model(
@@ -333,8 +360,11 @@ class CPUModelRunner:
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         multi_modal_input
+         lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
+        
+        if self.lora_config:
+            self.set_active_loras(lora_requests, lora_mapping)
 
         model_executable = self.model
         execute_model_kwargs = {
