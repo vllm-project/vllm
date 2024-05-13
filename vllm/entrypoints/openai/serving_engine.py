@@ -9,7 +9,8 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest, ErrorResponse,
+                                              CompletionRequest,
+                                              EmbeddingRequest, ErrorResponse,
                                               LogProbs, ModelCard, ModelList,
                                               ModelPermission)
 from vllm.logger import init_logger
@@ -165,7 +166,8 @@ class OpenAIServing:
 
     def _validate_prompt_and_tokenize(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         prompt: Optional[str] = None,
         prompt_ids: Optional[List[int]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
@@ -190,6 +192,16 @@ class OpenAIServing:
         input_text = prompt if prompt is not None else self.tokenizer.decode(
             prompt_ids)
         token_num = len(input_ids)
+
+        # Note: EmbeddingRequest doesn't have max_tokens
+        if isinstance(request, EmbeddingRequest):
+            if token_num > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
 
         if request.max_tokens is None:
             if token_num >= self.max_model_len:

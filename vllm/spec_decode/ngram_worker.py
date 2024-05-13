@@ -1,3 +1,4 @@
+import weakref
 from typing import List, Optional, Tuple
 
 import torch
@@ -37,7 +38,7 @@ class NGramWorker(LoraNotSupportedWorkerBase):
 
         # Current only support Top1Proposer
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             device=self.device,
             vocab_size=self.vocab_size,
         )
