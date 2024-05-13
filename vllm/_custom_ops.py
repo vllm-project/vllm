@@ -113,9 +113,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    vllm_ops.rotary_embedding(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
+    vllm_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
+                              is_neox)
 
 
 def batched_rotary_embedding(
@@ -141,9 +140,8 @@ def batched_rotary_embedding(
 
 
 # layer norm ops
-def rms_norm(
-    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
-) -> None:
+def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
+             epsilon: float) -> None:
     vllm_ops.rms_norm(out, input, weight, epsilon)
 
 
@@ -166,9 +164,8 @@ def awq_dequantize(
     thx: int,
     thy: int,
 ) -> torch.Tensor:
-    return vllm_ops.awq_dequantize(
-        qweight, scales, zeros, split_k_iters, thx, thy
-    )
+    return vllm_ops.awq_dequantize(qweight, scales, zeros, split_k_iters, thx,
+                                   thy)
 
 
 def awq_gemm(
@@ -191,14 +188,12 @@ def gptq_gemm(
     use_exllama: bool,
     bit: int,
 ) -> torch.Tensor:
-    return vllm_ops.gptq_gemm(
-        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, use_exllama, bit
-    )
+    return vllm_ops.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
+                              b_g_idx, use_exllama, bit)
 
 
-def gptq_shuffle(
-    q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int
-) -> None:
+def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
+                 bit: int) -> None:
     vllm_ops.gptq_shuffle(q_weight, q_perm, bit)
 
 
@@ -222,9 +217,8 @@ def marlin_gemm(
     size_n: int,
     size_k: int,
 ) -> torch.Tensor:
-    return vllm_ops.marlin_gemm(
-        a, b_q_weight, b_scales, workspace, size_m, size_n, size_k
-    )
+    return vllm_ops.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
+                                size_n, size_k)
 
 
 # cutlass
@@ -240,9 +234,8 @@ def cutlass_scaled_mm_dq(
         a_bf16 = a.to(dtype=torch.bfloat16)
         b_bf16 = b.to(dtype=torch.bfloat16)
 
-        return (b_scales * (a_scales * torch.mm(a_bf16, b_bf16))).to(
-            dtype=torch.bfloat16
-        )
+        return (b_scales *
+                (a_scales * torch.mm(a_bf16, b_bf16))).to(dtype=torch.bfloat16)
 
     else:
         m = a.shape[0]
@@ -263,9 +256,8 @@ def aqlm_gemm(
     codebook_partition_sizes: torch.Tensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    return vllm_ops.aqlm_gemm(
-        input, codes, codebooks, scales, codebook_partition_sizes, bias
-    )
+    return vllm_ops.aqlm_gemm(input, codes, codebooks, scales,
+                              codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(
@@ -284,9 +276,8 @@ def gptq_marlin_repack(
     size_n: int,
     num_bits: int,
 ) -> torch.Tensor:
-    return vllm_ops.gptq_marlin_repack(
-        b_q_weight, perm, size_k, size_n, num_bits
-    )
+    return vllm_ops.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
+                                       num_bits)
 
 
 def gptq_marlin_gemm(
@@ -404,9 +395,8 @@ def reshape_and_cache_flash(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
 ) -> None:
-    vllm_cache_ops.reshape_and_cache_flash(
-        key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype
-    )
+    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                           slot_mapping, kv_cache_dtype)
 
 
 def copy_blocks(
