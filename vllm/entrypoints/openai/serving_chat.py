@@ -3,7 +3,6 @@ import time
 from typing import (AsyncGenerator, AsyncIterator, Awaitable, Callable,
                     Iterable, List, Optional, Tuple, TypedDict, Union, final)
 
-from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartParam,
                                ChatCompletionRole)
 
