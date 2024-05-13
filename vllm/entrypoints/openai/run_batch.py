@@ -117,7 +117,7 @@ async def main(args):
         request = BatchRequestInput.model_validate_json(request_json)
         response_futures.append(run_request(openai_serving_chat, request))
 
-    responses = asyncio.gather(*response_futures)
+    responses = await asyncio.gather(*response_futures)
 
     output_buffer = StringIO()
     for response in responses:
