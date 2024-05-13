@@ -433,7 +433,12 @@ class ShardedStateLoader(BaseModelLoader):
             for path in filepaths:
                 with safe_open(path, framework="pt") as f:
                     for key in f.keys():  # noqa: SIM118
-                        state_dict[key].copy_(f.get_tensor(key))
+                        tensor = f.get_tensor(key)
+                        for dim, size in enumerate(tensor.shape):
+                            state_dict[key].data = (
+                                state_dict[key].data.narrow(dim, 0, size)
+                            )
+                        state_dict[key].data.copy_(tensor)
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(
