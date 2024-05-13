@@ -106,9 +106,15 @@ class NGramWorker(LoraNotSupportedWorkerBase):
                     # Do not match itself
                     matches = (windows[:-1] == ngram_tensor).all(dim=-1)
 
-                match_indices = matches.nonzero(as_tuple=True)[0]
-                if match_indices.size()[0] > 0:
-                    proposal_start_idx = match_indices[0].add_(ngram_size)
+                # first_match includes "values" (bool), indicating whether
+                # the match is found, and "indices", indicating the index
+                # of the first match.
+                # Note that "first_match.values.item()" triggers GPU-CPU
+                # sync so it is a bit inefficient, but we have not found
+                # a better way to do this.
+                first_match = matches.max(dim=-1)
+                if first_match.values.item():
+                    proposal_start_idx = first_match.indices.add_(ngram_size)
                     spec_indices = (
                         proposal_start_idx).repeat(sample_len) + torch.arange(
                             sample_len, device=self.device)
