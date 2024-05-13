@@ -113,7 +113,7 @@ async def main(args):
                                             )
 
     response_futures = []
-    for request_json in await (read_file(args.input_file)).split("\n"):
+    for request_json in (await read_file(args.input_file)).split("\n"):
         request = BatchRequestInput.model_validate_json(request_json)
         to_await.append(run_request(openai_serving_chat, request))
 
