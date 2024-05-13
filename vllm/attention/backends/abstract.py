@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from typing import Any, Dict, Generic, List, Optional, Tuple, Type, TypeVar
+from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
+                    TypeVar)
 
 import torch
 
@@ -10,12 +11,17 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_name() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
     def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
+    def make_metadata(*args, **kwargs) -> "AttentionMetadataPerStage":
         raise NotImplementedError
 
     @staticmethod
@@ -33,7 +39,7 @@ class AttentionBackend(ABC):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
@@ -41,7 +47,7 @@ class AttentionBackend(ABC):
     @abstractmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
@@ -50,13 +56,17 @@ class AttentionBackend(ABC):
 class AttentionMetadataPerStage:
     """Attention metadata for a specific stage. I.e., prefill or decode."""
 
-    def asdict_zerocopy(self) -> Dict[str, Any]:
+    def asdict_zerocopy(self,
+                        skip_fields: Optional[Set[str]] = None
+                        ) -> Dict[str, Any]:
         """Similar to dataclasses.asdict, but avoids deepcopying."""
+        if skip_fields is None:
+            skip_fields = set()
         # Note that if we add dataclasses as fields, they will need
         # similar handling.
         return {
             field.name: getattr(self, field.name)
-            for field in fields(self)
+            for field in fields(self) if field.name not in skip_fields
         }
 
 

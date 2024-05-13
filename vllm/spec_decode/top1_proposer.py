@@ -1,8 +1,9 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.util import sampler_output_to_torch
@@ -40,24 +41,22 @@ class Top1Proposer(SpeculativeProposer):
 
     def get_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        proposal_len: int,
+        execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
         """Get speculative proposals given the input batch.
 
         Sequences which would exceed the max model length are skipped during
         speculation.
         """
+        proposal_len = execute_model_req.num_lookahead_slots
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
 
         # Split speculative- and non-speculative- sequences.
         (
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
-        ) = self._split_by_max_model_len(seq_group_metadata_list, proposal_len)
+        ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
 
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -66,11 +65,12 @@ class Top1Proposer(SpeculativeProposer):
             # token_ids is like [batch] format in proposal_len size list,
             # while if it is false, the format would be [proposal_len]
             # in batch size list
-            maybe_sampler_output, transposed = self._worker.sampler_output(
+            nonzero_execute_model_req = ExecuteModelRequest(
                 seq_group_metadata_list=nonzero_proposal_len_seqs,
-                blocks_to_swap_in=blocks_to_swap_in,
-                blocks_to_swap_out=blocks_to_swap_out,
-                blocks_to_copy=blocks_to_copy,
+                num_lookahead_slots=proposal_len,
+            )
+            maybe_sampler_output, transposed = self._worker.sampler_output(
+                execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
             )
         else:
@@ -97,17 +97,27 @@ class Top1Proposer(SpeculativeProposer):
 
         return proposals
 
-    def _split_by_max_model_len(
+    def _split_by_proposal_len(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         proposal_len: int,
     ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
-        """Determine which sequences would exceed the max model length."""
+        """Split sequences by two groups:
+        1. Sequences with non-zero proposal length.
+        2. Sequences with zero proposal length (due to disabled speculation
+        or exceed the maximum model length).
+        """
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            # The speculative decoding for this request has been disabled
+            # (e.g. due to high traffic).
+            if seq_group_metadata.num_speculative_tokens == 0:
+                proposal_lens.append(0)
+                continue
+
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
             seq_len = seq_data.get_len()
 
@@ -115,13 +125,14 @@ class Top1Proposer(SpeculativeProposer):
             # are supported.
             # If max_proposal_len is defined, then we shall no exccess this
             # quota for nonzero_proposal
+            new_k = 0
             if (self.max_proposal_len is None
                     or seq_len + proposal_len < self.max_proposal_len):
-                proposal_lens.append(proposal_len)
+                new_k = proposal_len
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
-            else:
-                proposal_lens.append(0)
+            proposal_lens.append(new_k)
+            seq_group_metadata.num_speculative_tokens = new_k
 
         return (
             proposal_lens,
@@ -166,7 +177,7 @@ class Top1Proposer(SpeculativeProposer):
             return proposal_tokens, proposal_probs, proposal_lens_tensor
 
         sampler_output = maybe_sampler_output
-        proposal_tokens, proposal_probs = sampler_output_to_torch(
+        proposal_tokens, proposal_probs, _ = sampler_output_to_torch(
             sampler_output, sampler_transposed)
 
         # Now, reformat the output GPU tensors such that each sequence has

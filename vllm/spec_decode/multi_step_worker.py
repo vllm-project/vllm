@@ -1,9 +1,11 @@
 import copy
-from typing import Dict, List, Tuple
+import weakref
+from typing import List, Tuple
 
 import torch
 
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -31,7 +33,7 @@ class MultiStepWorker(Worker):
         super().init_device()
 
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             self.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,
@@ -44,10 +46,7 @@ class MultiStepWorker(Worker):
     @torch.inference_mode()
     def sampler_output(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        execute_model_req: ExecuteModelRequest,
         sample_len: int,
     ) -> Tuple[List[SamplerOutput], bool]:
         """Run the model forward pass sample_len times. Returns the list of
@@ -57,26 +56,24 @@ class MultiStepWorker(Worker):
 
         For multi step worker, this indicator shall be True.
         """
-        self._raise_if_unsupported(seq_group_metadata_list, blocks_to_swap_in,
-                                   blocks_to_swap_out, blocks_to_copy)
+        self._raise_if_unsupported(execute_model_req)
 
         # Shallow copy input data so modifications (such as appending tokens)
         # do not cause side-effects.
         copied_seq_group_metadata_list = self._shallow_copy_inputs(
-            seq_group_metadata_list)
+            execute_model_req.seq_group_metadata_list)
+        copied_execute_model_req = execute_model_req.clone(
+            copied_seq_group_metadata_list)
 
         # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(seq_group_metadata_list, sample_len)
+        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
+                                     sample_len)
 
         # Run model sample_len times.
         model_outputs = []
         for _ in range(sample_len):
             model_output = super().execute_model(
-                seq_group_metadata_list=copied_seq_group_metadata_list,
-                blocks_to_swap_in=blocks_to_swap_in,
-                blocks_to_swap_out=blocks_to_swap_out,
-                blocks_to_copy=blocks_to_copy,
-            )
+                execute_model_req=copied_execute_model_req)
             assert (len(model_output) == 1
                     ), "composing multistep workers not supported"
             model_output = model_output[0]
@@ -89,23 +86,13 @@ class MultiStepWorker(Worker):
 
     def get_spec_proposals(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-        max_proposal_len: int,
+        execute_model_req: ExecuteModelRequest,
     ) -> SpeculativeProposals:
         """Produce speculations given an input batch of sequences. The number of
         speculative tokens per sequence is determined by max_proposal_len.
         """
 
-        return self._proposer.get_proposals(
-            seq_group_metadata_list,
-            blocks_to_swap_in,
-            blocks_to_swap_out,
-            blocks_to_copy,
-            max_proposal_len,
-        )
+        return self._proposer.get_proposals(execute_model_req)
 
     def _append_new_tokens(
             self, model_output: SamplerOutput,
@@ -196,20 +183,22 @@ class MultiStepWorker(Worker):
 
     def _raise_if_unsupported(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
+        execute_model_req: ExecuteModelRequest,
     ) -> None:
         """MultiStepWorker does not yet implement support for cache swap
         operations or beam search.
         """
-        if any([blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy]):
+        if any([
+                execute_model_req.blocks_to_swap_in,
+                execute_model_req.blocks_to_swap_out,
+                execute_model_req.blocks_to_copy
+        ]):
             raise NotImplementedError(
                 "MultiStepWorker does not support cache operations")
 
         if any(
                 len(seq_group_metadata.seq_data.keys()) != 1
-                for seq_group_metadata in seq_group_metadata_list):
+                for seq_group_metadata in
+                execute_model_req.seq_group_metadata_list):
             raise NotImplementedError(
                 "MultiStepWorker does not support beam search.")

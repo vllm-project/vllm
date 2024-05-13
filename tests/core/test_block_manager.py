@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from typing import List
 
 import pytest
@@ -155,7 +156,10 @@ def test_append_slot_cow():
 
     cows = block_manager.append_slots(child)
     assert cows
-    for src_block, dst_blocks in cows.items():
+    dict_cows = defaultdict(list)
+    for src_block, dst_block in cows:
+        dict_cows[src_block].append(dst_block)
+    for src_block, dst_blocks in dict_cows.items():
         assert src_block not in dst_blocks
 
     after_blocks = block_manager.get_num_free_gpu_blocks()
@@ -215,7 +219,7 @@ def test_swap():
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_out(seq_group)
-    assert list(mapping.keys()) == gpu_blocks
+    assert [x[0] for x in mapping] == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
@@ -224,11 +228,11 @@ def test_swap():
 
     # Swap seq group from CPU -> GPU.
     cpu_blocks = block_manager.get_block_table(prompt)
-    assert block_manager.can_swap_in(seq_group)
+    assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_in(seq_group)
-    assert list(mapping.keys()) == cpu_blocks
+    assert [x[0] for x in mapping] == cpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_cpu_blocks + len(cpu_blocks) == after_cpu_blocks

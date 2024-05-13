@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -11,10 +11,17 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
 
+def nullable_str(val: str):
+    if not val or val == "None":
+        return None
+    return val
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
     model: str
+    served_model_name: Optional[Union[List[str]]] = None
     tokenizer: Optional[str] = None
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
@@ -44,7 +51,8 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
-    max_context_len_to_capture: int = 8192
+    max_context_len_to_capture: Optional[int] = None
+    max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
     tokenizer_pool_type: str = "ray"
@@ -75,6 +83,7 @@ class EngineArgs:
     speculative_model: Optional[str] = None
     num_speculative_tokens: Optional[int] = None
     speculative_max_model_len: Optional[int] = None
+    speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
 
@@ -95,7 +104,7 @@ class EngineArgs:
             help='Name or path of the huggingface model to use.')
         parser.add_argument(
             '--tokenizer',
-            type=str,
+            type=nullable_str,
             default=EngineArgs.tokenizer,
             help='Name or path of the huggingface tokenizer to use.')
         parser.add_argument(
@@ -104,21 +113,21 @@ class EngineArgs:
             help='Skip initialization of tokenizer and detokenizer')
         parser.add_argument(
             '--revision',
-            type=str,
+            type=nullable_str,
             default=None,
             help='The specific model version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
             'the default version.')
         parser.add_argument(
             '--code-revision',
-            type=str,
+            type=nullable_str,
             default=None,
             help='The specific revision to use for the model code on '
             'Hugging Face Hub. It can be a branch name, a tag name, or a '
             'commit id. If unspecified, will use the default version.')
         parser.add_argument(
             '--tokenizer-revision',
-            type=str,
+            type=nullable_str,
             default=None,
             help='The specific tokenizer version to use. It can be a branch '
             'name, a tag name, or a commit id. If unspecified, will use '
@@ -135,7 +144,7 @@ class EngineArgs:
                             action='store_true',
                             help='Trust remote code from huggingface.')
         parser.add_argument('--download-dir',
-                            type=str,
+                            type=nullable_str,
                             default=EngineArgs.download_dir,
                             help='Directory to download and load the weights, '
                             'default to the default cache dir of '
@@ -186,7 +195,7 @@ class EngineArgs:
             'supported for common inference criteria.')
         parser.add_argument(
             '--quantization-param-path',
-            type=str,
+            type=nullable_str,
             default=None,
             help='Path to the JSON file containing the KV cache '
             'scaling factors. This should generally be supplied, when '
@@ -303,7 +312,7 @@ class EngineArgs:
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
-                            type=str,
+                            type=nullable_str,
                             choices=[*QUANTIZATION_METHODS, None],
                             default=EngineArgs.quantization,
                             help='Method used to quantize the weights. If '
@@ -321,6 +330,14 @@ class EngineArgs:
                             type=int,
                             default=EngineArgs.max_context_len_to_capture,
                             help='Maximum context length covered by CUDA '
+                            'graphs. When a sequence has context length '
+                            'larger than this, we fall back to eager mode. '
+                            '(DEPRECATED. Use --max-seq_len-to-capture instead'
+                            ')')
+        parser.add_argument('--max-seq_len-to-capture',
+                            type=int,
+                            default=EngineArgs.max_seq_len_to_capture,
+                            help='Maximum sequence length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode.')
         parser.add_argument('--disable-custom-all-reduce',
@@ -340,7 +357,7 @@ class EngineArgs:
                             'asynchronous tokenization. Ignored '
                             'if tokenizer_pool_size is 0.')
         parser.add_argument('--tokenizer-pool-extra-config',
-                            type=str,
+                            type=nullable_str,
                             default=EngineArgs.tokenizer_pool_extra_config,
                             help='Extra config for tokenizer pool. '
                             'This should be a JSON string that will be '
@@ -395,7 +412,7 @@ class EngineArgs:
         # Related to Vision-language models such as llava
         parser.add_argument(
             '--image-input-type',
-            type=str,
+            type=nullable_str,
             default=None,
             choices=[
                 t.name.lower() for t in VisionLanguageConfig.ImageInputType
@@ -408,7 +425,7 @@ class EngineArgs:
                             help=('Input id for image token.'))
         parser.add_argument(
             '--image-input-shape',
-            type=str,
+            type=nullable_str,
             default=None,
             help=('The biggest image input shape (worst for memory footprint) '
                   'given an input type. Only used for vLLM\'s profile_run.'))
@@ -431,7 +448,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--speculative-model',
-            type=str,
+            type=nullable_str,
             default=EngineArgs.speculative_model,
             help=
             'The name of the draft model to be used in speculative decoding.')
@@ -445,11 +462,18 @@ class EngineArgs:
 
         parser.add_argument(
             '--speculative-max-model-len',
-            type=str,
+            type=int,
             default=EngineArgs.speculative_max_model_len,
             help='The maximum sequence length supported by the '
             'draft model. Sequences over this length will skip '
             'speculation.')
+
+        parser.add_argument(
+            '--speculative-disable-by-batch-size',
+            type=int,
+            default=EngineArgs.speculative_disable_by_batch_size,
+            help='Disable speculative decoding for new incoming requests '
+            'if the number of enqueue requests is larger than this value.')
 
         parser.add_argument(
             '--ngram-prompt-lookup-max',
@@ -466,7 +490,7 @@ class EngineArgs:
             'decoding.')
 
         parser.add_argument('--model-loader-extra-config',
-                            type=str,
+                            type=nullable_str,
                             default=EngineArgs.model_loader_extra_config,
                             help='Extra config for model loader. '
                             'This will be passed to the model loader '
@@ -474,10 +498,25 @@ class EngineArgs:
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
 
+        parser.add_argument(
+            "--served-model-name",
+            nargs="+",
+            type=str,
+            default=None,
+            help="The model name(s) used in the API. If multiple "
+            "names are provided, the server will respond to any "
+            "of the provided names. The model name in the model "
+            "field of a response will be the first name in this "
+            "list. If not specified, the model name will be the "
+            "same as the `--model` argument. Noted that this name(s)"
+            "will also be used in `model_name` tag content of "
+            "prometheus metrics, if multiple names provided, metrics"
+            "tag will take the first one.")
+
         return parser
 
     @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> 'EngineArgs':
+    def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
@@ -492,7 +531,8 @@ class EngineArgs:
             self.code_revision, self.tokenizer_revision, self.max_model_len,
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
-            self.max_logprobs, self.skip_tokenizer_init)
+            self.max_seq_len_to_capture, self.max_logprobs,
+            self.skip_tokenizer_init, self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -515,6 +555,8 @@ class EngineArgs:
             target_dtype=self.dtype,
             speculative_model=self.speculative_model,
             num_speculative_tokens=self.num_speculative_tokens,
+            speculative_disable_by_batch_size=self.
+            speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
             use_v2_block_manager=self.use_v2_block_manager,

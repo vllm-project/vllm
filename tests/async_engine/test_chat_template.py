@@ -101,12 +101,11 @@ def test_no_load_chat_template_literallike():
     assert template_content == template
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model,template,add_generation_prompt,expected_output",
     MODEL_TEMPLATE_GENERATON_OUTPUT)
-async def test_get_gen_prompt(model, template, add_generation_prompt,
-                              expected_output):
+def test_get_gen_prompt(model, template, add_generation_prompt,
+                        expected_output):
     # Initialize the tokenizer
     tokenizer = get_tokenizer(tokenizer_name=model)
     mock_serving_chat = MockServingChat(tokenizer)
