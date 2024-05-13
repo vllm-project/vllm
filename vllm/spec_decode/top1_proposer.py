@@ -79,7 +79,8 @@ class Top1Proposer(SpeculativeProposer):
                 nonzero_proposal_len_indices,
             ) = self._remove_no_proposal_seqs(proposal_lens,
                                               maybe_sampler_output,
-                                              nonzero_proposal_len_indices)
+                                              nonzero_proposal_len_indices,
+                                              transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
@@ -148,12 +149,18 @@ class Top1Proposer(SpeculativeProposer):
         )
 
     def _remove_no_proposal_seqs(self, proposal_lens, maybe_sampler_output,
-                                 nonzero_proposal_len_indices):
+                                 nonzero_proposal_len_indices, transposed):
         """Remove sequences from nonzero_proposal_len_indices and reset
         their proposal_len to 0 the draft worker does not provide a proposal
         (maybe_sampler_output=None). This can avoid scoring overheads.
         """
-        if maybe_sampler_output is None:
+
+        # If maybe_sampler_output is None, then the draft worker did not
+        # provide a proposal for any sequence and thus no action needed.
+        # Also we do not support transposed maybe_sampler_output for now
+        # because it seems not straightforward for draft workers outputting
+        # transposed sampler outputs to handle the case of no proposal.
+        if maybe_sampler_output is None or transposed:
             return (proposal_lens, maybe_sampler_output,
                     nonzero_proposal_len_indices)
 
