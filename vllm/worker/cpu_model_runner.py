@@ -67,16 +67,15 @@ class CPUModelRunner:
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        attn_impl = self.attn_backend.get_impl_cls()
-        with set_attn_impl(attn_impl):
-            self.model = get_model(
-                model_config=self.model_config,
-                load_config=self.load_config,
-                device_config=self.device_config,
-                vision_language_config=self.vision_language_config,
-                lora_config=self.lora_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config)
+        self.model = get_model(
+            model_config=self.model_config,
+            load_config=self.load_config,
+            device_config=self.device_config,
+            vision_language_config=self.vision_language_config,
+            lora_config=self.lora_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            cache_config=self.cache_config)
 
     def _prepare_prompt(
         self,
@@ -168,7 +167,6 @@ class CPUModelRunner:
             decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_input)
@@ -252,7 +250,6 @@ class CPUModelRunner:
             prefill_metadata=None,
             decode_metadata=None,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,

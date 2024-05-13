@@ -1,32 +1,15 @@
 import enum
-from contextlib import contextmanager
 from functools import lru_cache
 from typing import Optional, Type
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend, AttentionImpl
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
-
-_CACHED_ATTN_IMPL: Optional[Type[AttentionImpl]] = None
-
-
-@contextmanager
-def set_attn_impl(attn_impl: Optional[Type[AttentionImpl]]):
-    global _CACHED_ATTN_IMPL
-    prev = _CACHED_ATTN_IMPL
-    _CACHED_ATTN_IMPL = attn_impl
-    yield
-    _CACHED_ATTN_IMPL = prev
-
-
-def get_cached_attn_impl() -> Optional[Type[AttentionImpl]]:
-    global _CACHED_ATTN_IMPL
-    return _CACHED_ATTN_IMPL
 
 
 class _Backend(enum.Enum):
