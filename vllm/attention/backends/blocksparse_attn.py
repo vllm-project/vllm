@@ -220,6 +220,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
@@ -232,6 +233,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         if "num_kv_heads" not in blocksparse_params:
             blocksparse_params["num_kv_heads"] = num_kv_heads or num_heads
         blocksparse_params = BlocksparseParams(**blocksparse_params)
+        self.kv_cache_dtype = kv_cache_dtype
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -320,7 +322,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
                 kv_scale,
             )
 
@@ -364,7 +366,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     decode_meta.block_tables,
                     decode_meta.seq_lens_tensor,
                     decode_meta.max_seq_len,
-                    attn_metadata.kv_cache_dtype,
+                    self.kv_cache_dtype,
                     self.num_kv_heads,
                     self.scale,
                     self.alibi_slopes,

@@ -6,6 +6,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -113,6 +114,7 @@ class Phi3SmallSelfAttention(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -214,7 +216,8 @@ class Phi3SmallSelfAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads_per_partion,
-            blocksparse_params=bs_params
+            blocksparse_params=bs_params,
+            cache_config=cache_config,
         )
 
     def forward(
@@ -250,12 +253,14 @@ class Phi3SmallDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Phi3SmallSelfAttention(config, layer_idx,
-                                                quant_config)
+                                                cache_config=cache_config,
+                                                quant_config=quant_config)
         self.mlp = Phi3SmallMLP(config, quant_config)
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
@@ -293,6 +298,7 @@ class Phi3SmallModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -301,7 +307,7 @@ class Phi3SmallModel(nn.Module):
                                                    config.hidden_size)
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
         self.layers = nn.ModuleList([
-            Phi3SmallDecoderLayer(config, layer_idx, quant_config)
+            Phi3SmallDecoderLayer(config, layer_idx, cache_config, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
 
@@ -343,13 +349,14 @@ class Phi3SmallForCausalLM(nn.Module):
     def __init__(
         self,
         config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = Phi3SmallModel(config, quant_config)
+        self.model = Phi3SmallModel(config, cache_config, quant_config)
         self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
         self.lm_head = ParallelLMHead(
