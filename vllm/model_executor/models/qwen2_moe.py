@@ -279,9 +279,8 @@ class Qwen2MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
         )
         if (layer_idx not in config.mlp_only_layers) and (
-            config.num_experts > 0 and
-            (layer_idx + 1) % config.decoder_sparse_step == 0
-        ):
+                config.num_experts > 0 and
+            (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen2MoeSparseMoeBlock(config=config,
                                               quant_config=quant_config)
         else:
