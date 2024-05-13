@@ -13,8 +13,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
 from vllm.attention.ops.blocksparse_attention.interface import (
-    get_head_sliding_step, LocalStridedBlockSparseAttn,
-    LocalStridedBlockSparsePagedAttn)
+    get_head_sliding_step, LocalStridedBlockSparseAttn)
 
 
 @dataclass
@@ -53,13 +52,6 @@ class BlocksparseParams:
 
     # If within a group, the kv offsets that each q attends is the same or no.
     homo_head_group: bool = False
-    """
-    If to use customized Triton paged attn kernel
-    for blocksparse-attention during decoding phase.
-    By default it is False, but you can activate this by setting 
-    environment variable `PHI3SMALL_USE_TRITON_PAGED_ATTN=1`.
-    """
-    use_triton_paged_attn: Optional[bool] = None
 
     # Decided by homo_head and homo_head group
     head_sliding_step: int = field(init=False)
@@ -88,10 +80,6 @@ class BlocksparseParams:
         else:
             self.head_sliding_step = get_head_sliding_step(
                 total_heads, self.vert_stride)
-
-        if self.use_triton_paged_attn is None:
-            self.use_triton_paged_attn = bool(
-                int(os.environ.get("PHI3SMALL_USE_TRITON_PAGED_ATTN", "0")))
 
         self.active_head_range = (
             tp_rank * self.num_heads,
@@ -245,7 +233,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         self.vert_stride = self.blocksparse_params.vert_stride
         self.sparse_block_size = self.blocksparse_params.block_size
         self.head_sliding_step = self.blocksparse_params.head_sliding_step
-        self.use_triton_paged_attn = self.blocksparse_params.use_triton_paged_attn
 
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -266,17 +253,6 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             homo_head=self.blocksparse_params.homo_head,
             active_head_range=self.blocksparse_params.active_head_range,
         )
-
-        if self.blocksparse_params.use_triton_paged_attn:
-            self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
-                total_num_heads,
-                self.blocksparse_params.max_seqlen,
-                self.blocksparse_params.local_blocks,
-                self.blocksparse_params.vert_stride,
-                self.blocksparse_params.block_size,
-                homo_head=self.blocksparse_params.homo_head,
-                active_head_range=self.blocksparse_params.active_head_range,
-            )
 
     def forward(
         self,
@@ -343,36 +319,24 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            if self.use_triton_paged_attn:
-                output = self.bs_paged_attn(
-                    query,
-                    key_cache,
-                    value_cache,
-                    decode_meta.block_tables,
-                    decode_meta.seq_lens_tensor,
-                    sm_scale=self.scale,
-                    kv_scale=kv_scale,
-                )
-
-            else:  # cuda kernel
-                output = PagedAttention.forward_decode(
-                    query,
-                    key_cache,
-                    value_cache,
-                    decode_meta.block_tables,
-                    decode_meta.seq_lens_tensor,
-                    decode_meta.max_seq_len,
-                    self.kv_cache_dtype,
-                    self.num_kv_heads,
-                    self.scale,
-                    self.alibi_slopes,
-                    kv_scale,
-                    tp_rank=self.tp_rank,
-                    blocksparse_local_blocks=self.local_blocks,
-                    blocksparse_vert_stride=self.vert_stride,
-                    blocksparse_block_size=self.sparse_block_size,
-                    blocksparse_head_sliding_step=self.head_sliding_step,
-                )
+            output = PagedAttention.forward_decode(
+                query,
+                key_cache,
+                value_cache,
+                decode_meta.block_tables,
+                decode_meta.seq_lens_tensor,
+                decode_meta.max_seq_len,
+                self.kv_cache_dtype,
+                self.num_kv_heads,
+                self.scale,
+                self.alibi_slopes,
+                kv_scale,
+                tp_rank=self.tp_rank,
+                blocksparse_local_blocks=self.local_blocks,
+                blocksparse_vert_stride=self.vert_stride,
+                blocksparse_block_size=self.sparse_block_size,
+                blocksparse_head_sliding_step=self.head_sliding_step,
+            )
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
