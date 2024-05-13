@@ -14,6 +14,7 @@ from vllm.attention.ops.paged_attn import PagedAttention
 
 from vllm.utils import get_max_shared_memory_bytes
 from vllm.utils import is_hip
+from vllm.utils import make_tensor_with_pad
 
 from vllm.attention.layer import Attention
 
@@ -170,13 +171,13 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_
 def make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0'):
     #key_cache = torch.rand((num_blocks, num_heads, head_size//key_read_width, block_size, key_read_width),device=device)
     #val_cache = torch.rand((num_blocks, num_heads, head_size, block_size),device=device)
-    kv_cache = torch.rand((2, num_blocks, block_size * num_heads * head_size))
+    kv_cache = torch.rand((2, num_blocks, block_size * num_heads * head_size)).to(device)
     return kv_cache
 
 def num_tokens_to_min_blocks(num_tokens,block_size):
     return (num_tokens+block_size)//block_size
 
-def make_block_tables_slot_mapping(block_size,prompt_lens):
+def make_flat_block_tables_slot_mapping(block_size,prompt_lens):
     '''
     Naive block table:
     * For each batch element...
@@ -185,7 +186,11 @@ def make_block_tables_slot_mapping(block_size,prompt_lens):
     num_tokens = sum(prompt_lens)
     num_blocks = num_tokens_to_min_blocks(num_tokens,block_size)
     block_tables = list(range(num_blocks*100))
-    slot_mapping = [block_tables[idx//block_size] for idx in range(num_tokens)]
+    slot_mapping = [(idx % block_size) + block_tables[idx//block_size]*block_size for idx in range(num_tokens)]
+    prefill_block_tables_tensor = torch.tensor(
+        [],
+        device='cuda:0'
+    )
     block_tables_tensor = torch.tensor(
         block_tables,
         device='cuda:0'
@@ -195,7 +200,56 @@ def make_block_tables_slot_mapping(block_size,prompt_lens):
         dtype=torch.long,
         device='cuda:0'
     )
-    return block_tables_tensor, slot_mapping_tensor
+
+    return block_tables_tensor, slot_mapping_tensor, prefill_block_tables_tensor
+
+def make_block_tables_slot_mapping(block_size,prompt_lens,device='cuda:0'):
+    '''
+    Naive block table:
+    * For each batch element...
+    * Block table has 
+    '''
+    num_prompts = len(prompt_lens)
+    total_num_tokens = sum(prompt_lens)
+    # Provision block table blocks
+    num_blocks_list = [num_tokens_to_min_blocks(num_tokens,block_size) for num_tokens in prompt_lens]
+    max_block_table_len = max(num_blocks_list)
+    #block_tables = [list(range(num_blocks*10)) for num_blocks in num_blocks_list]
+    block_table_pad_tokens = 10
+
+    block_tables = []
+    slot_mapping = []
+    block_base_idx = sum(num_blocks_list)*2-1 # Support more blocks than needed
+    #seq_base_idx = 0
+    for sdx,num_tokens in enumerate(prompt_lens):
+        #num_blocks = num_tokens_to_min_blocks(num_tokens,block_size)
+        num_blocks = num_blocks_list[sdx]
+        block_table = list(range(block_base_idx,block_base_idx-num_blocks,-1))
+        for idx in range(num_tokens):
+            slot_mapping.append((idx % block_size) + block_table[idx//block_size]*block_size)
+
+        #seq_base_idx += num_tokens
+        block_base_idx -= num_blocks
+        block_tables.append(block_table)
+    
+    prefill_block_tables_tensor = torch.tensor(
+        [],
+        device='cuda:0'
+    )
+    block_tables_tensor = make_tensor_with_pad(
+        block_tables,
+        max_len=max_block_table_len+block_table_pad_tokens,
+        pad=0,
+        dtype=torch.int,
+        device=device,
+    )
+    slot_mapping_tensor = torch.tensor(
+        slot_mapping,
+        dtype=torch.long,
+        device=device
+    )
+
+    return block_tables_tensor, slot_mapping_tensor, prefill_block_tables_tensor
     
         
 def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:bool, prompt_lens:List[int], context_lens:List[int], block_tables, slot_mapping, device='cuda:0', kv_cache_dtype='auto', cross_prompt_lens:Optional[List[int]] = None):
@@ -205,7 +259,6 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
     '''
 
     if is_prompt:
-
         num_prefills = len(prompt_lens)
         num_prefill_tokens = sum(prompt_lens)
         num_decode_tokens = 0
@@ -227,9 +280,9 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
 
         num_prefills = 0
         num_prefill_tokens = 0
-        num_decode_tokens = sum(prompt_lens)
+        num_decode_tokens = sum(context_lens)
 
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, prompt_lens, context_lens, block_tables, device='cuda:0')
+        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, is_cross_attn, prompt_lens, context_lens, block_tables, device=device, cross_prompt_lens=cross_prompt_lens)
 
         return AttentionMetadata(
             num_prefills=num_prefills,
@@ -262,16 +315,18 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     max_q_prompt_len = max_prompt_len
     max_kv_prompt_len = max_q_prompt_len
     context_lens = None
-    key_read_width = 8
-    num_blocks = 128
+    key_read_width = 4
+    num_blocks = 4096
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
-    (key_cache, value_cache) = kv_cache
+    key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, num_heads, head_size)
+    #(key_cache, value_cache) = kv_cache
     scale = float(1.0 / (head_size**0.5))
     attn = make_attention(num_heads, head_size, scale)
     attn_backend = make_backend(backend_name)
     query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
-    block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,q_prompt_lens)
-    prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=None)
+    #block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,q_prompt_lens)
+    #prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn,q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=None)
     causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len)
     ideal_output = ref_masked_attention(
         query,
@@ -289,28 +344,30 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     decode_value = value[:,-1:]
     prefill_q_prompt_lens = [plen-1 for plen in q_prompt_lens]
     prefill_kv_prompt_lens = [plen-1 for plen in kv_prompt_lens]
-    decode_q_prompt_lens = prefill_q_prompt_lens
-    decode_kv_prompt_lens = prefill_kv_prompt_lens
+    decode_q_prompt_lens = [1 for _ in q_prompt_lens]
+    decode_kv_prompt_lens = [1 for _ in kv_prompt_lens]
     prefill_ideal_output = ideal_output[:,:-1]
-    prefill_packed_ideal_output = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
+    prefill_packed_ideal_output,_ = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
     decode_ideal_output = ideal_output[:,-1:]
-    decode_packed_ideal_output = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
+    decode_packed_ideal_output,_ = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
+
+    block_tables, slot_mapping, prefill_block_tables = make_block_tables_slot_mapping(block_size,prefill_q_prompt_lens)
+    prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn,prefill_q_prompt_lens, context_lens, prefill_block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=None)
 
     prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,prefill_key,prefill_value,prefill_q_prompt_lens,prefill_kv_prompt_lens)
-
-    # assert False, f"{prefill_attn_metadata.num_prefill_tokens} vs {key.shape}"
 
     prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
 
     # eval correctness of prefill output
-    torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output)
+    #assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output)
 
     # Put KVs in KV cache
-    PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                        value_cache,
-                                        prefill_attn_metadata.slot_mapping,
-                                        prefill_attn_metadata.kv_cache_dtype,
-                                        scale)
+    # Deprecated - handled automatically inside attention
+    # PagedAttention.write_to_paged_cache(key, value, key_cache,
+    #                                     value_cache,
+    #                                     prefill_attn_metadata.slot_mapping,
+    #                                     prefill_attn_metadata.kv_cache_dtype,
+    #                                     scale)
 
     is_prompt = False
     context_lens = [1 for _ in range(batch_size)]
@@ -321,7 +378,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     decode_packed_actual_output=attn.forward(decode_packed_query,decode_packed_key,decode_packed_value,kv_cache,decode_attn_metadata,scale)
 
     # eval correctness of decode output
-    torch.allclose(decode_packed_actual_output,decode_packed_ideal_output)
+    assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output) 
 
 @pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -351,8 +408,8 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
     key=key.unsqueeze(-2)
     value=value.unsqueeze(-2)
     # Block tables & slot mapping apply to cross-operand Ks and Vs
-    block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,kv_prompt_lens)
-    prefill_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
+    #block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,kv_prompt_lens)
+    #prefill_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
     causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len)
     ideal_output = ref_masked_attention(
         query,
@@ -376,6 +433,10 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
     prefill_packed_ideal_output = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
     decode_ideal_output = ideal_output[:,-1:,:,:]
     decode_packed_ideal_output = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
+
+    block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,prefill_kv_prompt_lens)
+    prefill_block_tables=torch.tensor
+    prefill_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, prefill_q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=prefill_kv_prompt_lens)
 
     prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,prefill_key,prefill_value,prefill_q_prompt_lens,prefill_kv_prompt_lens)
 
