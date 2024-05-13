@@ -18,10 +18,11 @@ class AbstractWorkerLoRAManager(ABC):
     """Abstract class for managing LoRA models on the worker side."""
 
     def __init__(self, max_num_seqs: int, max_num_batched_tokens: int,
-                 vocab_size: int, lora_config: LoRAConfig,
-                 device: torch.device):
+                 max_position_embeddings: int, vocab_size: int,
+                 lora_config: LoRAConfig, device: torch.device):
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_position_embeddings = max_position_embeddings
         self.vocab_size = vocab_size
         self.device = device
         self.lora_config = lora_config
@@ -86,6 +87,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self,
         max_num_seqs: int,
         max_num_batched_tokens: int,
+        max_position_embeddings: int,
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
@@ -98,8 +100,9 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self.embedding_padding_modules = embedding_padding_modules
         # Lazily initialized by create_lora_manager.
         self._lora_manager: LoRAModelManager
-        super().__init__(max_num_seqs, max_num_batched_tokens, vocab_size,
-                         lora_config, device)
+        super().__init__(max_num_seqs, max_num_batched_tokens,
+                         max_position_embeddings, vocab_size, lora_config,
+                         device)
 
     @property
     def is_enabled(self) -> bool:
@@ -161,6 +164,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
                     expected_lora_modules.append(module)
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_request.lora_local_path,
+                self.max_position_embeddings,
                 expected_lora_modules,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
@@ -191,7 +195,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._lora_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, self.embedding_modules)
+                lora_request.lora_int_id, 1, rank, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._lora_manager.add_lora(dummy_lora)

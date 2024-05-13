@@ -154,6 +154,27 @@ def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
+# SANG-TODO Download long lora files.
+@pytest.fixture(scope="session")
+def long_context_infos():
+    infos = {}
+    for lora_checkpoint_info in LONG_LORA_INFOS:
+        lora_id = lora_checkpoint_info["lora_id"]
+        local_lora_path = lora_checkpoint_info['local_path'] + "/lora"
+        print(
+            f"Downloading {lora_checkpoint_info['lora']} to {local_lora_path} "
+        )
+        subprocess.run([
+            "aws", "s3", "sync", "--quiet", lora_checkpoint_info["lora"],
+            local_lora_path
+        ])
+        infos[lora_id] = {
+            "context_length": lora_checkpoint_info["context_length"],
+            "lora": local_lora_path,
+        }
+    return infos
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
