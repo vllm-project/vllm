@@ -102,6 +102,11 @@ def _which_attn_to_use(
                     "divisible by 16.")
         return _Backend.XFORMERS
 
+    if sliding_window is not None:
+        logger.info(
+            "Cannot use FlashAttention-2 backend due to sliding window.")
+        return _Backend.XFORMERS
+
     try:
         import vllm_flash_attn  # noqa: F401
     except ImportError:

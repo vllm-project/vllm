@@ -168,6 +168,11 @@ class FlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
+        if sliding_window is not None:
+            # NOTE(woosuk): flash-attn's sliding window does not work with
+            # paged KV cache.
+            raise ValueError(
+                "Sliding window is not supported in FlashAttention.")
         if head_size not in _SUPPORTED_HEAD_SIZES:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
@@ -193,6 +198,7 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
         assert kv_scale == 1.0, "kv_scale is not supported in FlashAttention."
 
         num_tokens, hidden_size = query.shape
@@ -257,7 +263,6 @@ class FlashAttentionImpl(AttentionImpl):
                 output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
-                # FIXME(woosuk): FlashAttention does not support FP8 KV cache.
                 output[:num_prefill_tokens] = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
@@ -268,7 +273,6 @@ class FlashAttentionImpl(AttentionImpl):
                     max_seqlen_k=prefill_meta.max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=self.sliding_window,
                     alibi_slopes=self.alibi_slopes,
                     block_table=prefill_meta.block_tables,
                 )

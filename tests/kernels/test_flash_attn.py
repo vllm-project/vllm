@@ -1,4 +1,4 @@
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import pytest
 import torch
@@ -18,6 +18,7 @@ def ref_paged_attn(
     kv_lens: List[int],
     block_tables: torch.Tensor,
     scale: float,
+    sliding_window: Optional[int] = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -45,6 +46,13 @@ def ref_paged_attn(
         attn = torch.einsum("qhd,khd->hqk", q, k)
         mask = torch.triu(torch.ones(query_len, kv_len),
                           diagonal=kv_len - query_len + 1).bool()
+        # print(mask)
+        if sliding_window is not None:
+            sliding_window_mask = torch.triu(torch.ones(query_len, kv_len),
+                                             diagonal=kv_len -
+                                             (query_len + sliding_window) +
+                                             1).bool().logical_not()
+            mask |= sliding_window_mask
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1)
         out = torch.einsum("hqk,khd->qhd", attn, v)
@@ -120,12 +128,14 @@ def test_flash_attn_with_paged_kv(
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [None])
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode
 def test_varlen_with_paged_kv(
     seq_lens: List[Tuple[int, int]],
     num_heads: Tuple[int, int],
     head_size: int,
+    sliding_window: Optional[int],
     dtype: torch.dtype,
     block_size: int,
 ) -> None:
@@ -140,6 +150,9 @@ def test_varlen_with_paged_kv(
     assert num_query_heads % num_kv_heads == 0
     max_query_len = max(query_lens)
     max_kv_len = max(kv_lens)
+    window_size = ((sliding_window,
+                    sliding_window) if sliding_window is not None else
+                   (-1, -1))
     scale = head_size**-0.5
 
     query = torch.randn(sum(query_lens),
@@ -175,6 +188,7 @@ def test_varlen_with_paged_kv(
         max_seqlen_k=max_kv_len,
         softmax_scale=scale,
         causal=True,
+        window_size=window_size,
         block_table=block_tables,
     )
 
@@ -186,6 +200,7 @@ def test_varlen_with_paged_kv(
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
+        sliding_window=sliding_window,
     )
     assert torch.allclose(output, ref_output, atol=1e-2, rtol=1e-2), \
         f"{torch.max(torch.abs(output - ref_output))}"
