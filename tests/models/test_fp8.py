@@ -25,18 +25,18 @@ EXPECTED_STRS_MAP = {
         'LLaMA is a high-throughput and memory-efficient inference and serving engine for Large Language Models (',
         'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
         'Artificial intelligence (AI) and human intelligence (HI) differ significantly in how they process information.',
-        'A neural network is a complex system modeled after the human brain, composed of interconnected nodes or "ne',
-        'Zeta-5, a highly advanced robot designed for menial labor, whirred and beep',
-        'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. Here',
+        'A neural network is a complex system modeled after the human brain, consisting of interconnected nodes or "ne',
+        'Zeta-5, a highly advanced robot designed for menial labor, whirred to a',
+        'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. The',
         'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
-        'Here are the translations:\n\n**Japanese:** (Haya tori, nemuri nemuri)\n\n**'
+        'Here are the translations:\n\n**Japanese:** (Haya aki no tori, guri o',
     ],
     "meta-llama/Meta-Llama-3-8B-Instruct": [
         'LLM (Large Language Model) is a type of artificial intelligence (AI) model that is trained',
         'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
         'Artificial intelligence (AI) and human intelligence (HI) differ significantly in how they process information.',
         'A neural network is a complex system modeled after the human brain, composed of interconnected nodes or "ne',
-        'In the year 2154, the robotics lab at NeuroSpark Industries was on the cusp of',
+        'In the vast, sterile laboratory, Robot 3456-Alpha, or "Alpha" for short',
         'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. The',
         'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
         'Here are the translations:\n\n**Japanese:** (Haya aki wa mushi o tsukamu'
