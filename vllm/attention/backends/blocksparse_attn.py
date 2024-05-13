@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-from torch import nn
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
