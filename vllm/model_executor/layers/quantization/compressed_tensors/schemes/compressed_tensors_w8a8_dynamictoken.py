@@ -100,7 +100,7 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         input_scales = torch.empty((x.numel() // x.shape[-1], 1),
                                    dtype=x.dtype,
                                    device=x.device)
-        ops.quant_per_token(x_q, x, input_scales)
+        ops.dynamic_scaled_int8_quant(x_q, x, input_scales)
         return x_q, input_scales
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
