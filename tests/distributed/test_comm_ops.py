@@ -17,7 +17,7 @@ from vllm.test_utils import (init_test_distributed_environment,
 
 @ray.remote(num_gpus=1, max_calls=1)
 def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
-                           distributed_init_port: str):
+                           distributed_init_port: str, dtype):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
@@ -28,8 +28,8 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
                                       distributed_init_port)
     num_elements = 8
     all_tensors = [
-        torch.arange(num_elements, dtype=torch.float32, device="cuda") *
-        (r + 1) for r in range(tp_size)
+        torch.arange(num_elements, dtype=dtype, device="cuda") * (r + 1)
+        for r in range(tp_size)
     ]
     expected = torch.sum(torch.stack(all_tensors, dim=0), dim=0)
     t = all_tensors[rank]
@@ -39,7 +39,7 @@ def all_reduce_test_worker(tp_size: int, pp_size: int, rank: int,
 
 @ray.remote(num_gpus=1, max_calls=1)
 def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
-                           distributed_init_port: str):
+                           distributed_init_port: str, dtype):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
@@ -55,7 +55,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
         total_size *= s
     for all_gather_dimension in range(num_dimensions):
         all_tensors = [
-            torch.arange(total_size, dtype=torch.float32,
+            torch.arange(total_size, dtype=dtype,
                          device="cuda").reshape(tensor_size) * (r + 1)
             for r in range(tp_size)
         ]
@@ -67,7 +67,7 @@ def all_gather_test_worker(tp_size: int, pp_size: int, rank: int,
 
 @ray.remote(num_gpus=1, max_calls=1)
 def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
-                                      distributed_init_port: str):
+                                      distributed_init_port: str, dtype):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
@@ -107,9 +107,17 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tp_size", [2])
+@pytest.mark.parametrize("pipeline_parallel_size", [1])
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("test_target", [
     all_reduce_test_worker, all_gather_test_worker,
     broadcast_tensor_dict_test_worker
 ])
-def test_multi_process_tensor_parallel(tp_size, test_target):
-    multi_process_tensor_parallel(tp_size, 1, test_target)
+def test_multi_process_tensor_parallel(tp_size, pipeline_parallel_size,
+                                       test_target, dtype):
+    world_size = tp_size * pipeline_parallel_size
+    if world_size > torch.cuda.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target,
+                                  dtype)

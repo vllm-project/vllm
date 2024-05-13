@@ -25,6 +25,7 @@ def multi_process_tensor_parallel(
     tp_size: int,
     pp_size: int,
     test_target,
+    dtype,
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
@@ -34,7 +35,8 @@ def multi_process_tensor_parallel(
     refs = []
     for rank in range(tp_size * pp_size):
         refs.append(
-            test_target.remote(tp_size, pp_size, rank, distributed_init_port))
+            test_target.remote(tp_size, pp_size, rank, distributed_init_port,
+                               dtype))
     ray.get(refs)
 
     ray.shutdown()

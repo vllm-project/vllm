@@ -20,7 +20,7 @@ for i, v in enumerate(test_sizes):
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
+def graph_allreduce(tp_size, pp_size, rank, distributed_init_port, dtype):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -48,34 +48,33 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
     num_communication = rank // tp_size + 1
 
     for sz in test_sizes:
-        for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with graph_capture():
-                # use integers so result matches NCCL exactly
-                inp1 = torch.randint(1,
-                                     16, (sz, ),
-                                     dtype=dtype,
-                                     device=torch.cuda.current_device())
-                inp2 = torch.randint(1,
-                                     16, (sz, ),
-                                     dtype=dtype,
-                                     device=torch.cuda.current_device())
-                torch.cuda.synchronize()
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    for i in range(num_communication):
-                        out1 = tensor_model_parallel_all_reduce(inp1)
-                        # the input buffer is immediately modified to test
-                        # synchronization
-                        dist.all_reduce(inp1, group=group)
-                        out2 = tensor_model_parallel_all_reduce(inp2)
-                        dist.all_reduce(inp2, group=group)
-            graph.replay()
-            assert torch.allclose(out1, inp1)
-            assert torch.allclose(out2, inp2)
+        with graph_capture():
+            # use integers so result matches NCCL exactly
+            inp1 = torch.randint(1,
+                                 16, (sz, ),
+                                 dtype=dtype,
+                                 device=torch.cuda.current_device())
+            inp2 = torch.randint(1,
+                                 16, (sz, ),
+                                 dtype=dtype,
+                                 device=torch.cuda.current_device())
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for i in range(num_communication):
+                    out1 = tensor_model_parallel_all_reduce(inp1)
+                    # the input buffer is immediately modified to test
+                    # synchronization
+                    dist.all_reduce(inp1, group=group)
+                    out2 = tensor_model_parallel_all_reduce(inp2)
+                    dist.all_reduce(inp2, group=group)
+        graph.replay()
+        assert torch.allclose(out1, inp1)
+        assert torch.allclose(out2, inp2)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
-def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
+def eager_allreduce(tp_size, pp_size, rank, distributed_init_port, dtype):
     del os.environ["CUDA_VISIBLE_DEVICES"]
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -90,24 +89,23 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     num_communication = rank // tp_size + 1
     sz = 1024
     fa = get_tp_ca_communicator()
-    inp = torch.ones(sz, dtype=torch.float32, device=device)
-    out = inp
-    for _ in range(num_communication):
-        out = fa.all_reduce_unreg(out)
-    assert torch.allclose(out, inp * (tp_size**num_communication))
-
-    inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
+    inp = torch.ones(sz, dtype=dtype, device=device)
     out = inp
     for _ in range(num_communication):
         out = fa.all_reduce_unreg(out)
     assert torch.allclose(out, inp * (tp_size**num_communication))
 
 
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
-def test_custom_allreduce(tp_size, pipeline_parallel_size, test_target):
+@pytest.mark.parametrize("dtype",
+                         [torch.float32, torch.float16, torch.bfloat16])
+def test_custom_allreduce(tp_size, pipeline_parallel_size, test_target, dtype):
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target)
+    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target,
+                                  dtype)
