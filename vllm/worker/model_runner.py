@@ -267,6 +267,10 @@ class ModelRunner:
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
                 if self.attn_backend.get_name() == "flash-attn":
+                    # NOTE(woosuk): For flash-attn, the block table should
+                    # include the entries for the incoming prefill tokens.
+                    # TODO(woosuk): This is a temporary fix. We should
+                    # provide a unified interface for different backends.
                     block_table = seq_group_metadata.block_tables[seq_id]
                 else:
                     block_table = computed_block_nums
