@@ -140,7 +140,7 @@ __global__ void Marlin_24(
   int k_tiles = prob_k / 32 / thread_k_blocks;
   // number of thread_n_blocks in n-dim
   int n_tiles = prob_n / 16 / thread_n_blocks;
-  // iters needeed to cover all slices
+  // iters needed to cover all slices
   int iters = ceildiv(k_tiles * n_tiles * parallel, gridDim.x);
 
   // Ensure that the number of tiles in each stripe is a multiple of the
@@ -341,7 +341,7 @@ __global__ void Marlin_24(
   }
 
   // Since B-accesses have non-constant stride they have to be computed at
-  // runtime; we break dependicies between subsequent accesses with a tile by
+  // runtime; we break dependencies between subsequent accesses with a tile by
   // maintining multiple pointers (we have enough registers), a tiny
   // optimization.
   const int4 *B_ptr[b_sh_wr_iters];
@@ -434,7 +434,7 @@ __global__ void Marlin_24(
     // It may seem inefficient that we reload the groups for every sub-tile;
     // however, this does not seem to be a significant bottleneck, while some
     // theoretically better attempts have lead to bad instruction ordering by
-    // the compiler and correspondingly a noticable drop in performance.
+    // the compiler and correspondingly a noticeable drop in performance.
     if (group_blocks != -1) {
       int4 *sh_s_stage =
           sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
@@ -562,7 +562,7 @@ __global__ void Marlin_24(
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partioning
+  // finally have to globally reduce over the results. As the striped partitioning
   // minimizes the number of such reductions and our outputs are usually rather
   // small, we perform this reduction serially in L2 cache.
   auto global_reduce = [&](bool first = false, bool last = false) {
@@ -754,7 +754,7 @@ __global__ void Marlin_24(
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
-    // the loop seemed to noticeably worse performance after compliation.
+    // the loop seemed to noticeably worse performance after compilation.
     if (slice_iters == 0) {
       cp_async_wait<0>();
       bool last = slice_idx == slice_count - 1;
