@@ -50,17 +50,17 @@ class ModelInput(NamedTuple):
     num_prefills: int
 
     @classmethod
-    def empty(cls):
+    def empty(cls, device):
         return ModelInput(
-            input_tokens=torch.empty(0),
-            input_positions=torch.empty(0),
+            input_tokens=torch.empty(0, device=device),
+            input_positions=torch.empty(0, device=device),
             attn_metadata=None,
             seq_lens=[],
             query_lens=[],
             lora_mapping=None,
             lora_requests=set(),
             multi_modal_input=None,
-            slot_mapping=torch.empty(0),
+            slot_mapping=torch.empty(0, device=device),
             num_prefill_tokens=0,
             num_decode_tokens=0,
             num_prefills=0,
@@ -240,7 +240,7 @@ class ModelRunner:
         paged_kv_last_page_len: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty()
+            return ModelInput.empty(self.device)
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -515,7 +515,6 @@ class ModelRunner:
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
-                kv_cache_dtype=self.kv_cache_dtype,
                 use_cuda_graph=False,
                 max_prefill_seq_len=max_prefill_seq_len,
                 block_tables=block_tables,
@@ -537,7 +536,6 @@ class ModelRunner:
                 slot_mapping=slot_mapping_tensor,
                 num_prefill_tokens=num_prefill_tokens,
                 num_decode_tokens=num_decode_tokens,
-                kv_cache_dtype=self.kv_cache_dtype,
                 seq_lens=seq_lens,
                 seq_lens_tensor=seq_lens_tensor,
                 max_query_len=max_query_len,
@@ -830,11 +828,10 @@ class ModelRunner:
                     num_prefill_tokens=0,
                     num_decode_tokens=batch_size,
                     slot_mapping=slot_mapping[:batch_size],
-                    kv_cache_dtype=self.kv_cache_dtype,
                     seq_lens=None,
                     seq_lens_tensor=seq_lens[:batch_size],
                     max_query_len=None,
-                    max_prefill_seq_len=None,
+                    max_prefill_seq_len=0,
                     max_decode_seq_len=self.max_seq_len_to_capture,
                     query_start_loc=None,
                     seq_start_loc=None,

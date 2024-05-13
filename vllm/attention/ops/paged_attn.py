@@ -16,8 +16,8 @@ class PagedAttentionMetadata:
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
     seq_lens_tensor: Optional[torch.Tensor]
-    # Maximum sequence length in the batch.
-    max_decode_seq_len: Optional[int]
+    # Maximum sequence length in the batch. 0 if it is prefill-only batch.
+    max_decode_seq_len: int
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks

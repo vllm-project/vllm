@@ -88,12 +88,12 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int]
-    # Maximum sequence length among prefill batch. None if there are decoding
+    # Maximum sequence length among prefill batch. 0 if there are decoding
     # requests only.
-    max_prefill_seq_len: Optional[int]
-    # Maximum sequence length among decode batch. None if there are prefill
+    max_prefill_seq_len: int
+    # Maximum sequence length among decode batch. 0 if there are prefill
     # requests only.
-    max_decode_seq_len: Optional[int]
+    max_decode_seq_len: int
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -133,12 +133,11 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            kv_cache_dtype=self.kv_cache_dtype,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
-            max_decode_seq_len=None,
+            max_decode_seq_len=0,
             query_start_loc=self.query_start_loc[:self.num_prefills + 1],
             seq_start_loc=self.seq_start_loc[:self.num_prefills + 1],
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
@@ -162,11 +161,10 @@ class FlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-            kv_cache_dtype=self.kv_cache_dtype,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
-            max_prefill_seq_len=None,
+            max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             query_start_loc=None,
             seq_start_loc=None,

@@ -56,6 +56,9 @@ class FlashInferBackend(AttentionBackend):
 
 @dataclass
 class FlashInferMetadata(AttentionMetadata):
+    # Maximum sequence length among prefill batch. 0 if there are decoding
+    # requests only.
+    max_prefill_seq_len: int
 
     use_cuda_graph: bool = False
 
@@ -64,9 +67,6 @@ class FlashInferMetadata(AttentionMetadata):
     # Metadata for the prefill stage since we still
     # use flash attention for prefill.
     seq_start_loc: Optional[torch.Tensor] = None
-    # Maximum sequence length among prefill batch. None if there are decoding
-    # requests only.
-    max_prefill_seq_len: Optional[int] = None
     block_tables: Optional[torch.Tensor] = None
 
     # Metadata for the decode stage
