@@ -1,7 +1,7 @@
 import argparse
 import asyncio
-from io import StringIO
 import sys
+from io import StringIO
 
 import aiohttp
 
