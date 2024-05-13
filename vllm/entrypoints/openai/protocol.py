@@ -526,8 +526,8 @@ class BatchRequestOutput(OpenAIBaseModel):
     # inputs.
     custom_id : str
 
-    response : ChatCompletionResponse
+    response : Optional[ChatCompletionResponse]
 
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
-    error : Any
+    error : Optional[Any]
