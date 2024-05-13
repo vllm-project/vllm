@@ -1273,6 +1273,7 @@ class LoRALinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
         return query, key
 
 
+# SANG-TODO This needs to be changed. RoPE is separated from paged attention now.
 class LoRAPagedAttentionWithRoPE(LoRALayer):
 
     def __init__(self, base_layer: PagedAttentionWithRoPE) -> None:
