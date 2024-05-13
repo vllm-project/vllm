@@ -53,10 +53,9 @@ def paged_attention_v1(
 ) -> None:
     vllm_ops.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
-        seq_lens, block_size, max_seq_len, alibi_slopes,
-        kv_cache_dtype, kv_scale, tp_rank, blocksparse_local_blocks,
-        blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step)
+        seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
+        kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+        blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -84,8 +83,8 @@ def paged_attention_v2(
 ) -> None:
     vllm_ops.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
-        num_kv_heads, scale, block_tables, seq_lens, block_size,
-        max_seq_len, alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
+        num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
+        alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
         blocksparse_block_size, blocksparse_head_sliding_step)
 

@@ -203,14 +203,16 @@ class Phi3SmallSelfAttention(nn.Module):
 
         bs_params = None
         if not use_dense_attn:
-            bs_params = {'max_seqlen': self.max_position_embeddings,
-                        'num_heads': self.num_heads_per_partition,
-                        "num_kv_heads": self.num_kv_heads_per_partion,
-                        "block_size": self.sparse_block_size,
-                        "local_blocks": self.local_blocks,
-                        "vert_stride": self.vert_stride,
-                        "homo_head": self.homo_heads}
-    
+            bs_params = {
+                'max_seqlen': self.max_position_embeddings,
+                'num_heads': self.num_heads_per_partition,
+                "num_kv_heads": self.num_kv_heads_per_partion,
+                "block_size": self.sparse_block_size,
+                "local_blocks": self.local_blocks,
+                "vert_stride": self.vert_stride,
+                "homo_head": self.homo_heads
+            }
+
         self.attn = Attention(
             self.num_heads_per_partition,
             self.head_dim,
@@ -258,7 +260,8 @@ class Phi3SmallDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Phi3SmallSelfAttention(config, layer_idx,
+        self.self_attn = Phi3SmallSelfAttention(config,
+                                                layer_idx,
                                                 cache_config=cache_config,
                                                 quant_config=quant_config)
         self.mlp = Phi3SmallMLP(config, quant_config)
@@ -307,7 +310,8 @@ class Phi3SmallModel(nn.Module):
                                                    config.hidden_size)
         self.mup_embedding_multiplier = config.mup_embedding_multiplier
         self.layers = nn.ModuleList([
-            Phi3SmallDecoderLayer(config, layer_idx, cache_config, quant_config)
+            Phi3SmallDecoderLayer(config, layer_idx, cache_config,
+                                  quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
 

@@ -29,7 +29,7 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
-    is_blocksparse: bool=False,
+    is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
 
     if is_blocksparse:
@@ -37,7 +37,7 @@ def get_attn_backend(
         from vllm.attention.backends.blocksparse_attn import (
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
-    
+
     backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
                                  sliding_window, dtype, kv_cache_dtype,
                                  block_size)

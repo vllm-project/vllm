@@ -14,8 +14,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 
 from vllm.attention.ops.blocksparse_attention.interface import (
-    get_head_sliding_step,
-    LocalStridedBlockSparseAttn,
+    get_head_sliding_step, LocalStridedBlockSparseAttn,
     LocalStridedBlockSparsePagedAttn)
 
 
@@ -28,18 +27,17 @@ class BlocksparseParams:
     # Num kv heads per tensor-parallel rank/partition
     num_kv_heads: int
 
-    # block size used for blocksparse attention. 
+    # block size used for blocksparse attention.
     # This is the block_size used in `local_blocks`, `vert_stride`.
     block_size: int
 
-    # Nmber of blocks for local attention, i.e., number of 
+    # Nmber of blocks for local attention, i.e., number of
     # local attended tokens / `sparse_block_size`
     local_blocks: int
 
     # Attend to one block per every `vert_stride` blocks.
     # Controlling the sparsity
     vert_stride: int
-
     """
     If to use the same vertical stride offset for all heads, 
     i.e., attend to the same block of tokens on all heads.
@@ -52,10 +50,9 @@ class BlocksparseParams:
     See `..ops.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
     """
     homo_head: bool = False
-    
+
     # If within a group, the kv offsets that each q attends is the same or no.
     homo_head_group: bool = False
-
     """
     If to use customized Triton paged attn kernel
     for blocksparse-attention during decoding phase.
@@ -65,7 +62,7 @@ class BlocksparseParams:
     use_triton_paged_attn: Optional[bool] = None
 
     # Decided by homo_head and homo_head group
-    head_sliding_step: bool = field(init=False)
+    head_sliding_step: int = field(init=False)
 
     # range of q heads to for a TP rank
     active_head_range: Tuple = field(init=False)
@@ -227,12 +224,12 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             "Alibi not support for blocksparse flash attention.")
         assert sliding_window is None, ValueError(
             "sliding_window is invalid for blocksparse attention.")
-        
+
         if "num_heads" not in blocksparse_params:
             blocksparse_params["num_heads"] = num_heads
         if "num_kv_heads" not in blocksparse_params:
             blocksparse_params["num_kv_heads"] = num_kv_heads or num_heads
-        blocksparse_params = BlocksparseParams(**blocksparse_params)
+        self.blocksparse_params = BlocksparseParams(**blocksparse_params)
         self.kv_cache_dtype = kv_cache_dtype
 
         self.num_heads = num_heads
@@ -244,12 +241,11 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.blocksparse_params = blocksparse_params
-        self.local_blocks = blocksparse_params.local_blocks
-        self.vert_stride = blocksparse_params.vert_stride
-        self.sparse_block_size = blocksparse_params.block_size
-        self.head_sliding_step = blocksparse_params.head_sliding_step
-        self.use_triton_paged_attn = blocksparse_params.use_triton_paged_attn
+        self.local_blocks = self.blocksparse_params.local_blocks
+        self.vert_stride = self.blocksparse_params.vert_stride
+        self.sparse_block_size = self.blocksparse_params.block_size
+        self.head_sliding_step = self.blocksparse_params.head_sliding_step
+        self.use_triton_paged_attn = self.blocksparse_params.use_triton_paged_attn
 
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
         if head_size not in suppored_head_sizes:
@@ -263,23 +259,23 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         total_num_heads = num_heads * self.tp_size
         self.bs_attn = LocalStridedBlockSparseAttn(
             total_num_heads,
-            blocksparse_params.max_seqlen,
-            blocksparse_params.local_blocks,
-            blocksparse_params.vert_stride,
-            blocksparse_params.block_size,
-            homo_head=blocksparse_params.homo_head,
-            active_head_range=blocksparse_params.active_head_range,
+            self.blocksparse_params.max_seqlen,
+            self.blocksparse_params.local_blocks,
+            self.blocksparse_params.vert_stride,
+            self.blocksparse_params.block_size,
+            homo_head=self.blocksparse_params.homo_head,
+            active_head_range=self.blocksparse_params.active_head_range,
         )
 
-        if blocksparse_params.use_triton_paged_attn:
+        if self.blocksparse_params.use_triton_paged_attn:
             self.bs_paged_attn = LocalStridedBlockSparsePagedAttn(
                 total_num_heads,
-                blocksparse_params.max_seqlen,
-                blocksparse_params.local_blocks,
-                blocksparse_params.vert_stride,
-                blocksparse_params.block_size,
-                homo_head=blocksparse_params.homo_head,
-                active_head_range=blocksparse_params.active_head_range,
+                self.blocksparse_params.max_seqlen,
+                self.blocksparse_params.local_blocks,
+                self.blocksparse_params.vert_stride,
+                self.blocksparse_params.block_size,
+                homo_head=self.blocksparse_params.homo_head,
+                active_head_range=self.blocksparse_params.active_head_range,
             )
 
     def forward(
@@ -289,7 +285,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata[BlocksparseFlashAttentionMetadata],
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
