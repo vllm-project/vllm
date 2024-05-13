@@ -172,7 +172,7 @@ def test_swap(
     # generated
     preemption_metrics = None
     for m in REGISTRY.collect():
-        if m.name == "vllm:num_preemptions_total":
+        if m.name == "vllm:num_preemptions":
             preemption_metrics = m
     assert preemption_metrics is not None
     total_recorded_preemption = 0
