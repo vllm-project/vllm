@@ -9,81 +9,84 @@ Adapted from https://github.com/turboderp/exllamav2 and https://github.com/turbo
 #include <cuda_fp16.h>
 
 #include "qdq_util.cuh"
+#include "data_types.cuh"
 
 namespace vllm {
 namespace gptq {
 
+template <class D>
 class MatrixView_half
 {
 public:
-    const half* data;
+    const typename D::T* data;
     const int height;
     const int width;
 
-    __device__ __forceinline__ MatrixView_half(const half* data, const int height, const int width)
+    __device__ __forceinline__ MatrixView_half(const typename D::T* data, const int height, const int width)
         : data(data), height(height), width(width)
     { }
 
-    __device__ __forceinline__ half item(int row, int column) const { return data[row * width + column]; }
-    __device__ __forceinline__ half2 item_half2(int row, int column) const { return ((half2*)data)[(row * width + column) / 2]; }
-    __device__ __forceinline__ half2 item_half2half2(int row, int column) const { return __half2half2(data[row * width + column]); }
-    __device__ __forceinline__ const half* item_ptr(int row, int column) const { return &data[row * width + column]; }
+    __device__ __forceinline__ typename D::T item(int row, int column) const { return data[row * width + column]; }
+    __device__ __forceinline__ typename D::T2 item_half2(int row, int column) const { return ((typename D::T2*)data)[(row * width + column) / 2]; }
+    __device__ __forceinline__ typename D::T2 item_half2half2(int row, int column) const { return D::num2num2(data[row * width + column]); }
+    __device__ __forceinline__ const typename D::T* item_ptr(int row, int column) const { return &data[row * width + column]; }
 
-    __device__ __forceinline__ void item4(half (&items)[4], int row, int column) const
+    __device__ __forceinline__ void item4(typename D::T (&items)[4], int row, int column) const
     {
-        half2* ptr = (half2*) item_ptr(row, column);
-        half2 i01 = ptr[0];
-        half2 i23 = ptr[1];
-        items[0] = __low2half(i01);
-        items[1] = __high2half(i01);
-        items[2] = __low2half(i23);
-        items[3] = __high2half(i23);
+        typename D::T2* ptr = (typename D::T2*) item_ptr(row, column);
+        typename D::T2 i01 = ptr[0];
+        typename D::T2 i23 = ptr[1];
+        items[0] = D::low2num(i01);
+        items[1] = D::high2num(i01);
+        items[2] = D::low2num(i23);
+        items[3] = D::high2num(i23);
     }
     __device__ __forceinline__ void item4_f(float (&items)[4], int row, int column) const
     {
-        half2* ptr = (half2*)item_ptr(row, column);
-        half2 i01 = ptr[0];
-        half2 i23 = ptr[1];
-        items[0] = __half2float(__low2half(i01));
-        items[1] = __half2float(__high2half(i01));
-        items[2] = __half2float(__low2half(i23));
-        items[3] = __half2float(__high2half(i23));
+        typename D::T2* ptr = (typename D::T2*)item_ptr(row, column);
+        typename D::T2 i01 = ptr[0];
+        typename D::T2 i23 = ptr[1];
+        items[0] = D::num2float(D::low2num(i01));
+        items[1] = D::num2float(D::high2num(i01));
+        items[2] = D::num2float(D::low2num(i23));
+        items[3] = D::num2float(D::high2num(i23));
     }
 
-    __device__ __forceinline__ void item4_h2(half2 (&items)[4], int row, int column) const
+    __device__ __forceinline__ void item4_h2(typename D::T2 (&items)[4], int row, int column) const
     {
-        half2* ptr = (half2*)item_ptr(row, column);
-        half2 i01 = ptr[0];
-        half2 i23 = ptr[1];
-        items[0] = __half2half2(__low2half(i01));
-        items[1] = __half2half2(__high2half(i01));
-        items[2] = __half2half2(__low2half(i23));
-        items[3] = __half2half2(__high2half(i23));
+        typename D::T2* ptr = (typename D::T2*)item_ptr(row, column);
+        typename D::T2 i01 = ptr[0];
+        typename D::T2 i23 = ptr[1];
+        items[0] = D::num2num2(D::low2num(i01));
+        items[1] = D::num2num2(D::high2num(i01));
+        items[2] = D::num2num2(D::low2num(i23));
+        items[3] = D::num2num2(D::high2num(i23));
     }
 };
 
+template <class D>
 class MatrixView_half_rw
 {
 public:
-    half* data;
+    typename D::T* data;
     const int height;
     const int width;
 
-    __device__ __forceinline__ MatrixView_half_rw(half* data, const int height, const int width)
+    __device__ __forceinline__ MatrixView_half_rw(typename D::T* data, const int height, const int width)
         : data(data), height(height), width(width)
     { }
 
-    __device__ __forceinline__ half item(int row, int column) const { return data[row * width + column]; }
-    __device__ __forceinline__ half2 item_half2(int row, int column) const { return ((half2*)data)[(row * width + column) / 2]; }
-    __device__ __forceinline__ half* item_ptr(int row, int column) { return &data[row * width + column]; }
-    __device__ __forceinline__ void set(int row, int column, half value) { data[row * width + column] = value; }
-    __device__ __forceinline__ void set_half2(int row, int column, half2 value) { ((half2*)data)[(row * width + column) / 2] = value; }
+    __device__ __forceinline__ typename D::T item(int row, int column) const { return data[row * width + column]; }
+    __device__ __forceinline__ typename D::T2 item_half2(int row, int column) const { return ((typename D::T2*)data)[(row * width + column) / 2]; }
+    __device__ __forceinline__ typename D::T* item_ptr(int row, int column) { return &data[row * width + column]; }
+    __device__ __forceinline__ void set(int row, int column, typename D::T value) { data[row * width + column] = value; }
+    __device__ __forceinline__ void set_half2(int row, int column, typename D::T2 value) { ((typename D::T2*)data)[(row * width + column) / 2] = value; }
 
-    __device__ __forceinline__ void set4(int row, int column, half v0, half v1, half v2, half v3)
+    __device__ __forceinline__ void set4(int row, int column, typename D::T v0, typename D::T v1, typename D::T v2, typename D::T v3)
     {
-        half2 v01 = __halves2half2(v0, v1);
-        half2 v23 = __halves2half2(v2, v3);
-        half2* ptr = (half2*) item_ptr(row, column);
+        typename D::T2 v01 = D::nums2num2(v0, v1);
+        typename D::T2 v23 = D::nums2num2(v2, v3);
+        typename D::T2* ptr = (typename D::T2*) item_ptr(row, column);
         ptr[0] = v01;
         ptr[1] = v23;
     }

@@ -8,41 +8,46 @@ Copied from https://github.com/turboderp/exllamav2
 namespace vllm {
 namespace gptq {
 
+template <class D>
 union half2_uint32
 {
     uint32_t as_uint32;
-    half2 as_half2;
+    typename D::T2 as_half2;
     __device__ half2_uint32(uint32_t val) : as_uint32(val) {}
-    __device__ half2_uint32(half2 val) : as_half2(val) {}
+    __device__ half2_uint32(typename D::T2 val) : as_half2(val) {}
 };
 
+template <class D>
 union half_uint16
 {
     uint16_t as_uint16;
-    half as_half;
+    typename D::T as_half;
     __device__ half_uint16(uint16_t val) : as_uint16(val) {}
-    __device__ half_uint16(half val) : as_half(val) {}
+    __device__ half_uint16(typename D::T val) : as_half(val) {}
 };
 
 // Max_scale premultiplied by 1/256
 
-__forceinline__ __device__ half dq_scale(const int qs, const half max_scale)
+template <class D>
+__forceinline__ __device__ typename D::T dq_scale(const int qs, const typename D::T max_scale)
 {
     int qs_i = qs + 1;
-    half qs_h = __int2half_rn(qs_i * qs_i);
-    qs_h = __hmul(qs_h, max_scale);
+    typename D::T qs_h = D::int2num_rn(qs_i * qs_i);
+    qs_h = D::num_mul(qs_h, max_scale);
     return qs_h;
 }
 
-__forceinline__ __device__ half dq(const int q, const int qzero, const half scale)
+template <class D>
+__forceinline__ __device__ typename D::T dq(const int q, const int qzero, const typename D::T scale)
 {
-    return __hmul(__int2half_rn(q - qzero), scale);
+    return D::num_mul(D::int2num_rn(q - qzero), scale);
 }
 
-__forceinline__ __device__ half dq_ns(const int q, const int qzero)
+template <class D>
+__forceinline__ __device__ typename D::T dq_ns(const int q, const int qzero)
 {
     //return __hsub(__int2half_rn(q), __int2half_rn(qzero));
-    return __int2half_rn(q - qzero);
+    return D::int2num_rn(q - qzero);
 }
 
 __forceinline__ __device__ int exb(const uint32_t q, const int shift, const int mask)
