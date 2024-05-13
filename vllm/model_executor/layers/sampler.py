@@ -681,7 +681,9 @@ def _get_ranks(x: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
     """
     vals = x[torch.arange(0, len(x), device=x.device, dtype=indices.dtype),
              indices]
-    return (x > vals[:, None]).long().sum(1).add_(1)
+    result = (x > vals[:, None])
+    del vals
+    return result.sum(1).add_(1)
 
 
 def _get_logprobs(
