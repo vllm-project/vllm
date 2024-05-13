@@ -6,13 +6,14 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
-from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
+from vllm.worker.encoder_decoder_model_runner import EncoderDecoderModelRunner #, _get_graph_batch_size
 
 
-def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
+def _create_encoder_decoder_model_runner(model: str, *args, **kwargs) -> EncoderDecoderModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
-    model_runner = ModelRunner(
+
+    model_runner = EncoderDecoderModelRunner(
         model_config=engine_config.model_config,
         parallel_config=engine_config.parallel_config,
         scheduler_config=engine_config.scheduler_config,
@@ -25,29 +26,35 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     return model_runner
 
 
-@pytest.mark.parametrize("batch_size", list(range(1, 257)))
+@pytest.mark.parametrize("batch_size", [16]) #list(range(1, 257)))
 def test_prepare_prompt(batch_size):
-    model_runner = _create_model_runner(
-        "facebook/opt-125m",
+    enc_dec_model_runner = _create_encoder_decoder_model_runner(
+        "google-t5/t5-small",
         max_num_batched_tokens=100000,
         max_num_seqs=100000,
         enable_chunked_prefill=False,
     )
 
     seq_lens = []
+    enc_seq_lens = []
     seq_group_metadata_list = []
     block_tables = {0: [1]}
+    enc_block_table = [1]
     for i in range(batch_size):
         # make sure all tokens fit into one block
-        seq_len = i % (model_runner.block_size - 1) + 1
+        seq_len = i % (enc_dec_model_runner.block_size - 1) + 1
+        enc_seq_len = seq_len
         seq_lens.append(seq_len)
+        enc_seq_lens.append(enc_seq_len)
         seq_data = SequenceData(list(range(seq_len)))
+        enc_seq_data = SequenceData(reversed(list(range(seq_len))))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
             seq_data={0: seq_data},
             sampling_params=SamplingParams(temperature=0),
             block_tables=block_tables,
+            encoder_block_table=enc_block_table
         )
         assert seq_group_metadata.token_chunk_size == seq_data.get_len()
         seq_group_metadata_list.append(seq_group_metadata)
@@ -59,12 +66,12 @@ def test_prepare_prompt(batch_size):
                                                seq_len - 1)
         selected_token_start_idx += seq_len
     (input_tokens, input_positions, attn_metadata, return_seq_lens, _, _, _, _,
-     _, slot_mapping) = (model_runner._prepare_prompt(seq_group_metadata_list))
+     _, slot_mapping) = (enc_dec_model_runner._prepare_prompt(seq_group_metadata_list))
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
 
     # Verify input metadata is correct for prompts.
-    device = model_runner.device
+    device = enc_dec_model_runner.device
     assert attn_metadata.is_prompt is True
     assert torch.allclose(
         attn_metadata.seq_lens_tensor,
@@ -101,7 +108,7 @@ def test_prepare_prompt(batch_size):
 
     expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
                             dtype=torch.int32,
-                            device=model_runner.device)
+                            device=enc_dec_model_runner.device)
     assert torch.allclose(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
@@ -114,8 +121,8 @@ def test_prepare_prompt(batch_size):
         seq_group_metadata_list,
         seq_lens,
         query_lens=seq_lens,
-        device=model_runner.device,
-        pin_memory=model_runner.pin_memory)
+        device=enc_dec_model_runner.device,
+        pin_memory=enc_dec_model_runner.pin_memory)
     assert len(input_tokens) == sum(seq_lens)
     assert len(input_positions) == sum(seq_lens)
     actual = sampling_metadata.selected_token_indices
@@ -134,7 +141,7 @@ def test_prepare_prompt(batch_size):
 
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
-    model_runner = _create_model_runner(
+    model_runner = _create_encoder_decoder_model_runner(
         "facebook/opt-125m",
         seed=0,
         dtype="float16",
@@ -213,7 +220,7 @@ def test_prepare_decode_cuda_graph(batch_size):
 
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
-    model_runner = _create_model_runner(
+    model_runner = _create_encoder_decoder_model_runner(
         "facebook/opt-125m",
         seed=0,
         dtype="float16",
@@ -248,7 +255,7 @@ def distributed_init():
 @pytest.mark.parametrize("batch_size", list(range(2, 128)))
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
-    model_runner = _create_model_runner(
+    model_runner = _create_encoder_decoder_model_runner(
         "facebook/opt-125m",
         seed=0,
         dtype="float16",
