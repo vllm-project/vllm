@@ -256,13 +256,15 @@ class TensorDictWithBoundedMetadata:
         pass
 
     @classmethod
-    def get_example_metadata_list(cls):
-        # Note: in general, if the example data contains cuda tensor,
-        # use cpu tensor here to avoid creating cuda context during
-        # the initialization of the class. The estimation of the buffer size
-        # might be inaccurate (by one byte per field), but it is fine because
-        # the buffer size will be aligned to 256 bytes.
-        return {}
+    def get_example_metadata_list(cls) -> List[Tuple[str, Any]]:
+        """
+        Return an example metadata list for the fields. The format is
+        a list of (key, value) pairs. We use list rather than dict to
+        make sure the order is consistent across different ranks.
+        If the value is a normal Python object, leave it as is. If the value
+        is a tensor, replace it with its metadata.
+        """
+        return []
 
     # ===== subclass overrides ends =====
     # for type annotation

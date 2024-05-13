@@ -127,7 +127,7 @@ def fast_broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int,
         fields = ["a", "b"]
 
         @classmethod
-        def get_example_metadata_list(cls):
+        def get_example_metadata_list(cls) -> List[Tuple[str, Any]]:
             return [
                 ("a", TensorMeta("cuda", torch.float32, torch.Size([]))),
                 ("b", TensorMeta("cpu", torch.float32, torch.Size([]))),

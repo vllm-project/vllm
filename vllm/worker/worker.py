@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Union
+from typing import List, Optional, Set, Tuple, Union, Any
 
 import torch
 import torch.distributed
@@ -43,7 +43,7 @@ class BlockMetaData(TensorDictWithBoundedMetadata):
     ]
 
     @classmethod
-    def get_example_metadata_list(cls):
+    def get_example_metadata_list(cls) -> List[Tuple[str, Any]]:
         return [
             ("num_seq_groups", 1),
             ("blocks_to_swap_in",
