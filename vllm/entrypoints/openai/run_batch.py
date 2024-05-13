@@ -51,6 +51,11 @@ def parse_args():
                         required=True,
                         type=str,
                         help="The path or url to a single output file. Currently supports local file paths, or web (http or https) urls. If a URL is specified, the file should be available via HTTP PUT.")
+    parser.add_argument("--response-role",
+                        type=nullable_str,
+                        default="assistant",
+                        help="The role name to return if "
+                        "`request.add_generation_prompt=true`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
@@ -102,8 +107,7 @@ async def main(args):
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
                                             args.response_role,
-                                            args.lora_modules,
-                                            args.chat_template)
+                                            )
 
     response_futures = []
     for request_json in read_file(args.input_file).split("\n"):
