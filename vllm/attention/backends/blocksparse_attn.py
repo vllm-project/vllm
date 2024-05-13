@@ -30,7 +30,7 @@ class BlocksparseParams:
     # This is the block_size used in `local_blocks`, `vert_stride`.
     block_size: int
 
-    # Nmber of blocks for local attention, i.e., number of
+    # Number of blocks for local attention, i.e., number of
     # local attended tokens / `sparse_block_size`
     local_blocks: int
 
@@ -42,11 +42,12 @@ class BlocksparseParams:
     i.e., attend to the same block of tokens on all heads.
     By default, it is False, i.e., attention on the non-local 
     blocks depends on the `head_idx`, that is on
-    blocks satisfying `(block_idx + head_idx * head_sliding_step + 1) % \
-        vert_stride == 0`
+    blocks satisfying 
+    `(block_idx + head_idx * head_sliding_step + 1) % vert_stride == 0`
     where `head_sliding_step=max(1, int(vert_stride / num_total_heads))`,
             `block_idx = position_id // sparse_block_size`.
-    See `..ops.blocksparse_attention.utils:get_sparse_attn_mask` for more detail.
+    See `..ops.blocksparse_attention.utils:get_sparse_attn_mask`
+    for more detail.
     """
     homo_head: bool = False
 
