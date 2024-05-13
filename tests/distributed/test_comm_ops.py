@@ -106,33 +106,36 @@ def broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int, rank: int,
         assert torch.allclose(recv_dict["f"], test_dict["f"])
 
 
-class CustomData(TensorDictWithBoundedMetadata):
-
-    def __init__(self, a, b):
-        self.a = a
-        self.b = b
-
-    fields = ["a", "b"]
-
-    @classmethod
-    def get_example_metadata_list(cls):
-        return [
-            ("a", TensorMeta("cuda", torch.float32, torch.Size([]))),
-            ("b", TensorMeta("cpu", torch.float32, torch.Size([]))),
-        ]
-
-
 @ray.remote(num_gpus=1, max_calls=1)
-def fast_broadcast_tensor_dict_test_worker(tensor_parallel_size: int,
+def fast_broadcast_tensor_dict_test_worker(tp_size: int, pp_size: int,
                                            rank: int,
                                            distributed_init_port: str):
     # it is important to delete the CUDA_VISIBLE_DEVICES environment variable
     # so that each worker can see all the GPUs
     # they will be able to set the device to the correct GPU
     del os.environ["CUDA_VISIBLE_DEVICES"]
+
+    # Note: it is important to define the custom data class in the worker
+    # the class definition might initialize torch/cuda, and might read
+    # environment variables CUDA_VISIBLE_DEVICES
+    class CustomData(TensorDictWithBoundedMetadata):
+
+        def __init__(self, a, b):
+            self.a = a
+            self.b = b
+
+        fields = ["a", "b"]
+
+        @classmethod
+        def get_example_metadata_list(cls):
+            return [
+                ("a", TensorMeta("cuda", torch.float32, torch.Size([]))),
+                ("b", TensorMeta("cpu", torch.float32, torch.Size([]))),
+            ]
+
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
-    init_test_distributed_environment(1, tensor_parallel_size, rank,
+    init_test_distributed_environment(tp_size, pp_size, rank,
                                       distributed_init_port)
 
     test_dict = {
