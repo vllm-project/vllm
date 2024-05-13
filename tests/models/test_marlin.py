@@ -15,14 +15,12 @@ Note: This test currently fails running with --forked with the following:
 
 Run `pytest tests/models/test_marlin.py`.
 """
-
-import gc
 from dataclasses import dataclass
 
 import pytest
 import torch
-from compare_utils import check_logprobs_close
 
+from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 MAX_MODEL_LEN = 1024
@@ -57,36 +55,28 @@ model_pairs = [
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    vllm_runner_nm,
+    vllm_runner,
     example_prompts,
     model_pair: ModelPair,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    marlin_model = vllm_runner_nm(model_pair.model_marlin,
-                                  dtype=dtype,
-                                  max_model_len=MAX_MODEL_LEN)
+    marlin_model = vllm_runner(model_pair.model_marlin,
+                               dtype=dtype,
+                               quantization="marlin")
     marlin_outputs = marlin_model.generate_greedy_logprobs(
         example_prompts, max_tokens, num_logprobs)
-
     del marlin_model
-    gc.collect()
-    torch.cuda.empty_cache()
 
-    gptq_model = vllm_runner_nm(model_pair.model_gptq,
-                                dtype=dtype,
-                                max_model_len=MAX_MODEL_LEN)
+    gptq_model = vllm_runner(model_pair.model_gptq,
+                             dtype=dtype,
+                             quantization="gptq")
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
                                                        max_tokens,
                                                        num_logprobs)
-
     del gptq_model
-    gc.collect()
-    torch.cuda.empty_cache()
 
-    # loop through the prompts
-    # use logprobs or else this will consistently run out of memory
     check_logprobs_close(
         outputs_0_lst=gptq_outputs,
         outputs_1_lst=marlin_outputs,

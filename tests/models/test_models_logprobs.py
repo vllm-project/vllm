@@ -26,10 +26,14 @@ MODELS = [
     "Qwen/Qwen1.5-0.5B",
 ]
 
-SKIPPED_MODELS = [
+SKIPPED_MODELS_ACC = [
     "mosaicml/mpt-7b",
     "allenai/OLMo-1B",
     "bigcode/starcoder2-3b",
+]
+
+SKIPPED_MODELS_OOM = [
+    "EleutherAI/gpt-j-6b",
 ]
 
 
@@ -46,9 +50,12 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    if model in SKIPPED_MODELS:
+    if model in SKIPPED_MODELS_ACC:
         pytest.skip(reason="Low priority models not currently passing. "
                     "We need to re-enable these.")
+    if model in SKIPPED_MODELS_OOM:
+        pytest.skip(reason="These models cause OOM issue on the CPU"
+                    "because it is a fp32 checkpoint.")
 
     hf_model = hf_runner_nm(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy_logprobs_nm(example_prompts,

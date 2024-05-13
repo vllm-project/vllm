@@ -17,6 +17,15 @@ __device__ __forceinline__ float atomicMaxFloat(float* addr, float value) {
     return old;
 }
 
+#define FP8_E4M3_MAX std::numeric_limits<c10::Float8_e4m3fn>::max()
+
+template<typename scalar_t>
+__device__ __forceinline__ c10::Float8_e4m3fn scaled_fp8_conversion(const scalar_t val, const float scale) {
+  float x = static_cast<float>(val) / scale;
+  float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
+  return static_cast<c10::Float8_e4m3fn>(r);
+}
+
 // Compute the absolute maximum m of the input tensor and store
 // m / float8_e4m3::max() in *scale. Each thread block performs a
 // reduction tree and the memory in scale is atomically updated.
@@ -67,14 +76,37 @@ __global__ void scaled_fp8_quant_kernel(
   int64_t num_elems) {
   int i = blockDim.x * blockIdx.x + threadIdx.x;
   while (i < num_elems) {
-    out[i] = static_cast<c10::Float8_e4m3fn>(input[i] / *scale);
+    out[i] = scaled_fp8_conversion(input[i], *scale);
     i += blockDim.x * gridDim.x;
   }
 }
 
 } // namespace vllm
 
-void scaled_fp8_quant(
+void static_scaled_fp8_quant(
+  torch::Tensor& out,      // [..., d]
+  torch::Tensor& input,    // [..., d]
+  torch::Tensor& scale)    // [1]
+{
+  int64_t num_tokens = input.numel() / input.size(-1);
+  int64_t num_elems = input.numel();
+  dim3 grid(num_tokens);
+  dim3 block(1024);
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_TYPES(
+    input.scalar_type(),
+    "scaled_fp8_quant_kernel",
+    [&] {
+      vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        out.data_ptr<c10::Float8_e4m3fn>(),
+        input.data_ptr<scalar_t>(),
+        scale.data_ptr<float>(),
+        num_elems);
+      });
+}
+
+void dynamic_scaled_fp8_quant(
   torch::Tensor& out,      // [..., d]
   torch::Tensor& input,    // [..., d]
   torch::Tensor& scale)    // [1]
@@ -100,4 +132,3 @@ void scaled_fp8_quant(
         num_elems);
       });
 }
-

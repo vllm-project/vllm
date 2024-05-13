@@ -14,7 +14,9 @@ MODELS = [
 ]
 
 
-@pytest.mark.skip(reason="drift")
+@pytest.mark.skip(
+    reason="Numerical imprecision on A10 GPU causing inexact match. "
+    "TODO: move to logprobs testing strategy.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
@@ -56,13 +58,11 @@ def test_models(
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
-    print(vllm_outputs[0])
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
         vllm_output_ids, vllm_output_str = vllm_outputs[i]
-        assert (
-            hf_output_str == vllm_output_str
-        ), f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}"
-        assert (hf_output_ids == vllm_output_ids
-                ), f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}"
+        assert hf_output_str == vllm_output_str, (
+            f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
+        assert hf_output_ids == vllm_output_ids, (
+            f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")

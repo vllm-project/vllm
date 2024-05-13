@@ -14,12 +14,15 @@ TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
 #   Otherwise, we have duplicate ray.init() calls which fails.
 #   Rather than ruining .github/scripts/run-tests to pass via env
 #   variables, we just run llama which is sufficient for smoke test.
+import os
+
 import pytest
 import torch
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
 ]
+VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -35,16 +38,19 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    enforce_eager = False
+    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    if backend_by_env_var == "FLASHINFER":
+        enforce_eager = True
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(
-        model,
-        dtype=dtype,
-        tensor_parallel_size=2,
-    )
+    vllm_model = vllm_runner(model,
+                             dtype=dtype,
+                             tensor_parallel_size=2,
+                             enforce_eager=enforce_eager)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 

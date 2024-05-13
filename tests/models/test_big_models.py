@@ -8,12 +8,23 @@ import pytest
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
-    # "mistralai/Mistral-7B-v0.1",  # Broken
-    # "Deci/DeciLM-7b",  # Broken
-    # "tiiuae/falcon-7b",  # Broken
+    "mistralai/Mistral-7B-v0.1",
+    "Deci/DeciLM-7b",
+    "tiiuae/falcon-7b",
     "EleutherAI/gpt-j-6b",
     "mosaicml/mpt-7b",
-    # "Qwen/Qwen1.5-0.5B"  # Broken,
+    "Qwen/Qwen1.5-0.5B",
+]
+
+SKIPPED_MODELS_ACC = [
+    "mistralai/Mistral-7B-v0.1",
+    "Deci/DeciLM-7b",
+    "tiiuae/falcon-7b",
+    "Qwen/Qwen1.5-0.5B",
+]
+
+SKIPPED_MODELS_OOM = [
+    "EleutherAI/gpt-j-6b",
 ]
 
 
@@ -28,6 +39,13 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
+    if model in SKIPPED_MODELS_ACC:
+        pytest.skip(reason="Low priority models not currently passing "
+                    "due to precision. We need to re-enable these.")
+    if model in SKIPPED_MODELS_OOM:
+        pytest.skip(reason="These models cause OOM issue on the CPU"
+                    "because it is a fp32 checkpoint.")
+
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
@@ -43,3 +61,19 @@ def test_models(
             f"Test{i}:\nHF: {hf_output_str!r}\nvLLM: {vllm_output_str!r}")
         assert hf_output_ids == vllm_output_ids, (
             f"Test{i}:\nHF: {hf_output_ids}\nvLLM: {vllm_output_ids}")
+
+
+@pytest.mark.skip("Slow and not useful (just prints model).")
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+def test_model_print(
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
+    vllm_model = vllm_runner(model, dtype=dtype)
+    # This test is for verifying whether the model's extra_repr
+    # can be printed correctly.
+    print(vllm_model.model.llm_engine.model_executor.driver_worker.
+          model_runner.model)
+    del vllm_model

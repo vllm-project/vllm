@@ -43,8 +43,7 @@ def do_sample(llm, lora_path: str, lora_id: int, max_tokens=256):
         prompts,
         sampling_params,
         lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None,
-    )
+        if lora_id else None)
     # Print the outputs.
     generated_texts = []
     for output in outputs:
@@ -64,21 +63,19 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
     # if torch.cuda.device_count() < tp_size:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    llm = vllm.LLM(
-        model=model.model_path,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        max_model_len=400,
-        tensor_parallel_size=tp_size,
-        quantization=model.quantization,
-        trust_remote_code=True,
-    )
+    llm = vllm.LLM(model=model.model_path,
+                   enable_lora=True,
+                   max_num_seqs=16,
+                   max_loras=4,
+                   max_model_len=400,
+                   tensor_parallel_size=tp_size,
+                   quantization=model.quantization,
+                   trust_remote_code=True)
 
     if model.quantization is None:
         expected_no_lora_output = [
             "Here are some examples of orange-brown colors",
-            "I'm sorry, I don't have",
+            "I'm sorry, I don't have"
         ]
         expected_lora_output = [
             "#ff8050",
@@ -111,7 +108,7 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
                 assert o.startswith(
-                    "#"), f"Expected example {i} to start with # but got {o}"
+                    '#'), f"Expected example {i} to start with # but got {o}"
             return
         assert output == expected_output
 
@@ -158,28 +155,24 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
     # if torch.cuda.device_count() < 2:
     #     pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
 
-    llm_tp1 = vllm.LLM(
-        model=model.model_path,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        tensor_parallel_size=1,
-        quantization=model.quantization,
-        trust_remote_code=True,
-    )
+    llm_tp1 = vllm.LLM(model=model.model_path,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       max_loras=4,
+                       tensor_parallel_size=1,
+                       quantization=model.quantization,
+                       trust_remote_code=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
     del llm_tp1
     cleanup()
 
-    llm_tp2 = vllm.LLM(
-        model=model.model_path,
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=4,
-        tensor_parallel_size=2,
-        quantization=model.quantization,
-    )
+    llm_tp2 = vllm.LLM(model=model.model_path,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       max_loras=4,
+                       tensor_parallel_size=2,
+                       quantization=model.quantization)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
     del llm_tp2

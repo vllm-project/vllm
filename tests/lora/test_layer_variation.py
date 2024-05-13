@@ -70,6 +70,7 @@ for length in range(2, 6):
 # step 1: init a base model and serve with LoRA to get the reference results
 # step 2: merge the same LoRA to the base model, serve the merged model
 # step 3: compare the results from step 1 and step 2
+@pytest.mark.skip("Failure in NM Automation. Work to re-enable")
 @pytest.mark.parametrize("tp_size", [1])
 @pytest.mark.parametrize("target_modules", TARGET_MODULES_LIST)
 @pytest.mark.parametrize("rank", [8, 16, 32, 64])

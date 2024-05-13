@@ -1,5 +1,5 @@
 import importlib.util
-from typing import Type
+from typing import Optional, Type
 
 import numpy
 import torch
@@ -17,14 +17,19 @@ SparseBitmaskStorageFormat = "SparseBitmaskStorageFormat"
 
 
 class LazyCompressedParameter(torch.Tensor):
+    uncompressed_data: Optional[torch.Tensor]
+    compressed_data: Optional[torch.Tensor]
 
     @staticmethod
-    def __new__(cls,
-                uncompressed_data: torch.Tensor,
-                is_empty: bool = False,
-                storage_format_cls: Type[
-                    CompressedStorageFormat] = SparseBitmaskStorageFormat,
-                compress_transposed: bool = False):
+    def __new__(
+            cls,
+            uncompressed_data: torch.Tensor,
+            is_empty: bool = False,
+            # Lazy import causes typing issues.
+            storage_format_cls:  # type: ignore
+        Type[  # type: ignore
+            CompressedStorageFormat] = SparseBitmaskStorageFormat,  # type: ignore
+            compress_transposed: bool = False):
 
         if not is_magic_wand_available:
             raise ValueError(
@@ -106,6 +111,10 @@ class LazyCompressedParameter(torch.Tensor):
             # before committing to compression.
 
             # Count zeros in each group of 4
+            if self.uncompressed_data is None:
+                raise ValueError(
+                    "Uncompressed data must exist if calling .compress(),"
+                    "but got self.uncompressed is None")
             reshaped_tensor = self.uncompressed_data.view(-1, 4)
             zeros = reshaped_tensor == 0
             zeros_per_group = zeros.sum(dim=1)
@@ -115,8 +124,9 @@ class LazyCompressedParameter(torch.Tensor):
 
             if not has_semi_structured_sparsity:
                 logger.warning(
-                    f"Called compress() on tensor of shape {self.shape} but "
-                    "does not have 2:4 sparsity, skipping compression")
+                    "Called compress() on tensor of shape %s but "
+                    "does not have 2:4 sparsity, skipping compression",
+                    self.shape)
                 return
 
         else:
@@ -126,8 +136,9 @@ class LazyCompressedParameter(torch.Tensor):
             # Only compress if we have sufficient sparsity (>=40%)
             if sparsity < 0.4:
                 logger.warning(
-                    f"Called compress() on tensor of shape {self.shape}, but "
-                    f"only has {sparsity:.2}% sparsity, skipping compression")
+                    "Called compress() on tensor of shape %s but "
+                    "only has %s sparsity, skipping compression", self.shape,
+                    sparsity)
                 return
 
         if self.uncompressed_data is None:

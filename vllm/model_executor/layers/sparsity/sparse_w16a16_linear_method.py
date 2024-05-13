@@ -20,7 +20,7 @@ class SparseW16A16LinearMethod(LinearMethodBase):
     Args:
         sparsity_config: The sparse config.
     """
-    storage_format_cls: Type[CompressedStorageFormat] = None
+    storage_format_cls: Optional[Type[CompressedStorageFormat]] = None
 
     def __init__(self, sparsity_config: SparsityConfig,
                  storage_format_cls: Type[CompressedStorageFormat]):
@@ -49,7 +49,7 @@ class SparseW16A16LinearMethod(LinearMethodBase):
             # save GPU memory. When the parameter will be loaded from
             # disk it will be copied into this tensor
             is_empty=True,
-            storage_format_cls=self.storage_format_cls,
+            storage_format_cls=self.storage_format_cls,  # type: ignore
             # If we don't support F.linear or something analogous,
             # transpose when we compress so we can use a basic matmul
             compress_transposed=not supports_linear)
@@ -58,7 +58,7 @@ class SparseW16A16LinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    def apply_weights(
+    def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -72,7 +72,7 @@ class SparseW16A16LinearMethod(LinearMethodBase):
             assert not w.has_compressed_data
             output = F.linear(x, w.uncompressed_data, bias)
         elif self.storage_format_cls == SparseSemiStructuredStorageFormat:
-            w_encap = w.compressed_data.encapsulated_torch_sparse_tensor
+            w_encap = w.compressed_data.encapsulated_torch_sparse_tensor  # type: ignore
             out_shape = (x.shape[:-1] + (w_encap.shape[0], ))
             reshaped_x, valid_rows_range = pad_tensor_to_multiple(
                 x.reshape(-1, x.shape[-1]), 8)
@@ -102,5 +102,8 @@ class SparseW16A16LinearMethod(LinearMethodBase):
             # Standard matrix multiply
             # Uncompress to dense
             assert not w.compress_transposed
-            output = F.linear(x, w.compressed_data.decompress(), bias)
+            output = F.linear(
+                x,
+                w.compressed_data.decompress(),  # type: ignore
+                bias)  # type: ignore
         return output

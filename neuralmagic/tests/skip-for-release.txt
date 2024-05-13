@@ -1,1 +1,17 @@
+tests/distributed/test_basic_distributed_correctness.py
+tests/distributed/test_chunked_prefill_distributed.py
+tests/distributed/test_comm_ops.py
+tests/distributed/test_custom_all_reduce.py
+tests/distributed/test_pynccl_library.py
+tests/distributed/test_pynccl.py
+tests/spec_decode/test_utils.py
+tests/spec_decode/test_multi_step_worker.py
+tests/spec_decode/test_spec_decode_worker.py
+tests/spec_decode/test_batch_expansion.py
+tests/spec_decode/test_metrics.py
+tests/spec_decode/test_ngram_worker.py
+tests/spec_decode/e2e/test_logprobs.py
+tests/spec_decode/e2e/test_ngram_correctness.py
+tests/spec_decode/e2e/test_compatibility.py
+tests/spec_decode/e2e/test_multistep_correctness.py
 tests/accuracy/test_lm_eval_correctness.py

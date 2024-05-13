@@ -1,9 +1,10 @@
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List, Optional, Type
 
 import torch
 from magic_wand import (CompressedStorageFormat,
                         SparseSemiStructuredStorageFormat)
 
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.sparsity.base_config import SparsityConfig
 
 from .sparse_w16a16_linear_method import SparseW16A16LinearMethod
@@ -44,5 +45,13 @@ class SemiStructuredSparseW16A16Config(SparsityConfig):
             cls, config: Dict[str, Any]) -> "SemiStructuredSparseW16A16Config":
         return cls()
 
-    def get_linear_method(self) -> "SparseW16A16LinearMethod":
-        return SparseW16A16LinearMethod(self, self.get_storage_format_cls())
+    def get_quant_method(
+            self,
+            layer: torch.nn.Module) -> Optional["SparseW16A16LinearMethod"]:
+        if isinstance(layer, LinearBase):
+            return SparseW16A16LinearMethod(
+                self, self.get_storage_format_cls())  # type: ignore
+        return None
+
+    def get_scaled_act_names(self) -> List[str]:
+        return []
