@@ -15,8 +15,6 @@ from vllm.distributed import (broadcast_tensor_dict,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.communication_op import TensorDictWithBoundedMetadata
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    init_custom_ar)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
