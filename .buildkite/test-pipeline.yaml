@@ -24,28 +24,26 @@ steps:
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s test_comm_ops.py
-  working_dir: "/vllm-workspace/tests/distributed"
+  command: pytest -v -s distributed/test_comm_ops.py
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
 
 - label: Distributed Tests
-  working_dir: "/vllm-workspace/tests/distributed"
-
-  num_gpus: 2 # only support 1 or 2 for now.
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
   mirror_hardwares: [amd]
-
   commands:
-  - pytest -v -s test_pynccl_library.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
+  - pytest -v -s distributed/test_pynccl_library.py
+  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s distributed/test_chunked_prefill_distributed.py
 
 - label: Distributed Tests (Multiple Groups)
-  working_dir: "/vllm-workspace/tests/distributed"
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
-  - pytest -v -s test_pynccl.py
+  - pytest -v -s distributed/test_pynccl.py
 
 - label: Engine Test
   #mirror_hardwares: [amd]

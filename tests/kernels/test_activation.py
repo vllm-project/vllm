@@ -2,10 +2,11 @@ from typing import Type
 
 import pytest
 import torch
-from allclose_default import get_default_atol, get_default_rtol
 
 from vllm.model_executor.layers.activation import (FastGELU, GeluAndMul,
                                                    NewGELU, SiluAndMul)
+
+from .allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing

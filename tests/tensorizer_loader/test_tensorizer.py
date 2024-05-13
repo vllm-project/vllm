@@ -9,11 +9,12 @@ import pytest
 import ray
 import torch
 
-from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
 from vllm.model_executor.model_loader.tensorizer import (
     EncryptionParams, TensorizerConfig, TensorSerializer,
     is_vllm_serialized_tensorizer, load_with_tensorizer, open_stream)
+
+from ..utils import ServerRunner
 
 prompts = [
     "Hello, my name is",
