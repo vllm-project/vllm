@@ -41,6 +41,8 @@ class Attention(nn.Module):
             block_size = 16
         if num_kv_heads is None:
             num_kv_heads = num_heads
+        # During model initialization, the default dtype is set as the model
+        # weight and activation dtype.
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
                                         sliding_window, dtype, kv_cache_dtype,
