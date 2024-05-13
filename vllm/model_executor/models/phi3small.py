@@ -216,7 +216,6 @@ class Phi3SmallSelfAttention(nn.Module):
             num_kv_heads=self.num_kv_heads_per_partion,
             blocksparse_params=bs_params
         )
-        print(f'>> {self.attn=}')
 
     def forward(
         self,

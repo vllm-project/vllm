@@ -162,15 +162,15 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata,
     # The number of generation tokens. Doesn't include padding.
     num_generation_tokens: int
 
-    # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
+    # NOTE(sang): Definition of seq_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|
     # |---------------- N iteration ---------------------|
     # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
+    # |---------- seq_len ----------|
     # |-------------------- seqlen ----------------------|
     #                                   |- subquery_len -|
 
-    # WARNING(sang): context_len has different definition depending on if it is
+    # WARNING(sang): seq_len has different definition depending on if it is
     # prefill vs decoding. When it is prefill, it doesn't include new tokens.
     # When it is for decoding, it includes a new token.
 
@@ -351,7 +351,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     decode_meta.block_tables,
-                    decode_meta.context_lens,
+                    decode_meta.seq_lens_tensor,
                     sm_scale=self.scale,
                     kv_scale=kv_scale,
                 )
@@ -362,8 +362,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
                     key_cache,
                     value_cache,
                     decode_meta.block_tables,
-                    decode_meta.context_lens,
-                    decode_meta.max_context_len,
+                    decode_meta.seq_lens_tensor,
+                    decode_meta.max_seq_len,
                     attn_metadata.kv_cache_dtype,
                     self.num_kv_heads,
                     self.scale,

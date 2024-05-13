@@ -852,11 +852,11 @@ void paged_attention_v1(
     kv_block_stride,                                                                   \
     kv_head_stride,                                                                    \
     kv_scale,                                                                          \
-    tp_rank,                                                                                  \
-    blocksparse_local_blocks,                                                                 \
-    blocksparse_vert_stride,                                                                  \
-    blocksparse_block_size,                                                                   \
-    blocksparse_head_sliding_step);                                                           \
+    tp_rank,                                                                           \
+    blocksparse_local_blocks,                                                          \
+    blocksparse_vert_stride,                                                           \
+    blocksparse_block_size,                                                            \
+    blocksparse_head_sliding_step);                                                    \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>    \
   <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                            \
     out_ptr,                                                                           \
@@ -964,9 +964,9 @@ void paged_attention_v2_launcher(
 }
 
 #define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE,                \
-          IS_BLOCK_SPARSE)                                                       \
+          IS_BLOCK_SPARSE)                                                \
   paged_attention_v2_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,           \
-         IS_BLOCK_SPARSE>(                                                       \
+         IS_BLOCK_SPARSE>(                                                \
     out,                                                                  \
     exp_sums,                                                             \
     max_logits,                                                           \
@@ -980,11 +980,11 @@ void paged_attention_v2_launcher(
     seq_lens,                                                             \
     max_seq_len,                                                          \
     alibi_slopes,                                                         \
-    kv_scale,                                                                    \
-    tp_rank,                                                                     \
-    blocksparse_local_blocks,                                                    \
-    blocksparse_vert_stride,                                                     \
-    blocksparse_block_size,                                                      \
+    kv_scale,                                                             \
+    tp_rank,                                                              \
+    blocksparse_local_blocks,                                             \
+    blocksparse_vert_stride,                                              \
+    blocksparse_block_size,                                               \
     blocksparse_head_sliding_step);
 
 
