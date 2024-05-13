@@ -97,7 +97,7 @@ async def main(args):
     event_loop: Optional[asyncio.AbstractEventLoop]
 
     # When using single vLLM without engine_use_ray
-    model_config = asyncio.run(engine.get_model_config())
+    model_config = await engine.get_model_config()
 
     openai_serving_chat = OpenAIServingChat(engine, model_config,
                                             served_model_names,
