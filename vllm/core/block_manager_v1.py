@@ -258,7 +258,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # Mapping: req_id -> BlockTable
         # Note that each SequenceGroup has a unique
         # request ID
-        self.encoder_block_tables: Dict[int, BlockTable] = {}
+        self.encoder_block_tables: Dict[str, BlockTable] = {}
 
     def get_seq_num_required_blocks(self, seq: Sequence) -> int:
         if seq is None:
@@ -341,6 +341,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 else:
                     block = self.gpu_allocator.allocate()
                     # Set the reference counts of the token blocks.
+                    # TODO: feature not supported with encoder/decoder
                     block.ref_count = seq_group.num_seqs()
                 block_table.append(block)
 

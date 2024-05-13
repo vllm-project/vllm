@@ -93,14 +93,15 @@ def test_allocate_encoder_decoder():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
+    block_req_per_seq_group = 2
     block_manager = BlockSpaceManagerV1(block_size,
                                         num_cpu_blocks,
                                         num_gpu_blocks,
                                         watermark=0)
 
     # Allocate same sequence group to all available gpu blocks.
-    for i in range(num_gpu_blocks):
-        _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), block_size//2, block_size//2)
+    for i in range(num_gpu_blocks//block_req_per_seq_group):
+        _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), block_size, block_size)
         assert block_manager.can_allocate(seq_group)
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
@@ -111,7 +112,7 @@ def test_allocate_encoder_decoder():
                                         num_cpu_blocks,
                                         num_gpu_blocks,
                                         watermark=1 / num_gpu_blocks)
-    for i in range(num_gpu_blocks - 1):
+    for i in range((num_gpu_blocks - 1)//block_req_per_seq_group):
         _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), block_size//2, block_size//2)
         assert block_manager.can_allocate(seq_group)
         block_manager.allocate(seq_group)
