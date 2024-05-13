@@ -74,7 +74,9 @@ async def write_file(path_or_url : str, data : str) -> None:
             async with session.put(path_or_url, data=data.encode("utf-8")) as resp:
                 pass
     else:
-        # TODO: Make this asynchronous?
+        # We should make this async, but as long as this is always run as a
+        # standalone program, blocking the event loop won't effect performance
+        # in this particular case.
         with open(path_or_url, "w") as f:
             f.write(data)
 
