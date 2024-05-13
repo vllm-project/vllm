@@ -110,6 +110,7 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w,
   CHECK_EQ(y.size(0), x.size(0));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   bool ok = false;
+  // printf("xr h_in is %d, h_out is %d", h_in, h_out)
   if (h_in <= 128512 && h_out <= 128512) {
     // TODO: See if we can get rid of this massive nested switch
     switch (x.scalar_type()) {

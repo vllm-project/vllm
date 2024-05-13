@@ -903,11 +903,12 @@ class LoRAConfig:
                            model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
-        if scheduler_config.max_num_batched_tokens > 65528:
-            raise ValueError(
-                "Due to limitations of the custom LoRA CUDA kernel, "
-                "max_num_batched_tokens must be <= 65528 when "
-                "LoRA is enabled.")
+        pass
+        # if scheduler_config.max_num_batched_tokens > 65528:
+        #     raise ValueError(
+        #         "Due to limitations of the custom LoRA CUDA kernel, "
+        #         "max_num_batched_tokens must be <= 65528 when "
+        #         "LoRA is enabled.")
 
 
 @dataclass

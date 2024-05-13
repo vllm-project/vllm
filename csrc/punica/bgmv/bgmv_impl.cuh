@@ -21,14 +21,14 @@ bgmv_shrink_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                    const int64_t *__restrict__ indicies, int64_t y_offset,
                    int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
                    float scale) {
-  size_t batch_idx = blockIdx.y;
+  size_t batch_idx = blockIdx.x;
   int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
   if (idx < 0) {
     return;
   }
 
   auto block = cg::this_thread_block();
-  size_t j = blockIdx.x;
+  size_t j = blockIdx.y;
   constexpr size_t num_pipeline_stages = 2;
   constexpr size_t tile_size = tx * ty * vec_size;
   __shared__ W_T W_shared[num_pipeline_stages * tile_size];
@@ -150,7 +150,7 @@ bgmv_expand_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
                    const int64_t *__restrict__ indicies, int64_t y_offset,
                    int64_t full_y_size, int64_t num_layers, int64_t layer_idx,
                    float scale) {
-  size_t batch_idx = blockIdx.y;
+  size_t batch_idx = blockIdx.x;
   int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
 
   if (idx < 0) {
@@ -158,7 +158,7 @@ bgmv_expand_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
   }
 
   auto block = cg::this_thread_block();
-  size_t tile_idx = blockIdx.x;
+  size_t tile_idx = blockIdx.y;
 
   // load X;
   vec_t<in_T, vec_size> x_vec;
@@ -209,7 +209,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
 
     if constexpr (32 % tx == 0 && feat_out % (32 / tx * tz) == 0) {
       constexpr int ty = 32 / tx;
-      dim3 nblks(feat_out / (ty * tz), batch_size);
+      dim3 nblks(batch_size, feat_out / (ty * tz));
       dim3 nthrs(tx, ty, tz);
 
       bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz>
@@ -244,7 +244,7 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
       constexpr int tx = 32;
       constexpr int ty = 4;
 
-      dim3 nblks(feat_out, batch_size);
+      dim3 nblks(batch_size, feat_out);
       dim3 nthrs(tx, ty);
 
       bgmv_shrink_kernel<feat_in, feat_out, vec_size, vec_size * sizeof(in_T),
