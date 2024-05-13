@@ -74,6 +74,7 @@ async def write_file(path_or_url : str, data : str) -> None:
             async with session.put(path_or_url, data=data.encode("utf-8")) as resp:
                 pass
     else:
+        # TODO: Make this asynchronous?
         with open(path_or_url, "w") as f:
             f.write(data)
 
@@ -110,7 +111,7 @@ async def main(args):
                                             )
 
     response_futures = []
-    for request_json in read_file(args.input_file).split("\n"):
+    for request_json in await read_file(args.input_file).split("\n"):
         request = BatchRequestInput.model_validate_json(request_json)
         to_await.append(run_request(openai_serving_chat, request))
 
