@@ -1,3 +1,101 @@
+import time
+from enum import IntEnum
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
+
+from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
+                            get_attn_backend)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
+from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed.communication_op import graph_capture, graph_mode
+from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+from vllm.model_executor import SamplingMetadata
+from vllm.model_executor.model_loader import get_model
+from vllm.sampling_params import SamplingParams
+from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
+                           SequenceGroupMetadata)
+from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
+                        is_pin_memory_available, make_tensor_with_pad)
+
+logger = init_logger(__name__)
+
+_PAD_SLOT_ID = -1
+LORA_WARMUP_RANK = 8
+_BATCH_SIZE_ALIGNMENT = 8
+# Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
+# NOTE: _get_graph_batch_size needs to be updated if this list is changed.
+_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
+]
+
+class PreparePromptMetadata(NamedTuple):
+    input_tokens: List[int]
+    input_positions: List[int]
+    attn_metadata: Optional[AttentionMetadataPerStage]
+    seq_lens: List[int]
+    query_lens: List[int]
+    lora_index_mapping: List[int]
+    lora_prompt_mapping: List[int]
+    lora_requests: Set[LoRARequest]
+    multi_modal_input: Optional[torch.Tensor]
+    slot_mapping: List[int]
+
+    @classmethod
+    def empty(cls):
+        return PreparePromptMetadata(
+            input_tokens=[],
+            input_positions=[],
+            attn_metadata=None,
+            seq_lens=[],
+            query_lens=[],
+            lora_index_mapping=[],
+            lora_prompt_mapping=[],
+            lora_requests=set(),
+            multi_modal_input=None,
+            slot_mapping=[],
+        )
+
+
+class PrepareDecodeMetadata(NamedTuple):
+    input_tokens: List[int]
+    input_positions: List[int]
+    attn_metadata: Optional[AttentionMetadata]
+    lora_index_mapping: List[int]
+    lora_prompt_mapping: List[int]
+    lora_requests: Set[LoRARequest]
+    slot_mapping: List[int]
+
+    @classmethod
+    def empty(cls):
+        return PrepareDecodeMetadata(
+            input_tokens=[],
+            input_positions=[],
+            attn_metadata=None,
+            lora_index_mapping=[],
+            lora_prompt_mapping=[],
+            lora_requests=set(),
+            slot_mapping=[],
+        )
+
+
+# How batches are constructed.
+class BatchType(IntEnum):
+    # Every batch is prefill.
+    PREFILL = 0
+    # Every batch is decode.
+    DECODE = 1
+    # Batch is a mixture of prefill and decode.
+    MIXED = 2
+
+
 class ModelRunner:
 
     def __init__(
@@ -42,10 +140,18 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization
-        self.model: torch.nn.Module  # Set after load_model
+        self.model: nn.Module  # Set after load_model
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
@@ -66,6 +172,7 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -688,14 +795,14 @@ class ModelRunner:
             if self.is_encoder_decoder:
                 cross_input_tokens = metadata_dict.pop("cross_input_tokens")
                 cross_input_positions = metadata_dict.pop("cross_input_positions")
-                cross_prefill_attn_metadata = metadata_dict.pop("cross_prefill_attn_metadata")
+                #cross_prefill_attn_metadata = metadata_dict.pop("cross_prefill_attn_metadata")
                 cross_seq_lens = metadata_dict.pop("cross_seq_lens")
                 cross_query_lens = metadata_dict.pop("cross_query_lens")
                 cross_multi_modal_input = metadata_dict.pop("cross_multi_modal_input")
                 cross_slot_mapping = metadata_dict.pop("cross_slot_mapping")
                 cross_decode_input_tokens = metadata_dict.pop("cross_decode_input_tokens")
                 cross_decode_input_positions = metadata_dict.pop("cross_decode_input_positions")
-                cross_decode_attn_metadata = metadata_dict.pop("cross_decode_attn_metadata")
+                #cross_decode_attn_metadata = metadata_dict.pop("cross_decode_attn_metadata")
                 cross_decode_slot_mapping = metadata_dict.pop("cross_decode_slot_mapping")               
 
             # Create an attention metadata.
@@ -728,7 +835,6 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         return (input_tokens, input_positions, attn_metadata,
@@ -940,7 +1046,6 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
-                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
                 if self.lora_config:
@@ -979,3 +1084,142 @@ class ModelRunner:
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
+
+
+class CUDAGraphRunner:
+
+    def __init__(self, model: nn.Module):
+        self.model = model
+        self.input_buffers: Dict[str, torch.Tensor] = {}
+        self.output_buffers: Dict[str, torch.Tensor] = {}
+
+        self._graph: Optional[torch.cuda.CUDAGraph] = None
+
+    @property
+    def graph(self):
+        assert self._graph is not None
+        return self._graph
+
+    def capture(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        memory_pool,
+        **kwargs,
+    ) -> None:
+        assert self._graph is None
+        # Run the model once without capturing the graph.
+        # This is to make sure that the captured graph does not include the
+        # kernel launches for initial benchmarking (e.g., Triton autotune).
+        with graph_mode():
+            self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
+        torch.cuda.synchronize()
+
+        # Capture the graph.
+        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
+        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
+            with graph_mode():
+                hidden_states = self.model(
+                    input_ids,
+                    positions,
+                    kv_caches,
+                    attn_metadata,
+                    **kwargs,
+                )
+        torch.cuda.synchronize()
+
+        # Save the input and output buffers.
+        self.input_buffers = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "kv_caches": kv_caches,
+            "slot_mapping": attn_metadata.slot_mapping,
+            "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
+            "block_tables": attn_metadata.decode_metadata.block_tables,
+        }
+        self.output_buffers = {"hidden_states": hidden_states}
+        return
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        **kwargs,
+    ) -> torch.Tensor:
+        # KV caches are fixed tensors, so we don't need to copy them.
+        del kv_caches
+
+        # Copy the input tensors to the input buffers.
+        self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
+        self.input_buffers["positions"].copy_(positions, non_blocking=True)
+        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
+                                                 non_blocking=True)
+        self.input_buffers["seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
+        self.input_buffers["block_tables"].copy_(
+            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        # Run the graph.
+        self.graph.replay()
+
+        # Return the output tensor.
+        return self.output_buffers["hidden_states"]
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+def _get_graph_batch_size(batch_size: int) -> int:
+    """Returns the padded batch size given actual batch size.
+
+    Batch sizes are 1, 2, 4, _BATCH_SIZE_ALIGNMENT,
+    2*_BATCH_SIZE_ALIGNMENT, 3*_BATCH_SIZE_ALIGNMENT...
+    """
+    if batch_size <= 2:
+        return batch_size
+    elif batch_size <= 4:
+        return 4
+    else:
+        return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
+                _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+
+
+def _prepare_fake_inputs(
+        seq_len: int, vision_language_config: Optional[VisionLanguageConfig]):
+    """Prepare fake inputs for profile run."""
+    if vision_language_config:
+        prompt_tokens = [
+            vision_language_config.image_token_id
+        ] * vision_language_config.image_feature_size + [0] * (
+            seq_len - vision_language_config.image_feature_size)
+        fake_image_input = MultiModalData(
+            type=MultiModalData.Type.IMAGE,
+            data=torch.zeros(vision_language_config.image_input_shape,
+                             dtype=torch.float16))
+    else:
+        prompt_tokens = [0] * seq_len
+        fake_image_input = None
+    return SequenceData(prompt_tokens), fake_image_input
+
+
+def _is_block_tables_empty(block_tables: Union[None, Dict]):
+    """
+    Check if block_tables is None or a dictionary with all None values.
+    """
+    if block_tables is None:
+        return True
+    if isinstance(block_tables, dict) and all(
+            value is None for value in block_tables.values()):
+        return True
+    return False
