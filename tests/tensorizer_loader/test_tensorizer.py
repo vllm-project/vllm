@@ -9,7 +9,6 @@ import pytest
 import ray
 import torch
 
-from tests.entrypoints.test_openai_server import ServerRunner
 from vllm import SamplingParams
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
@@ -20,6 +19,8 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          serialize_vllm_model)
 
 # yapf conflicts with isort for this docstring
+
+from ..utils import ServerRunner
 
 prompts = [
     "Hello, my name is",
