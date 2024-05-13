@@ -428,14 +428,16 @@ class ShardedStateLoader(BaseModelLoader):
                    lora_config: Optional[LoRAConfig],
                    vision_language_config: Optional[VisionLanguageConfig],
                    parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig) -> nn.Module:
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
         from safetensors import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
-                                          lora_config, vision_language_config)
+                                          lora_config, vision_language_config,
+                                          cache_config)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
                 model_config.model,
