@@ -454,14 +454,6 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
     # eval correctness of prefill output
     assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
 
-    # Put KVs in KV cache
-    # Deprecated - handled automatically inside attention
-    # PagedAttention.write_to_paged_cache(key, value, key_cache,
-    #                                     value_cache,
-    #                                     prefill_attn_metadata.slot_mapping,
-    #                                     prefill_attn_metadata.kv_cache_dtype,
-    #                                     scale)
-
     is_prompt = False
     context_lens = [1 for _ in range(batch_size)]
     decode_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
