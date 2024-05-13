@@ -4,15 +4,16 @@ from unittest.mock import MagicMock
 import pytest
 from transformers import PreTrainedTokenizer
 
-from tests.core.utils import create_seq_group
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Logprob, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
+from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
+                           SequenceOutput, SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
+
+from ...core.utils import create_seq_group
 
 
 @pytest.mark.parametrize("seq_output_len", [128])
@@ -51,7 +52,7 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     new_token_ids = list(range(num_new_tokens))
 
     outputs = [
-        SequenceGroupOutput(
+        CompletionSequenceGroupOutput(
             samples=[
                 SequenceOutput(
                     parent_seq_id=seq.seq_id,
@@ -103,7 +104,7 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
     new_token_ids = list(range(num_new_tokens))
 
     outputs = [
-        SequenceGroupOutput(
+        CompletionSequenceGroupOutput(
             samples=[
                 SequenceOutput(
                     parent_seq_id=seq.seq_id,
@@ -170,7 +171,7 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     new_token_ids[eos_index] = eos_token_id
 
     outputs = [
-        SequenceGroupOutput(
+        CompletionSequenceGroupOutput(
             samples=[
                 SequenceOutput(
                     parent_seq_id=seq.seq_id,
@@ -239,7 +240,7 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     new_token_ids[eos_index] = eos_token_id
 
     outputs = [
-        SequenceGroupOutput(
+        CompletionSequenceGroupOutput(
             samples=[
                 SequenceOutput(
                     parent_seq_id=seq.seq_id,
