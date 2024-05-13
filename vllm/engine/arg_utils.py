@@ -33,7 +33,8 @@ class EngineArgs:
     quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
-    worker_use_ray: Optional[bool] = None
+    worker_use_ray: bool = False
+    distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -222,11 +223,16 @@ class EngineArgs:
             ' parameter.')
         # Parallel arguments
         parser.add_argument(
+            '--distributed-executor-backend',
+            choices=['ray', 'mp'],
+            default=EngineArgs.distributed_executor_backend,
+            help='Backend to use for distributed serving. When more than 1 GPU '
+            'is used, will be automatically set to "ray" if installed '
+            'or "mp" (multiprocessing) otherwise.')
+        parser.add_argument(
             '--worker-use-ray',
-            action=BooleanOptionalAction,
-            default=None,
-            help='Use Ray for distributed serving, will default '
-            'to true when ray is installed and more than 1 GPU is used.')
+            action='store_true',
+            help='Deprecated, use --distributed-executor-backend=ray.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -660,51 +666,3 @@ def _engine_args_parser():
 def _async_engine_args_parser():
     return AsyncEngineArgs.add_cli_args(argparse.ArgumentParser(),
                                         async_args_only=True)
-
-
-class BooleanOptionalAction(argparse.Action):
-    """This class is from python 3.9, included here to retain compatibility
-    with python 3.8. It allows boolean args with no explicit default, so
-    that we can honor explicit true/false but otherwise default based on some
-    other criteria.
-
-    See https://docs.python.org/3/library/argparse.html#action
-
-    It can be removed once 3.8 is no longer supported.
-    """
-
-    def __init__(self,
-                 option_strings,
-                 dest,
-                 default=None,
-                 type=None,
-                 choices=None,
-                 required=False,
-                 help=None,
-                 metavar=None):
-
-        _option_strings = []
-        for option_string in option_strings:
-            _option_strings.append(option_string)
-
-            if option_string.startswith('--'):
-                option_string = '--no-' + option_string[2:]
-                _option_strings.append(option_string)
-
-        super().__init__(option_strings=_option_strings,
-                         dest=dest,
-                         nargs=0,
-                         default=default,
-                         type=type,
-                         choices=choices,
-                         required=required,
-                         help=help,
-                         metavar=metavar)
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if option_string in self.option_strings:
-            setattr(namespace, self.dest,
-                    not option_string.startswith('--no-'))
-
-    def format_usage(self):
-        return ' | '.join(self.option_strings)
