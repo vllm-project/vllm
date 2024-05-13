@@ -194,6 +194,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/cutlass/scaled_mm_dq_sm8x.cu"
     "csrc/quantization/cutlass/scaled_mm_dq_sm90.cu")
 
+  #
+  # The CUTLASS kernels for Hopper require sm90a to be enabled.
+  # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
+  # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
   set_source_files_properties(
       "csrc/quantization/cutlass/scaled_mm_dq_sm90.cu"
       PROPERTIES
