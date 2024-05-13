@@ -574,6 +574,7 @@ class EngineArgs:
                                  speculative_config.num_lookahead_slots),
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
+            embedding_mode=model_config.embedding_mode,
         )
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,

@@ -1,5 +1,5 @@
 import time
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -10,8 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture_mode
-from vllm.distributed.device_communicators import custom_all_reduce
+from vllm.distributed.communication_op import graph_capture, graph_mode
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -213,9 +212,6 @@ class ModelRunner:
         num_prefill_tokens = 0
         num_decode_tokens = 0
 
-        if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty()
-
         # The following fields are only for flashinfer
         # Please follow https://docs.flashinfer.ai/tutorials/kv_layout.html#page-layout
         # for the precise definition of the following fields.
@@ -233,6 +229,9 @@ class ModelRunner:
         paged_kv_indptr: List[int] = [0]
         # paged_kv_last_page_len is the length of the last page of each request
         paged_kv_last_page_len: List[int] = []
+
+        if len(seq_group_metadata_list) == 0:
+            return ModelInput.empty()
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -333,18 +332,19 @@ class ModelRunner:
                     lora_requests.add(seq_group_metadata.lora_request)
 
                 lora_index_mapping += [lora_id] * (seq_len - context_len)
-                lora_prompt_mapping.extend(
-                    [lora_id] * (seq_len - context_len if seq_group_metadata.
-                                 sampling_params.prompt_logprobs else 1))
+                lora_prompt_mapping.extend([lora_id] * (
+                    seq_len - context_len if seq_group_metadata.sampling_params
+                    and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
                 if seq_group_metadata.multi_modal_data:
                     multi_modal_input_list.append(
                         seq_group_metadata.multi_modal_data.data)
 
-                if seq_group_metadata.block_tables is None:
+                if _is_block_tables_empty(seq_group_metadata.block_tables):
                     # During memory profiling, the block tables are not
                     # initialized yet. In this case, we just use a dummy
                     # slot mapping.
+                    # In embeddings, the block tables are {seq_id: None}.
                     slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                     continue
 
@@ -673,7 +673,6 @@ class ModelRunner:
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
-
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
@@ -803,13 +802,7 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or pynccl. When not using CUDA
-        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
-        # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or pynccl if it is disabled or not supported.
-        with custom_all_reduce.capture():
+        with graph_capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
@@ -897,7 +890,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with graph_capture_mode():
+        with graph_mode():
             self.model(
                 input_ids,
                 positions,
@@ -912,7 +905,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with graph_capture_mode():
+            with graph_mode():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -995,3 +988,15 @@ def _prepare_fake_inputs(
         prompt_tokens = [0] * seq_len
         fake_image_input = None
     return SequenceData(prompt_tokens), fake_image_input
+
+
+def _is_block_tables_empty(block_tables: Union[None, Dict]):
+    """
+    Check if block_tables is None or a dictionary with all None values.
+    """
+    if block_tables is None:
+        return True
+    if isinstance(block_tables, dict) and all(
+            value is None for value in block_tables.values()):
+        return True
+    return False
