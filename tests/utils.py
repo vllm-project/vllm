@@ -77,7 +77,7 @@ def multi_process_tensor_parallel(
 ) -> None:
     # Using ray helps debugging the error when it failed
     # as compared to multiprocessing.
-    ray.init()
+    ray.init(runtime_env={"working_dir": VLLM_PATH})
 
     distributed_init_port = get_open_port()
     refs = []
