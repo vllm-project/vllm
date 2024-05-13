@@ -53,9 +53,12 @@ def create_dummy_prompt_encoder_decoder(
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
     encoder_prompt = Sequence(int(request_id), encoder_prompt_str, encoder_prompt_tokens, block_size)
     seq_group = SequenceGroup(
-        request_id, [decoder_prompt],
-        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        time.time(), lora_request, encoder_seq=encoder_prompt)
+        request_id=request_id, 
+        seqs=[decoder_prompt],
+        sampling_params=SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
+        arrival_time=time.time(), 
+        lora_request=lora_request, 
+        encoder_seq=encoder_prompt)
 
     return decoder_prompt, encoder_prompt, seq_group
 

@@ -12,7 +12,7 @@ from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, SequenceGroup, SequenceStatus
 
-from .utils import create_dummy_prompt
+from .utils import create_dummy_prompt, create_dummy_prompt_encoder_decoder
 
 
 def get_sequence_groups(scheduler_output):
@@ -113,6 +113,44 @@ def test_scheduler_schedule_simple():
     assert len(seq_group_meta) == num_seq_group
     append_new_token(out, 1)
 
+def test_scheduler_schedule_simple_encoder_decoder():
+    block_req_per_seq_group = 2
+    block_size = 4
+    num_seq_group = 4//block_req_per_seq_group # encoder/decoder requires more storage-per-sequence-group
+    max_model_len = 16
+    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(num_seq_group):
+        _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), 
+                                                              decoder_prompt_length=block_size,
+                                                              encoder_prompt_length=block_size)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Schedule seq groups prompts.
+    num_tokens = block_size * num_seq_group
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert out.num_batched_tokens == num_tokens
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
+    assert len(seq_group_meta) == num_seq_group
+    append_new_token(out, 1)
+
+    # Schedule seq groups generation.
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert out.num_batched_tokens == num_seq_group
+    assert (not out.blocks_to_copy and not out.blocks_to_swap_in
+            and not out.blocks_to_swap_out)
+    assert len(seq_group_meta) == num_seq_group
+    append_new_token(out, 1)
 
 def test_scheduler_prefill_prioritized():
     """Verify running batched tokens are not applied to prefill requests."""
@@ -519,6 +557,50 @@ def test_prefill_schedule_no_block_manager_capacity():
     budget = create_token_budget()
     for i in range(3):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        waiting.append(seq_group)
+    scheduler.block_manager.can_allocate = MagicMock()
+    scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
+    remaining_waiting, output = scheduler._schedule_prefills(
+        waiting, budget, None)
+    assert len(output.ignored_seq_groups) == 3
+    assert len(output.seq_groups) == 0
+    assert budget.num_batched_tokens == 0
+    assert budget.num_curr_seqs == 0
+    assert len(remaining_waiting) == 0
+
+
+def test_prefill_schedule_no_block_manager_capacity_encoder_decoder():
+    """
+    Test sequence cannot be scheduled due to block manager has no capacity.
+    """
+    block_req_per_seq_group = 2
+    num_seq_groups = 3 # // block_req_per_seq_group
+    #block_size = 4
+    scheduler = initialize_scheduler()
+    waiting = deque()
+    budget = create_token_budget()
+    for i in range(num_seq_groups):
+        _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), 
+                                                              decoder_prompt_length=60,
+                                                              encoder_prompt_length=60)
+        waiting.append(seq_group)
+    scheduler.block_manager.can_allocate = MagicMock()
+    scheduler.block_manager.can_allocate.return_value = AllocStatus.LATER
+    remainig_waiting, output = scheduler._schedule_prefills(
+        waiting, budget, None)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 0
+    assert budget.num_batched_tokens == 0
+    assert budget.num_curr_seqs == 0
+    assert len(remainig_waiting) == 3
+
+    scheduler = initialize_scheduler()
+    waiting = deque()
+    budget = create_token_budget()
+    for i in range(3):
+        _, _, seq_group = create_dummy_prompt_encoder_decoder(str(i), 
+                                                              decoder_prompt_length=60,
+                                                              encoder_prompt_length=60)
         waiting.append(seq_group)
     scheduler.block_manager.can_allocate = MagicMock()
     scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
