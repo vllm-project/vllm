@@ -3,6 +3,25 @@
 Performance and Tuning
 ======================
 
+Preemption
+----------
+Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
+The vLLM can preempt requests to free up KV cache space for other requests. Preempted requests are recomputed when sufficient KV cache space becomes
+available again. When this occurs, the following warning is printed:
+
+```
+WARNING 05-09 00:49:33 scheduler.py:1057] Sequence group 0 is preempted by PreemptionMode.SWAP mode because there is not enough KV cache space. This can affect the end-to-end performance. Increase gpu_memory_utilization or tensor_parallel_size to provide more KV cache memory. total_cumulative_preemption_cnt=1
+```
+
+While this mechanism ensures system robustness, preemption and recomputation can adversely affect end-to-end latency.
+If you frequently encounter preemptions from the vLLM engine, consider the following actions:
+
+- Increase `gpu_memory_utilization`. The vLLM pre-allocates GPU cache by using gpu_memory_utilization% of memory. By increasing this utilization, you can provide more KV cache space.
+- Decrease `max_num_seqs` or `max_num_batched_tokens`. This can reduce the number of concurrent requests in a batch, thereby requiring less KV cache space.
+- Increase `tensor_parallel_size`. This approach shards model weights, so each GPU has more memory available for KV cache.
+
+You can also monitor the number of preemption requests through Prometheus metrics exposed by the vLLM. Additionally, you can log the cumulative number of preemption requests by setting disable_log_stats=False.
+
 Chunked Prefill
 ---------------
 vLLM supports an experimental feature chunked prefill. Chunked prefill allows to chunk large prefills into smaller chunks and batch them together with decode requests.

@@ -180,6 +180,7 @@ def test_scheduler_schedule_preempt_abort():
             and not out.blocks_to_swap_out)
     assert len(seq_group_meta) == 1
     assert scheduler.get_num_unfinished_seq_groups() == 2
+    assert out.preempted == 1
 
     # Abort seq group a. Re-schedule seq group b prompt with recomputation.
     scheduler.abort_seq_group("1")

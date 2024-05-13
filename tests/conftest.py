@@ -499,3 +499,19 @@ def get_tokenizer_pool_config(tokenizer_group_type):
                                    pool_type="ray",
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
+
+
+@pytest.fixture()
+def temporary_enable_log_propagate():
+    import logging
+    logger = logging.getLogger("vllm")
+    logger.propagate = True
+    yield
+    logger.propagate = False
+
+
+@pytest.fixture()
+def caplog_vllm(temporary_enable_log_propagate, caplog):
+    # To capture vllm log, we should enable propagate=True temporarily
+    # because caplog depends on logs propagated to the root logger.
+    yield caplog
