@@ -19,6 +19,7 @@ import torch
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+WORKER_USE_RAY = "WORKER_USE_RAY"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -27,7 +28,6 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
-@pytest.mark.parametrize("worker_use_ray", [False, True])
 def test_models(
     hf_runner,
     vllm_runner,
@@ -36,8 +36,9 @@ def test_models(
     dtype: str,
     max_tokens: int,
     chunked_prefill_token_size: int,
-    worker_use_ray: bool,
 ) -> None:
+    worker_use_ray = os.getenv(WORKER_USE_RAY, "1") == "1"
+
     # Add a chunked prefill config.
     max_num_seqs = min(chunked_prefill_token_size, 256)
     assert chunked_prefill_token_size != -1
