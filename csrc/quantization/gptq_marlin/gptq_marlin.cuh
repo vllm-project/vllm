@@ -9,6 +9,10 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#include <cuda_bf16.h>
+#endif
+
 namespace gptq_marlin {
 
 // 8 warps are a good choice since every SM has 4 schedulers and having more than 1 warp per
@@ -37,6 +41,7 @@ constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   // No support for async
 #else
+
 
 __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool pred = true) {
   const int BYTES = 16;
