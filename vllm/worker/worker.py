@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import List, Optional, Set, Tuple, Union, Any
+from typing import Any, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed
