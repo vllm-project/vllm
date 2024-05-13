@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -266,7 +266,7 @@ def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                block_mapping: Dict[int, int]) -> None:
+                block_mapping: torch.Tensor) -> None:
     vllm_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
