@@ -17,7 +17,6 @@ set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0;9.0a")
-set(CMAKE_CUDA_FLAGS "-gencode arch=compute_90a,code=sm_90a ${CMAKE_CUDA_FLAGS}")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
@@ -194,6 +193,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/cutlass/scaled_mm_dq_entry.cu"
     "csrc/quantization/cutlass/scaled_mm_dq_sm8x.cu"
     "csrc/quantization/cutlass/scaled_mm_dq_sm90.cu")
+
+  set_source_files_properties(
+      "csrc/quantization/cutlass/scaled_mm_dq_sm90.cu"
+      PROPERTIES
+      COMPILE_FLAGS
+      "-gencode arch=compute_90a,code=sm_90a")
+
 endif()
 
 define_gpu_extension_target(
