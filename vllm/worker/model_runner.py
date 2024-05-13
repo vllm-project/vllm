@@ -324,7 +324,9 @@ class ModelRunner:
                     decode_only = False
                     prefill_seq_lens.append(seq_len)
                 else:
-                    assert query_len == 1
+                    assert query_len == 1, (
+                        "seq_len: {}, context_len: {}, query_len: {}".format(
+                            seq_len, context_len, query_len))
                     num_decode_tokens += query_len
                     decode_seq_lens.append(seq_len)
 
@@ -382,7 +384,6 @@ class ModelRunner:
                     slot_mapping.append(slot)
 
         batch_size = len(input_tokens)
-        print(f"SANG-TODO {query_lens=}")
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(prefill_seq_lens, default=0)
         max_decode_seq_len = max(decode_seq_lens, default=0)
@@ -425,7 +426,7 @@ class ModelRunner:
                 dtype=torch.int,
                 device=self.device,
             )
-        assert max_query_len > 0
+        assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         context_lens_tensor = torch.tensor(context_lens,
                                            dtype=torch.int,
