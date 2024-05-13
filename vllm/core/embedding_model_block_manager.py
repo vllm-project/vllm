@@ -46,8 +46,7 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
                     num_lookahead_slots: int) -> AllocStatus:
         return AllocStatus.OK
 
-    def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         return None  # type: ignore
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:

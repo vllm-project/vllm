@@ -608,17 +608,16 @@ class SchedulerConfig:
             such a case, we use swapping instead.
     """
 
-    def __init__(
-        self,
-        max_num_batched_tokens: Optional[int],
-        max_num_seqs: int,
-        max_model_len: int,
-        use_v2_block_manager: bool = False,
-        num_lookahead_slots: int = 0,
-        delay_factor: float = 0.0,
-        enable_chunked_prefill: bool = False,
-        embedding_mode: Optional[bool] = False,
-        preemption_mode: Optional[str] = None) -> None:
+    def __init__(self,
+                 max_num_batched_tokens: Optional[int],
+                 max_num_seqs: int,
+                 max_model_len: int,
+                 use_v2_block_manager: bool = False,
+                 num_lookahead_slots: int = 0,
+                 delay_factor: float = 0.0,
+                 enable_chunked_prefill: bool = False,
+                 embedding_mode: Optional[bool] = False,
+                 preemption_mode: Optional[str] = None) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
