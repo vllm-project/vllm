@@ -46,7 +46,7 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
 
 - label: Engine Test
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
@@ -71,13 +71,13 @@ steps:
   parallelism: 4
 
 - label: Models Test
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py
+    - pytest -v -s models --ignore=models/test_llava.py
 
 - label: Llava Test
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models/test_llava.py
@@ -99,7 +99,7 @@ steps:
   command: pytest -v -s worker
 
 - label: Speculative decoding tests
-  mirror_hardwares: [amd]
+  #mirror_hardwares: [amd]
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N

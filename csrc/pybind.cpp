@@ -97,6 +97,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
   cache_ops.def(
+    "reshape_and_cache_flash",
+    &reshape_and_cache_flash,
+    "Reshape the key and value tensors and cache them");
+  cache_ops.def(
     "convert_fp8",
     &convert_fp8,
     "Convert the key and value cache to fp8 data type");
