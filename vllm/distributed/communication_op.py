@@ -322,6 +322,9 @@ def broadcast_tensor_dict(
             metadata_list, tensor_list = _split_tensor_dict(tensor_dict,
                                                             keys=cls.fields)
             s = pickle.dumps(metadata_list)
+            assert len(s) <= cls.size_upper_bound, (
+                f"Object size after serialization {len(s)} exceeds the upper"
+                f" bound {cls.size_upper_bound}")
             cls.buffer_tensor[:len(s)].copy_(
                 torch.frombuffer(s, dtype=torch.uint8))
             dist.broadcast(cls.buffer_tensor, src=src, group=metadata_group)
