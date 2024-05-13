@@ -13,7 +13,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
-from vllm.worker.model_runner import BatchType, ModelRunner
+from vllm.worker.model_runner import ModelRunner
 
 logger = init_logger(__name__)
 
@@ -88,85 +88,24 @@ class EmbeddingModelRunner(ModelRunner):
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
                Set[LoRARequest], LoRAMapping, torch.Tensor]:
         if self.is_driver_worker:
-            prefill_reqs = []
-            decode_reqs = []
-            for seq_group_meta in seq_group_metadata_list:
-                if seq_group_meta.is_prompt:
-                    prefill_reqs.append(seq_group_meta)
-                else:
-                    decode_reqs.append(seq_group_meta)
-
             # Prepare input tensors.
             (
                 input_tokens,
                 input_positions,
-                prefill_attn_metadata,
-                prompt_lens,
-                subquery_lens,
-                lora_index_mapping,
-                lora_prompt_mapping,
+                attn_metadata,
+                seq_lens,
+                _,
+                lora_mapping,
                 lora_requests,
                 multi_modal_input,
                 slot_mapping,
-            ) = self._prepare_prompt(prefill_reqs)
-            (
-                decode_input_tokens,
-                decode_input_positions,
-                decode_attn_metadata,
-                decode_lora_index_mapping,
-                decode_lora_prompt_mapping,
-                decode_lora_requests,
-                decode_slot_mapping,
-            ) = self._prepare_decode(decode_reqs)
-
+                num_prefill_tokens,
+                num_decode_tokens,
+                num_prefills,
+            ) = self._prepare_model_input(seq_group_metadata_list)
             # Prepare PoolingMetadata
             pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
-                                                     prompt_lens)
-
-            if not self.scheduler_config.chunked_prefill_enabled:
-                assert (len(prefill_reqs) and len(decode_reqs)) == 0
-
-            num_prefills = len(prompt_lens)
-            num_prefill_tokens = len(input_tokens)
-            num_decode_tokens = len(decode_input_tokens)
-
-            # Coalesce tensors. Note that attn_metadata is currently not
-            # coalesced for simplicity.
-            input_tokens.extend(decode_input_tokens)
-            input_positions.extend(decode_input_positions)
-            slot_mapping.extend(decode_slot_mapping)
-            lora_index_mapping.extend(decode_lora_index_mapping)
-            lora_prompt_mapping.extend(decode_lora_prompt_mapping)
-            lora_requests.update(decode_lora_requests)
-
-            input_tokens = torch.tensor(input_tokens,
-                                        dtype=torch.long,
-                                        device=self.device)
-            input_positions = torch.tensor(input_positions,
-                                           dtype=torch.long,
-                                           device=self.device)
-            slot_mapping = torch.tensor(slot_mapping,
-                                        dtype=torch.long,
-                                        device=self.device)
-
-            if self.lora_config:
-                lora_mapping = LoRAMapping(
-                    lora_index_mapping,
-                    lora_prompt_mapping,
-                )
-            else:
-                lora_mapping = None
-
-            # Broadcast the metadata.
-            # If batch contains both prefill and decode, it sends 2 broadcasts.
-            # If it only contains 1 type, it triggers a single broadcast.
-            if (prefill_attn_metadata is not None
-                    and decode_attn_metadata is not None):
-                batch_type = BatchType.MIXED
-            elif prefill_attn_metadata is not None:
-                batch_type = BatchType.PREFILL
-            else:
-                batch_type = BatchType.DECODE
+                                                     seq_lens)
 
             metadata_dict = {
                 "input_tokens": input_tokens,
@@ -178,65 +117,25 @@ class EmbeddingModelRunner(ModelRunner):
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
-                "batch_type": batch_type,
             }
-            if prefill_attn_metadata is not None:
-                metadata_dict.update(prefill_attn_metadata.asdict_zerocopy())
-            else:
-                assert decode_attn_metadata is not None
-                metadata_dict.update(decode_attn_metadata.asdict_zerocopy())
+            if attn_metadata:
+                metadata_dict.update(attn_metadata.asdict_zerocopy())
             broadcast_tensor_dict(metadata_dict, src=0)
-
-            # Broadcast decode attn metadata for mixed batch type.
-            # The additional broadcast costs 300us overhead on 4 A10 GPUs.
-            # We can potentially reduce the overhead by coelescing tensors.
-            if batch_type == BatchType.MIXED:
-                assert decode_attn_metadata is not None
-                metadata_dict = decode_attn_metadata.asdict_zerocopy()
-                broadcast_tensor_dict(metadata_dict, src=0)
         else:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
-            slot_mapping = metadata_dict.pop("slot_mapping")
-            num_prefills = metadata_dict.pop("num_prefills")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
             multi_modal_input = metadata_dict.pop("multi_modal_input")
-            num_prefill_tokens = metadata_dict.pop("num_prefill_tokens")
-            num_decode_tokens = metadata_dict.pop("num_decode_tokens")
-            batch_type = metadata_dict.pop("batch_type")
-
-            # Create an attention metadata.
-            prefill_attn_metadata = None
-            decode_attn_metadata = None
-            if batch_type == BatchType.PREFILL or batch_type == BatchType.MIXED:
-                prefill_attn_metadata = self.attn_backend.make_metadata(
+            if metadata_dict:
+                attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
             else:
-                decode_attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-
+                attn_metadata = None
             pooling_metadata = PoolingMetadata(seq_groups=None,
                                                seq_data=None,
                                                prompt_lens=None)
-
-            # if it is a mixed batch, decode attn_metadata is broadcasted
-            # separately.
-            if batch_type == BatchType.MIXED:
-                metadata_dict = broadcast_tensor_dict(src=0)
-                decode_attn_metadata = self.attn_backend.make_metadata(
-                    **metadata_dict)
-
-        attn_metadata = AttentionMetadata(
-            num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
-            num_prefill_tokens=num_prefill_tokens,
-            num_decode_tokens=num_decode_tokens,
-            prefill_metadata=prefill_attn_metadata,
-            decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
                 lora_requests, lora_mapping, multi_modal_input)

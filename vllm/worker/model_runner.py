@@ -332,9 +332,12 @@ class ModelRunner:
                     lora_requests.add(seq_group_metadata.lora_request)
 
                 lora_index_mapping += [lora_id] * (seq_len - context_len)
-                lora_prompt_mapping.extend([lora_id] * (
-                    seq_len - context_len if seq_group_metadata.sampling_params
-                    and seq_group_metadata.sampling_params.prompt_logprobs else 1))
+                lora_prompt_mapping.extend(
+                    [lora_id] *
+                    (seq_len -
+                     context_len if seq_group_metadata.sampling_params
+                     and seq_group_metadata.sampling_params.prompt_logprobs
+                     else 1))
 
                 if seq_group_metadata.multi_modal_data:
                     multi_modal_input_list.append(
@@ -598,8 +601,6 @@ class ModelRunner:
             metadata_dict = broadcast_tensor_dict(src=0)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
-            # slot_mapping = metadata_dict.pop("slot_mapping")
-            # num_prefills = metadata_dict.pop("num_prefills")
             selected_token_indices = metadata_dict.pop(
                 "selected_token_indices")
             lora_mapping = metadata_dict.pop("lora_mapping")
