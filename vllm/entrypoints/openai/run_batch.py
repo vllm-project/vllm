@@ -124,7 +124,7 @@ async def main(args):
         print(response.model_dump_json(), file=output_buffer)
 
     output_buffer.seek(0)
-    write_file(args.output_file, output_buffer.read().strip())
+    await write_file(args.output_file, output_buffer.read().strip())
 
 
 if __name__ == "__main__":
