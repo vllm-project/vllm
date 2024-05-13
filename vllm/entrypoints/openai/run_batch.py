@@ -41,12 +41,12 @@ logger = init_logger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(
         description="vLLM OpenAI-Compatible batch runner.")
-    parser.add_argument("--i",
+    parser.add_argument("-i",
                         "--input-file",
                         required=True,
                         type=str,
                         help="The path or url to a single input file. Currently supports local file paths, or the http protocol (http or https). If a URL is specified, the file should be available via HTTP GET.")
-    parser.add_argument("--o",
+    parser.add_argument("-o",
                         "--output-file",
                         required=True,
                         type=str,
