@@ -1,6 +1,6 @@
 import codecs
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, List,
                     Optional, Tuple, TypedDict, Union, final)
 
 from fastapi import Request
@@ -100,9 +100,13 @@ class OpenAIServingChat(OpenAIServing):
         return [ConversationMessage(role=role, content="\n".join(texts))], []
 
     async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
+            self, request: ChatCompletionRequest, is_aborted : Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
+        if is_aborted is None:
+            async def always_false():
+                return False
+            is_aborted = always_false
         """Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
@@ -166,7 +170,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             try:
                 return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id,
+                    request, is_aborted, result_generator, request_id,
                     conversation)
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
@@ -319,7 +323,7 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, raw_request: Request,
+        self, request: ChatCompletionRequest, is_aborted : Callable[[], Awaitable[bool]],
         result_generator: AsyncIterator[RequestOutput], request_id: str,
         conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -329,7 +333,7 @@ class OpenAIServingChat(OpenAIServing):
         final_res: Optional[RequestOutput] = None
 
         async for res in result_generator:
-            if await raw_request.is_disconnected():
+            if await is_aborted():
                 # Abort the request if the client disconnects.
                 await self.engine.abort(request_id)
                 return self.create_error_response("Client disconnected")
