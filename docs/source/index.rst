@@ -105,6 +105,7 @@ Documentation
    dev/engine/engine_index
    dev/kernel/paged_attention
    dev/dockerfile/dockerfile
+   dev/logits_processors/logits_processor_plugins
 
 Indices and tables
 ==================
