@@ -64,7 +64,11 @@ def main(args):
     # Copy metadata files to output directory
     for file in os.listdir(model_path):
         if os.path.splitext(file)[1] not in (".bin", ".pt", ".safetensors"):
-            shutil.copy(f"{model_path}/{file}", args.output)
+            if os.path.isdir(file):
+                shutil.copytree(f"{model_path}/{file}",
+                                f"{args.output}/{file}")
+            else:
+                shutil.copy(f"{model_path}/{file}", args.output)
 
 
 if __name__ == "__main__":
