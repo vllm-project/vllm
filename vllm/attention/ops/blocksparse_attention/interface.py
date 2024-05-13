@@ -1,11 +1,11 @@
 import math
-from functools import lru_cache
 
 import torch
 
+from vllm.utils import is_cpu, is_hip
+
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
-from vllm.utils import is_cpu, is_hip
 
 IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
                          and torch.cuda.get_device_capability()[0] >= 8)

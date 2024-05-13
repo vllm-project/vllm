@@ -161,8 +161,8 @@ def _fwd_kernel_inner(
         else:
             k = tl.load(
                 k_ptrs + start_n * stride_kt,
-                mask=(offs_n[None, :] + start_n < k_seqlen)
-                & (offs_d[:, None] < D_HEAD),
+                mask=(offs_n[None, :] + start_n < k_seqlen) &
+                (offs_d[:, None] < D_HEAD),
             )
     else:
         if EVEN_D:
@@ -183,7 +183,7 @@ def _fwd_kernel_inner(
             float("-inf"),
         )
 
-    ### flash-attn2
+    # flash-attn2
     m_ij = tl.maximum(m_i, tl.max(qk, 1))
     p = tl.math.exp2(qk - m_ij[:, None])
     l_ij = tl.sum(p, 1)
@@ -204,8 +204,8 @@ def _fwd_kernel_inner(
         else:
             v = tl.load(
                 v_ptrs + start_n * stride_vt,
-                mask=(offs_n[:, None] + start_n < k_seqlen)
-                & (offs_d[None, :] < D_HEAD),
+                mask=(offs_n[:, None] + start_n < k_seqlen) &
+                (offs_d[None, :] < D_HEAD),
             )
     else:
         if EVEN_D:
@@ -403,7 +403,7 @@ def _fwd_kernel_batch_inference(
         M_LT_N,
     )
 
-    ### flash-attn 2
+    # flash-attn 2
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
 

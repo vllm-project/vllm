@@ -1,5 +1,3 @@
-# from vllm.attention import Attention, AttentionMetadata
-import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Type
 
@@ -7,13 +5,12 @@ import torch
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
+from vllm.attention.ops.blocksparse_attention.interface import (
+    LocalStridedBlockSparseAttn, get_head_sliding_step)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
-
-from vllm.attention.ops.blocksparse_attention.interface import (
-    get_head_sliding_step, LocalStridedBlockSparseAttn)
 
 
 @dataclass
