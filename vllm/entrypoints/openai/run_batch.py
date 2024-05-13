@@ -1,36 +1,17 @@
 import asyncio
-import importlib
-import inspect
-import re
-from contextlib import asynccontextmanager
-from http import HTTPStatus
-from typing import Optional, Set
+from typing import Optional
 from vllm.utils import random_uuid
 from io import StringIO
-import json
 import argparse
 
-import fastapi
-import uvicorn
-from fastapi import Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from prometheus_client import make_asgi_app
-from starlette.routing import Mount
 import aiohttp
 
 import vllm
-import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest, ChatCompletionResponse, CompletionRequest,
-    EmbeddingRequest, ErrorResponse, BatchRequestInput, BatchRequestOutput)
+    ChatCompletionResponse, BatchRequestInput, BatchRequestOutput)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
