@@ -78,11 +78,13 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
   } // namespace fp16
 
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   namespace bf16 {
 #define INCLUDE_GPT_MARGIN_BFLOAT16 1
 #include "gptq_marlin_part.cu"
 #undef INCLUDE_GPT_MARGIN_BFLOAT16
   } // namespace bf16
+#endif
 
 } // namespace gptq_marlin
 
@@ -205,6 +207,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
         size_k, workspace.data_ptr(), num_bits, has_act_order, is_k_full,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     gptq_marlin::bf16::marlin_mm_f16i4(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(), c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
@@ -212,8 +215,9 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
         size_k, workspace.data_ptr(), num_bits, has_act_order, is_k_full,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
+#endif
   } else {
-    throw std::runtime_error("gpt_marlin_gemm only supports bfloat16 and float16");
+    throw std::runtime_error("unsupported dtype");
   }
 
   return c;
