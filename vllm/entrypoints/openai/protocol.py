@@ -493,6 +493,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+
 class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
@@ -502,32 +503,33 @@ class BatchRequestInput(OpenAIBaseModel):
 
     # A developer-provided per-request id that will be used to match outputs to
     # inputs. Must be unique for each request in a batch.
-    custom_id : str
+    custom_id: str
 
     # The HTTP method to be used for the request. Currently only POST is
     # supported.
-    method : str
+    method: str
 
     # The OpenAI API relative URL to be used for the request. Currently
     # /v1/chat/completions is supported.
-    url : str
+    url: str
 
     # The parameteters of the request.
-    body : Union[ChatCompletionRequest,]
+    body: Union[ChatCompletionRequest, ]
+
 
 class BatchRequestOutput(OpenAIBaseModel):
     """
     The per-line object of the batch output and error files
     """
 
-    id : str
+    id: str
 
     # A developer-provided per-request id that will be used to match outputs to
     # inputs.
-    custom_id : str
+    custom_id: str
 
-    response : Optional[ChatCompletionResponse]
+    response: Optional[ChatCompletionResponse]
 
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
-    error : Optional[Any]
+    error: Optional[Any]

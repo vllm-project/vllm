@@ -1,7 +1,7 @@
 import codecs
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, List,
-                    Optional, Tuple, TypedDict, Union, final)
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Callable,
+                    Iterable, List, Optional, Tuple, TypedDict, Union, final)
 
 from fastapi import Request
 from openai.types.chat import (ChatCompletionContentPartParam,
@@ -100,12 +100,16 @@ class OpenAIServingChat(OpenAIServing):
         return [ConversationMessage(role=role, content="\n".join(texts))], []
 
     async def create_chat_completion(
-            self, request: ChatCompletionRequest, is_aborted : Optional[Callable[[], Awaitable[bool]]] = None,
+        self,
+        request: ChatCompletionRequest,
+        is_aborted: Optional[Callable[[], Awaitable[bool]]] = None,
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
         if is_aborted is None:
+
             async def always_false():
                 return False
+
             is_aborted = always_false
         """Completion API similar to OpenAI's API.
 
@@ -323,7 +327,8 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, is_aborted : Callable[[], Awaitable[bool]],
+        self, request: ChatCompletionRequest,
+        is_aborted: Callable[[], Awaitable[bool]],
         result_generator: AsyncIterator[RequestOutput], request_id: str,
         conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
