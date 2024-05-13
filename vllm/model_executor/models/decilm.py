@@ -28,7 +28,7 @@ from typing import Iterable, Optional, Tuple
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -56,12 +56,14 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     def __init__(
         self,
         config: Optional[PretrainedConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, "num_key_value_heads_per_layer")
         super().__init__(config=config,
+                         cache_config=cache_config,
                          quant_config=quant_config,
                          lora_config=lora_config)
 
