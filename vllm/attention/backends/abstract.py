@@ -99,7 +99,7 @@ class AttentionMetadata(Generic[T]):
 
     # The attention metadata for encode operations required by
     # prefill requests in a batch. None if encoding is not required.
-    encode_metadata: Optional[T] = None
+    # encode_metadata: Optional[T] = None
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:
