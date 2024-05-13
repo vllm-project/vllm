@@ -111,10 +111,18 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization
-        self.model: torch.nn.Module  # Set after load_model
+        self.model: nn.Module  # Set after load_model
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
@@ -130,6 +138,7 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -279,7 +288,14 @@ class ModelRunner:
                     assert computed_block_nums is not None
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
-                    block_tables.append(computed_block_nums)
+                    if self.attn_backend.get_name() == "flash-attn":
+                        # NOTE(woosuk): For flash-attn, the block table should
+                        # include the entries for the incoming prefill tokens.
+                        # TODO(woosuk): This is a temporary fix. We should
+                        # provide a unified interface for different backends.
+                        block_table = seq_group_metadata.block_tables[seq_id]
+                    else:
+                        block_tables.append(computed_block_nums)
                 elif (self.scheduler_config.chunked_prefill_enabled
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:

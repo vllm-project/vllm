@@ -67,8 +67,6 @@ class AttentionMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    # The kv cache's data type.
-    kv_cache_dtype: str
 
     @property
     @abstractmethod
@@ -112,6 +110,7 @@ class AttentionImpl(ABC, Generic[T]):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         raise NotImplementedError
 
@@ -123,6 +122,6 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError

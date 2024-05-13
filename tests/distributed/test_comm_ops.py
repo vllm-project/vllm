@@ -11,8 +11,9 @@ import torch
 from vllm.distributed import (broadcast_tensor_dict,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.test_utils import (init_test_distributed_environment,
-                             multi_process_tensor_parallel)
+
+from ..utils import (init_test_distributed_environment,
+                     multi_process_tensor_parallel)
 
 
 @ray.remote(num_gpus=1, max_calls=1)

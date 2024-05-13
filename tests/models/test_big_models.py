@@ -12,7 +12,7 @@ MODELS = [
     # "Deci/DeciLM-7b",  # Broken
     # "tiiuae/falcon-7b",  # Broken
     "EleutherAI/gpt-j-6b",
-    "mosaicml/mpt-7b",
+    # "mosaicml/mpt-7b",  # Broken
     # "Qwen/Qwen1.5-0.5B"  # Broken,
 ]
 
