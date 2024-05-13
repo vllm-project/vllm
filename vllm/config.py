@@ -784,12 +784,15 @@ class SpeculativeConfig:
         draft_quantization = None
 
         if speculative_model == "[ngram]":
-            assert (ngram_prompt_lookup_max is not None
-                    and ngram_prompt_lookup_max > 0)
             if ngram_prompt_lookup_min is None:
-                ngram_prompt_lookup_min = 0
-            else:
-                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
