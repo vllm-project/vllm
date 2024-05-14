@@ -265,7 +265,7 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
-        return self._add_requests(
+        return self._validate_and_add_requests(
             inputs=inputs,
             params=sampling_params,
             use_tqdm=use_tqdm,
@@ -395,7 +395,7 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        return self._add_requests(
+        return self._validate_and_add_requests(
             inputs=inputs,
             params=pooling_params,
             use_tqdm=use_tqdm,
@@ -458,7 +458,7 @@ class LLM:
         return inputs
 
     @overload
-    def _add_requests(
+    def _validate_and_add_requests(
         self,
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams]],
@@ -468,7 +468,7 @@ class LLM:
         ...
 
     @overload
-    def _add_requests(  # type: ignore[misc]
+    def _validate_and_add_requests(  # type: ignore[misc]
         self,
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         params: Union[PoolingParams, Sequence[PoolingParams]],
@@ -477,7 +477,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    def _add_requests(
+    def _validate_and_add_requests(
         self,
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
