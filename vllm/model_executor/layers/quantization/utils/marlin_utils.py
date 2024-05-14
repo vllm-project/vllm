@@ -22,7 +22,7 @@ def is_marlin_supported():
 # As a result of this reordering, the vector loads inside the kernel will get the data as it is needed for tensor-core # noqa: E501
 # (without the need to use ldmatrix instructions) # noqa: E501
 def _get_perms(num_bits):
-    perm = []
+    perm_list = []
     for i in range(32):
         perm1 = []
         col = i // 4
@@ -35,9 +35,9 @@ def _get_perms(num_bits):
             ]:
                 perm1.append(16 * row + col + 8 * block)
         for j in range(4):
-            perm.extend([p + 256 * j for p in perm1])
+            perm_list.extend([p + 256 * j for p in perm1])
 
-    perm = numpy.array(perm)
+    perm = numpy.array(perm_list)
 
     if num_bits == 4:
         interleave = numpy.array([0, 2, 4, 6, 1, 3, 5, 7])
