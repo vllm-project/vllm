@@ -264,6 +264,7 @@ class ModelRunner:
                     # So, we should have a special logic here.
                     # TODO(sang): Fix it.
                     context_len = seq_data.get_len() - 1
+
                 seq_len = min(
                     seq_data.get_len(),
                     context_len + seq_group_metadata.token_chunk_size)
@@ -295,7 +296,8 @@ class ModelRunner:
                         # provide a unified interface for different backends.
                         block_table = seq_group_metadata.block_tables[seq_id]
                     else:
-                        block_tables.append(computed_block_nums)
+                        block_table = computed_block_nums
+                    block_tables.append(block_table)
                 elif (self.scheduler_config.chunked_prefill_enabled
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
