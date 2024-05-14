@@ -174,11 +174,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-    def _get_worker_kwargs(self, *args, **kwargs):
-        kwargs = super()._get_worker_kwargs(*args, **kwargs)
-        kwargs['speculative_config'] = self.speculative_config
-        return kwargs
-
     def execute_model(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:

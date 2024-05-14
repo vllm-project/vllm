@@ -239,15 +239,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
-    def _broadcast_num_lookahead_slots(self, execute_model_req: Optional[ExecuteModelRequest] = None, disable_all_speculation: bool = False) -> int:
-        """Broadcast how many lookahead slots are scheduled for this step.
+    def _broadcast_control_flow_decision(self, execute_model_req: Optional[ExecuteModelRequest] = None, disable_all_speculation: bool = False) -> int:
+        """Broadcast how many lookahead slots are scheduled for this step, and
+        whether all speculation is disabled, to all non-driver workers.
 
-        In draft-model speculative decoding, the number of invocations of the
-        draft worker changes depending on whether we've scheduled prefill or
-        decode. We broadcast this scheduling information out so that the non-
-        driver workers can run their models the correct number of times.
+        This is required as if the number of draft model runs changes
+        dynamically, the non-driver workers won't know unless we perform a
+        communication to inform then.
 
-        Returns the broadcasted num_lookahead_slots.
+        Returns the broadcasted num_lookahead_slots and disable_all_speculation.
         """
 
         if self.rank == self._driver_rank:
@@ -276,7 +276,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if self.rank == self._driver_rank:
             disable_all_speculation = self._should_disable_all_speculation(execute_model_req)
             
-        num_lookahead_slots, disable_all_speculation = self._broadcast_num_lookahead_slots(
+        num_lookahead_slots, disable_all_speculation = self._broadcast_control_flow_decision(
             execute_model_req, disable_all_speculation)
         
         if self.rank == self._driver_rank:
@@ -316,30 +316,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # this state within spec decode worker.
             seq_group_metadata.num_speculative_tokens = 0
         
-        
-#        assert execute_model_req.seq_group_metadata_list is not None, (
-#            "speculative decoding "
-#            "requires non-None seq_group_metadata_list")
-#
-#        if disable_all:
-#            for seq_group_metadata in execute_model_req.seq_group_metadata_list:
-#                # Once num_speculative_tokens is set to 0, the spec decode
-#                # of this request will be disabled forever.
-#                # TODO(comaniac): We currently store spec decoding specific
-#                # state in the global data structure, but we should maintain
-#                # this state within spec decode worker.
-#                seq_group_metadata.num_speculative_tokens = 0
-#
-#        # If no spec tokens, call the proposer and scorer workers normally.
-#        # This happens for prefill, or when the spec decode is disabled
-#        # for this batch.
-#        if execute_model_req.num_lookahead_slots == 0 or len(
-#                execute_model_req.seq_group_metadata_list) == 0:
-#            return self._run_no_spec(execute_model_req,
-#                                     skip_proposer=disable_all)
-#
-#        return self._run_speculative_decoding_step(execute_model_req)
-
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:

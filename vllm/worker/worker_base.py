@@ -126,33 +126,9 @@ class WorkerWrapperBase:
         """
         enable_trace_function_call_for_thread()
 
-        if self.worker_class_name == "Worker2":
-            from vllm.worker.worker import Worker
-
-            speculative_config = kwargs.pop('speculative_config')
-
-            target_worker = Worker(*args, **kwargs)
-
-            from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
-
-            draft_worker_kwargs = kwargs.copy()
-            draft_worker_kwargs.update(
-                model_config=speculative_config.draft_model_config,
-                parallel_config=speculative_config.draft_parallel_config,
-                ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
-                ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
-                # TODO allow draft-model specific load config.
-                #load_config=self.load_config,
-            )
-            spec_decode_worker = SpecDecodeWorker.create_worker(
-                scorer_worker=target_worker,
-                draft_worker_kwargs=draft_worker_kwargs,
-            )
-            self.worker = spec_decode_worker
-        else:
-            mod = importlib.import_module(self.worker_module_name)
-            worker_class = getattr(mod, self.worker_class_name)
-            self.worker = worker_class(*args, **kwargs)
+        mod = importlib.import_module(self.worker_module_name)
+        worker_class = getattr(mod, self.worker_class_name)
+        self.worker = worker_class(*args, **kwargs)
 
     def execute_method(self, method, *args, **kwargs):
         try:
