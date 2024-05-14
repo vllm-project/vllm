@@ -142,7 +142,7 @@ def test_prepare_prompt(batch_size):
 @pytest.mark.parametrize("batch_size", list(range(1, 257)))
 def test_prepare_decode_cuda_graph(batch_size):
     model_runner = _create_encoder_decoder_model_runner(
-        "facebook/opt-125m",
+        "google-t5/t5-small",
         seed=0,
         dtype="float16",
         enforce_eager=False,
@@ -221,7 +221,7 @@ def test_prepare_decode_cuda_graph(batch_size):
 def test_empty_seq_group():
     """Verify prepare prompt and decode returns empty output."""
     model_runner = _create_encoder_decoder_model_runner(
-        "facebook/opt-125m",
+        "google-t5/t5-small",
         seed=0,
         dtype="float16",
         enforce_eager=False,
@@ -256,9 +256,9 @@ def distributed_init():
 @pytest.mark.parametrize("enforce_eager", [True, False])
 def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     model_runner = _create_encoder_decoder_model_runner(
-        "facebook/opt-125m",
+        "google-t5/t5-small",
         seed=0,
-        dtype="float16",
+        dtype="float32",
         enforce_eager=enforce_eager,
         max_num_batched_tokens=100000,
         max_num_seqs=100000,

@@ -492,11 +492,15 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
+        request_id = seq_group.request_id
         blocks: Set[PhysicalTokenBlock] = set()
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 continue
             blocks.update(self.block_tables[seq.seq_id])
+        # Encoder blocks
+        if seq_group.encoder_seq is not None:
+            blocks.update(self.encoder_block_tables[request_id])
         return list(blocks)
 
     def can_swap_in(self,
@@ -506,6 +510,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
+        if seq_group.encoder_seq is not None:
+            num_swapped_seqs += 1
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         # NOTE: Conservatively, we assume that every sequence will allocate
         # at least one free block right after the swap-in.
@@ -523,6 +529,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 num_lookahead_slots: int = 0) -> List[Tuple[int, int]]:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
+
+        request_id = seq_group.request_id
 
         # CPU block -> GPU block.
         # dict is efficient in lookup `if cpu_block in mapping`
@@ -544,6 +552,23 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self.cpu_allocator.free(cpu_block)
             self.block_tables[seq.seq_id] = new_block_table
 
+        if seq_group.encoder_seq is not None:
+            new_block_table: BlockTable = []
+            block_table = self.encoder_block_tables[request_id]
+
+            for cpu_block in block_table:
+                if cpu_block in mapping:
+                    gpu_block = mapping[cpu_block]
+                    gpu_block.ref_count += 1
+                else:
+                    gpu_block = self.gpu_allocator.allocate(
+                        cpu_block.block_hash, cpu_block.num_hashed_tokens)
+                    mapping[cpu_block] = gpu_block
+                new_block_table.append(gpu_block)
+                # Free the CPU block swapped in to GPU.
+                self.cpu_allocator.free(cpu_block)
+            self.encoder_block_tables[request_id] = new_block_table
+
         block_number_mapping = {
             cpu_block.block_number: gpu_block.block_number
             for cpu_block, gpu_block in mapping.items()
@@ -556,6 +581,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+        request_id = seq_group.request_id
+
         # GPU block -> CPU block.
         # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
@@ -575,6 +602,23 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Free the GPU block swapped out to CPU.
                 self.gpu_allocator.free(gpu_block)
             self.block_tables[seq.seq_id] = new_block_table
+
+        if seq_group.encoder_seq is not None:
+            new_block_table: BlockTable = []
+            block_table = self.encoder_block_tables[request_id]
+
+            for gpu_block in block_table:
+                if gpu_block in mapping:
+                    cpu_block = mapping[gpu_block]
+                    cpu_block.ref_count += 1
+                else:
+                    cpu_block = self.cpu_allocator.allocate(
+                        gpu_block.block_hash, gpu_block.num_hashed_tokens)
+                    mapping[gpu_block] = cpu_block
+                new_block_table.append(cpu_block)
+                # Free the GPU block swapped out to CPU.
+                self.gpu_allocator.free(gpu_block)
+            self.encoder_block_tables[request_id] = new_block_table
 
         block_number_mapping = {
             gpu_block.block_number: cpu_block.block_number
@@ -613,6 +657,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]
+        return [block.block_number for block in block_table]
+
+    def get_encoder_block_table(self, seq_group: SequenceGroup) -> List[int]:
+        block_table = self.encoder_block_tables[seq_group.request_id]
         return [block.block_number for block in block_table]
 
     def get_num_free_gpu_blocks(self) -> int:
