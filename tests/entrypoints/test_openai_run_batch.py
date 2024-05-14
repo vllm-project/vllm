@@ -33,6 +33,7 @@ def test_e2e():
             # Validation should throw if the schema is wrong.
             BatchRequestOutput.model_validate_json(line)
 
+
 def test_e2e_invalid_input():
     """
     Ensure that we fail when the input doesn't conform to the openai api.
