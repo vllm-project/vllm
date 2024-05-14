@@ -9,10 +9,6 @@
 #include <cuda_runtime.h>
 #include <iostream>
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-#include <cuda_bf16.h>
-#endif
-
 namespace gptq_marlin {
 
 // 8 warps are a good choice since every SM has 4 schedulers and having more than 1 warp per
