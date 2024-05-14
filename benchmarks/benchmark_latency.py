@@ -186,9 +186,7 @@ if __name__ == '__main__':
         action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
-    parser.add_argument(
-        '--use-v2-block-manager',
-        action='store_true')
+    parser.add_argument('--use-v2-block-manager', action='store_true')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',

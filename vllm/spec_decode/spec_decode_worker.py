@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
@@ -17,11 +18,11 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 from vllm.worker.worker import Worker
-from vllm.distributed.communication_op import broadcast_tensor_dict
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
+
 
 def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     """Helper method that is the entrypoint for Executors which use
@@ -29,6 +30,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     """
     assert "speculative_config" in kwargs
     speculative_config = kwargs.get("speculative_config")
+    assert speculative_config is not None
 
     target_worker = Worker(*args, **kwargs)
 
@@ -37,10 +39,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     draft_worker_kwargs.update(
         model_config=speculative_config.draft_model_config,
         parallel_config=speculative_config.draft_parallel_config,
-        ngram_prompt_lookup_max=speculative_config.
-        ngram_prompt_lookup_max,
-        ngram_prompt_lookup_min=speculative_config.
-        ngram_prompt_lookup_min,
+        ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
         # TODO allow draft-model specific load config.
         #load_config=load_config,
     )
@@ -49,7 +49,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
         disable_by_batch_size=speculative_config.
-            speculative_disable_by_batch_size,
+        speculative_disable_by_batch_size,
     )
 
     return spec_decode_worker
@@ -231,7 +231,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
-    def _broadcast_control_flow_decision(self, execute_model_req: Optional[ExecuteModelRequest] = None, disable_all_speculation: bool = False) -> int:
+    def _broadcast_control_flow_decision(
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None,
+            disable_all_speculation: bool = False) -> Tuple[int, bool]:
         """Broadcast how many lookahead slots are scheduled for this step, and
         whether all speculation is disabled, to all non-driver workers.
 
@@ -254,60 +257,72 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             assert execute_model_req is None
             broadcast_dict = broadcast_tensor_dict(src=self._driver_rank)
 
-        return (broadcast_dict["num_lookahead_slots"], broadcast_dict["disable_all_speculation"])
-            
+        return (broadcast_dict["num_lookahead_slots"],
+                broadcast_dict["disable_all_speculation"])
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest] = None) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
 
         disable_all_speculation = False
         if self.rank == self._driver_rank:
-            disable_all_speculation = self._should_disable_all_speculation(execute_model_req)
-            
-        num_lookahead_slots, disable_all_speculation = self._broadcast_control_flow_decision(
-            execute_model_req, disable_all_speculation)
-        
+            disable_all_speculation = self._should_disable_all_speculation(
+                execute_model_req)
+
+        (num_lookahead_slots,
+         disable_all_speculation) = self._broadcast_control_flow_decision(
+             execute_model_req, disable_all_speculation)
+
         if self.rank == self._driver_rank:
+            assert execute_model_req is not None
             assert execute_model_req.seq_group_metadata_list is not None, (
                 "speculative decoding requires non-None seq_group_metadata_list"
             )
 
-            self._maybe_disable_speculative_tokens(disable_all_speculation, execute_model_req.seq_group_metadata_list)
+            self._maybe_disable_speculative_tokens(
+                disable_all_speculation,
+                execute_model_req.seq_group_metadata_list)
 
             # If no spec tokens, call the proposer and scorer workers normally.
             # Used for prefill.
             if num_lookahead_slots == 0 or len(
                     execute_model_req.seq_group_metadata_list) == 0:
-                return self._run_no_spec(execute_model_req, skip_proposer=disable_all_speculation)
+                return self._run_no_spec(execute_model_req,
+                                         skip_proposer=disable_all_speculation)
 
-            return self._run_speculative_decoding_step(execute_model_req, num_lookahead_slots)
+            return self._run_speculative_decoding_step(execute_model_req,
+                                                       num_lookahead_slots)
         else:
-            return self._run_non_driver_rank(num_lookahead_slots)
+            self._run_non_driver_rank(num_lookahead_slots)
+            return []
 
-    def _should_disable_all_speculation(self, execute_model_req: ExecuteModelRequest) -> bool:
+    def _should_disable_all_speculation(
+            self, execute_model_req: ExecuteModelRequest) -> bool:
         # When the batch size is too large, disable speculative decoding
         # to stop trading off throughput for latency.
         disable_all_speculation = (execute_model_req.running_queue_size >=
-                       self.disable_by_batch_size)
+                                   self.disable_by_batch_size)
 
         return disable_all_speculation
 
-    def _maybe_disable_speculative_tokens(self, disable_all_speculation: bool, seq_group_metadata: List[SequenceGroupMetadata]) -> None:
+    def _maybe_disable_speculative_tokens(
+            self, disable_all_speculation: bool,
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
         if not disable_all_speculation:
             return
 
-        for seq_group_metadata in seq_group_metadata:
+        for seq_group_metadata in seq_group_metadata_list:
             # Once num_speculative_tokens is set to 0, the spec decode
             # of this request will be disabled forever.
             # TODO(comaniac): We currently store spec decoding specific
             # state in the global data structure, but we should maintain
             # this state within spec decode worker.
             seq_group_metadata.num_speculative_tokens = 0
-        
+
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:
@@ -331,16 +346,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.logprobs = None
         return [sampler_output]
 
-    def _run_non_driver_rank(
-            self,
-            num_lookahead_slots: int) -> None:
+    def _run_non_driver_rank(self, num_lookahead_slots: int) -> None:
         """Run proposer and verifier model in non-driver workers. This is used
         for both speculation cases (num_lookahead_slots>0) and non-speculation
         cases (e.g. prefill).
         """
         # In non-driver workers the input is None
         execute_model_req = None
-        
+
         # Even if num_lookahead_slots is zero, we want to run the proposer model
         # as it may have KV.
         #
@@ -353,8 +366,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
-            self,
-            execute_model_req: ExecuteModelRequest,
+            self, execute_model_req: ExecuteModelRequest,
             num_lookahead_slots: int) -> List[SamplerOutput]:
         """Execute a single step of speculative decoding.
 

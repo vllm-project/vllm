@@ -612,6 +612,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
                                          max_output_len=output_len,
                                          force_output_len=True)
 
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -624,19 +625,14 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         "use_v2_block_manager": True,
 
         #"disable_custom_all_reduce": True,
-
         "tensor_parallel_size": 2,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize(
-    "test_llm_kwargs",
-    [
-        {
-            "speculative_model": "JackFram/llama-68m",
-            "num_speculative_tokens": 3,
-        }
-    ])
+@pytest.mark.parametrize("test_llm_kwargs", [{
+    "speculative_model": "JackFram/llama-68m",
+    "num_speculative_tokens": 3,
+}])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
     "output_len",
@@ -646,7 +642,7 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
     ])
 @pytest.mark.parametrize("seed", [1])
 def test_tp_gt_1(baseline_llm_generator, test_llm_generator, batch_size: int,
-                output_len: int):
+                 output_len: int):
     """
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
@@ -654,6 +650,8 @@ def test_tp_gt_1(baseline_llm_generator, test_llm_generator, batch_size: int,
                                          batch_size,
                                          max_output_len=output_len,
                                          force_output_len=True)
+
+
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
