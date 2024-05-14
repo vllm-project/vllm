@@ -48,6 +48,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
+        disable_by_batch_size=speculative_config.
+            speculative_disable_by_batch_size,
     )
 
     #assert self.parallel_config.world_size == 1, (
@@ -237,7 +239,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
-    def _broadcast_num_lookahead_slots(self, execute_model_req: Optional[ExecuteModelRequest] = None) -> int:
+    def _broadcast_num_lookahead_slots(self, execute_model_req: Optional[ExecuteModelRequest] = None, disable_all_speculation: bool = False) -> int:
         """Broadcast how many lookahead slots are scheduled for this step.
 
         In draft-model speculative decoding, the number of invocations of the
@@ -253,13 +255,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
             broadcast_dict = dict(
                 num_lookahead_slots=execute_model_req.num_lookahead_slots,
+                disable_all_speculation=disable_all_speculation,
             )
             broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
         else:
             assert execute_model_req is None
             broadcast_dict = broadcast_tensor_dict(src=self._driver_rank)
 
-        return broadcast_dict["num_lookahead_slots"]
+        return (broadcast_dict["num_lookahead_slots"], broadcast_dict["disable_all_speculation"])
             
 
     @torch.inference_mode()
@@ -268,33 +271,56 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req: Optional[ExecuteModelRequest] = None) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-        num_lookahead_slots = self._broadcast_num_lookahead_slots(
-            execute_model_req)
+
+        disable_all_speculation = False
+        if self.rank == self._driver_rank:
+            disable_all_speculation = self._should_disable_all_speculation(execute_model_req)
+            
+        num_lookahead_slots, disable_all_speculation = self._broadcast_num_lookahead_slots(
+            execute_model_req, disable_all_speculation)
         
         if self.rank == self._driver_rank:
             assert execute_model_req.seq_group_metadata_list is not None, (
                 "speculative decoding requires non-None seq_group_metadata_list"
             )
 
+            self._maybe_disable_speculative_tokens(disable_all_speculation, execute_model_req.seq_group_metadata_list)
+
             # If no spec tokens, call the proposer and scorer workers normally.
             # Used for prefill.
             if num_lookahead_slots == 0 or len(
                     execute_model_req.seq_group_metadata_list) == 0:
-                return self._run_no_spec(execute_model_req)
+                return self._run_no_spec(execute_model_req, skip_proposer=disable_all_speculation)
 
             return self._run_speculative_decoding_step(execute_model_req, num_lookahead_slots)
         else:
             return self._run_non_driver_rank(num_lookahead_slots)
-        # TODO(cade) rebase DSD
-#
+
+    def _should_disable_all_speculation(self, execute_model_req: ExecuteModelRequest) -> bool:
+        # When the batch size is too large, disable speculative decoding
+        # to stop trading off throughput for latency.
+        disable_all_speculation = (execute_model_req.running_queue_size >=
+                       self.disable_by_batch_size)
+
+        return disable_all_speculation
+
+    def _maybe_disable_speculative_tokens(self, disable_all_speculation: bool, seq_group_metadata: List[SequenceGroupMetadata]) -> None:
+        if not disable_all_speculation:
+            return
+
+        for seq_group_metadata in seq_group_metadata:
+            # Once num_speculative_tokens is set to 0, the spec decode
+            # of this request will be disabled forever.
+            # TODO(comaniac): We currently store spec decoding specific
+            # state in the global data structure, but we should maintain
+            # this state within spec decode worker.
+            seq_group_metadata.num_speculative_tokens = 0
+        
+        
 #        assert execute_model_req.seq_group_metadata_list is not None, (
 #            "speculative decoding "
 #            "requires non-None seq_group_metadata_list")
 #
-#        # When the batch size is too large, disable speculative decoding
-#        # to stop trading off throughput for latency.
-#        disable_all = (execute_model_req.running_queue_size >=
-#                       self.disable_by_batch_size)
 #        if disable_all:
 #            for seq_group_metadata in execute_model_req.seq_group_metadata_list:
 #                # Once num_speculative_tokens is set to 0, the spec decode
