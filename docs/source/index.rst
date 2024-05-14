@@ -74,6 +74,7 @@ Documentation
 
    offline_inference/llm
    offline_inference/sampling_params
+   offline_inference/pooling_params
 
 .. toctree::
    :maxdepth: 1
