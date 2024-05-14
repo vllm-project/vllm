@@ -48,7 +48,7 @@ completion = client.chat.completions.create(
 ```
 
 ### Extra Parameters for Chat API
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../offline_inference/sampling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
@@ -65,7 +65,7 @@ The following extra parameters are supported:
 ```
 
 ### Extra Parameters for Completions API
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+The following [sampling parameters (click through to see documentation)](../offline_inference/sampling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
