@@ -75,6 +75,7 @@ Documentation
    serving/deploying_with_docker
    serving/distributed_serving
    serving/metrics
+   serving/env_vars
    serving/usage_stats
    serving/integrations
 
@@ -86,6 +87,7 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/performance
 
 .. toctree::
    :maxdepth: 1

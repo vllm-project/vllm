@@ -5,7 +5,7 @@ from itertools import count, takewhile
 from os.path import commonprefix
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Set
+from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
@@ -45,6 +45,10 @@ class BlockAllocatorBase(ABC):
 
     @abstractmethod
     def get_num_free_blocks(self) -> int:
+        pass
+
+    @abstractmethod
+    def get_num_total_blocks(self) -> int:
         pass
 
     @abstractmethod
@@ -131,6 +135,9 @@ class CachedBlockAllocator(BlockAllocatorBase):
         return (self.num_blocks - self.current_num_blocks +
                 self.evictor.num_blocks)
 
+    def get_num_total_blocks(self) -> int:
+        return self.num_blocks
+
     def contains_block(self, block_hash: int) -> bool:
         return block_hash in self.cached_blocks or block_hash in self.evictor
 
@@ -189,6 +196,9 @@ class UncachedBlockAllocator(BlockAllocatorBase):
 
     def get_num_free_blocks(self) -> int:
         return len(self.free_blocks)
+
+    def get_num_total_blocks(self) -> int:
+        return self.num_blocks
 
     def contains_block(self, block_hash: int) -> bool:
         raise NotImplementedError(
@@ -376,7 +386,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int = 0,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
         """Allocate a physical slot for a new token."""
         logical_blocks = seq.logical_token_blocks
         block_table = self.block_tables[seq.seq_id]
@@ -395,7 +405,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 # Allocate a new physical block.
                 new_block = self._allocate_last_physical_block(seq)
                 block_table.append(new_block)
-                return {}
+                return []
 
         # We want to append the token to the last physical block.
         last_block = block_table[-1]
@@ -408,7 +418,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 maybe_new_block = self._maybe_promote_last_block(
                     seq, last_block)
                 block_table[-1] = maybe_new_block
-            return {}
+            return []
         else:
             # The last block is shared with other sequences.
             # Copy on Write: Allocate a new block and copy the tokens.
@@ -416,7 +426,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
             block_table[-1] = new_block
             self.gpu_allocator.free(last_block)
-            return {last_block.block_number: [new_block.block_number]}
+            return [(last_block.block_number, new_block.block_number)]
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         # NOTE: fork does not allocate a new physical block.
@@ -444,7 +454,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def can_swap_in(self,
                     seq_group: SequenceGroup,
-                    num_lookahead_slots: int = 0) -> bool:
+                    num_lookahead_slots: int = 0) -> AllocStatus:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
         blocks = self._get_physical_blocks(seq_group)
@@ -454,15 +464,21 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # at least one free block right after the swap-in.
         # NOTE: This should match the logic in can_append_slot().
         num_required_blocks = len(blocks) + num_swapped_seqs
-        return num_free_blocks - num_required_blocks >= self.watermark_blocks
+        if self.gpu_allocator.get_num_total_blocks() < num_required_blocks:
+            return AllocStatus.NEVER
+        elif num_free_blocks - num_required_blocks >= self.watermark_blocks:
+            return AllocStatus.OK
+        else:
+            return AllocStatus.LATER
 
     def swap_in(self,
                 seq_group: SequenceGroup,
-                num_lookahead_slots: int = 0) -> Dict[int, int]:
+                num_lookahead_slots: int = 0) -> List[Tuple[int, int]]:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
         # CPU block -> GPU block.
+        # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             new_block_table: BlockTable = []
@@ -485,14 +501,16 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             cpu_block.block_number: gpu_block.block_number
             for cpu_block, gpu_block in mapping.items()
         }
-        return block_number_mapping
+        # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         # GPU block -> CPU block.
+        # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             new_block_table: BlockTable = []
@@ -515,7 +533,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             gpu_block.block_number: cpu_block.block_number
             for gpu_block, cpu_block in mapping.items()
         }
-        return block_number_mapping
+        # convert to list of tuples once here
+        return list(block_number_mapping.items())
 
     def _free_block_table(self, block_table: BlockTable) -> None:
         # when using a sliding window, each seq will only use up

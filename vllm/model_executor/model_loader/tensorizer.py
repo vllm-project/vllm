@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,7 +19,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
-tensorizer_load_fail = None
+tensorizer_error_msg = None
 
 try:
     from tensorizer import (DecryptionParams, EncryptionParams,
@@ -27,7 +28,7 @@ try:
     from tensorizer.utils import (convert_bytes, get_mem_usage,
                                   no_init_or_tensor)
 except ImportError as e:
-    tensorizer_load_fail = e
+    tensorizer_error_msg = str(e)
 
 __all__ = [
     'EncryptionParams', 'DecryptionParams', 'TensorDeserializer',
@@ -142,13 +143,10 @@ class TensorizerArgs:
 
     def __post_init__(self):
         self.file_obj = self.tensorizer_uri
-        self.s3_access_key_id = (self.s3_access_key_id
-                                 or os.environ.get("S3_ACCESS_KEY_ID")) or None
-        self.s3_secret_access_key = (
-            self.s3_secret_access_key
-            or os.environ.get("S3_SECRET_ACCESS_KEY")) or None
-        self.s3_endpoint = (self.s3_endpoint
-                            or os.environ.get("S3_ENDPOINT_URL")) or None
+        self.s3_access_key_id = self.s3_access_key_id or envs.S3_ACCESS_KEY_ID
+        self.s3_secret_access_key = (self.s3_secret_access_key
+                                     or envs.S3_SECRET_ACCESS_KEY)
+        self.s3_endpoint = self.s3_endpoint or envs.S3_ENDPOINT_URL
         self.stream_params = {
             "s3_access_key_id": self.s3_access_key_id,
             "s3_secret_access_key": self.s3_secret_access_key,
@@ -256,11 +254,11 @@ class TensorizerAgent:
 
     def __init__(self, tensorizer_config: TensorizerConfig,
                  quant_config: QuantizationConfig, **extra_kwargs):
-        if tensorizer_load_fail is not None:
+        if tensorizer_error_msg is not None:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
-                "to use this feature with `pip install vllm[tensorizer]`."
-            ) from tensorizer_load_fail
+                "to use this feature with `pip install vllm[tensorizer]`. "
+                "Error message: {}".format(tensorizer_error_msg))
 
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (
