@@ -21,6 +21,8 @@ from vllm.sequence import Logprob, MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
 
+# TODO remove, fixes cuda deferred init error x pytest assertion rewrite
+torch.zeros(0, device='cuda')
 
 class AsyncLLM:
     """AsyncLLM
