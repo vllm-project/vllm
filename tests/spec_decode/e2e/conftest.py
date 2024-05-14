@@ -22,6 +22,7 @@ from vllm.utils import Counter, random_uuid
 
 from ...conftest import cleanup
 
+
 class AsyncLLM:
     """AsyncLLM
 
