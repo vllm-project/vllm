@@ -1,9 +1,10 @@
 import numpy
 import torch
-from quant_utils import get_pack_factor, quantize_weights, sort_weights
 
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_TILE)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_pack_factor, quantize_weights, sort_weights)
 
 __cuda_arch = torch.cuda.get_device_capability()
 

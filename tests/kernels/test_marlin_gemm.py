@@ -4,13 +4,14 @@ Run `pytest tests/kernels/marlin/test_marlin_gemm.py`.
 """
 import pytest
 import torch
-from marlin_utils import (MarlinWorkspace, is_marlin_supported,
-                          marlin_quantize, marlin_weights)
-from quant_utils import gptq_pack, quantize_weights, sort_weights
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    MarlinWorkspace, is_marlin_supported, marlin_quantize, marlin_weights)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    gptq_pack, quantize_weights, sort_weights)
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
