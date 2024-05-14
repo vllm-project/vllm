@@ -8,6 +8,8 @@ from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
+from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
+    GPTQMarlin24Config)
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 
@@ -16,9 +18,10 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "awq": AWQConfig,
     "fp8": Fp8Config,
     "gptq": GPTQConfig,
-    "squeezellm": SqueezeLLMConfig,
     "gptq_marlin": GPTQMarlinConfig,
+    "gptq_marlin_24": GPTQMarlin24Config,
     "marlin": MarlinConfig,
+    "squeezellm": SqueezeLLMConfig,
 }
 
 
