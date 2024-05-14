@@ -218,6 +218,7 @@ __device__ void paged_attention_kernel(
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
+    // (e.g., kv_block_stride).
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
       const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
@@ -359,6 +360,7 @@ __device__ void paged_attention_kernel(
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to int64
     // because int32 can lead to overflow when this variable is multiplied by large numbers
+    // (e.g., kv_block_stride).
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
       int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
