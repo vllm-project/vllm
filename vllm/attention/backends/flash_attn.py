@@ -342,13 +342,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            # if attn_metadata.slot_mapping[0].item() == 4869:
-            #     print(f"SANG-TODO {decode_query.shape=} {output.shape=} {num_prefill_tokens=} {decode_meta.block_tables.shape=} {decode_meta.seq_lens_tensor.shape=}")
-            #     print(f"SANG-TODO {attn_metadata.slot_mapping.shape=} {attn_metadata.num_decode_tokens=}")
-            #     print(f"SANG-TODO {decode_meta.block_tables=}")
-            #     # print(f"SANG-TODO {attn_metadata.slot_mapping=}")
-            #     print(f"SANG-TODO {decode_meta.seq_lens_tensor=}")
-            #     print(f"SANG-TODO decode query: {decode_query=}")
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,

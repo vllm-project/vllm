@@ -502,7 +502,6 @@ class ModelRunner:
         slot_mapping_tensor = torch.tensor(slot_mapping,
                                            dtype=torch.long,
                                            device=self.device)
-        print(f"SANG-TODO {seq_lens_tensor=} {block_tables=}")
 
         if self.attn_backend.get_name() == "flashinfer":
             if not hasattr(self, "flashinfer_workspace_buffer"):
