@@ -51,8 +51,6 @@ class GPTQMarlin24Config(QuantizationConfig):
         # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
-        self.checkpoint_format = "marlin_24"
-
     def __repr__(self) -> str:
         return "Marlin24Config(weight_bits={}, group_size={})".format(
             self.weight_bits, self.group_size)
