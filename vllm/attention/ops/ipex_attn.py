@@ -69,7 +69,7 @@ class PagedAttention:
         *args,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        block_size = value_cache.shape[3]
+        block_size = value_cache.shape[1]
         head_mapping = torch.arange(
             0,
             num_kv_heads,
@@ -78,7 +78,7 @@ class PagedAttention:
         ).view(num_kv_heads,1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
         ipex_modules.PagedAttention.single_query_cached_kv_attention(
             output,
-            query.contiguous(),
+            query,
             key_cache,
             value_cache,
             head_mapping,
