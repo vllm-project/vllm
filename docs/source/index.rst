@@ -112,6 +112,12 @@ Documentation
    dev/kernel/paged_attention
    dev/dockerfile/dockerfile
 
+.. toctree::
+   :maxdepth: 2
+   :caption: Community
+
+   community/meetups
+
 Indices and tables
 ==================
 
