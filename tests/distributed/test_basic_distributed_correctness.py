@@ -4,10 +4,12 @@ by one. The solution is to pass arguments (model name) by environment
 variables.
 Run:
 ```sh
+cd $VLLM_PATH/tests
+
 TEST_DIST_MODEL=facebook/opt-125m pytest \
-    test_basic_distributed_correctness.py
+    distributed/test_basic_distributed_correctness.py
 TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf \
-    test_basic_distributed_correctness.py
+    distributed/test_basic_distributed_correctness.py
 ```
 """
 import os
