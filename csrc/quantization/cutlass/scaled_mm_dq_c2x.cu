@@ -12,6 +12,7 @@
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm_coord.h"
+#include "cutlass/arch/mma_sm75.h"
 #include "cutlass/arch/arch.h"
 #include "cutlass/arch/mma.h"
 #include "cutlass/gemm/device/gemm.h"
@@ -37,7 +38,7 @@ using namespace cute;
    per-row. B can be quantized per-tensor or per-column. They must have
    symmetric quantization.
 
-   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the 
+   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
    scales are applied elementwise with numpy-style broadcasting.
 
    ScaleA and ScaleB define the epilogue functions that apply the scales for
@@ -48,8 +49,9 @@ using namespace cute;
 namespace {
 
 template <typename Arch, typename ElementAB_, typename ElementD_,
-          typename TileShape, typename WarpShape, typename InstructionShape>
-struct sm8x_gemm {
+          typename TileShape, typename WarpShape, typename InstructionShape,
+          int32_t MainLoopStages>
+struct cutlass_2x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
 
@@ -90,7 +92,7 @@ struct sm8x_gemm {
       cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA, EVTCompute0>;
 
   using D = cutlass::epilogue::threadblock::VisitorAuxStore<
-      OutputTileThreadMap, cutlass::bfloat16_t,
+      OutputTileThreadMap, ElementD,
       cutlass::FloatRoundStyle::round_to_nearest,
       Stride<int64_t, Int<1>, Int<0>>>;
 
@@ -108,7 +110,8 @@ struct sm8x_gemm {
       Arch, 
       TileShape, WarpShape, InstructionShape,
       EVTD,
-      cutlass::gemm::threadblock::ThreadblockSwizzleStreamK, 5, Operator,
+      cutlass::gemm::threadblock::ThreadblockSwizzleStreamK,
+      MainLoopStages, Operator,
       1 /* epilogue stages */
       >::GemmKernel;
   // clang-format on
@@ -169,9 +172,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   };
 
   typename Gemm::Op::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel,  // universal mode
-      problem_size,                                           // problem size
-      1,                                                      // batch count
+      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel, // universal mode
+      problem_size,                                          // problem size
+      1,                                                     // batch count
       epilogue_args,
       a_ptr,
       b_ptr,
@@ -196,7 +199,34 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   CUTLASS_CHECK(status);
 }
 
-}  // namespace
+} // namespace
+
+void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
+                               torch::Tensor const &b,
+                               torch::Tensor const &a_scales,
+                               torch::Tensor const &b_scales) {
+  assert(a.dtype() == torch::kInt8);
+  assert(b.dtype() == torch::kInt8);
+  assert(a_scales.dtype() == torch::kFloat32);
+  assert(b_scales.dtype() == torch::kFloat32);
+
+  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
+  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<8, 8, 16>;
+
+  if (out.dtype() == torch::kBFloat16) {
+    return cutlass_scaled_mm_dq_dispatcher<
+        cutlass_2x_gemm<cutlass::arch::Sm75, int8_t, cutlass::bfloat16_t,
+                        TileShape, WarpShape, InstructionShape, 2>>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    assert(out.dtype() == torch::kFloat16);
+    return cutlass_scaled_mm_dq_dispatcher<
+        cutlass_2x_gemm<cutlass::arch::Sm75, int8_t, cutlass::half_t, TileShape,
+                        WarpShape, InstructionShape, 2>>(out, a, b, a_scales,
+                                                         b_scales);
+  }
+}
 
 void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
@@ -206,15 +236,23 @@ void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
   assert(b.dtype() == torch::kInt8);
   assert(a_scales.dtype() == torch::kFloat32);
   assert(b_scales.dtype() == torch::kFloat32);
-  assert(out.dtype() == torch::kBFloat16);
 
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
 
-  return cutlass_scaled_mm_dq_dispatcher<
-      sm8x_gemm<cutlass::arch::Sm80, int8_t, cutlass::bfloat16_t, TileShape,
-                WarpShape, InstructionShape>>(out, a, b, a_scales, b_scales);
+  if (out.dtype() == torch::kBFloat16) {
+    return cutlass_scaled_mm_dq_dispatcher<
+        cutlass_2x_gemm<cutlass::arch::Sm80, int8_t, cutlass::bfloat16_t,
+                        TileShape, WarpShape, InstructionShape, 5>>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    assert(out.dtype() == torch::kFloat16);
+    return cutlass_scaled_mm_dq_dispatcher<
+        cutlass_2x_gemm<cutlass::arch::Sm80, int8_t, cutlass::half_t, TileShape,
+                        WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                         b_scales);
+  }
 }
 
 void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
@@ -229,21 +267,35 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
     assert(b.dtype() == torch::kInt8);
     assert(a_scales.dtype() == torch::kFloat32);
     assert(b_scales.dtype() == torch::kFloat32);
-    assert(out.dtype() == torch::kBFloat16);
 
-    return cutlass_scaled_mm_dq_dispatcher<
-        sm8x_gemm<cutlass::arch::Sm89, int8_t, cutlass::bfloat16_t, TileShape,
-                  WarpShape, InstructionShape>>(out, a, b, a_scales, b_scales);
+    if (out.dtype() == torch::kBFloat16) {
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_2x_gemm<cutlass::arch::Sm89, int8_t, cutlass::bfloat16_t,
+                          TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, a_scales, b_scales);
+    } else {
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_2x_gemm<cutlass::arch::Sm89, int8_t, cutlass::half_t,
+                          TileShape, WarpShape, InstructionShape, 5>>(
+          out, a, b, a_scales, b_scales);
+    }
   } else {
     assert(a.dtype() == torch::kFloat8_e4m3fn);
     assert(b.dtype() == torch::kFloat8_e4m3fn);
     assert(a_scales.dtype() == torch::kFloat32);
     assert(b_scales.dtype() == torch::kFloat32);
-    assert(out.dtype() == torch::kBFloat16);
 
-    return cutlass_scaled_mm_dq_dispatcher<
-        sm8x_gemm<cutlass::arch::Sm89, cutlass::float_e4m3_t,
-                  cutlass::bfloat16_t, TileShape, WarpShape, InstructionShape>>(
-        out, a, b, a_scales, b_scales);
+    if (out.dtype() == torch::kBFloat16) {
+      return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+          cutlass::arch::Sm89, cutlass::float_e4m3_t, cutlass::bfloat16_t,
+          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                      b_scales);
+    } else {
+      assert(out.dtype() == torch::kFloat16);
+      return cutlass_scaled_mm_dq_dispatcher<cutlass_2x_gemm<
+          cutlass::arch::Sm89, cutlass::float_e4m3_t, cutlass::half_t,
+          TileShape, WarpShape, InstructionShape, 5>>(out, a, b, a_scales,
+                                                      b_scales);
+    }
   }
 }

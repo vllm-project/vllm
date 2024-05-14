@@ -46,7 +46,7 @@ namespace {
 template <typename ElementAB_, typename ElementD_, typename TileShape,
           typename ClusterShape, typename KernelSchedule,
           typename EpilogueSchedule>
-struct sm90_gemm {
+struct cutlass_3x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
   using ElementAcc =
@@ -184,7 +184,7 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   cutlass::Status status = gemm_op.run(args);
   CUTLASS_CHECK(status);
 }
-}  // namespace
+} // namespace
 
 void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
@@ -197,10 +197,18 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
         typename cutlass::gemm::KernelTmaWarpSpecializedPingpong;
     using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
 
-    return cutlass_scaled_mm_dq_dispatcher<
-        sm90_gemm<int8_t, cutlass::bfloat16_t, TileShape, ClusterShape,
-                  KernelSchedule, EpilogueSchedule>>(out, a, b, a_scales,
-                                                     b_scales);
+    if (out.dtype() == torch::kBFloat16) {
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_3x_gemm<int8_t, cutlass::bfloat16_t, TileShape, ClusterShape,
+                          KernelSchedule, EpilogueSchedule>>(
+          out, a, b, a_scales, b_scales);
+    } else {
+      assert(out.dtype() == torch::kFloat16);
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_3x_gemm<int8_t, cutlass::half_t, TileShape, ClusterShape,
+                          KernelSchedule, EpilogueSchedule>>(
+          out, a, b, a_scales, b_scales);
+    }
   } else {
     using TileShape = Shape<_128, _128, _128>;
     using ClusterShape = Shape<_1, _2, _1>;
@@ -209,9 +217,17 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
     using EpilogueSchedule =
         typename cutlass::epilogue::TmaWarpSpecializedCooperative;
 
-    return cutlass_scaled_mm_dq_dispatcher<
-        sm90_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t, TileShape,
-                  ClusterShape, KernelSchedule, EpilogueSchedule>>(
-        out, a, b, a_scales, b_scales);
+    if (out.dtype() == torch::kBFloat16) {
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t, TileShape,
+                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+          out, a, b, a_scales, b_scales);
+    } else {
+      assert(out.dtype() == torch::kFloat16);
+      return cutlass_scaled_mm_dq_dispatcher<
+          cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t, TileShape,
+                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+          out, a, b, a_scales, b_scales);
+    }
   }
 }

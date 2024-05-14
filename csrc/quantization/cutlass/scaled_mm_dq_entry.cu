@@ -1,13 +1,20 @@
 #include <torch/extension.h>
 
+void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
+                               torch::Tensor const &b,
+                               torch::Tensor const &a_scales,
+                               torch::Tensor const &b_scales);
+
 void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
                                torch::Tensor const &b_scales);
+
 void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
                                torch::Tensor const &b_scales);
+
 void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
@@ -34,8 +41,11 @@ void cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
     cutlass_scaled_mm_dq_sm90(out, a, b, a_scales, b_scales);
   } else if (version_num == 89) /* Ada Lovelace */ {
     cutlass_scaled_mm_dq_sm89(out, a, b, a_scales, b_scales);
-  } else /* Ampere */ {
-    TORCH_CHECK(version_num >= 80);
+  } else if (version_num >= 80) /* Ampere */ {
     cutlass_scaled_mm_dq_sm80(out, a, b, a_scales, b_scales);
+  } else 
+  {
+    TORCH_CHECK(version_num >= 75);
+    cutlass_scaled_mm_dq_sm75(out, a, b, a_scales, b_scales);
   }
 }

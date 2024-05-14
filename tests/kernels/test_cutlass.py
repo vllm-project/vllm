@@ -2,6 +2,8 @@
 
 Run `pytest tests/kernels/test_cutlass.py`.
 """
+from typing import Type
+
 import pytest
 import torch
 
@@ -35,6 +37,7 @@ def cutlass_fp8_gemm_helper(
     k: int,
     per_token_act_quant: bool,
     per_out_channel_weight_quant: bool,
+    out_dtype: Type[torch.dtype] = torch.bfloat16
 ):
     # Test for a cutlass kernel with per-token activation quantization
     # and per-output channel weight quantization.
@@ -49,10 +52,10 @@ def cutlass_fp8_gemm_helper(
     scale_b = (torch.randn(
         (1, n_b_scales), device="cuda", dtype=torch.float32) / 10)
 
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b)
+    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b *
-                        b.to(dtype=torch.float32)).to(dtype=torch.bfloat16)
+                        b.to(dtype=torch.float32)).to(out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-2, atol=1e-1)
 
@@ -63,6 +66,7 @@ def cutlass_int8_gemm_helper(
     k: int,
     per_token_act_quant: bool,
     per_out_channel_weight_quant: bool,
+    out_dtype: Type[torch.dtype] = torch.bfloat16
 ):
     # Test for a cutlass kernel with per-token activation quantization
     # and per-output channel weight quantization.
@@ -77,10 +81,10 @@ def cutlass_int8_gemm_helper(
     scale_b = (torch.randn(
         (1, n_b_scales), device="cuda", dtype=torch.float32) / 10)
 
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b)
+    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b *
-                        b.to(dtype=torch.float32)).to(dtype=torch.bfloat16)
+                        b.to(dtype=torch.float32)).to(dtype=out_dtype)
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
@@ -106,6 +110,21 @@ def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
                            per_out_ch: bool):
     cutlass_int8_gemm_helper(m, n, k, per_act_token, per_out_ch)
 
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+def test_cutlass_int8_gemm_output_dtype(per_act_token: bool,
+                                       per_out_ch: bool, out_dtype: Type[torch.dtype]):
+    cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, out_dtype)
+
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.skipif(capability < 89,
+                    reason="FP8 is not supported on this GPU type.")
+def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool,
+                                       per_out_ch: bool, out_dtype: Type[torch.dtype]):
+    cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, out_dtype)
 
 # For the following two tests:
 # N and K correspond to the size of the weight matrix and likely to be multiples
