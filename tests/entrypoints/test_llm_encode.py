@@ -4,8 +4,6 @@ import pytest
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
 
-from ..conftest import cleanup
-
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
 PROMPTS = [
@@ -24,18 +22,17 @@ TOKEN_IDS = [
     [1000, 1003, 1001, 1002],
 ]
 
-pytestmark = pytest.mark.llm
+pytestmark = pytest.mark.llm_encode
 
 
 @pytest.fixture(scope="module")
 def llm():
+    # pytest caches the fixture so we cannot GC it
     yield LLM(model=MODEL_NAME,
               max_num_batched_tokens=32768,
               tensor_parallel_size=1,
-              gpu_memory_utilization=0.90,
+              gpu_memory_utilization=0.75,
               enforce_eager=True)
-
-    cleanup()
 
 
 def assert_outputs_equal(o1: List[EmbeddingRequestOutput],
