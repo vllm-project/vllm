@@ -121,4 +121,4 @@ def _which_attn_to_use(
         return _Backend[backend_by_env_var]
 
     # Default case.
-    return _Backend.FLASH_ATTN
+    return _Backend.XFORMERS
