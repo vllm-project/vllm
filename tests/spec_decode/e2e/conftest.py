@@ -9,7 +9,6 @@ import torch
 from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                     nvmlInit)
 
-from tests.conftest import cleanup
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
@@ -21,8 +20,10 @@ from vllm.sequence import Logprob, MultiModalData
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, random_uuid
 
-# TODO remove, fixes cuda deferred init error x pytest assertion rewrite
-torch.zeros(0, device='cuda')
+from ...conftest import cleanup
+
+## TODO remove, fixes cuda deferred init error x pytest assertion rewrite
+#torch.zeros(0, device='cuda')
 
 class AsyncLLM:
     """AsyncLLM

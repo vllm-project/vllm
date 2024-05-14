@@ -11,6 +11,11 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_name() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
     def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
@@ -34,7 +39,7 @@ class AttentionBackend(ABC):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
@@ -89,8 +94,6 @@ class AttentionMetadata(Generic[T]):
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor
-    # The kv cache's data type.
-    kv_cache_dtype: str
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:
@@ -111,6 +114,7 @@ class AttentionImpl(ABC):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
     ) -> None:
         raise NotImplementedError
 
@@ -122,6 +126,6 @@ class AttentionImpl(ABC):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        kv_scale: float,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError

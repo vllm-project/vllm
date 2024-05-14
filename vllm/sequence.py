@@ -1,11 +1,13 @@
 """Sequence and its related classes."""
 import copy
 import enum
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -375,12 +377,12 @@ class SequenceGroupState:
 
 class MultiModalData:
     """Multi modal request.
-    
+
     Args:
         type: The data type.
         data: The actual data.
         The required shape and semantic meaning of it depends on the vision
-        language config of the hosted model. 
+        language config of the hosted model.
         See `VisionLanguageConfig` in `config.py`.
     """
 
@@ -402,16 +404,22 @@ class SequenceGroup:
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
         multi_modal_data: Multi modal data associated with the request.
+        embeddings: The embeddings vectors of the prompt of the sequence group
+            for an embedding model.
+        pooling_params: The pooling parameters used to generate the pooling
+            for an embedding model.
     """
 
     def __init__(
         self,
         request_id: str,
         seqs: List[Sequence],
-        sampling_params: SamplingParams,
         arrival_time: float,
+        sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
+        embeddings: Optional[List[float]] = None,
+        pooling_params: Optional[PoolingParams] = None,
     ) -> None:
         self.request_id = request_id
         self.seqs_dict = {seq.seq_id: seq for seq in seqs}
@@ -425,6 +433,8 @@ class SequenceGroup:
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
         self.multi_modal_data = multi_modal_data
+        self.embeddings = embeddings
+        self.pooling_params = pooling_params
 
     @property
     def prompt(self) -> str:
@@ -479,12 +489,13 @@ class SequenceGroup:
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
         lifetime of the request."""
-        if self.sampling_params.use_beam_search:
+        if self.sampling_params and self.sampling_params.use_beam_search:
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.
             return self.sampling_params.best_of
         else:
-            if self.sampling_params.best_of > self.num_seqs():
+            if (self.sampling_params
+                    and self.sampling_params.best_of > self.num_seqs()):
                 # At prompt stage, the sequence group is not yet filled up
                 # and only have one sequence running. However, in the
                 # generation stage, we will have `best_of` sequences running.
@@ -555,7 +566,7 @@ class SequenceGroup:
         return all(seq.is_finished() for seq in self.get_seqs())
 
     def is_prefill(self) -> bool:
-        # Every sequences should be in the same stage.
+        # Every sequence should be in the same stage.
         return self.get_seqs()[0].is_prefill()
 
     def __repr__(self) -> str:
@@ -594,6 +605,7 @@ class SequenceGroupMetadata:
         sampling_params: SamplingParams,
         block_tables: Dict[int, List[int]],
         do_sample: bool = True,
+        pooling_params: Optional[PoolingParams] = None,
         token_chunk_size: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         computed_block_nums: Optional[List[int]] = None,
@@ -605,12 +617,19 @@ class SequenceGroupMetadata:
         self.seq_data = seq_data
         self.sampling_params = sampling_params
         self.block_tables = block_tables
+        self.pooling_params = pooling_params
         self.lora_request = lora_request
         self.computed_block_nums = computed_block_nums
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
+
+        # The number of speculative tokens adopted in this request.
+        # None means specuative decoding is not used.
+        # Zero means speculative decoding is disabled for some reasons.
+        # TODO: We should maintain this states out of the sequence group.
+        self.num_speculative_tokens = None
 
         if self._token_chunk_size is None:
             if is_prompt:
@@ -663,8 +682,20 @@ class SequenceOutput:
         return equal and log_probs_equal
 
 
-class SequenceGroupOutput:
-    """The model output associated with a sequence group."""
+class SequenceGroupOutput(ABC):
+    """The base class for model outputs associated with a sequence group."""
+
+    @abstractmethod
+    def __repr__(self) -> str:
+        pass
+
+    @abstractmethod
+    def __eq__(self, other: object) -> bool:
+        pass
+
+
+class CompletionSequenceGroupOutput(SequenceGroupOutput):
+    """The model output associated with a completion sequence group."""
 
     def __init__(
         self,
@@ -676,14 +707,33 @@ class SequenceGroupOutput:
         self.prompt_logprobs = prompt_logprobs
 
     def __repr__(self) -> str:
-        return (f"SequenceGroupOutput(samples={self.samples}, "
+        return (f"CompletionSequenceGroupOutput(samples={self.samples}, "
                 f"prompt_logprobs={self.prompt_logprobs})")
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, SequenceGroupOutput):
+        if not isinstance(other, CompletionSequenceGroupOutput):
             raise NotImplementedError()
         return (self.samples == other.samples
                 and self.prompt_logprobs == other.prompt_logprobs)
+
+
+class EmbeddingSequenceGroupOutput(SequenceGroupOutput):
+    """The model output associated with an embedding sequence group."""
+
+    def __init__(
+        self,
+        embeddings: List[float],
+    ) -> None:
+        self.embeddings = embeddings
+
+    def __repr__(self) -> str:
+        return (f"EmbeddingSequenceGroupOutput("
+                f"embeddings_shape={len(self.embeddings)})")
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, EmbeddingSequenceGroupOutput):
+            raise NotImplementedError()
+        return self.embeddings == other.embeddings
 
 
 @dataclass
@@ -691,11 +741,11 @@ class SamplerOutput:
     """For each sequence group, we generate a list of SequenceOutput object,
     each of which contains one possible candidate for the next token.
 
-    This datastructure implements methods so it can be used like a list, but
+    This data structure implements methods, so it can be used like a list, but
     also has optional fields for device tensors.
     """
 
-    outputs: List[SequenceGroupOutput]
+    outputs: List[CompletionSequenceGroupOutput]
 
     # On-device tensor containing probabilities of each token.
     sampled_token_probs: Optional["torch.Tensor"] = None
@@ -737,14 +787,35 @@ class SamplerOutput:
 
 
 @dataclass
+class PoolerOutput:
+    """The output from a pooling operation in the embedding model."""
+    outputs: List[EmbeddingSequenceGroupOutput]
+
+    spec_decode_worker_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+
+    def __getitem__(self, idx: int):
+        return self.outputs[idx]
+
+    def __setitem__(self, idx: int, value):
+        self.outputs[idx] = value
+
+    def __len__(self):
+        return len(self.outputs)
+
+    def __eq__(self, other: object):
+        return isinstance(other,
+                          self.__class__) and self.outputs == other.outputs
+
+
+@dataclass
 class ExecuteModelRequest:
     """The model execution request."""
     # The sequence group metadata list.
     seq_group_metadata_list: List[SequenceGroupMetadata]
-    # Blocks to swap in. Dict of CPU -> GPU block number.
-    blocks_to_swap_in: Dict[int, int] = field(default_factory=dict)
-    # Blocks to swap out. Dict of GPU -> CPU block number.
-    blocks_to_swap_out: Dict[int, int] = field(default_factory=dict)
+    # Blocks to swap in. List of CPU -> GPU block number.
+    blocks_to_swap_in: List[Tuple[int, int]] = field(default_factory=list)
+    # Blocks to swap out. List of GPU -> CPU block number.
+    blocks_to_swap_out: List[Tuple[int, int]] = field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = field(default_factory=list)
     # The number of slots for lookahead decoding.
