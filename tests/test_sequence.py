@@ -1,45 +1,18 @@
-import time
-from typing import Optional
-
 import pytest
 
-from vllm import SamplingParams
-from vllm.lora.request import LoRARequest
-from vllm.sequence import (SamplerOutput, Sequence, SequenceData,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput)
+from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
+                           SequenceData, SequenceOutput)
 
-
-def create_dummy_prompt(
-    request_id: str,
-    prompt_length: int,
-    block_size: Optional[int] = None,
-    lora_request: Optional[LoRARequest] = None,
-    use_beam_search: bool = False,
-    best_of: int = 1,
-) -> SequenceGroup:
-    if not block_size:
-        block_size = prompt_length
-
-    # Create dummy prompt sequence with tokens 0...block_size-1
-    # and prompt "0 ... block_size".
-    prompt_tokens = list(range(prompt_length))
-    prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
-    seq_group = SequenceGroup(
-        request_id, [prompt],
-        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        time.time(), lora_request)
-
-    return seq_group
+from .core.utils import create_dummy_prompt
 
 
 @pytest.fixture
 def sample_outputs():
     return [
-        SequenceGroupOutput(samples=[
+        CompletionSequenceGroupOutput(samples=[
             SequenceOutput(parent_seq_id=0, output_token=i, logprobs={})
         ],
-                            prompt_logprobs=None) for i in range(5)
+                                      prompt_logprobs=None) for i in range(5)
     ]
 
 
@@ -60,10 +33,10 @@ def test_sampler_output_getitem(sampler_output, sample_outputs):
 
 
 def test_sampler_output_setitem(sampler_output):
-    new_output = SequenceGroupOutput(samples=[
+    new_output = CompletionSequenceGroupOutput(samples=[
         SequenceOutput(parent_seq_id=0, output_token=99, logprobs={})
     ],
-                                     prompt_logprobs=None)
+                                               prompt_logprobs=None)
     sampler_output[2] = new_output
     assert sampler_output[2] == new_output
 
@@ -102,7 +75,7 @@ def test_sequence_data_prefill():
 
 
 def test_sequence_group_stage():
-    seq_group = create_dummy_prompt("1", 12)
+    _, seq_group = create_dummy_prompt("1", 12)
     assert seq_group.is_prefill() is True
     seq_group.update_num_computed_tokens(6)
     assert seq_group.is_prefill() is True

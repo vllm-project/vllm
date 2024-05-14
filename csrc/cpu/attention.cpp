@@ -70,11 +70,11 @@ template <typename T>
 FORCE_INLINE std::pair<T, T>
 reduceSoftmaxAlibi(T *data, const int size, const int capacity,
                    const float alibi_slope, const int start_index,
-                   const int context_len) {
-  data[0] += alibi_slope * (start_index - context_len + 1);
+                   const int seq_len) {
+  data[0] += alibi_slope * (start_index - seq_len + 1);
   T max = data[0];
   for (int i = 1; i < size; ++i) {
-    T qk = data[i] + alibi_slope * (start_index + i - context_len + 1);
+    T qk = data[i] + alibi_slope * (start_index + i - seq_len + 1);
     data[i] = qk;
     max = max >= qk ? max : qk;
   }
@@ -225,7 +225,7 @@ struct paged_attention_v1_impl {
        const int num_kv_heads, const float scale,
        const int
            *__restrict__ block_tables, // [num_seqs, max_num_blocks_per_seq]
-       const int *__restrict__ context_lens, // [num_seqs]
+       const int *__restrict__ seq_lens, // [num_seqs]
        const int max_num_blocks_per_seq,
        const float *__restrict__ alibi_slopes, // [num_heads]
        const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -235,32 +235,32 @@ struct paged_attention_v1_impl {
 
     static_assert(BLOCK_SIZE == 16);
 
-    int max_context_len = max_num_blocks_per_seq * BLOCK_SIZE;
-    int max_context_len_padded = (max_context_len + 15) & 0xFFFFFFF0;
-    TORCH_CHECK((max_context_len_padded * sizeof(float)) % 64 == 0);
+    int max_seq_len = max_num_blocks_per_seq * BLOCK_SIZE;
+    int max_seq_len_padded = (max_seq_len + 15) & 0xFFFFFFF0;
+    TORCH_CHECK((max_seq_len_padded * sizeof(float)) % 64 == 0);
 
     const int parallel_work_item_num = omp_get_max_threads();
 
     size_t logits_bytes =
-        parallel_work_item_num * max_context_len_padded * sizeof(float);
+        parallel_work_item_num * max_seq_len_padded * sizeof(float);
     float *logits = (float *)std::aligned_alloc(
         64, logits_bytes); // Cacheline alignment for each context token.
-                           // [parallel_work_item_num, max_context_len_padded]
+                           // [parallel_work_item_num, max_seq_len_padded]
 
 #pragma omp parallel for collapse(2) schedule(dynamic, 1)
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-        int context_len = context_lens[seq_idx];
+        int seq_len = seq_lens[seq_idx];
         const int *seq_block_table =
             block_tables + max_num_blocks_per_seq * seq_idx;
-        const int block_num = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        const int block_num = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
         const int64_t kv_head_idx = head_idx / num_queries_per_kv;
         const scalar_t *__restrict__ q_vec_ptr =
             q + seq_idx * q_stride + head_idx * HEAD_SIZE;
         const int last_block_token_num =
-            context_len - (block_num - 1) * BLOCK_SIZE;
+            seq_len - (block_num - 1) * BLOCK_SIZE;
         float *__restrict__ thread_block_logits =
-            logits + omp_get_thread_num() * max_context_len_padded;
+            logits + omp_get_thread_num() * max_seq_len_padded;
 
         // Compute logits
         for (int block_idx = 0; block_idx < block_num; ++block_idx) {
@@ -278,11 +278,11 @@ struct paged_attention_v1_impl {
 
         // Compute softmax
         if (alibi_slopes) {
-          reduceSoftmaxAlibi(thread_block_logits, context_len,
+          reduceSoftmaxAlibi(thread_block_logits, seq_len,
                              block_num * BLOCK_SIZE, alibi_slopes[head_idx], 0,
-                             context_len);
+                             seq_len);
         } else {
-          reduceSoftmax(thread_block_logits, context_len,
+          reduceSoftmax(thread_block_logits, seq_len,
                         block_num * BLOCK_SIZE);
         }
 
@@ -340,7 +340,7 @@ struct paged_attention_v1_impl {
 #define LAUNCH_V1_ATTENTION_KERNEL(T, HEAD_SIZE, BLOCK_SIZE)                   \
   paged_attention_v1_impl<T, HEAD_SIZE, BLOCK_SIZE>::call(                     \
       out_ptr, query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale, \
-      block_tables_ptr, context_lens_ptr, max_num_blocks_per_seq,              \
+      block_tables_ptr, seq_lens_ptr, max_num_blocks_per_seq,              \
       alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride, num_seqs,   \
       num_heads);
 
@@ -348,8 +348,8 @@ template <typename T, int BLOCK_SIZE>
 void paged_attention_v1_impl_launcher(
     torch::Tensor &out, torch::Tensor &query, torch::Tensor &key_cache,
     torch::Tensor &value_cache, int num_kv_heads, float scale,
-    torch::Tensor &block_tables, torch::Tensor &context_lens,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes) {
+    torch::Tensor &block_tables, torch::Tensor &seq_lens,
+    int max_seq_len, const c10::optional<torch::Tensor> &alibi_slopes) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -369,7 +369,7 @@ void paged_attention_v1_impl_launcher(
   T *key_cache_ptr = reinterpret_cast<T *>(key_cache.data_ptr());
   T *value_cache_ptr = reinterpret_cast<T *>(value_cache.data_ptr());
   int *block_tables_ptr = block_tables.data_ptr<int>();
-  int *context_lens_ptr = context_lens.data_ptr<int>();
+  int *seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
   case 64:
@@ -399,7 +399,7 @@ void paged_attention_v1_impl_launcher(
 #define CALL_V1_KERNEL_LAUNCHER(T, BLOCK_SIZE)                                 \
   paged_attention_v1_impl_launcher<T, BLOCK_SIZE>(                             \
       out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,   \
-      context_lens, max_context_len, alibi_slopes);
+      seq_lens, max_seq_len, alibi_slopes);
 
 #define CALL_V1_KERNEL_LAUNCHER_BLOCK_SIZE(T)                                  \
   switch (block_size) {                                                        \
@@ -416,8 +416,8 @@ void paged_attention_v1(torch::Tensor &out, torch::Tensor &query,
                         torch::Tensor &key_cache, torch::Tensor &value_cache,
                         int num_kv_heads, float scale,
                         torch::Tensor &block_tables,
-                        torch::Tensor &context_lens, int block_size,
-                        int max_context_len,
+                        torch::Tensor &seq_lens, int block_size,
+                        int max_seq_len,
                         const c10::optional<torch::Tensor> &alibi_slopes,
                         const std::string &kv_cache_dtype, float kv_scale) {
   TORCH_CHECK(kv_scale == 1.0f);
@@ -448,7 +448,7 @@ struct paged_attention_v2_impl {
       const int num_kv_heads, const float scale,
       const int
           *__restrict__ block_tables, // [num_seqs, max_num_blocks_per_seq]
-      const int *__restrict__ context_lens, // [num_seqs]
+      const int *__restrict__ seq_lens, // [num_seqs]
       const int max_num_blocks_per_seq,
       const float *__restrict__ alibi_slopes, // [num_heads]
       const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -465,22 +465,22 @@ struct paged_attention_v2_impl {
       for (int partition_idx = 0; partition_idx < max_num_partitions;
            ++partition_idx) {
         for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-          const int context_len = context_lens[seq_idx];
+          const int seq_len = seq_lens[seq_idx];
           const int start_token_idx = partition_idx * PARTITION_SIZE;
 
-          if (start_token_idx >= context_len)
+          if (start_token_idx >= seq_len)
             continue;
 
           const int partition_num =
-              (context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
+              (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
           const bool no_reduce = (partition_num == 1);
-          const int context_token_num =
-              (std::min(context_len, start_token_idx + PARTITION_SIZE) -
+          const int token_num =
+              (std::min(seq_len, start_token_idx + PARTITION_SIZE) -
                start_token_idx);
           const int block_num =
-              (context_token_num + BLOCK_SIZE - 1) / BLOCK_SIZE;
+              (token_num + BLOCK_SIZE - 1) / BLOCK_SIZE;
           const int last_block_token_num =
-              context_token_num - (block_num - 1) * BLOCK_SIZE;
+              token_num - (block_num - 1) * BLOCK_SIZE;
           const int *seq_block_table = block_tables +
                                        max_num_blocks_per_seq * seq_idx +
                                        start_token_idx / BLOCK_SIZE;
@@ -507,10 +507,10 @@ struct paged_attention_v2_impl {
           std::pair<float, float> max_and_sum;
           if (alibi_slopes) {
             max_and_sum = reduceSoftmaxAlibi(
-                logits, context_token_num, block_num * BLOCK_SIZE,
-                alibi_slopes[head_idx], start_token_idx, context_len);
+                logits, token_num, block_num * BLOCK_SIZE,
+                alibi_slopes[head_idx], start_token_idx, seq_len);
           } else {
-            max_and_sum = reduceSoftmax(logits, context_token_num,
+            max_and_sum = reduceSoftmax(logits, token_num,
                                         block_num * BLOCK_SIZE);
           }
 
@@ -583,9 +583,9 @@ struct paged_attention_v2_impl {
 #pragma omp parallel for collapse(2) schedule(static, 1)
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
-        const int context_len = context_lens[seq_idx];
+        const int seq_len = seq_lens[seq_idx];
         const int partition_num =
-            (context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
+            (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
 
         if (partition_num == 1)
           continue;
@@ -612,9 +612,9 @@ struct paged_attention_v2_impl {
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       for (int head_idx = 0; head_idx < num_heads; ++head_idx) {
         for (int group_idx = 0; group_idx < head_group_num; ++group_idx) {
-          const int context_len = context_lens[seq_idx];
+          const int seq_len = seq_lens[seq_idx];
           const int partition_num =
-              (context_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
+              (seq_len + PARTITION_SIZE - 1) / PARTITION_SIZE;
 
           if (partition_num == 1)
             continue;
@@ -649,7 +649,7 @@ struct paged_attention_v2_impl {
   paged_attention_v2_impl<T, HEAD_SIZE, BLOCK_SIZE, PARTITION_SIZE>::call(     \
       out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr,           \
       key_cache_ptr, value_cache_ptr, num_kv_heads, scale, block_tables_ptr,   \
-      context_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,    \
+      seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,    \
       kv_block_stride, kv_head_stride, num_seqs, num_heads,                    \
       max_num_partitions);
 
@@ -658,8 +658,8 @@ void paged_attention_v2_impl_launcher(
     torch::Tensor &out, torch::Tensor &exp_sums, torch::Tensor &max_logits,
     torch::Tensor &tmp_out, torch::Tensor &query, torch::Tensor &key_cache,
     torch::Tensor &value_cache, int num_kv_heads, float scale,
-    torch::Tensor &block_tables, torch::Tensor &context_lens, int block_size,
-    int max_context_len, const c10::optional<torch::Tensor> &alibi_slopes) {
+    torch::Tensor &block_tables, torch::Tensor &seq_lens, int block_size,
+    int max_seq_len, const c10::optional<torch::Tensor> &alibi_slopes) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -683,7 +683,7 @@ void paged_attention_v2_impl_launcher(
   T *key_cache_ptr = reinterpret_cast<T *>(key_cache.data_ptr());
   T *value_cache_ptr = reinterpret_cast<T *>(value_cache.data_ptr());
   int *block_tables_ptr = block_tables.data_ptr<int>();
-  int *context_lens_ptr = context_lens.data_ptr<int>();
+  int *seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
   case 64:
@@ -713,8 +713,8 @@ void paged_attention_v2_impl_launcher(
 #define CALL_V2_KERNEL_LAUNCHER(T, BLOCK_SIZE)                                 \
   paged_attention_v2_impl_launcher<T, BLOCK_SIZE>(                             \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,       \
-      num_kv_heads, scale, block_tables, context_lens, block_size,             \
-      max_context_len, alibi_slopes);
+      num_kv_heads, scale, block_tables, seq_lens, block_size,             \
+      max_seq_len, alibi_slopes);
 
 #define CALL_V2_KERNEL_LAUNCHER_BLOCK_SIZE(T)                                  \
   switch (block_size) {                                                        \
@@ -732,8 +732,8 @@ void paged_attention_v2(torch::Tensor &out, torch::Tensor &exp_sums,
                         torch::Tensor &query, torch::Tensor &key_cache,
                         torch::Tensor &value_cache, int num_kv_heads,
                         float scale, torch::Tensor &block_tables,
-                        torch::Tensor &context_lens, int block_size,
-                        int max_context_len,
+                        torch::Tensor &seq_lens, int block_size,
+                        int max_seq_len,
                         const c10::optional<torch::Tensor> &alibi_slopes,
                         const std::string &kv_cache_dtype, float kv_scale) {
   TORCH_CHECK(kv_scale == 1.0f);

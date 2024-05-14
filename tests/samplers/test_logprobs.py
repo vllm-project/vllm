@@ -1,8 +1,9 @@
 import pytest
 import torch
 
-from tests.conftest import VllmRunner
 from vllm import SamplingParams
+
+from ..conftest import VllmRunner
 
 MODELS = ["facebook/opt-125m"]
 

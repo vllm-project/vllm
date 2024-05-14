@@ -6,6 +6,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig)
+from vllm.model_executor.layers.quantization.deepspeedfp import (
+    DeepSpeedFPConfig)
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
@@ -22,6 +24,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "gptq_marlin": GPTQMarlinConfig,
     "marlin": MarlinConfig,
     "sparseml": CompressedTensorsConfig
+    "deepspeedfp": DeepSpeedFPConfig
 }
 
 

@@ -17,27 +17,40 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
+  - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
 
 - label: Core Test
+  mirror_hardwares: [amd]
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s test_comm_ops.py
-  working_dir: "/vllm-workspace/tests/distributed"
-  num_gpus: 2 # only support 1 or 2 for now.
+  command: pytest -v -s distributed/test_comm_ops.py
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
 
 - label: Distributed Tests
-  working_dir: "/vllm-workspace/tests/distributed"
-  num_gpus: 2 # only support 1 or 2 for now.
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+  mirror_hardwares: [amd]
   commands:
-  - pytest -v -s test_pynccl.py
-  - pytest -v -s test_pynccl_library.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
+  - pytest -v -s distributed/test_pynccl_library.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
+
+- label: Distributed Tests (Multiple Groups)
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  commands:
+  - pytest -v -s distributed/test_pynccl.py
 
 - label: Engine Test
+  #mirror_hardwares: [amd]
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
@@ -48,29 +61,35 @@ steps:
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
+  mirror_hardwares: [amd]
   commands:
     # install aws cli for llava_example.py
-    - pip install awscli
+    # install tensorizer for tensorize_vllm_model.py
+    - pip install awscli tensorizer
     - python3 offline_inference.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 llava_example.py
+    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Kernels Test %N
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Models Test
+  #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
-    - pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py
+    - pytest -v -s models --ignore=models/test_llava.py
 
 - label: Llava Test
+  #mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models/test_llava.py
 
 - label: Prefix Caching Test
+  mirror_hardwares: [amd]
   commands:
     - pytest -v -s prefix_caching
 
@@ -78,12 +97,15 @@ steps:
   command: pytest -v -s samplers
 
 - label: LogitsProcessor Test
+  mirror_hardwares: [amd]
   command: pytest -v -s test_logits_processor.py
 
 - label: Worker Test
+  mirror_hardwares: [amd]
   command: pytest -v -s worker
 
 - label: Speculative decoding tests
+  #mirror_hardwares: [amd]
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N
@@ -101,6 +123,7 @@ steps:
 
 - label: Benchmarks
   working_dir: "/vllm-workspace/.buildkite"
+  mirror_hardwares: [amd]
   commands:
   - pip install aiohttp
   - bash run-benchmarks.sh
