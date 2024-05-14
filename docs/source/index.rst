@@ -50,6 +50,7 @@ For more information, check out the following:
 * `vLLM announcing blog post <https://vllm.ai>`_ (intro to PagedAttention)
 * `vLLM paper <https://arxiv.org/abs/2309.06180>`_ (SOSP 2023)
 * `How continuous batching enables 23x throughput in LLM inference while reducing p50 latency <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
+* :ref:`vLLM Meetups <meetups>`.
 
 
 
@@ -111,6 +112,12 @@ Documentation
    dev/engine/engine_index
    dev/kernel/paged_attention
    dev/dockerfile/dockerfile
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Community
+
+   community/meetups
 
 Indices and tables
 ==================
