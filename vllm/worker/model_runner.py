@@ -12,7 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture, graph_mode
+from vllm.distributed.communication_op import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -1047,14 +1047,13 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with graph_mode():
-            self.model(
-                input_ids,
-                positions,
-                kv_caches,
-                attn_metadata,
-                **kwargs,
-            )
+        self.model(
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            **kwargs,
+        )
         torch.cuda.synchronize()
 
         # Capture the graph.
@@ -1062,14 +1061,13 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with graph_mode():
-                hidden_states = self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    attn_metadata,
-                    **kwargs,
-                )
+            hidden_states = self.model(
+                input_ids,
+                positions,
+                kv_caches,
+                attn_metadata,
+                **kwargs,
+            )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.

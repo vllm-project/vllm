@@ -14,33 +14,6 @@ from .parallel_state import (get_cpu_world_group,
 
 
 @contextmanager
-def graph_mode():
-    # In graph mode, we have to be very careful about the collective
-    # operations. The current status is:
-    #     allreduce \ Mode   |  Eager  |  Graph  |
-    # --------------------------------------------
-    # custom allreduce       | enabled | enabled |
-    # PyNccl                 | disabled| enabled |
-    # torch.distributed      | enabled | disabled|
-    #
-    # Note that custom allreduce will have a runtime check, if the tensor size
-    # is too large, it will fallback to the next available option.
-    # In summary: When using CUDA graph, we use
-    # either custom all-reduce kernel or pynccl. When not using CUDA
-    # graph, we use either custom all-reduce kernel or PyTorch NCCL.
-    # We always prioritize using custom all-reduce kernel but fall back
-    # to PyTorch or pynccl if it is disabled or not supported.
-    pynccl_comm = get_tp_pynccl_communicator()
-    if pynccl_comm is None:
-        context = nullcontext()
-    else:
-        context = pynccl_comm.change_state(enable=True,
-                                           stream=torch.cuda.current_stream())
-    with context:
-        yield
-
-
-@contextmanager
 def graph_capture():
     """
     `graph_capture` is a context manager which should include the code that
@@ -51,7 +24,29 @@ def graph_capture():
     ca_comm = get_tp_ca_communicator()
     context = nullcontext() if ca_comm is None else ca_comm.capture()
     with context:
-        yield
+        # In graph mode, we have to be very careful about the collective
+        # operations. The current status is:
+        #     allreduce \ Mode   |  Eager  |  Graph  |
+        # --------------------------------------------
+        # custom allreduce       | enabled | enabled |
+        # PyNccl                 | disabled| enabled |
+        # torch.distributed      | enabled | disabled|
+        #
+        # Note that custom allreduce will have a runtime check, if the tensor
+        #  size is too large, it will fallback to the next available option.
+        # In summary: When using CUDA graph, we use
+        # either custom all-reduce kernel or pynccl. When not using CUDA
+        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
+        # We always prioritize using custom all-reduce kernel but fall back
+        # to PyTorch or pynccl if it is disabled or not supported.
+        pynccl_comm = get_tp_pynccl_communicator()
+        if pynccl_comm is None:
+            context = nullcontext()
+        else:
+            context = pynccl_comm.change_state(
+                enable=True, stream=torch.cuda.current_stream())
+        with context:
+            yield
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
