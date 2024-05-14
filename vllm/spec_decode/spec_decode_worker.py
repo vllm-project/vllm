@@ -18,17 +18,17 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker import Worker
 from vllm.distributed.communication_op import broadcast_tensor_dict
 
 logger = init_logger(__name__)
 
 def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
-    #assert self.speculative_config is not None
+    """Helper method that is the entrypoint for Executors which use
+    WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
+    """
     assert "speculative_config" in kwargs
     speculative_config = kwargs.get("speculative_config")
-
-    from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
-    from vllm.worker.worker import Worker
 
     target_worker = Worker(*args, **kwargs)
 
@@ -52,15 +52,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
             speculative_disable_by_batch_size,
     )
 
-    #assert self.parallel_config.world_size == 1, (
-    #    "GPUExecutor only supports single GPU.")
-
     return spec_decode_worker
-
-    #self.driver_worker = spec_decode_worker
-
-    ## Load model handled in spec decode worker.
-    #self.driver_worker.init_device()
 
 
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
