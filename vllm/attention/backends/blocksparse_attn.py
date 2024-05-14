@@ -123,7 +123,7 @@ class BlocksparseFlashAttentionBackend(AttentionBackend):
 @dataclass
 class BlocksparseFlashAttentionMetadata(AttentionMetadata,
                                         PagedAttentionMetadata):
-    """A Ccopy of Metadata for FlashAttentionBackend,
+    """A copy of Metadata for FlashAttentionBackend,
     to avoid having to install flash_attn.
 
     NOTE: Any python object stored here is not updated when it is
