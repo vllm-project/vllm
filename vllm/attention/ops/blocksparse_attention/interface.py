@@ -32,8 +32,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
     ):
         super().__init__()
         if use_spda is None:
-            use_spda = is_hip() or is_cpu() or \
-                       torch.cuda.get_device_capability()[0] < 8
+            use_spda = is_hip() or is_cpu() or not \
+                       IS_COMPUTE_8_OR_ABOVE
         device = device or (torch.cuda.current_device()
                             if torch.cuda.is_available() else "cpu")
         device = torch.device(device)
