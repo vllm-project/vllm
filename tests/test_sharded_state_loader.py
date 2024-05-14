@@ -43,12 +43,13 @@ def test_filter_subtensors():
         assert tensor.equal(state_dict[key])
 
 
-@pytest.mark.parametrize("enable_lora", [False])
+@pytest.mark.parametrize("enable_lora", [False, True])
 def test_sharded_state_loader(enable_lora):
     weights_patterns = ("*.bin", "*.pt", "*.safetensors")
 
     with TemporaryDirectory() as cache_dir, TemporaryDirectory() as output_dir:
-        input_dir = snapshot_download("facebook/opt-125m", cache_dir=cache_dir)
+        input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
+                                      cache_dir=cache_dir)
 
         llm = LLM(
             model=input_dir,
@@ -63,6 +64,7 @@ def test_sharded_state_loader(enable_lora):
         for file in os.listdir(input_dir):
             if not any(file.endswith(ext) for ext in weights_patterns):
                 shutil.copy(f"{input_dir}/{file}", output_dir)
+        del llm.llm_engine.model_executor
 
         llm_before = LLM(
             model=input_dir,
@@ -72,6 +74,7 @@ def test_sharded_state_loader(enable_lora):
         )
         gen_before = llm_before.generate(prompts, sampling_params)
         out_before = [gen.outputs[0].__dict__ for gen in gen_before]
+        del llm_before.llm_engine.model_executor
 
         llm_after = LLM(
             model=output_dir,
@@ -82,5 +85,6 @@ def test_sharded_state_loader(enable_lora):
         )
         gen_after = llm_after.generate(prompts, sampling_params)
         out_after = [gen.outputs[0].__dict__ for gen in gen_after]
+        del llm_after.llm_engine.model_executor
 
         assert out_before == out_after
