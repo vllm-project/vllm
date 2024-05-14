@@ -342,6 +342,9 @@ class FlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
+            # print(f"SANG-TODO {decode_query=} {output=} {num_prefill_tokens=} {decode_meta.block_tables=} {decode_meta.seq_lens_tensor=}")
+            # print(f"SANG-TODO {attn_metadata.slot_mapping=} {attn_metadata.num_decode_tokens=}")
+            print(f"SANG-TODO {decode_meta.block_tables=}")
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
@@ -352,6 +355,7 @@ class FlashAttentionImpl(AttentionImpl):
                 causal=True,
                 alibi_slopes=self.alibi_slopes,
             ).squeeze(1)
+            # print("SANG-TODO decode done")
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)

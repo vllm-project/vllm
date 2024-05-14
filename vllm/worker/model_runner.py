@@ -268,11 +268,11 @@ class ModelRunner:
                 seq_len = min(
                     seq_data.get_len(),
                     context_len + seq_group_metadata.token_chunk_size)
-                # Do not change seq_len for prefill because prefill should
-                # not have window.
+                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                # TODO(sang): This is a hack to make it work with paged attn.
+                # Use a proper sliding window implementation.
                 if (self.sliding_window is not None and not is_prompt):
                     seq_len = min(seq_len, self.sliding_window)
-                tokens = seq_data.get_token_ids()[context_len:seq_len]
                 seq_lens.append(seq_len)
 
                 # Prefix cache was hit.
@@ -297,7 +297,6 @@ class ModelRunner:
                         block_table = seq_group_metadata.block_tables[seq_id]
                     else:
                         block_table = computed_block_nums
-                    block_tables.append(block_table)
                 elif (self.scheduler_config.chunked_prefill_enabled
                       or not is_prompt):
                     if seq_group_metadata.block_tables is not None:
@@ -310,7 +309,6 @@ class ModelRunner:
                             sliding_window_blocks = (self.sliding_window //
                                                      self.block_size)
                             block_table = block_table[-sliding_window_blocks:]
-                        block_tables.append(block_table)
 
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
@@ -323,13 +321,19 @@ class ModelRunner:
                             paged_kv_last_page_len.append(last_page_len)
                     else:
                         # Only happens when memory profiling runs.
-                        block_tables.append([])
+                        block_table = []
                 else:
                     # Prefill without chunked prefill or memory profiling.
-                    block_tables.append([])
+                    block_table = []
+                block_tables.append(block_table)
 
                 context_lens.append(context_len)
-                query_len = seq_len - context_len
+                # Due to hack in slinding window, we have a branch logic here.
+                # TODO(sang): Fix it.
+                if is_prompt:
+                    query_len = seq_len - context_len
+                else:
+                    query_len = 1
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
