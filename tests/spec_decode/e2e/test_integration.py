@@ -1,3 +1,7 @@
+"""Tests which cover integration of the speculative decoding framework with
+other features, e.g. cuda graphs or tensor parallelism.
+"""
+
 import pytest
 
 from .conftest import run_greedy_equality_correctness_test
