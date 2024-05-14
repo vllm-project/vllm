@@ -22,8 +22,8 @@ def graph_capture():
     is replayed.
     """
     ca_comm = get_tp_ca_communicator()
-    context = nullcontext() if ca_comm is None else ca_comm.capture()
-    with context:
+    maybe_ca_context = nullcontext() if ca_comm is None else ca_comm.capture()
+    with maybe_ca_context:
         # In graph mode, we have to be very careful about the collective
         # operations. The current status is:
         #     allreduce \ Mode   |  Eager  |  Graph  |
@@ -41,11 +41,11 @@ def graph_capture():
         # to PyTorch or pynccl if it is disabled or not supported.
         pynccl_comm = get_tp_pynccl_communicator()
         if pynccl_comm is None:
-            context = nullcontext()
+            maybe_pynccl_context = nullcontext()
         else:
-            context = pynccl_comm.change_state(
+            maybe_pynccl_context = pynccl_comm.change_state(
                 enable=True, stream=torch.cuda.current_stream())
-        with context:
+        with maybe_pynccl_context:
             yield
 
 
