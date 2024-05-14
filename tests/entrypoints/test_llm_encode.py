@@ -24,6 +24,8 @@ TOKEN_IDS = [
     [1000, 1003, 1001, 1002],
 ]
 
+pytestmark = pytest.mark.llm
+
 
 @pytest.fixture(scope="module")
 def llm():

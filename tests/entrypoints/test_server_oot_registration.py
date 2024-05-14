@@ -2,6 +2,7 @@ import multiprocessing
 import sys
 import time
 
+import pytest
 import torch
 from openai import OpenAI, OpenAIError
 
@@ -9,6 +10,8 @@ from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
+
+pytestmark = pytest.mark.openai
 
 
 class MyOPTForCausalLM(OPTForCausalLM):
