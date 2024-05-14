@@ -268,7 +268,12 @@ class ModelRunner:
                 seq_len = min(
                     seq_data.get_len(),
                     context_len + seq_group_metadata.token_chunk_size)
-                tokens = seq_data.get_token_ids()[context_len:seq_len]
+                if is_prompt:
+                    tokens = seq_data.get_token_ids()[context_len:seq_len]
+                else:
+                    # Optimization. get_token_ids requires the entire copy of
+                    # tokens.
+                    tokens = [seq_data.get_last_token_id()]
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window
