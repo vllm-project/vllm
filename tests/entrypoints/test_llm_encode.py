@@ -47,14 +47,12 @@ def test_v1_v2_api_consistency_single_prompt_string(llm: LLM, prompt):
     pooling_params = PoolingParams()
 
     with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.encode(prompts=prompt,
-                                 pooling_params=pooling_params)
+        v1_output = llm.encode(prompts=prompt, pooling_params=pooling_params)
 
     v2_output = llm.encode(prompt, pooling_params=pooling_params)
     assert_outputs_equal(v1_output, v2_output)
 
-    v2_output = llm.encode({"prompt": prompt},
-                             pooling_params=pooling_params)
+    v2_output = llm.encode({"prompt": prompt}, pooling_params=pooling_params)
     assert_outputs_equal(v1_output, v2_output)
 
 
@@ -66,10 +64,10 @@ def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
         v1_output = llm.encode(prompt_token_ids=prompt_token_ids,
-                                 pooling_params=pooling_params)
+                               pooling_params=pooling_params)
 
     v2_output = llm.encode({"prompt_token_ids": prompt_token_ids},
-                             pooling_params=pooling_params)
+                           pooling_params=pooling_params)
     assert_outputs_equal(v1_output, v2_output)
 
 
@@ -78,8 +76,7 @@ def test_v1_v2_api_consistency_multi_prompt_string(llm: LLM):
     pooling_params = PoolingParams()
 
     with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.encode(prompts=PROMPTS,
-                                 pooling_params=pooling_params)
+        v1_output = llm.encode(prompts=PROMPTS, pooling_params=pooling_params)
 
     v2_output = llm.encode(PROMPTS, pooling_params=pooling_params)
     assert_outputs_equal(v1_output, v2_output)
@@ -99,7 +96,7 @@ def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
 
     with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
         v1_output = llm.encode(prompt_token_ids=TOKEN_IDS,
-                                 pooling_params=pooling_params)
+                               pooling_params=pooling_params)
 
     v2_output = llm.encode(
         [{
