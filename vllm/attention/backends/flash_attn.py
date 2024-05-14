@@ -348,6 +348,7 @@ class FlashAttentionImpl(AttentionImpl):
             #     print(f"SANG-TODO {decode_meta.block_tables=}")
             #     # print(f"SANG-TODO {attn_metadata.slot_mapping=}")
             #     print(f"SANG-TODO {decode_meta.seq_lens_tensor=}")
+            #     print(f"SANG-TODO decode query: {decode_query=}")
             output[num_prefill_tokens:] = flash_attn_with_kvcache(
                 decode_query.unsqueeze(1),
                 key_cache,
