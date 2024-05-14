@@ -1,5 +1,7 @@
 import time
-from typing import Iterable, List, Optional, Type, Union
+from typing import Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Type, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
@@ -21,9 +23,12 @@ from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+                          RequestOutputFactory)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput, Sequence,
+from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
+                           PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -172,7 +177,8 @@ class LLMEngine:
             load_config=load_config,
         )
 
-        self._initialize_kv_caches()
+        if not self.model_config.embedding_mode:
+            self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -356,18 +362,10 @@ class LLMEngine:
         self,
         request_id: str,
         processed_inputs: LLMInputs,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
     ) -> None:
-        max_logprobs = self.get_model_config().max_logprobs
-        if (sampling_params.logprobs
-                and sampling_params.logprobs > max_logprobs) or (
-                    sampling_params.prompt_logprobs
-                    and sampling_params.prompt_logprobs > max_logprobs):
-            raise ValueError(f"Cannot request more than "
-                             f"{max_logprobs} logprobs.")
-
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -381,19 +379,26 @@ class LLMEngine:
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                        lora_request)
 
-        # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
-        # Add the eos token id into the sampling_params to support min_tokens
-        # processing
-        if seq.eos_token_id is not None:
-            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields)
-
-        # Create the sequence group.
-        seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request)
+        # Create a SequenceGroup based on SamplingParams or PoolingParams
+        if isinstance(params, SamplingParams):
+            seq_group = self._create_sequence_group_with_sampling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
+        elif isinstance(params, PoolingParams):
+            seq_group = self._create_sequence_group_with_pooling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
+        else:
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
 
         # Add the sequence group to the scheduler.
         self.scheduler.add_seq_group(seq_group)
@@ -425,7 +430,7 @@ class LLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
@@ -438,7 +443,9 @@ class LLMEngine:
         Args:
             request_id: The unique ID of the request.
             inputs: The inputs to the LLM.
-            sampling_params: The sampling parameters for text generation.
+            params: Parameters for sampling or pooling.
+                :class:`~vllm.SamplingParams` for text generation.
+                :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
 
@@ -479,10 +486,65 @@ class LLMEngine:
         return self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
-            sampling_params=sampling_params,
+            params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
         )
+
+    def _create_sequence_group_with_sampling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        sampling_params: SamplingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with SamplingParams."""
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
+
+        # Defensive copy of SamplingParams, which are used by the sampler,
+        # this doesn't deep-copy LogitsProcessor objects
+        sampling_params = sampling_params.clone()
+        # Add the eos token id into the sampling_params to support min_tokens
+        # processing
+        if seq.eos_token_id is not None:
+            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields)
+
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  sampling_params=sampling_params,
+                                  lora_request=lora_request)
+
+        return seq_group
+
+    def _create_sequence_group_with_pooling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        pooling_params: PoolingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoolingParams."""
+        # Defensive copy of PoolingParams, which are used by the pooler
+        pooling_params = pooling_params.clone()
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  lora_request=lora_request,
+                                  pooling_params=pooling_params)
+        return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -519,13 +581,25 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
+    def _process_sequence_group_outputs(
+        self,
+        seq_group: SequenceGroup,
+        outputs: List[EmbeddingSequenceGroupOutput],
+    ) -> None:
+        seq_group.embeddings = outputs[0].embeddings
+
+        for seq in seq_group.get_seqs():
+            seq.status = SequenceStatus.FINISHED_STOPPED
+
+        return
+
     def _process_model_outputs(
         self,
-        output: List[SamplerOutput],
+        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
         scheduled_seq_groups: List[ScheduledSequenceGroup],
         ignored_seq_groups: List[SequenceGroup],
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> List[RequestOutput]:
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Apply the model output to the sequences in the scheduled seq groups.
 
         Returns RequestOutputs that can be returned to the client.
@@ -536,7 +610,7 @@ class LLMEngine:
         # Organize outputs by [sequence group][step] instead of
         # [step][sequence group].
         output_by_sequence_group = create_output_by_sequence_group(
-            sampler_outputs=output, num_seq_groups=len(scheduled_seq_groups))
+            output, num_seq_groups=len(scheduled_seq_groups))
 
         # Update the scheduled sequence groups with the model outputs.
         for scheduled_seq_group, outputs, seq_group_meta in zip(
@@ -545,6 +619,9 @@ class LLMEngine:
             seq_group = scheduled_seq_group.seq_group
             seq_group.update_num_computed_tokens(
                 scheduled_seq_group.token_chunk_size)
+            if self.model_config.embedding_mode:
+                self._process_sequence_group_outputs(seq_group, outputs)
+                continue
 
             self.output_processor.process_prompt_logprob(seq_group, outputs)
             if seq_group_meta.do_sample:
@@ -554,18 +631,19 @@ class LLMEngine:
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[RequestOutput] = []
+        request_outputs: List[Union[RequestOutput,
+                                    EmbeddingRequestOutput]] = []
         for scheduled_seq_group in scheduled_seq_groups:
             seq_group = scheduled_seq_group.seq_group
             seq_group.maybe_set_first_token_time(now)
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         for seq_group in ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -605,7 +683,7 @@ class LLMEngine:
             >>> while True:
             >>>     if example_inputs:
             >>>         req_id, prompt, sampling_params = example_inputs.pop(0)
-            >>>         engine.add_request(str(req_id), prompt, sampling_params)
+            >>>         engine.add_request(str(req_id),prompt,sampling_params)
             >>>
             >>>     # continue the request processing
             >>>     request_outputs = engine.step()
@@ -672,12 +750,15 @@ class LLMEngine:
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
-        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 0.
+        if num_total_gpu is not None:
+            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
+            )
+            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
-        if num_total_cpu > 0:
+        if num_total_cpu is not None and num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
             cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
@@ -687,6 +768,8 @@ class LLMEngine:
         num_generation_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
+        num_preemption_iter = (0 if scheduler_outputs is None else
+                               scheduler_outputs.preempted)
 
         # Request stats
         #   Latency
@@ -751,8 +834,10 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
-                    best_of_requests.append(seq_group.sampling_params.best_of)
-                    n_requests.append(seq_group.sampling_params.n)
+                    if seq_group.sampling_params is not None:
+                        best_of_requests.append(
+                            seq_group.sampling_params.best_of)
+                        n_requests.append(seq_group.sampling_params.n)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
@@ -778,7 +863,6 @@ class LLMEngine:
 
         return Stats(
             now=now,
-
             # System stats
             #   Scheduler State
             num_running_sys=num_running_sys,
@@ -794,6 +878,7 @@ class LLMEngine:
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
+            num_preemption_iter=num_preemption_iter,
 
             # Request stats
             #   Latency

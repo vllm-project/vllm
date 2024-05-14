@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union)
+                    Set, Tuple, Type, Union, overload)
 
 from transformers import PreTrainedTokenizer
 
@@ -15,7 +15,8 @@ from vllm.executor.ray_utils import initialize_ray_cluster, ray
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.usage.usage_lib import UsageContext
@@ -48,15 +49,16 @@ def _raise_exception_on_finish(
 
 
 class AsyncStream:
-    """A stream of RequestOutputs for a request that can be
-    iterated over asynchronously."""
+    """A stream of RequestOutputs or EmbeddingRequestOutputs for a request
+    that can be iterated over asynchronously."""
 
     def __init__(self, request_id: str) -> None:
         self.request_id = request_id
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, Exception]) -> None:
+    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
+                              Exception]) -> None:
         if self._finished:
             return
         self._queue.put_nowait(item)
@@ -72,7 +74,7 @@ class AsyncStream:
     def __aiter__(self):
         return self
 
-    async def __anext__(self) -> RequestOutput:
+    async def __anext__(self) -> Union[RequestOutput, EmbeddingRequestOutput]:
         result = await self._queue.get()
         if isinstance(result, Exception):
             raise result
@@ -109,7 +111,8 @@ class RequestTracker:
                 self.abort_request(rid)
 
     def process_request_output(self,
-                               request_output: RequestOutput,
+                               request_output: Union[RequestOutput,
+                                                     EmbeddingRequestOutput],
                                *,
                                verbose: bool = False) -> None:
         """Process a request output from the engine."""
@@ -197,7 +200,8 @@ class RequestTracker:
 class _AsyncLLMEngine(LLMEngine):
     """Extension of LLMEngine to add async methods."""
 
-    async def step_async(self) -> List[RequestOutput]:
+    async def step_async(
+            self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -261,7 +265,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         inputs: PromptInputs,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
@@ -277,7 +281,7 @@ class _AsyncLLMEngine(LLMEngine):
         return self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
-            sampling_params=sampling_params,
+            params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
         )
@@ -517,7 +521,7 @@ class AsyncLLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncStream:
@@ -538,9 +542,9 @@ class AsyncLLMEngine:
 
             logger.info(
                 "Received request %s: prompt: %r, "
-                "sampling_params: %s, prompt_token_ids: %s, "
-                "lora_request: %s.", request_id, shortened_prompt,
-                sampling_params, shortened_token_ids, lora_request)
+                "params: %s, prompt_token_ids: %s, "
+                "lora_request: %s.", request_id, shortened_prompt, params,
+                shortened_token_ids, lora_request)
 
         if not self.is_running:
             if self.start_engine_loop:
@@ -570,7 +574,7 @@ class AsyncLLMEngine:
         stream = self._request_tracker.add_request(
             request_id,
             inputs=processed_inputs,
-            sampling_params=sampling_params,
+            params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
         )
@@ -580,7 +584,7 @@ class AsyncLLMEngine:
     async def generate(
         self,
         inputs: PromptInputs,
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncIterator[RequestOutput]:
@@ -592,13 +596,15 @@ class AsyncLLMEngine:
 
         Args:
             inputs: The inputs to the LLM.
-            sampling_params: The sampling parameters of the request.
+            params: Parameters for sampling or pooling.
+                :class:`~vllm.SamplingParams` for text generation.
+                :class:`~vllm.PoolingParams` for pooling.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
 
         Yields:
-            The output `RequestOutput` objects from the LLMEngine for the
-            request.
+            The output `RequestOutput` objects from the LLMEngine
+            for the request.
 
         Details:
             - If the engine is not running, start the background loop,
@@ -643,25 +649,135 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        # Preprocess the request.
-        arrival_time = time.time()
+        async for output in self.process_request(
+                request_id,
+                inputs,
+                params,
+                lora_request=lora_request,
+        ):
+            yield output
 
-        try:
+    async def encode(
+        self,
+        inputs: PromptInputs,
+        pooling_params: PoolingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AsyncIterator[EmbeddingRequestOutput]:
+        """Generate outputs for a request from an embedding model.
+
+        Generate outputs for a request. This method is a coroutine. It adds the
+        request into the waiting queue of the LLMEngine and streams the outputs
+        from the LLMEngine to the caller.
+
+        Args:
+            inputs: The inputs to the LLM.
+            pooling_params: The pooling parameters of the request.
+            request_id: The unique id of the request.
+            lora_request: LoRA request to use for generation, if any.
+
+        Yields:
+            The output `EmbeddingRequestOutput` objects from the LLMEngine 
+            for the request.
+
+        Details:
+            - If the engine is not running, start the background loop,
+              which iteratively invokes
+              :meth:`~vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`
+              to process the waiting requests.
+            - Add the request to the engine's `RequestTracker`.
+              On the next background loop, this request will be sent to
+              the underlying engine.
+              Also, a corresponding `AsyncStream` will be created.
+            - Wait for the request outputs from `AsyncStream` and yield them.
+
+        Example:
+            >>> # Please refer to entrypoints/api_server.py for
+            >>> # the complete example.
+            >>>
+            >>> # initialize the engine and the example input
+            >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
+            >>> example_input = {
+            >>>     "input": "What is LLM?",
+            >>>     "request_id": 0,
+            >>> }
+            >>>
+            >>> # start the generation
+            >>> results_generator = engine.encode(
+            >>>    example_input["input"],
+            >>>    PoolingParams(),
+            >>>    example_input["request_id"])
+            >>>
+            >>> # get the results
+            >>> final_output = None
+            >>> async for request_output in results_generator:
+            >>>     if await request.is_disconnected():
+            >>>         # Abort the request if the client disconnects.
+            >>>         await engine.abort(request_id)
+            >>>         # Return or raise an error
+            >>>         ...
+            >>>     final_output = request_output
+            >>>
+            >>> # Process and return the final output
+            >>> ...
+        """
+        async for output in self.process_request(
+                request_id,
+                inputs,
+                pooling_params,
+                lora_request=lora_request,
+        ):
+            yield output
+
+    @overload
+    def process_request(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        params: SamplingParams,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AsyncIterator[RequestOutput]:
+        ...
+
+    @overload
+    def process_request(  # type: ignore[misc]
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        params: PoolingParams,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AsyncIterator[EmbeddingRequestOutput]:
+        ...
+
+    def process_request(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
+        """Common logic to process requests with SamplingParams or
+        PoolingParams."""
+
+        async def generator():
+            arrival_time = time.time()
+
             stream = await self.add_request(
                 request_id,
                 inputs,
-                sampling_params,
+                params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
             )
 
-            async for request_output in stream:
-                yield request_output
-        except (Exception, asyncio.CancelledError) as e:
-            # If there is an exception or coroutine is cancelled, abort the
-            # request.
-            self._abort(request_id)
-            raise e
+            try:
+                async for request_output in stream:
+                    yield request_output
+            except (Exception, asyncio.CancelledError) as e:
+                self._abort(request_id)
+                raise e
+
+        return generator()
 
     async def abort(self, request_id: str) -> None:
         """Abort a request.

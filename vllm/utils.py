@@ -329,7 +329,7 @@ def _generate_random_fp8(
     from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor, tensor_tmp)
     del tensor_tmp
 
 

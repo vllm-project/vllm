@@ -28,10 +28,13 @@ def create_dummy_prompt(
                           "multi_modal_data": None,
                       },
                       block_size=block_size)
-    seq_group = SequenceGroup(
-        request_id, [prompt],
-        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        time.time(), lora_request)
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[prompt],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(
+                                  use_beam_search=use_beam_search,
+                                  best_of=best_of),
+                              lora_request=lora_request)
 
     return prompt, seq_group
 
