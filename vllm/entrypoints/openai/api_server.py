@@ -101,7 +101,7 @@ async def show_version():
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
     generator = await openai_serving_chat.create_chat_completion(
-        request, raw_request.is_disconnected)
+        request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
