@@ -45,14 +45,12 @@
 #include "cutlass/epilogue/threadblock/fusion/visitor_2x.hpp"
 #include "cute/tensor.hpp"
 
-// clang-format on 
+// clang-format on
 
 namespace cutlass::epilogue::threadblock {
 
 using namespace cute;
 using namespace detail;
-
-using X = Underscore;
 
 template<
   class ThreadMap,
@@ -126,14 +124,16 @@ struct VisitorRowOrScalarBroadcast {
       auto src_v = filter(tC_gRow);
       auto coord_v = filter(tC_cRow);
       auto dst_v = filter(tC_rRow);
-      
+
       if (params_ptr->ptr_row) {
+        // In this case we are loading from a row vector and broadcasting
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(src_v); ++i) {
           bool guard = get<1>(coord_v(i)) < n;
           cutlass::arch::global_load<VecType, sizeof(VecType)>(dst_v(i), (void const*)&src_v(i), guard);
         }
       } else {
+        // In this case we are loading from a scalar and broadcasting
         VecType filled_vec;
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < VecLength; i++) {
@@ -142,7 +142,10 @@ struct VisitorRowOrScalarBroadcast {
 
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(src_v); ++i) {
-          dst_v(i) = filled_vec;
+          if(get<1>(coord_v(i)) < n)
+          {
+            dst_v(i) = filled_vec;
+          }
         }
       }
     }
@@ -268,19 +271,24 @@ struct VisitorColOrScalarBroadcast {
     begin_epilogue() {
       clear(tC_rCol);
 
+      Tensor pred = make_tensor<bool>(shape(tC_gCol));
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < size(pred); ++i) {
+        pred(i) = get<0>(tC_cCol(i)) < m;
+      }
+
       if (params_ptr->ptr_col) {
-        Tensor pred = make_tensor<bool>(shape(tC_gCol));
-        CUTLASS_PRAGMA_UNROLL
-        for (int i = 0; i < size(pred); ++i) {
-          pred(i) = get<0>(tC_cCol(i)) < m;
-        }
+        // In this case we are loading from a column vector and broadcasting
         copy_if(pred, tC_gCol, tC_rCol);
       } else {
+        // In this case we are loading from a scalar and broadcasting
         auto dst_v = filter(tC_rCol);
 
         CUTLASS_PRAGMA_UNROLL
         for (int i = 0; i < size(dst_v); ++i) {
-          dst_v(i) = params_ptr->null_default;
+          if(pred(i)){
+             dst_v(i) = params_ptr->null_default;
+          }
         }
       }
     }

@@ -25,9 +25,12 @@
 #include "common.hpp"
 // clang-format on
 
+using namespace cute;
+
 /////////////////////////////////////////
 
-template <typename Arch, typename ElementAB_, typename ElementD_>
+template <typename Arch, typename ElementAB_, typename ElementD_,
+          typename TileShape, typename WarpShape, typename InstructionShape>
 struct sm8x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
@@ -42,20 +45,16 @@ struct sm8x_gemm {
 
   using OutputTileThreadMap =
       cutlass::epilogue::threadblock::OutputTileThreadLayout<
-          cutlass::gemm::GemmShape<256, 128, 64>,
-          cutlass::gemm::GemmShape<64, 64, 64>, float, 4,
-          1 /* epilogue stages */
+          TileShape, WarpShape, float, 4, 1 /* epilogue stages */
           >;
 
   using Accum = cutlass::epilogue::threadblock::VisitorAccFetch;
 
   using ScaleA = cutlass::epilogue::threadblock::VisitorColOrScalarBroadcast<
-      OutputTileThreadMap, float,
-      cute::Stride<cute::Int<1>, cute::Int<0>, cute::Int<0>>>;
+      OutputTileThreadMap, float, Stride<Int<1>, Int<0>, Int<0>>>;
 
   using ScaleB = cutlass::epilogue::threadblock::VisitorRowOrScalarBroadcast<
-      OutputTileThreadMap, float,
-      cute::Stride<cute::Int<0>, cute::Int<1>, cute::Int<0>>>;
+      OutputTileThreadMap, float, Stride<Int<0>, Int<1>, Int<0>>>;
 
   using Compute0 = cutlass::epilogue::threadblock::VisitorCompute<
       cutlass::multiplies, float, float,
@@ -74,27 +73,21 @@ struct sm8x_gemm {
   using D = cutlass::epilogue::threadblock::VisitorAuxStore<
       OutputTileThreadMap, cutlass::bfloat16_t,
       cutlass::FloatRoundStyle::round_to_nearest,
-      cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>>;
+      Stride<int64_t, Int<1>, Int<0>>>;
 
   using EVTD = cutlass::epilogue::threadblock::Sm80EVT<D, EVTCompute1>;
 
-  // Gemm operator cutlass_tensorop_f32_i16832gemm_s8_256x128_64x3_tn_align16
-  using cutlass_tensorop_f32_i16832gemm_s8_256x128_64x3_tn_align16_base =
-      typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
-          ElementAB, cutlass::layout::RowMajor,
-          cutlass::ComplexTransform::kNone, 16, ElementAB,
-          cutlass::layout::ColumnMajor, cutlass::ComplexTransform::kNone, 16,
-          float, cutlass::layout::RowMajor, 4, ElementAcc, float,
-          cutlass::arch::OpClassTensorOp, Arch,
-          cutlass::gemm::GemmShape<256, 128, 64>,
-          cutlass::gemm::GemmShape<64, 64, 64>,
-          cutlass::gemm::GemmShape<16, 8, 32>, EVTD,
-          cutlass::gemm::threadblock::ThreadblockSwizzleStreamK, 3, Operator,
-          1 /* epilogue stages */
-          >::GemmKernel;
+  using KernelType = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+      ElementAB, cutlass::layout::RowMajor, cutlass::ComplexTransform::kNone,
+      16, ElementAB, cutlass::layout::ColumnMajor,
+      cutlass::ComplexTransform::kNone, 16, float, cutlass::layout::RowMajor, 4,
+      ElementAcc, float, cutlass::arch::OpClassTensorOp, Arch, TileShape,
+      WarpShape, InstructionShape, EVTD,
+      cutlass::gemm::threadblock::ThreadblockSwizzleStreamK, 5, Operator,
+      1 /* epilogue stages */
+      >::GemmKernel;
 
-  using Op = cutlass::gemm::device::GemmUniversalAdapter<
-      cutlass_tensorop_f32_i16832gemm_s8_256x128_64x3_tn_align16_base>;
+  using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
 
 /////////////////////////////////////////
@@ -116,8 +109,8 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(0);
 
-  using StrideC = cute::Stride<int64_t, cute::Int<1>, cute::Int<0>>;
-  StrideC c_stride{ldc, cute::Int<1>{}, cute::Int<0>{}};
+  using StrideC = Stride<int64_t, Int<1>, Int<0>>;
+  StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
   auto a_ptr = static_cast<ElementAB const *>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB const *>(b.data_ptr());
@@ -148,9 +141,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   };
 
   typename Gemm::Op::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemm,  // universal mode
-      problem_size,                             // problem size
-      1,                                        // batch count
+      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel, // universal mode
+      problem_size,                                          // problem size
+      1,                                                     // batch count
       epilogue_args,
       a_ptr,
       b_ptr,
@@ -185,15 +178,24 @@ void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
   assert(b_scales.dtype() == torch::kFloat32);
   assert(out.dtype() == torch::kBFloat16);
 
+  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
+  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+
   return cutlass_scaled_mm_dq_dispatcher<
-      sm8x_gemm<cutlass::arch::Sm80, int8_t, cutlass::bfloat16_t>>(
-      out, a, b, a_scales, b_scales);
+      sm8x_gemm<cutlass::arch::Sm80, int8_t, cutlass::bfloat16_t, TileShape,
+                WarpShape, InstructionShape>>(out, a, b, a_scales, b_scales);
 }
 
 void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
                                torch::Tensor const &b_scales) {
+
+  using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
+  using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
+  using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
+
   if (a.dtype() == torch::kInt8) {
     assert(b.dtype() == torch::kInt8);
     assert(a_scales.dtype() == torch::kFloat32);
@@ -201,8 +203,8 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
     assert(out.dtype() == torch::kBFloat16);
 
     return cutlass_scaled_mm_dq_dispatcher<
-        sm8x_gemm<cutlass::arch::Sm89, int8_t, cutlass::bfloat16_t>>(
-        out, a, b, a_scales, b_scales);
+        sm8x_gemm<cutlass::arch::Sm89, int8_t, cutlass::bfloat16_t, TileShape,
+                  WarpShape, InstructionShape>>(out, a, b, a_scales, b_scales);
   } else {
     assert(a.dtype() == torch::kFloat8_e4m3fn);
     assert(b.dtype() == torch::kFloat8_e4m3fn);
@@ -210,8 +212,9 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
     assert(b_scales.dtype() == torch::kFloat32);
     assert(out.dtype() == torch::kBFloat16);
 
-    return cutlass_scaled_mm_dq_dispatcher<sm8x_gemm<
-        cutlass::arch::Sm89, cutlass::float_e4m3_t, cutlass::bfloat16_t>>(
+    return cutlass_scaled_mm_dq_dispatcher<
+        sm8x_gemm<cutlass::arch::Sm89, cutlass::float_e4m3_t,
+                  cutlass::bfloat16_t, TileShape, WarpShape, InstructionShape>>(
         out, a, b, a_scales, b_scales);
   }
 }
