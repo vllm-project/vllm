@@ -56,7 +56,7 @@ class Top1Proposer(SpeculativeProposer):
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
-        ) = self._split_by_max_model_len(seq_group_metadata_list, proposal_len)
+        ) = self._split_by_proposal_len(seq_group_metadata_list, proposal_len)
 
         if nonzero_proposal_len_seqs:
             # Speculate tokens using the draft worker for the speculative
@@ -73,6 +73,14 @@ class Top1Proposer(SpeculativeProposer):
                 execute_model_req=nonzero_execute_model_req,
                 sample_len=proposal_len,
             )
+            (
+                proposal_lens,
+                maybe_sampler_output,
+                nonzero_proposal_len_indices,
+            ) = self._remove_no_proposal_seqs(proposal_lens,
+                                              maybe_sampler_output,
+                                              nonzero_proposal_len_indices,
+                                              transposed)
         else:
             # If no sequences can be speculated, set sampler output to None.
             maybe_sampler_output = None
@@ -97,17 +105,27 @@ class Top1Proposer(SpeculativeProposer):
 
         return proposals
 
-    def _split_by_max_model_len(
+    def _split_by_proposal_len(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         proposal_len: int,
     ) -> Tuple[List[int], List[SequenceGroupMetadata], List[int]]:
-        """Determine which sequences would exceed the max model length."""
+        """Split sequences by two groups:
+        1. Sequences with non-zero proposal length.
+        2. Sequences with zero proposal length (due to disabled speculation
+        or exceed the maximum model length).
+        """
 
         proposal_lens: List[int] = []
         nonzero_proposal_len_seqs: List[SequenceGroupMetadata] = []
         nonzero_proposal_len_indices: List[int] = []
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            # The speculative decoding for this request has been disabled
+            # (e.g. due to high traffic).
+            if seq_group_metadata.num_speculative_tokens == 0:
+                proposal_lens.append(0)
+                continue
+
             seq_data = next(iter(seq_group_metadata.seq_data.values()))
             seq_len = seq_data.get_len()
 
@@ -115,19 +133,75 @@ class Top1Proposer(SpeculativeProposer):
             # are supported.
             # If max_proposal_len is defined, then we shall no exccess this
             # quota for nonzero_proposal
+            new_k = 0
             if (self.max_proposal_len is None
                     or seq_len + proposal_len < self.max_proposal_len):
-                proposal_lens.append(proposal_len)
+                new_k = proposal_len
                 nonzero_proposal_len_seqs.append(seq_group_metadata)
                 nonzero_proposal_len_indices.append(i)
-            else:
-                proposal_lens.append(0)
+            proposal_lens.append(new_k)
+            seq_group_metadata.num_speculative_tokens = new_k
 
         return (
             proposal_lens,
             nonzero_proposal_len_seqs,
             nonzero_proposal_len_indices,
         )
+
+    def _remove_no_proposal_seqs(self, proposal_lens, maybe_sampler_output,
+                                 nonzero_proposal_len_indices, transposed):
+        """Remove sequences from nonzero_proposal_len_indices and reset
+        their proposal_len to 0 the draft worker does not provide a proposal
+        (maybe_sampler_output=None). This can avoid scoring overheads.
+        """
+
+        # If maybe_sampler_output is None, then the draft worker did not
+        # provide a proposal for any sequence and thus no action needed.
+        # Also we do not support transposed maybe_sampler_output for now
+        # because it seems not straightforward for draft workers outputting
+        # transposed sampler outputs to handle the case of no proposal.
+        if maybe_sampler_output is None or transposed:
+            return (proposal_lens, maybe_sampler_output,
+                    nonzero_proposal_len_indices)
+
+        new_proposal_lens: List[int] = []
+        new_nonzero_proposal_len_indices: List[int] = []
+        new_maybe_sampler_output: List[SamplerOutput] = []
+        nonzero_proposal_len_idx_ptr = 0
+        seq_idx = 0
+        while seq_idx < len(
+                proposal_lens) and nonzero_proposal_len_idx_ptr < len(
+                    nonzero_proposal_len_indices):
+            if seq_idx < nonzero_proposal_len_indices[
+                    nonzero_proposal_len_idx_ptr]:
+                # Sequence is not in the original nonzero_proposal_len_indices,
+                # meaning that it has a proposal length of 0 before sending to
+                # the draft worker.
+                assert proposal_lens[seq_idx] == 0
+                new_proposal_lens.append(0)
+            else:
+                # Sequence is in the original nonzero_proposal_len_indices
+                if maybe_sampler_output[nonzero_proposal_len_idx_ptr] is None:
+                    # but does not have a proposal from the draft worker.
+                    new_proposal_lens.append(0)
+                else:
+                    # and has a proposal from the draft worker. Add it to the
+                    # new nonzero proposal list and keep the sampler output.
+                    new_proposal_lens.append(proposal_lens[seq_idx])
+                    new_nonzero_proposal_len_indices.append(seq_idx)
+                    new_maybe_sampler_output.append(
+                        maybe_sampler_output[nonzero_proposal_len_idx_ptr])
+                nonzero_proposal_len_idx_ptr += 1
+            seq_idx += 1
+
+        # The remaining sequences should have proposal length of 0.
+        new_proposal_lens.extend(proposal_lens[seq_idx:])
+
+        # We assume sampler_output will not be a list of all Nones.
+        # In this case this function should not be called.
+        assert new_maybe_sampler_output
+        return (new_proposal_lens, new_maybe_sampler_output,
+                new_nonzero_proposal_len_indices)
 
     def _merge_outputs(
         self,

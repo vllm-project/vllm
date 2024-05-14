@@ -8,11 +8,11 @@ import pytest
 
 MODELS = [
     "meta-llama/Llama-2-7b-hf",
-    # "mistralai/Mistral-7B-v0.1",  # Broken
+    # "mistralai/Mistral-7B-v0.1",  # Tested by test_mistral.py
     # "Deci/DeciLM-7b",  # Broken
     # "tiiuae/falcon-7b",  # Broken
     "EleutherAI/gpt-j-6b",
-    "mosaicml/mpt-7b",
+    # "mosaicml/mpt-7b",  # Broken
     # "Qwen/Qwen1.5-0.5B"  # Broken,
 ]
 

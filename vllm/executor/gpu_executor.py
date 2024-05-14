@@ -1,9 +1,9 @@
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -93,6 +93,8 @@ class GPUExecutor(ExecutorBase):
         spec_decode_worker = SpecDecodeWorker.create_worker(
             scorer_worker=target_worker,
             draft_worker_kwargs=draft_worker_kwargs,
+            disable_by_batch_size=self.speculative_config.
+            speculative_disable_by_batch_size,
         )
 
         assert self.parallel_config.world_size == 1, (
@@ -121,8 +123,8 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
@@ -148,7 +150,7 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _GB = 1 << 30
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 
 class ModelConfig:
@@ -126,6 +128,7 @@ class ModelConfig:
                                                        served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -136,6 +139,11 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+
+    def _verify_embedding_mode(self) -> None:
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.embedding_mode = any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
@@ -591,6 +599,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -602,6 +611,7 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -610,6 +620,10 @@ class SchedulerConfig:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
                 self.max_num_batched_tokens = 512
+            elif embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                self.max_num_batched_tokens = max(
+                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -623,6 +637,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.embedding_mode = embedding_mode
 
         self._verify_args()
 
@@ -692,6 +707,7 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
@@ -720,6 +736,9 @@ class SpeculativeConfig:
             use_v2_block_manager (bool): Whether vLLM is configured to use the
                 v2 block manager or not. Used for raising an error since the v2
                 block manager is required with spec decode.
+            speculative_disable_by_batch_size (Optional[int]): Disable
+                speculative decoding for new incoming requests when the number
+                of enqueue requests  is larger than this value, if provided.
             ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
@@ -730,7 +749,7 @@ class SpeculativeConfig:
                 the necessary conditions are met, else None.
         """
 
-        if (speculative_model is None and num_speculative_tokens is None):
+        if speculative_model is None and num_speculative_tokens is None:
             return None
 
         if speculative_model is not None and num_speculative_tokens is None:
@@ -738,6 +757,12 @@ class SpeculativeConfig:
                 "Expected both speculative_model and "
                 "num_speculative_tokens to be provided, but found "
                 f"{speculative_model=} and {num_speculative_tokens=}.")
+
+        if (speculative_disable_by_batch_size is not None
+                and speculative_disable_by_batch_size < 2):
+            raise ValueError("Expect the batch size threshold of disabling "
+                             "speculative decoding is > 1, but got "
+                             f"{speculative_disable_by_batch_size=}")
 
         assert (speculative_model is not None
                 and num_speculative_tokens is not None)
@@ -759,12 +784,15 @@ class SpeculativeConfig:
         draft_quantization = None
 
         if speculative_model == "[ngram]":
-            assert (ngram_prompt_lookup_max is not None
-                    and ngram_prompt_lookup_max > 0)
             if ngram_prompt_lookup_min is None:
-                ngram_prompt_lookup_min = 0
-            else:
-                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -807,6 +835,7 @@ class SpeculativeConfig:
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
         )
@@ -876,8 +905,9 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
-        ngram_prompt_lookup_max: int,
-        ngram_prompt_lookup_min: int,
+        speculative_disable_by_batch_size: Optional[int],
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ):
         """Create a SpeculativeConfig object.
 
@@ -886,12 +916,19 @@ class SpeculativeConfig:
             draft_parallel_config: ParallelConfig for the draft model.
             num_speculative_tokens: The number of tokens to sample from the
                 draft model before scoring with the target model.
+            speculative_disable_by_batch_size: Disable speculative
+                decoding for new incoming requests when the number of
+                enqueue requests is larger than this value.
+            ngram_prompt_lookup_max: Max size of ngram token window.
+            ngram_prompt_lookup_min: Min size of ngram token window.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
-        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max
-        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min
+        self.speculative_disable_by_batch_size = \
+            speculative_disable_by_batch_size
+        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
+        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
 
         self._verify_args()
 
@@ -1046,6 +1083,7 @@ def _get_and_verify_dtype(
             if config_dtype == torch.float32:
                 # Following the common practice, we use float16 for float32
                 # models.
+                logger.info("Casting torch.float32 to torch.float16.")
                 torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
@@ -1070,9 +1108,11 @@ def _get_and_verify_dtype(
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
+            logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)
             pass
         elif config_dtype == torch.float32:
             # Downcasting from float32 to float16 or bfloat16 is allowed.
+            logger.info("Downcasting %s to %s.", config_dtype, torch_dtype)
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.

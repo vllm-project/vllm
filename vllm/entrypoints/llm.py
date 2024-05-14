@@ -5,12 +5,16 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
+from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalData
-from vllm.outputs import RequestOutput
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter
+
+logger = init_logger(__name__)
 
 
 class LLM:
@@ -164,8 +168,91 @@ class LLM:
             multi_modal_datas: A list of multi modal data, one per prompt.
 
         Returns:
-            A list of `RequestOutput` objects containing the generated
-            completions in the same order as the input prompts.
+            A list of `RequestOutput` objects containing the
+            generated completions in the same order as the input prompts.
+        """
+        if sampling_params is None:
+            # Use default sampling params.
+            sampling_params = SamplingParams()
+
+        requests_data = self._validate_and_prepare_requests(
+            prompts,
+            sampling_params,
+            prompt_token_ids,
+            lora_request,
+            multi_modal_datas,
+        )
+
+        # Add requests to the engine and run the engine
+        for request_data in requests_data:
+            self._add_request(**request_data)
+
+        return self._run_engine(use_tqdm)
+
+    def encode(
+        self,
+        prompts: Optional[Union[str, List[str]]] = None,
+        pooling_params: Optional[Union[PoolingParams,
+                                       List[PoolingParams]]] = None,
+        prompt_token_ids: Optional[List[List[int]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_datas: Optional[Union[
+            Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        """Generates the completions for the input prompts.
+
+        NOTE: This class automatically batches the given prompts, considering
+        the memory constraint. For the best performance, put all of your prompts
+        into a single list and pass it to this method.
+
+        Args:
+            prompts: A list of prompts to generate completions for.
+            pooling_params: The pooling parameters for pooling. If None, we
+                use the default pooling parameters.
+            prompt_token_ids: A list of token IDs for the prompts. If None, we
+                use the tokenizer to convert the prompts to token IDs.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            multi_modal_datas: A list of multi modal data, one per prompt.
+
+        Returns:
+            A list of `EmbeddingRequestOutput` objects containing the
+            generated embeddings in the same order as the input prompts.
+        """
+        if pooling_params is None:
+            # Use default pooling params.
+            pooling_params = PoolingParams()
+
+        requests_data = self._validate_and_prepare_requests(
+            prompts,
+            pooling_params,
+            prompt_token_ids,
+            lora_request,
+            multi_modal_datas,
+        )
+
+        # Add requests to the engine and run the engine
+        for request_data in requests_data:
+            self._add_request(**request_data)
+
+        return self._run_engine(use_tqdm)
+
+    def _validate_and_prepare_requests(
+        self,
+        prompts: Optional[Union[str, List[str]]],
+        params: Union[Union[SamplingParams, PoolingParams],
+                      List[Union[SamplingParams,
+                                 PoolingParams]]],  # Unified parameter
+        prompt_token_ids: Optional[List[List[int]]] = None,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_datas: Optional[Union[
+            Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
+    ) -> List[dict]:
+        """Validates and prepares request data for adding to the engine.
+
+        Ensures prompts and token IDs are consistent, and returns a list of
+        dictionaries with request data for further processing.
         """
         if prompts is None and prompt_token_ids is None:
             raise ValueError("Either prompts or prompt_token_ids must be "
@@ -191,15 +278,9 @@ class LLM:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
 
-        if sampling_params is None:
-            # Use default sampling params.
-            sampling_params = SamplingParams()
-        elif (isinstance(sampling_params, list)
-              and len(sampling_params) != num_requests):
-            raise ValueError(
-                f"The lengths of prompts/prompt_token_ids ({num_requests}) and "
-                f"sampling_params ({len(sampling_params)}) must be the same.")
-
+        if isinstance(params, list) and len(params) != num_requests:
+            raise ValueError("The lengths of prompts and params "
+                             "must be the same.")
         if isinstance(multi_modal_datas, MultiModalData):
             # Convert a single multi_modal_data to a list.
             multi_modal_datas = [multi_modal_datas]
@@ -209,27 +290,29 @@ class LLM:
                              f"({num_requests}) and multi_modal_datas "
                              f"({len(multi_modal_datas)}) must be the same.")
 
+        # Add requests to the engine.
+        requests_data = []
         for i in range(num_requests):
-            prompt = prompts[i] if prompts is not None else None
-            sampling_params_item = sampling_params[i] if isinstance(
-                sampling_params, list) else sampling_params
-            token_ids = None if prompt_token_ids is None else prompt_token_ids[
-                i]
-            multi_modal_data = multi_modal_datas[
-                i] if multi_modal_datas is not None else None
-            self._add_request(
-                prompt,
-                sampling_params_item,
-                token_ids,
-                lora_request=lora_request,
-                multi_modal_data=multi_modal_data,
-            )
-        return self._run_engine(use_tqdm)
+            requests_data.append({
+                "prompt":
+                prompts[i] if prompts is not None else None,
+                "params":
+                params[i] if isinstance(params, list) else params,
+                "prompt_token_ids":
+                None if prompt_token_ids is None else prompt_token_ids[i],
+                "lora_request":
+                lora_request,
+                "multi_modal_data":
+                multi_modal_datas[i]
+                if multi_modal_datas is not None else None,
+            })
+
+        return requests_data
 
     def _add_request(
         self,
         prompt: Optional[str],
-        sampling_params: SamplingParams,
+        params: Union[SamplingParams, PoolingParams],
         prompt_token_ids: Optional[List[int]],
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
@@ -237,26 +320,38 @@ class LLM:
         request_id = str(next(self.request_counter))
         self.llm_engine.add_request(request_id,
                                     prompt,
-                                    sampling_params,
+                                    params,
                                     prompt_token_ids,
                                     lora_request=lora_request,
                                     multi_modal_data=multi_modal_data)
 
-    def _run_engine(self, use_tqdm: bool) -> List[RequestOutput]:
+    def _run_engine(
+            self, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
-            pbar = tqdm(total=num_requests,
-                        desc="Processed prompts",
-                        dynamic_ncols=True)
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=f"Generation Speed: {0:.2f} toks/s",
+            )
         # Run the engine.
-        outputs: List[RequestOutput] = []
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:
+                        if isinstance(output, RequestOutput):
+                            # Calculate tokens only for RequestOutput
+                            total_toks += sum(
+                                len(stp.token_ids) for stp in output.outputs)
+                            spd = total_toks / pbar.format_dict["elapsed"]
+                            pbar.postfix = f"Generation Speed: {spd:.2f} toks/s"
                         pbar.update(1)
         if use_tqdm:
             pbar.close()

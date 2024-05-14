@@ -1,8 +1,7 @@
-import contextlib
 import time
 from collections import defaultdict
 from enum import IntEnum
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
@@ -10,12 +9,11 @@ import torch.nn as nn
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataPerStage,
                             get_attn_backend)
-from vllm.attention.backends.flashinfer import FlashInferBackend
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict, with_pynccl_for_all_reduce
-from vllm.distributed.device_communicators import (custom_all_reduce,
-                                                   pynccl_utils)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
+from vllm.distributed import broadcast_tensor_dict
+from vllm.distributed.communication_op import graph_capture, graph_mode
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -108,6 +106,7 @@ class ModelRunner:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         kv_cache_dtype: Optional[str] = "auto",
@@ -117,34 +116,41 @@ class ModelRunner:
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.vision_language_config = vision_language_config
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
         self.device = self.device_config.device
+        self.pin_memory = is_pin_memory_available()
 
-        # Set after load_model.
-        self.lora_manager: LRUCacheWorkerLoRAManager = None
-
+        self.kv_cache_dtype = kv_cache_dtype
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
         self.graph_runners: Dict[int, CUDAGraphRunner] = {}
         self.graph_memory_pool: Optional[Tuple[
             int, int]] = None  # Set during graph capture.
-
-        self.max_seq_len_to_capture = (self.model_config.max_seq_len_to_capture
-                                       if self.model_config is not None else 0)
-
-        self.pin_memory = is_pin_memory_available()
-        self.kv_cache_dtype = kv_cache_dtype
-        self.vision_language_config = vision_language_config
-
+        # When using CUDA graph, the input block tables must be padded to
+        # max_seq_len_to_capture. However, creating the block table in
+        # Python can be expensive. To optimize this, we cache the block table
+        # in numpy and only copy the actual input content at every iteration.
+        # The shape of the cached block table will be
+        # (max batch size to capture, max context len to capture / block size).
+        self.graph_block_tables = np.zeros(
+            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
+            dtype=np.int32)
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
@@ -156,18 +162,11 @@ class ModelRunner:
             self.input_processor = None
 
         # Lazy initialization
-        self.model: torch.nn.Module  # Set after load_model
-        self.block_size: int  # Set after initial profiling.
-        # When using CUDA graph, the input block tables must be padded to
-        # max_seq_len_to_capture. However, creating the block table in
-        # Python can be expensive. To optimize this, we cache the block table
-        # in numpy and only copy the actual input content at every iteration.
-        # The shape of the cached block table will be
-        # (max batch size to capture, max context len to capture / block size).
-        self.graph_block_tables: torch.Tensor  # Set after initial profiling.
-
+        self.model: nn.Module  # Set after load_model
         # Set if the backend is flashinfer.
         self.flashinfer_workspace_buffer: torch.Tensor
+        # Set after load_model.
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -179,6 +178,7 @@ class ModelRunner:
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -221,13 +221,6 @@ class ModelRunner:
             logger.warning("KV cache scaling factors provided, "
                            "but the KV cache data type is not FP8. "
                            "KV cache scaling factors will not be used.")
-
-    def set_block_size(self, block_size: int) -> None:
-        self.block_size = block_size
-
-        self.graph_block_tables = np.zeros(
-            (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
-            dtype=np.int32)
 
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
@@ -284,20 +277,27 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                prefix_block_tables.append(computed_block_nums)
+                if self.attn_backend.get_name() == "flash-attn":
+                    # NOTE(woosuk): For flash-attn, the block table should
+                    # include the entries for the incoming prefill tokens.
+                    # TODO(woosuk): This is a temporary fix. We should
+                    # provide a unified interface for different backends.
+                    block_table = seq_group_metadata.block_tables[seq_id]
+                else:
+                    block_table = computed_block_nums
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
-                    prefix_block_tables.append(block_table)
                 else:
                     # The first prefill.
-                    prefix_block_tables.append([])
+                    block_table = []
             else:
-                prefix_block_tables.append([])
+                block_table = []
                 # Right now, prefill start is always 0. However, this
                 # assumption can be changed once chunked prefill is introduced.
                 assert context_len == 0
+            prefix_block_tables.append(block_table)
 
             # actual prompt lens
             context_lens.append(context_len)
@@ -313,10 +313,9 @@ class ModelRunner:
                 lora_requests.add(seq_group_metadata.lora_request)
 
             lora_index_mapping += [lora_id] * (seq_len - context_len)
-            lora_prompt_mapping.extend(
-                [lora_id] *
-                (seq_len - context_len
-                 if seq_group_metadata.sampling_params.prompt_logprobs else 1))
+            lora_prompt_mapping.extend([lora_id] * (
+                seq_len - context_len if seq_group_metadata.sampling_params
+                and seq_group_metadata.sampling_params.prompt_logprobs else 1))
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data is not None:
@@ -330,9 +329,10 @@ class ModelRunner:
                 for k, v in mm_kwargs.items():
                     multi_modal_kwargs_list[k].append(v)
 
-            if seq_group_metadata.block_tables is None:
+            if _is_block_tables_empty(seq_group_metadata.block_tables):
                 # During memory profiling, the block tables are not initialized
                 # yet. In this case, we just use a dummy slot mapping.
+                # In embeddings, the block tables are {seq_id: None}.
                 slot_mapping.extend([_PAD_SLOT_ID] * seq_len)
                 continue
 
@@ -405,7 +405,7 @@ class ModelRunner:
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-        if self.attn_backend is FlashInferBackend:
+        if self.attn_backend.get_name() == "flashinfer":
             attn_metadata = self.attn_backend.make_metadata(
                 is_prompt=True,
                 use_cuda_graph=False,
@@ -571,7 +571,7 @@ class ModelRunner:
                 device=self.device,
             )
 
-        if self.attn_backend is FlashInferBackend:
+        if self.attn_backend.get_name() == "flashinfer":
             if not hasattr(self, "flashinfer_workspace_buffer"):
                 # Allocate 16MB workspace buffer
                 # Follow the example of flashinfer: https://docs.flashinfer.ai/api/python/decode.html
@@ -784,7 +784,6 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         return (input_tokens, input_positions, attn_metadata,
@@ -842,7 +841,6 @@ class ModelRunner:
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
-
         # This represents the maximum number of different requests
         # that will have unique loras, an therefore the max amount of memory
         # consumption create dummy lora request copies from the lora request
@@ -850,20 +848,22 @@ class ModelRunner:
         dummy_lora_requests = []
         dummy_lora_requests_per_seq = []
         if self.lora_config:
-            for idx in range(self.lora_config.max_loras):
-                lora_id = idx + 1
-                dummy_lora_request = LoRARequest(
-                    lora_name=f"warmup_{lora_id}",
-                    lora_int_id=lora_id,
-                    lora_local_path="/not/a/real/path",
-                )
-                self.lora_manager.add_dummy_lora(dummy_lora_request,
-                                                 rank=LORA_WARMUP_RANK)
-                dummy_lora_requests.append(dummy_lora_request)
-            dummy_lora_requests_per_seq = [
-                dummy_lora_requests[idx % len(dummy_lora_requests)]
-                for idx in range(max_num_seqs)
-            ]
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_local_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
 
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
@@ -951,10 +951,6 @@ class ModelRunner:
         Since it is used for decoding-only, it assumes there's only 1 token
         per sequence in the batch.
         """
-        # NOTE(woosuk): This is a hack to ensure that the NCCL backend is never
-        # deleted before the CUDA graphs.
-        self.pynccl_backend = pynccl_utils.get_nccl_backend()
-
         assert not self.model_config.enforce_eager
         logger.info("Capturing the model for CUDA graphs. This may lead to "
                     "unexpected consequences if the model is not static. To "
@@ -982,13 +978,7 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        # NOTE(woosuk): There are 3 backends for all-reduce: custom all-reduce
-        # kernel, pynccl, and PyTorch NCCL. When using CUDA graph, we use
-        # either custom all-reduce kernel or pynccl. When not using CUDA
-        # graph, we use either custom all-reduce kernel or PyTorch NCCL.
-        # We always prioritize using custom all-reduce kernel but fall back
-        # to PyTorch or pynccl if it is disabled or not supported.
-        with custom_all_reduce.capture():
+        with graph_capture():
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
@@ -1012,7 +1002,6 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
-                    kv_cache_dtype=self.kv_cache_dtype,
                 )
 
                 if self.lora_config:
@@ -1080,7 +1069,7 @@ class CUDAGraphRunner:
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with _maybe_pynccl():
+        with graph_mode():
             self.model(
                 input_ids,
                 positions,
@@ -1095,7 +1084,7 @@ class CUDAGraphRunner:
         # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with _maybe_pynccl():
+            with graph_mode():
                 hidden_states = self.model(
                     input_ids,
                     positions,
@@ -1147,16 +1136,6 @@ class CUDAGraphRunner:
         return self.forward(*args, **kwargs)
 
 
-@contextlib.contextmanager
-def _maybe_pynccl():
-    if pynccl_utils.is_initialized(
-    ) and not custom_all_reduce.is_initialized():
-        with with_pynccl_for_all_reduce():
-            yield
-    else:
-        yield
-
-
 def _get_graph_batch_size(batch_size: int) -> int:
     """Returns the padded batch size given actual batch size.
 
@@ -1170,3 +1149,15 @@ def _get_graph_batch_size(batch_size: int) -> int:
     else:
         return ((batch_size + _BATCH_SIZE_ALIGNMENT - 1) //
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
+
+
+def _is_block_tables_empty(block_tables: Union[None, Dict]):
+    """
+    Check if block_tables is None or a dictionary with all None values.
+    """
+    if block_tables is None:
+        return True
+    if isinstance(block_tables, dict) and all(
+            value is None for value in block_tables.values()):
+        return True
+    return False
