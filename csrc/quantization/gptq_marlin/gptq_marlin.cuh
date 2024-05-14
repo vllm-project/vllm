@@ -38,7 +38,6 @@ constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
   // No support for async
 #else
 
-
 __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool pred = true) {
   const int BYTES = 16;
   uint32_t  smem  = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));

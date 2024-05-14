@@ -8,11 +8,9 @@
 
 namespace gptq_marlin {
 
-
 template <typename scalar_t>
 class ScalarType {
 };
-
 
 template <>
 class ScalarType<half> {
@@ -37,9 +35,7 @@ public:
     static __host__ __device__ half inline float2num(const float x) { return __float2half(x); }
 };
 
-
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-
 template <>
 class ScalarType<nv_bfloat16> {
 public:
@@ -59,11 +55,8 @@ public:
 
     static __host__ __device__ nv_bfloat16 inline float2num(const float x) { return __float2bfloat16(x); }
 };
-
 #endif
-
 
 }
 
 #endif
-
