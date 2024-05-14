@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, is_vllm_serialized_tensorizer, load_with_tensorizer,
+    TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
@@ -291,7 +291,7 @@ class TensorizerLoader(BaseModelLoader):
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 
-    def _load_model_unserialized(
+    def _load_model_serialized_cpu(
         self,
         model_config: ModelConfig,
         device_config: DeviceConfig,
@@ -299,11 +299,12 @@ class TensorizerLoader(BaseModelLoader):
         vision_language_config: Optional[VisionLanguageConfig],
         cache_config: CacheConfig,
     ) -> nn.Module:
-        """Load an unserialized model with tensorizer.
+        """Load a serialized model with tensorizer to the CPU.
 
-        Unserialized here means "not serialized with tensorizer". This
-        should still be faster than default HuggingFace loading, but will
-        be slower than loading a tensorizer-serialized model.
+        This is only necessary when the model isn't vLLM-tensorized (see
+        examples/tensorize_vllm_model.py) This should still be faster than
+        default HuggingFace loading, but will be slower than loading a
+        vLLM-tensorized model.
         """
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
@@ -324,8 +325,9 @@ class TensorizerLoader(BaseModelLoader):
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
 
-        See the examples/tensorize_vllm_model.py example "
-        script for serializing vLLM models."""
+        Expects a vLLM-tensorized model. See the
+        examples/tensorize_vllm_model.py example script
+        for serializing vLLM models."""
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
@@ -353,15 +355,15 @@ class TensorizerLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         self._verify_config(model_config, parallel_config)
 
-        if is_vllm_serialized_tensorizer(self.tensorizer_config):
+        if is_vllm_tensorized(self.tensorizer_config):
             return self._load_model_serialized(model_config, device_config,
                                                lora_config,
                                                vision_language_config,
                                                cache_config)
-        return self._load_model_unserialized(model_config, device_config,
-                                             lora_config,
-                                             vision_language_config,
-                                             cache_config)
+        return self._load_model_serialized_cpu(model_config, device_config,
+                                               lora_config,
+                                               vision_language_config,
+                                               cache_config)
 
 
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
