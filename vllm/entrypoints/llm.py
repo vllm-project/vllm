@@ -271,7 +271,6 @@ class LLM:
                 f"prompt_token_ids ({len(prompt_token_ids)}) must be the same."
             )
 
-        # Add requests to the engine.
         if prompts is not None:
             num_requests = len(prompts)
         else:
