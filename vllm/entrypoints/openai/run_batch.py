@@ -113,6 +113,7 @@ async def main(args):
         args.response_role,
     )
 
+    # Submit all requests in the file to the engine "concurrently".
     response_futures = []
     for request_json in (await read_file(args.input_file)).strip().split("\n"):
         request = BatchRequestInput.model_validate_json(request_json)
