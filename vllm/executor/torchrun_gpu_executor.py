@@ -1,4 +1,5 @@
 import os
+import torch
 from typing import Dict, List, Optional
 
 from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
@@ -8,7 +9,9 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.model_executor.parallel_utils.communication_op import (
-    broadcast_object_list)
+    broadcast_object_list,
+    tensor_model_parallel_all_gather,
+)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
@@ -62,6 +65,17 @@ class TorchrunGPUExecutor(GPUExecutor):
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
+
+    def determine_num_available_blocks(self) -> tuple[int, int]:
+        num_gpu_blocks, num_cpu_blocks = (
+            self.driver_worker.determine_num_available_blocks())
+        t = torch.tensor(
+            [[num_gpu_blocks], [num_cpu_blocks]],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        output = tensor_model_parallel_all_gather(t)
+        return (torch.min(output[0]).item(), torch.min(output[1]).item())
 
     def execute_model(self,
                       seq_group_metadata_list: List[SequenceGroupMetadata],
