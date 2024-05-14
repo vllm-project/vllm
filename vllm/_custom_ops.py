@@ -155,14 +155,13 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 # cutlass
 def cutlass_scaled_mm_dq(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_scales: torch.Tensor,
-    b_scales: torch.Tensor,
-    out_dtype : Type[torch.dtype] = torch.bfloat16
-) -> torch.Tensor:
+        a: torch.Tensor,
+        b: torch.Tensor,
+        a_scales: torch.Tensor,
+        b_scales: torch.Tensor,
+        out_dtype: Type[torch.dtype] = torch.bfloat16) -> torch.Tensor:
     shape_fallback = b.shape[0] % 16 != 0 or b.shape[1] % 16 != 0
-    assert(out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
 
     capability = torch.cuda.get_device_capability()
     capability = capability[0] * 10 + capability[1]
