@@ -269,11 +269,6 @@ class ModelRunner:
                     seq_data.get_len(),
                     context_len + seq_group_metadata.token_chunk_size)
                 tokens = seq_data.get_token_ids()[context_len:seq_len]
-                # TODO(sang): This is a hack to make it work with paged attn.
-                # Use a proper sliding window implementation.
-                if (self.sliding_window is not None and not is_prompt):
-                    seq_len = min(seq_len, self.sliding_window)
-                seq_lens.append(seq_len)
 
                 # Prefix cache was hit.
                 # Prefix is not supported with sliding_window
@@ -327,13 +322,16 @@ class ModelRunner:
                     block_table = []
                 block_tables.append(block_table)
 
+                # TODO(sang): This is a hack to make sliding window work with
+                # paged attn. We can remove it if we make paged attn kernel
+                # to properly handle slinding window attn.
+                if (self.sliding_window is not None and not is_prompt):
+                    seq_len = min(seq_len, self.sliding_window)
+                    context_len = seq_len - 1
+
+                seq_lens.append(seq_len)
                 context_lens.append(context_len)
-                # Due to hack in slinding window, we have a branch logic here.
-                # TODO(sang): Fix it.
-                if is_prompt:
-                    query_len = seq_len - context_len
-                else:
-                    query_len = 1
+                query_len = seq_len - context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
