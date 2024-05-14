@@ -49,7 +49,7 @@ from .conftest import run_greedy_equality_correctness_test
 @pytest.mark.parametrize("seed", [1])
 def test_tp_gt_1(baseline_llm_generator, test_llm_generator, batch_size: int,
                  output_len: int):
-    """
+    """Verify greedy equality when tensor parallelism is used.
     """
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
