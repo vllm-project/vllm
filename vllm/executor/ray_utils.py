@@ -44,7 +44,7 @@ try:
 
 except ImportError as e:
     logger.warning(
-        "Failed to import Ray with %r. For distributed inference, "
+        "Failed to import Ray with %r. For multi-node inference, "
         "please install Ray with `pip install ray`.", e)
     ray = None  # type: ignore
     RayWorkerWrapper = None  # type: ignore
@@ -67,7 +67,7 @@ def initialize_ray_cluster(
     """
     if ray is None:
         raise ImportError(
-            "Ray is not installed. Please install Ray to use distributed "
+            "Ray is not installed. Please install Ray to use multi-node "
             "serving.")
 
     # Connect to a ray cluster.

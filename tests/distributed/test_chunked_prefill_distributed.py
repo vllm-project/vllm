@@ -19,6 +19,7 @@ import torch
 MODELS = [
     os.environ["TEST_DIST_MODEL"],
 ]
+DISTRIBUTED_EXECUTOR_BACKEND = "DISTRIBUTED_EXECUTOR_BACKEND"
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
@@ -36,6 +37,8 @@ def test_models(
     max_tokens: int,
     chunked_prefill_token_size: int,
 ) -> None:
+    distributed_executor_backend = os.getenv(DISTRIBUTED_EXECUTOR_BACKEND)
+
     # Add a chunked prefill config.
     max_num_seqs = min(chunked_prefill_token_size, 256)
     assert chunked_prefill_token_size != -1
@@ -53,6 +56,7 @@ def test_models(
         max_num_seqs=max_num_seqs,
         enable_chunked_prefill=enable_chunked_prefill,
         max_num_batched_tokens=max_num_batched_tokens,
+        distributed_executor_backend=distributed_executor_backend,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
