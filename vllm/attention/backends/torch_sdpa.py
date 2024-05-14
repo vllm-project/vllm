@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.utils import is_cpu
 
-if is_cpu() and os.getenv("VLLM_CPU_IPEX", 0):
+if is_cpu() and os.getenv("VLLM_CPU_IPEX", "0") == "1":
     from vllm.attention.ops.ipex_attn import PagedAttention
 else:
     from vllm.attention.ops.paged_attn import PagedAttention
