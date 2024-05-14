@@ -21,7 +21,6 @@ Express your support on Twitter if vLLM aids you, or simply offer your appreciat
 ### Build from source
 
 ```bash
-pip install -r requirements.txt
 pip install -e .  # This may take several minutes.
 ```
 
@@ -30,6 +29,8 @@ pip install -e .  # This may take several minutes.
 ```bash
 pip install -r requirements-dev.txt
 
+# linting and formatting
+bash format.sh
 # Static type checking
 mypy
 # Unit tests

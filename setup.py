@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import logging
 import os
@@ -5,7 +6,7 @@ import re
 import subprocess
 import sys
 from shutil import which
-from typing import List
+from typing import Dict, List
 
 import torch
 from packaging.version import Version, parse
@@ -13,8 +14,23 @@ from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from torch.utils.cpp_extension import CUDA_HOME
 
+
+def load_module_from_path(module_name, path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
+
+# cannot import envs directly because it depends on vllm,
+#  which is not installed yet
+envs = load_module_from_path('envs', os.path.join(ROOT_DIR, 'vllm', 'envs.py'))
+
+VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 
 # vLLM only supports Linux platform
 assert sys.platform.startswith(
@@ -50,16 +66,18 @@ class CMakeExtension(Extension):
 
 class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
-    did_config = {}
+    did_config: Dict[str, bool] = {}
 
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
     def compute_num_jobs(self):
-        num_jobs = os.environ.get("MAX_JOBS", None)
+        # `num_jobs` is either the value of the MAX_JOBS environment variable
+        # (if defined) or the number of CPUs available.
+        num_jobs = envs.MAX_JOBS
         if num_jobs is not None:
             num_jobs = int(num_jobs)
-            logger.info(f"Using MAX_JOBS={num_jobs} as the number of jobs.")
+            logger.info("Using MAX_JOBS=%d as the number of jobs.", num_jobs)
         else:
             try:
                 # os.sched_getaffinity() isn't universally available, so fall
@@ -69,11 +87,20 @@ class cmake_build_ext(build_ext):
                 num_jobs = os.cpu_count()
 
         nvcc_threads = None
-        if _is_cuda():
-            nvcc_cuda_version = get_nvcc_cuda_version()
-            if nvcc_cuda_version >= Version("11.2"):
-                nvcc_threads = int(os.getenv("NVCC_THREADS", 8))
-                num_jobs = max(1, round(num_jobs / (nvcc_threads / 4)))
+        if _is_cuda() and get_nvcc_cuda_version() >= Version("11.2"):
+            # `nvcc_threads` is either the value of the NVCC_THREADS
+            # environment variable (if defined) or 1.
+            # when it is set, we reduce `num_jobs` to avoid
+            # overloading the system.
+            nvcc_threads = envs.NVCC_THREADS
+            if nvcc_threads is not None:
+                nvcc_threads = int(nvcc_threads)
+                logger.info(
+                    "Using NVCC_THREADS=%d as the number of nvcc threads.",
+                    nvcc_threads)
+            else:
+                nvcc_threads = 1
+            num_jobs = max(1, num_jobs // nvcc_threads)
 
         return num_jobs, nvcc_threads
 
@@ -91,7 +118,7 @@ class cmake_build_ext(build_ext):
         # Select the build type.
         # Note: optimization level + debug info are set by the build type
         default_cfg = "Debug" if self.debug else "RelWithDebInfo"
-        cfg = os.getenv("CMAKE_BUILD_TYPE", default_cfg)
+        cfg = envs.CMAKE_BUILD_TYPE or default_cfg
 
         # where .so files will be written, should be the same for all extensions
         # that use the same CMakeLists.txt.
@@ -102,9 +129,10 @@ class cmake_build_ext(build_ext):
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),
             '-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={}'.format(outdir),
             '-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}'.format(self.build_temp),
+            '-DVLLM_TARGET_DEVICE={}'.format(VLLM_TARGET_DEVICE),
         ]
 
-        verbose = bool(int(os.getenv('VERBOSE', '0')))
+        verbose = envs.VERBOSE
         if verbose:
             cmake_args += ['-DCMAKE_VERBOSE_MAKEFILE=ON']
 
@@ -186,11 +214,15 @@ def _is_hpu() -> bool:
 
 
 def _is_cuda() -> bool:
-    return torch.version.cuda is not None and not _is_neuron() and not _is_hpu()
+    return VLLM_TARGET_DEVICE == "cuda" \
+            and torch.version.cuda is not None \
+            and not _is_neuron() \
+            and not _is_hpu()
 
 
 def _is_hip() -> bool:
-    return torch.version.hip is not None
+    return (VLLM_TARGET_DEVICE == "cuda"
+            or VLLM_TARGET_DEVICE == "rocm") and torch.version.hip is not None
 
 
 def _is_neuron() -> bool:
@@ -199,10 +231,14 @@ def _is_neuron() -> bool:
         subprocess.run(["neuron-ls"], capture_output=True, check=True)
     except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
         torch_neuronx_installed = False
-    return torch_neuronx_installed
+    return torch_neuronx_installed or envs.VLLM_BUILD_WITH_NEURON
+
+
+def _is_cpu() -> bool:
+    return VLLM_TARGET_DEVICE == "cpu"
 
 def _install_punica() -> bool:
-    return bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0")))
+    return envs.VLLM_INSTALL_PUNICA_KERNELS
 
 
 def get_hipcc_rocm_version():
@@ -251,6 +287,7 @@ def get_nvcc_cuda_version() -> Version:
 
     Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
+    assert CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output([CUDA_HOME + "/bin/nvcc", "-V"],
                                           universal_newlines=True)
     output = nvcc_output.split()
@@ -313,6 +350,8 @@ def get_vllm_version() -> str:
         if gaudi_sw_version != MAIN_CUDA_VERSION:
             gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
             version += f"+gaudi{gaudi_sw_version}"
+    elif _is_cpu():
+        version += "+cpu"
     else:
         raise RuntimeError("Unknown runtime environment")
 
@@ -330,28 +369,40 @@ def read_readme() -> str:
 
 def get_requirements() -> List[str]:
     """Get Python package dependencies from requirements.txt."""
+
+    def _read_requirements(filename: str) -> List[str]:
+        with open(get_path(filename)) as f:
+            requirements = f.read().strip().split("\n")
+        resolved_requirements = []
+        for line in requirements:
+            if line.startswith("-r "):
+                resolved_requirements += _read_requirements(line.split()[1])
+            else:
+                resolved_requirements.append(line)
+        return resolved_requirements
+
     if _is_cuda():
-        with open(get_path("requirements.txt")) as f:
-            requirements = f.read().strip().split("\n")
-        if get_nvcc_cuda_version() <= Version("11.8"):
-            # replace cupy-cuda12x with cupy-cuda11x for cuda 11.x
-            for i in range(len(requirements)):
-                if requirements[i].startswith("cupy-cuda12x"):
-                    requirements[i] = "cupy-cuda11x"
-                    break
+        requirements = _read_requirements("requirements-cuda.txt")
+        cuda_major = torch.version.cuda.split(".")[0]
+        modified_requirements = []
+        for req in requirements:
+            if "vllm-nccl-cu12" in req:
+                modified_requirements.append(
+                    req.replace("vllm-nccl-cu12", f"vllm-nccl-cu{cuda_major}"))
+            else:
+                modified_requirements.append(req)
+        requirements = modified_requirements
     elif _is_hip():
-        with open(get_path("requirements-rocm.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
-        with open(get_path("requirements-neuron.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-neuron.txt")
     elif _is_hpu():
-        with open(get_path("requirements-hpu.txt")) as f:
-            requirements = f.read().strip().split("\n")
+        requirements = _read_requirements("requirements-hpu.txt")
+    elif _is_cpu():
+        requirements = _read_requirements("requirements-cpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCM, Neuron or HPU.")
-
+            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, or CPU.")
     return requirements
 
 
@@ -369,7 +420,8 @@ if not (_is_neuron() or _is_hpu()):
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
 }
-if os.environ.get("VLLM_USE_PRECOMPILED"):
+if envs.VLLM_USE_PRECOMPILED:
+    ext_modules = []
     package_data["vllm"].append("*.so")
 
 setup(
@@ -395,10 +447,13 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
-                                    "tests")),
+                                    "tests*")),
     python_requires=">=3.8",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
+    extras_require={
+        "tensorizer": ["tensorizer==2.9.0"],
+    },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() or _is_hpu() else {},
     package_data=package_data,
 )

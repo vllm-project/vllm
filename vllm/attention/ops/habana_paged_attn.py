@@ -16,17 +16,11 @@ _PARTITION_SIZE = 512
 @dataclass
 class HabanaPagedAttentionMetadata:
     """Metadata for PagedAttention."""
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
-    # (batch_size,). The length of context (tokens stored in KV cache) per
-    # sequence. WARNING: When it is a prefill request, it doesn't include new
-    # tokens. When it is for decoding, it includes a new token.
-    context_lens: Optional[torch.Tensor]
-    # Maximum context length in the batch.
-    max_context_len: Optional[int]
+    # (batch_size,). The length of sequences (entire tokens seen so far) per
+    # sequence.
+    seq_lens_tensor: Optional[torch.Tensor]
+    # Maximum sequence length in the batch.
+    max_seq_len: Optional[int]
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
     # E.g., [0, 1, 2] means tokens are stored in 0th, 1st, and 2nd blocks
@@ -34,7 +28,6 @@ class HabanaPagedAttentionMetadata:
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
     block_tables: Optional[torch.Tensor]
-    kv_cache_dtype: str
 
 
 class HabanaPagedAttention:
@@ -88,12 +81,13 @@ class HabanaPagedAttention:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
-        context_lens: torch.Tensor,
-        max_context_len: int,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
         alibi_slopes: Optional[torch.Tensor],
+        kv_scale: float,
     ) -> torch.Tensor:
         block_size = value_cache.shape[3]
         return ops.paged_attention_v1(
@@ -103,9 +97,9 @@ class HabanaPagedAttention:
             num_kv_heads,
             scale,
             block_tables,
-            context_lens,
+            seq_lens,
             block_size,
-            max_context_len,
+            max_seq_len,
             alibi_slopes,
             kv_cache_dtype,
         )
@@ -119,10 +113,11 @@ class HabanaPagedAttention:
         value_cache: torch.Tensor,
         block_tables: torch.Tensor,
         subquery_start_loc: torch.Tensor,
-        prompt_lens_tensor: torch.Tensor,
+        seq_lens_tensor: torch.Tensor,
         context_lens: torch.Tensor,
-        max_subquery_len: int,
+        max_query_len: int,
         alibi_slopes: Optional[torch.Tensor],
+        sliding_window: Optional[int],
     ) -> torch.Tensor:
         raise NotImplementedError("forward_prefix is not implemented for HabanaPagedAttention")
 

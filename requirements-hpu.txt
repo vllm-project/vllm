@@ -1,15 +1,8 @@
-cmake>=3.21
-ninja  # For faster builds.
-psutil
+# Common dependencies
+-r requirements-common.txt
+
+# Dependencies for HPU code
 ray == 2.9.3
-sentencepiece  # Required for LLaMA tokenizer.
-numpy
-fastapi
-uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
-prometheus_client >= 0.18.0
-pynvml == 11.5.0
-triton >= 2.1.0
-outlines == 0.0.34
+triton
 pandas
 tabulate

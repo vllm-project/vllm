@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_random_seed
 from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
@@ -37,7 +38,12 @@ def _prepare_test(
                              1e-2,
                              dtype=input_tensor.dtype)
     logits_processor = MockLogitsProcessor(32000, 0.5, fake_logits)
-    model_runner = ModelRunner(None, None, None, None, None)
+    model_runner = ModelRunner(model_config=None,
+                               parallel_config=None,
+                               scheduler_config=None,
+                               device_config=None,
+                               load_config=None,
+                               lora_config=None)
     return input_tensor, fake_logits, logits_processor, model_runner
 
 
@@ -64,7 +70,7 @@ def test_logits_processors(seed: int, device: str):
         return logits
 
     seq_group_metadata_list = []
-    prompt_lens = []
+    seq_lens = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -75,11 +81,14 @@ def test_logits_processors(seed: int, device: str):
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
             ))
-        prompt_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
+        seq_lens.append(seq_group_metadata_list[-1].seq_data[0].get_len())
 
-    sampling_metadata = model_runner._prepare_sample(seq_group_metadata_list,
-                                                     prompt_lens,
-                                                     subquery_lens=prompt_lens)
+    sampling_metadata = SamplingMetadata.prepare(
+        seq_group_metadata_list,
+        seq_lens,
+        query_lens=seq_lens,
+        device=model_runner.device,
+        pin_memory=model_runner.pin_memory)
     logits_processor_output = logits_processor(
         embedding=None,
         hidden_states=input_tensor,
