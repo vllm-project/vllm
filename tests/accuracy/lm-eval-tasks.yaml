@@ -63,12 +63,13 @@
 #       value: 0.5041698256254739
 
 # Mixtral: FP16
-- model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
-  tasks:
-  - name: "gsm8k"
-    metrics:
-    - name: "exact_match,strict-match"
-      value: 0.6550416982562547
-    - name: "exact_match,flexible-extract"
-      value: 0.6603487490523123
-  enable_tensor_parallel: true
+# g5.12xlarge runner (4x 24GB A10 GPUs) has insufficient VRAM
+# - model_name: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+#   tasks:
+#   - name: "gsm8k"
+#     metrics:
+#     - name: "exact_match,strict-match"
+#       value: 0.6550416982562547
+#     - name: "exact_match,flexible-extract"
+#       value: 0.6603487490523123
+#   enable_tensor_parallel: true

@@ -139,7 +139,7 @@ jobs:
 
     TEST-MULTI:
         needs: [BUILD]
-        if: success() && contains(fromJSON('["NIGHTLY", "RELEASE"]'), inputs.wf_category)
+        if: success() && contains(fromJSON('["NIGHTLY", "WEEKLY", "RELEASE"]'), inputs.wf_category)
         uses: ./.github/workflows/test.yml
         with:
             test_label: ${{ inputs.test_label_multi }}
@@ -180,7 +180,7 @@ jobs:
     TEST-ACCURACY-SMOKE:
       needs: [BUILD]
       if: inputs.wf_category == 'NIGHTLY'
-      uses: ./.github/workflows/nm-lm-eval-smoke.yml
+      uses: ./.github/workflows/nm-test-accuracy-smoke.yml
       with:
         label: ${{ inputs.test_label_solo }}
         timeout: ${{ inputs.benchmark_timeout }}
@@ -194,7 +194,7 @@ jobs:
     TEST-ACCURACY-FULL:
       needs: [BUILD]
       if: ${{ inputs.wf_category == 'WEEKLY' || inputs.wf_category == 'RELEASE' }}
-      uses: ./.github/workflows/nm-lm-eval-accuracy.yml
+      uses: ./.github/workflows/nm-test-accuracy-full.yml
       with:
         label: ${{ inputs.test_label_multi }}
         timeout: ${{ inputs.benchmark_timeout }}

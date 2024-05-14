@@ -1,4 +1,4 @@
-name: nm-lm-eval-accuracy
+name: nm-test-accuracy-smoke
 on:
   # makes workflow reusable
   workflow_call:
@@ -68,7 +68,7 @@ env:
   VENV_BASE: "LM_EVAL"
 
 jobs:
-  LM-EVAL-FULL:
+  TEST-ACCURACY-SMOKE:
 
     runs-on: ${{ inputs.label }}
     timeout-minutes: ${{ fromJSON(inputs.timeout) }}
@@ -116,8 +116,8 @@ jobs:
             python: ${{ inputs.python }}
             venv: ${{ env.VENV_BASE }}
 
-      - name: run lm-eval-accuracy
-        uses: ./.github/actions/nm-lm-eval-accuracy/
+      - name: run lm-eval-smoke
+        uses: ./.github/actions/nm-lm-eval-smoke/
         with:
           python: ${{ inputs.python }}
           venv: ${{ env.VENV_BASE }}

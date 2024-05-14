@@ -12,7 +12,7 @@ import torch
 
 from tests.utils.logging import log_banner
 
-MAX_SERVER_START_WAIT = 600  # time (seconds) to wait for server to start
+MAX_SERVER_START_WAIT = 15 * 60  # time (seconds) to wait for server to start
 
 
 @ray.remote(num_gpus=torch.cuda.device_count())
