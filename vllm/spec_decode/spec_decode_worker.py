@@ -22,6 +22,44 @@ from vllm.distributed.communication_op import broadcast_tensor_dict
 
 logger = init_logger(__name__)
 
+def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
+    #assert self.speculative_config is not None
+    assert "speculative_config" in kwargs
+    speculative_config = kwargs.get("speculative_config")
+
+    from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+    from vllm.worker.worker import Worker
+
+    target_worker = Worker(*args, **kwargs)
+
+    draft_worker_kwargs = kwargs.copy()
+    # Override draft-model specific worker args.
+    draft_worker_kwargs.update(
+        model_config=speculative_config.draft_model_config,
+        parallel_config=speculative_config.draft_parallel_config,
+        ngram_prompt_lookup_max=speculative_config.
+        ngram_prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.
+        ngram_prompt_lookup_min,
+        # TODO allow draft-model specific load config.
+        #load_config=load_config,
+    )
+
+    spec_decode_worker = SpecDecodeWorker.create_worker(
+        scorer_worker=target_worker,
+        draft_worker_kwargs=draft_worker_kwargs,
+    )
+
+    #assert self.parallel_config.world_size == 1, (
+    #    "GPUExecutor only supports single GPU.")
+
+    return spec_decode_worker
+
+    #self.driver_worker = spec_decode_worker
+
+    ## Load model handled in spec decode worker.
+    #self.driver_worker.init_device()
+
 
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.

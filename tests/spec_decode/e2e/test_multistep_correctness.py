@@ -589,6 +589,8 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
         # Required for spec decode.
         "use_v2_block_manager": True,
 
+        #"disable_custom_all_reduce": True,
+
         "tensor_parallel_size": 2,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
