@@ -329,7 +329,8 @@ def _fwd_kernel_batch_inference(
     sparse_crow_ptr = (layout_crow_ptr + off_h * layout_crow_stride_h +
                        q_pbid * layout_crow_stride_m)
 
-    # TODO(linxihui): load at once, supported in new Triton
+    # TODO(linxihui): load at once, with any Triton version
+    # that supports `tl.split`, e.g., Triton 3.0
     k_block_start = tl.load(sparse_crow_ptr).to(tl.int32)
     k_block_end = tl.load(sparse_crow_ptr + 1).to(tl.int32)
 

@@ -20,8 +20,6 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-# from vllm.model_executor.models.phi3small.phi3small_attention import (
-#     BlockSparseFlashAttention)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
@@ -38,14 +36,14 @@ def load_column_parallel_weight(param: torch.nn.Parameter,
     param.data.copy_(loaded_weight)
 
 
-class QKVParallelLinear2(QKVParallelLinear):
+class HeadMajorQKVParallelLinear(QKVParallelLinear):
 
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor):
         return load_column_parallel_weight(param, loaded_weight)
 
 
-class MergedColumnParallelLinear2(MergedColumnParallelLinear):
+class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
 
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor):
@@ -87,7 +85,7 @@ class Phi3SmallMLP(nn.Module):
         self.gegelu_limit = config.gegelu_limit
         self.intermediate_size = config.intermediate_size
 
-        self.up_proj = MergedColumnParallelLinear2(
+        self.up_proj = HeadMajorColumnParallelLinear(
             self.hidden_size,
             2 * [self.intermediate_size],
             bias=True,
@@ -154,7 +152,7 @@ class Phi3SmallSelfAttention(nn.Module):
             norm_factor = math.sqrt(self.head_dim)
         self.scale = 1 / norm_factor
 
-        self.query_key_value = QKVParallelLinear2(
+        self.query_key_value = HeadMajorQKVParallelLinear(
             self.hidden_size,
             self.head_dim,
             self.num_heads,

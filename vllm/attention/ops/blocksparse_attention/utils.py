@@ -131,7 +131,6 @@ def binary_mask_to_bias(mask_dense):
 
 
 def get_head_sliding_step(n_heads, vert_stride, homo_head=False):
-    # if vert_stride <= n_heads, rotating the heads
     if homo_head:
         return 0
     return max(1, int(vert_stride / n_heads))
