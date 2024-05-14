@@ -34,9 +34,8 @@ void cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
     cutlass_scaled_mm_dq_sm90(out, a, b, a_scales, b_scales);
   } else if (version_num == 89) /* Ada Lovelace */ {
     cutlass_scaled_mm_dq_sm89(out, a, b, a_scales, b_scales);
-  } else if (version_num >= 80) /* Ampere */ {
+  } else /* Ampere */ {
+    TORCH_CHECK(version_num >= 80);
     cutlass_scaled_mm_dq_sm80(out, a, b, a_scales, b_scales);
-  } else {
-    throw std::runtime_error("Unsupported GPU architecture");
   }
 }

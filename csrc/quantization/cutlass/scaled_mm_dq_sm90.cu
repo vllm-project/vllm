@@ -24,6 +24,25 @@ using namespace cute;
 
 /////////////////////////////////////////
 
+/*
+   This defines a quantized GEMM operation with dequantized output, similar to
+   torch._scaled_mm. It is defined using the CUTLASS 3.x API, and is used for
+   NVIDIA GPUs with sm90a (Hopper) or later.
+
+   A and B may be either int8 or fp8_e4m3. A can be quantized per-tensor or
+   per-row. B can be quantized per-tensor or per-column. They must have
+   symmetric quantization.
+
+   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
+   scales are applied elementwise with numpy-style broadcasting.
+
+   ScaleA and ScaleB define the epilogue functions that apply the scales for
+   the A and B operands respectively. These scales may be either per-tensor or
+   per row or column.
+*/
+
+namespace {
+
 template <typename ElementAB_, typename ElementD_, typename TileShape,
           typename ClusterShape, typename KernelSchedule,
           typename EpilogueSchedule>
@@ -80,15 +99,19 @@ struct sm90_gemm {
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
+  using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
+      static_cast<int>(CEStorageSize)>;
 
+  // clang-format off
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, ElementAB,
-          cutlass::layout::RowMajor, 16, ElementAB,
-          cutlass::layout::ColumnMajor, 16, ElementAcc, TileShape, ClusterShape,
-          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
-              CEStorageSize)>,
+          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, 
+          ElementAB, cutlass::layout::RowMajor, 16, 
+          ElementAB, cutlass::layout::ColumnMajor, 16, 
+          ElementAcc, TileShape, ClusterShape,
+          Stages,
           KernelSchedule>::CollectiveOp;
+  // clang-format on
 
   using KernelType = cutlass::gemm::kernel::GemmUniversal<
       cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
@@ -98,9 +121,6 @@ struct sm90_gemm {
 };
 
 /////////////////////////////////////////
-
-using StrideA = Stride<int64_t, Int<1>, Int<0>>;
-using StrideB = Stride<int64_t, Int<1>, Int<0>>;
 
 template <typename Gemm>
 void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
@@ -118,7 +138,10 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   int64_t ldb = b.stride(1);
   int64_t ldc = out.stride(0);
 
+  using StrideA = Stride<int64_t, Int<1>, Int<0>>;
+  using StrideB = Stride<int64_t, Int<1>, Int<0>>;
   using StrideC = typename Gemm::StrideC;
+
   StrideA a_stride{lda, Int<1>{}, Int<0>{}};
   StrideB b_stride{ldb, Int<1>{}, Int<0>{}};
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
@@ -161,6 +184,7 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   cutlass::Status status = gemm_op.run(args);
   CUTLASS_CHECK(status);
 }
+}  // namespace
 
 void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,

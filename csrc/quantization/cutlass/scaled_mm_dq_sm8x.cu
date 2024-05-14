@@ -1,7 +1,6 @@
-#include <torch/extension.h>
-
 #include <assert.h>
 #include <stddef.h>
+#include <torch/extension.h>
 
 // clang-format will break include orders
 // clang-format off
@@ -29,11 +28,31 @@ using namespace cute;
 
 /////////////////////////////////////////
 
+/*
+   This defines a quantized GEMM operation with dequantized output, similar to
+   torch._scaled_mm. It is defined using the CUTLASS 2.x API, and is used for
+   NVIDIA GPUs with SM versions prior to sm90 (Hopper).
+
+   A and B may be either int8 or fp8_e4m3. A can be quantized per-tensor or
+   per-row. B can be quantized per-tensor or per-column. They must have
+   symmetric quantization.
+
+   So the GEMM operation is D = (a_scales * A) (b_scales * B), where the 
+   scales are applied elementwise with numpy-style broadcasting.
+
+   ScaleA and ScaleB define the epilogue functions that apply the scales for
+   the A and B operands respectively. These scales may be either per-tensor or
+   per row or column.
+*/
+
+namespace {
+
 template <typename Arch, typename ElementAB_, typename ElementD_,
           typename TileShape, typename WarpShape, typename InstructionShape>
 struct sm8x_gemm {
   using ElementAB = ElementAB_;
   using ElementD = ElementD_;
+
   using ElementAcc =
       typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
                                 float>::type;
@@ -77,15 +96,22 @@ struct sm8x_gemm {
 
   using EVTD = cutlass::epilogue::threadblock::Sm80EVT<D, EVTCompute1>;
 
-  using KernelType = typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
-      ElementAB, cutlass::layout::RowMajor, cutlass::ComplexTransform::kNone,
-      16, ElementAB, cutlass::layout::ColumnMajor,
-      cutlass::ComplexTransform::kNone, 16, float, cutlass::layout::RowMajor, 4,
-      ElementAcc, float, cutlass::arch::OpClassTensorOp, Arch, TileShape,
-      WarpShape, InstructionShape, EVTD,
+  // clang-format off
+  using RowMajor = typename cutlass::layout::RowMajor;
+  using ColumnMajor = typename cutlass::layout::ColumnMajor;
+  using KernelType = 
+    typename cutlass::gemm::kernel::DefaultGemmWithVisitor<
+      ElementAB, RowMajor, cutlass::ComplexTransform::kNone, 16, 
+      ElementAB, ColumnMajor, cutlass::ComplexTransform::kNone, 16, 
+      float, cutlass::layout::RowMajor, 4,
+      ElementAcc, float, cutlass::arch::OpClassTensorOp, 
+      Arch, 
+      TileShape, WarpShape, InstructionShape,
+      EVTD,
       cutlass::gemm::threadblock::ThreadblockSwizzleStreamK, 5, Operator,
       1 /* epilogue stages */
       >::GemmKernel;
+  // clang-format on
 
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
@@ -119,6 +145,8 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   auto a_scales_ptr = a_scales.data_ptr<float>();
   auto b_scales_ptr = b_scales.data_ptr<float>();
 
+  // If A and B are quantized per-tensor, then these scale tensors are scalars,
+  // and they are passed in via the second argument.
   using ScaleAArgs = typename Gemm::ScaleA::Arguments;
   ScaleAArgs a_args = a_scales.numel() == 1
                           ? ScaleAArgs{nullptr, a_scales.item<float>(), {}}
@@ -141,9 +169,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   };
 
   typename Gemm::Op::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel, // universal mode
-      problem_size,                                          // problem size
-      1,                                                     // batch count
+      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel,  // universal mode
+      problem_size,                                           // problem size
+      1,                                                      // batch count
       epilogue_args,
       a_ptr,
       b_ptr,
@@ -168,6 +196,8 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   CUTLASS_CHECK(status);
 }
 
+}  // namespace
+
 void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
@@ -191,7 +221,6 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
                                torch::Tensor const &b_scales) {
-
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
