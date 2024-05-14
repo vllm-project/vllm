@@ -140,7 +140,7 @@ class SequenceData:
         return len(self.output_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return list(self.prompt_token_ids) + self.output_token_ids
+        return self.prompt_token_ids + self.output_token_ids
 
     def get_prefix_token_ids(
             self, num_tokens: int
