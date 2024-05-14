@@ -22,10 +22,6 @@ from vllm.utils import Counter, random_uuid
 
 from ...conftest import cleanup
 
-## TODO remove, fixes cuda deferred init error x pytest assertion rewrite
-torch.zeros(0, device='cuda')
-
-
 class AsyncLLM:
     """AsyncLLM
 

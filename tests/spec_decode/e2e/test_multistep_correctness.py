@@ -626,6 +626,13 @@ def test_many_k(baseline_llm_generator, test_llm_generator, batch_size: int,
 
         #"disable_custom_all_reduce": True,
         "tensor_parallel_size": 2,
+
+        # Use AsyncLLM engine, so that the engine runs in its own process.
+        # Otherwise, since vLLM does not follow true SPMD, the test runner
+        # process will have both the engine and the rank0 worker. NCCL is not
+        # cleaned up properly, and its server host thread leaks, causing the
+        # second run of the test to fail with internal NCCL error.
+        "use_async": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

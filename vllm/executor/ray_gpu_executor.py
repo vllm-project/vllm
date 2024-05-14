@@ -28,9 +28,6 @@ USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
-        #assert (not self.speculative_config
-        #        ), "Speculative decoding not yet supported for RayGPU backend."
-
         assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
 
