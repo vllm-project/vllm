@@ -33,7 +33,8 @@ __global__ void permute_cols_kernel(int4 const *__restrict__ a_int4_ptr,
                                     int4 *__restrict__ out_int4_ptr, int size_m,
                                     int size_k, int block_rows) {}
 
-template <const int num_bits,        // number of bits used for weights
+template <typename scalar_t,         // compute dtype, half or nv_float16
+          const int num_bits,        // number of bits used for weights
           const int threads,         // number of threads in a threadblock
           const int thread_m_blocks, // number of 16x16 blocks in the m
                                      // dimension (batchsize) of the threadblock
@@ -187,6 +188,10 @@ __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_4bit<nv_bfloat
 }
 #endif
 
+// Fast Int8ToFp16/Int8ToBf16: Efficiently dequantize 8bit int values to fp16 or bf16
+// Reference:
+// - FP16: https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L53-L85
+// - BF16: https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L125-L175
 template <typename scalar_t>
 __device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit(int q) {
   throw std::runtime_error("unsupported");
@@ -366,7 +371,7 @@ __global__ void permute_cols_kernel(int4 const *__restrict__ a_int4_ptr,
   }
 }
 
-template <typename scalar_t,
+template <typename scalar_t,         // compute dtype, half or nv_float16
           const int num_bits,        // number of bits used for weights
           const int threads,         // number of threads in a threadblock
           const int thread_m_blocks, // number of 16x16 blocks in the m
@@ -1819,6 +1824,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
+    printf("123");
     gptq_marlin::marlin_mm_f16i4<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(), b_scales.data_ptr<at::Half>(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n,
@@ -1826,6 +1832,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
+    printf("123456");
     gptq_marlin::marlin_mm_f16i4<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(), c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n,
