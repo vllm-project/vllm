@@ -51,6 +51,8 @@ class GPTQMarlin24Config(QuantizationConfig):
         # Permutation length used by the marlin kernels.
         self.perm_len = 1024
 
+        self.checkpoint_format = "marlin_24"
+
     def __repr__(self) -> str:
         return "Marlin24Config(weight_bits={}, group_size={})".format(
             self.weight_bits, self.group_size)
@@ -71,6 +73,10 @@ class GPTQMarlin24Config(QuantizationConfig):
     @classmethod
     def get_config_filenames(cls) -> List[str]:
         return ["quantize_config.json"]
+
+    @classmethod
+    def is_checkpoint(self, hf_quant_cfg) -> bool:
+        return hf_quant_cfg.get("checkpoint_format") == "marlin_24"
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlin24Config":

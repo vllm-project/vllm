@@ -68,6 +68,13 @@ class MarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
+    def is_checkpoint(self, hf_quant_cfg) -> bool:
+        # compat: autogptq >=0.8.0 use checkpoint_format: str
+        # compat: autogptq <=0.7.1 is_marlin_format: bool
+        return (hf_quant_cfg.get("checkpoint_format") == "marlin"
+                or hf_quant_cfg.get("is_marlin_format", False))
+
+    @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(group_size)

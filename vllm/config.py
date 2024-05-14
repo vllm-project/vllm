@@ -13,7 +13,9 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
+MarlinConfig = get_quantization_config("marlin")
 GPTQMarlinConfig = get_quantization_config("gptq_marlin")
+GPTQMarlin24Config = get_quantization_config("gptq_marlin_24")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -155,19 +157,12 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
-
-            is_format_marlin_24 = (
-                quant_cfg.get("checkpoint_format") == "marlin_24")
 
             # Check which LinearMethod the GPTQ model should use.
             if quant_method == "gptq":
                 # If serialized in Marlin format, use MarlinLinearMethod.
                 # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
-                if is_format_marlin:
+                if MarlinConfig.is_checkpoint(quant_cfg):
                     logger.info("The model is serialized in Marlin format. "
                                 "Using Marlin kernel.")
                     quant_method = "marlin"
@@ -175,7 +170,7 @@ class ModelConfig:
                         self.quantization = quant_method
 
                 # If serialized in 2:4 Marlin format, use Marlin2:4.
-                elif is_format_marlin_24:
+                elif GPTQMarlin24Config.is_checkpoint(quant_cfg):
                     logger.info("The model is serialized in Marlin_24 format. "
                                 "Using Marlin_24 kernel.")
                     quant_method = "gptq_marlin_24"
