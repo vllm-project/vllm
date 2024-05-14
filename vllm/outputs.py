@@ -48,6 +48,7 @@ class CompletionOutput:
                 f"stop_reason={self.stop_reason})")
 
 
+@dataclass
 class EmbeddingOutput:
     """The output data of one completion output of a request.
 
@@ -56,15 +57,11 @@ class EmbeddingOutput:
         length of vector depends on the model as listed in the embedding guide.
     """
 
-    def __init__(
-        self,
-        embedding: List[float],
-    ) -> None:
-        self.embedding = embedding
+    embedding: List[float]
 
     def __repr__(self) -> str:
         return (f"EmbeddingOutput("
-                f"embedding={len(self.embedding)}")
+                f"embedding={len(self.embedding)})")
 
 
 class RequestOutput:

@@ -25,7 +25,7 @@ TOKEN_IDS = [
 
 @pytest.fixture(scope="module")
 def llm():
-    yield LLM(model="facebook/opt-125m",
+    yield LLM(model=MODEL_NAME,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.10,
