@@ -18,6 +18,7 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.distributed.communication_op import broadcast_tensor_dict
 
 logger = init_logger(__name__)
 
@@ -191,39 +192,54 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
+    def _broadcast_num_lookahead_slots(self, execute_model_req: Optional[ExecuteModelRequest] = None) -> int:
+        """Broadcast how many lookahead slots are scheduled for this step.
+
+        In draft-model speculative decoding, the number of invocations of the
+        draft worker changes depending on whether we've scheduled prefill or
+        decode. We broadcast this scheduling information out so that the non-
+        driver workers can run their models the correct number of times.
+
+        Returns the broadcasted num_lookahead_slots.
+        """
+
+        if self.rank == self._driver_rank:
+            assert execute_model_req is not None
+
+            broadcast_dict = dict(
+                num_lookahead_slots=execute_model_req.num_lookahead_slots,
+            )
+            broadcast_tensor_dict(dict_to_broadcast, src=self._driver_rank)
+        else:
+            assert execute_model_req is None
+            broadcast_dict = broadcast_tensor_dict(src=self._driver_rank)
+
+        return broadcast_dict["num_lookahead_slots"]
+            
+
     @torch.inference_mode()
     def execute_model(
             self,
-            execute_model_req: ExecuteModelRequest = None) -> List[SamplerOutput]:
+            execute_model_req: Optional[ExecuteModelRequest] = None) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
+        num_lookahead_slots = self._broadcast_num_lookahead_slots(
+            execute_model_req)
         
-        from vllm.distributed.communication_op import broadcast_tensor_dict
-        
-        if self.rank == 0:
-            t_dict = {
-                "key":execute_model_req,
-            }
-            broadcast_tensor_dict(t_dict, src=0)
-        else:
-            t_dict = broadcast_tensor_dict(src=0)
-            execute_model_req = t_dict["key"]
+        if self.rank == self._driver_rank:
+            assert execute_model_req.seq_group_metadata_list is not None, (
+                "speculative decoding requires non-None seq_group_metadata_list"
+            )
 
-        assert execute_model_req.seq_group_metadata_list is not None, (
-            "speculative decoding "
-            "requires non-None seq_group_metadata_list")
-
-        if self.rank == 0:
             # If no spec tokens, call the proposer and scorer workers normally.
             # Used for prefill.
-            if execute_model_req.num_lookahead_slots == 0 or len(
+            if num_lookahead_slots == 0 or len(
                     execute_model_req.seq_group_metadata_list) == 0:
                 return self._run_no_spec(execute_model_req)
 
-            return self._run_speculative_decoding_step(execute_model_req)
+            return self._run_speculative_decoding_step(execute_model_req, num_lookahead_slots)
         else:
-            return self._run_no_spec_dummy(execute_model_req)
-            
+            return self._run_non_driver_rank(num_lookahead_slots)
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(
@@ -249,35 +265,31 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.logprobs = None
         return [sampler_output]
 
-    @nvtx_range("spec_decode_worker._run_no_spec_dummy")
-    def _run_no_spec_dummy(
+    def _run_non_driver_rank(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        """Run a prefill step, without any speculation. The input is sent to the
-        proposer and scorer model so that the KV cache is consistent between the
-        two.
+            num_lookahead_slots: int) -> None:
+        """Run proposer and verifier model in non-driver workers. This is used
+        for both speculation cases (num_lookahead_slots>0) and non-speculation
+        cases (e.g. prefill).
         """
-        #logger.info("run proposer worker no spec")
-
+        # In non-driver workers the input is None
+        execute_model_req = None
+        
+        # Even if num_lookahead_slots is zero, we want to run the proposer model
+        # as it may have KV.
+        #
+        # We run the proposer once per lookahead slot. In the future we should
+        # delegate how many times it runs to the proposer.
         for _ in range(max(execute_model_req.num_lookahead_slots, 1)):
             self.proposer_worker.execute_model(execute_model_req)
 
-        #logger.info("run target worker no spec")
-        sampler_output = self.scorer_worker.execute_model(execute_model_req)
-        #assert len(sampler_output) == 1
-        #sampler_output = sampler_output[0]
-
-        ## Clear device tensors from sampler output. This reduces communication
-        ## overhead when the engine runs in a different process than the workers.
-        #sampler_output.probs = None
-        #sampler_output.sampled_tokens = None
-        #sampler_output.logprobs = None
-        #return [sampler_output]
+        self.scorer_worker.execute_model(execute_model_req)
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
             self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            execute_model_req: ExecuteModelRequest,
+            num_lookahead_slots: int) -> List[SamplerOutput]:
         """Execute a single step of speculative decoding.
 
         This invokes the proposer worker to get k speculative tokens for each
@@ -286,6 +298,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         #logger.info("get spec proposals")
         # Generate proposals using draft worker.
@@ -480,6 +493,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @property
     def device(self):
         return self.scorer_worker.device
+
+    @property
+    def _driver_rank(self) -> int:
+        return 0
 
     def get_cache_block_size_bytes(self):
         """Return the size of a cache block in bytes.
