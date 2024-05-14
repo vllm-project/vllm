@@ -209,7 +209,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             broadcast_dict = dict(
                 num_lookahead_slots=execute_model_req.num_lookahead_slots,
             )
-            broadcast_tensor_dict(dict_to_broadcast, src=self._driver_rank)
+            broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
         else:
             assert execute_model_req is None
             broadcast_dict = broadcast_tensor_dict(src=self._driver_rank)
