@@ -1062,7 +1062,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE: List[<str>] = []  #["float", "float32"]
+_ROCM_NOT_SUPPORTED_DTYPE: List[strs] = []  #["float", "float32"]
 
 
 def _get_and_verify_dtype(
