@@ -66,6 +66,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("moe_align_block_size", &moe_align_block_size,
           "Aligning the number of tokens to be processed by each expert such "
           "that it is divisible by the block size.");
+  ops.def("convert_fp8", &convert_fp8,
+                "Convert the key and value cache to fp8 data type");
+  
+#ifdef USE_ROCM
+  ops.def("fp8_gemm", &fp8_gemm, "fp8 GEMM with fp8 output");
+  ops.def("fp8_gemm_16", &fp8_gemm_16, "fp8 GEMM with fp16 output");
+#endif
 
   ops.def("static_scaled_int8_quant", &static_scaled_int8_quant,
           "Compute int8 quantized tensor for given scaling factor");
@@ -80,8 +87,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 "Reshape the key and value tensors and cache them");
   cache_ops.def("reshape_and_cache_flash", &reshape_and_cache_flash,
                 "Reshape the key and value tensors and cache them");
-  cache_ops.def("convert_fp8", &convert_fp8,
-                "Convert the key and value cache to fp8 data type");
 
   // Cuda utils
   pybind11::module cuda_utils =
