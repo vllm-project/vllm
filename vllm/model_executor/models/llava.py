@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import ClassVar, Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -40,7 +40,7 @@ class LlavaMultiModalProjector(nn.Module):
                                   text_hidden_size,
                                   bias=True)
 
-    def forward(self, image_features):
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
@@ -50,14 +50,27 @@ class LlavaMultiModalProjector(nn.Module):
 def _merge_vision_embeddings(input_ids: torch.Tensor,
                              inputs_embeds: torch.Tensor,
                              vision_embeddings: torch.Tensor,
-                             image_token_id: int):
+                             image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
-    inputs_embeds[mask] = vision_embeddings.view(-1,
+
+    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
+    if mask.sum() != image_feature_size:
+        raise ValueError(f"image_feature_size should be {image_feature_size}, "
+                         f"but found: {mask.sum()}")
+
+    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
                                                  vision_embeddings.shape[-1])
+
+    return inputs_embeds
 
 
 class LlavaForConditionalGeneration(nn.Module):
+
+    is_vlm: ClassVar[bool] = True
+    """Indicates that the model is a vision-language model and thus accepts
+    the `vision_language_config` parameter.
+    """
 
     def __init__(self,
                  config: "LlavaConfig",
@@ -98,14 +111,12 @@ class LlavaForConditionalGeneration(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        image_input: Optional[torch.Tensor] = None
-    ) -> SamplerOutput:  # noqa: E501
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
         """Run forward pass for Llava 1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -172,7 +183,7 @@ class LlavaForConditionalGeneration(nn.Module):
                 image_features = image_input
             vision_embeddings = self.multi_modal_projector(image_features)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-            _merge_vision_embeddings(
+            inputs_embeds = _merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
             input_ids = None
