@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <cuda_runtime.h>
 
 void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
@@ -23,16 +24,11 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
 void cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
                           torch::Tensor const &b, torch::Tensor const &a_scales,
                           torch::Tensor const &b_scales) {
-  // TODO(tms): Hack. cudaGetDeviceProperties is very slow.
-  static std::optional<int32_t> maybe_version_num = std::nullopt;
-  if (!maybe_version_num.has_value()) {
-    int device;
-    cudaGetDevice(&device);
-    cudaDeviceProp properties;
-    cudaGetDeviceProperties(&properties, device);
-    maybe_version_num = properties.major * 10 + properties.minor;
-  }
-  int32_t version_num = maybe_version_num.value();
+  int32_t major_capability;
+  int32_t minor_capability;
+  cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor, 0);
+  cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor, 0);
+  int32_t version_num = major_capability * 10 + minor_capability;
 
   if (version_num >= 90) /* H100 */ {
     // TODO: This kernel only works for sm90a
@@ -43,8 +39,7 @@ void cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
     cutlass_scaled_mm_dq_sm89(out, a, b, a_scales, b_scales);
   } else if (version_num >= 80) /* Ampere */ {
     cutlass_scaled_mm_dq_sm80(out, a, b, a_scales, b_scales);
-  } else 
-  {
+  } else {
     TORCH_CHECK(version_num >= 75);
     cutlass_scaled_mm_dq_sm75(out, a, b, a_scales, b_scales);
   }
