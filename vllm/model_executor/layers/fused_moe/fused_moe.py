@@ -437,9 +437,9 @@ def invoke_fused_moe_kernel_fp8(A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
     bf16_mantisa_bits = 7
 
     # auxilary masks used for dequantizing the fp8 data
-    _sign_mask = 1 << (_mantisa_bits + _exponent_bits)
-    _mantisa_mask = (1 << _mantisa_bits) - 1
-    _exponent_mask = ((1 << _exponent_bits) - 1) << _mantisa_bits
+    _sign_mask = 1 << (fp8_mantisa_bits + fp8_exponent_bits)
+    _mantisa_mask = (1 << fp8_mantisa_bits) - 1
+    _exponent_mask = ((1 << fp8_exponent_bits) - 1) << fp8_mantisa_bits
 
     fused_moe_kernel_fp8[grid](
         A,
@@ -680,7 +680,7 @@ def fused_experts(hidden_states: torch.Tensor,
             True,
             1, 
             quantization_group_size2, 
-            config1)
+            config_2)
     else:
         invoke_fused_moe_kernel(intermediate_cache2,
                             w2,
