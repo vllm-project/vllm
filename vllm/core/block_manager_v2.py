@@ -10,6 +10,7 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 SeqId = int
+EncoderSeqId = str
 
 
 class BlockSpaceManagerV2(BlockSpaceManager):
@@ -85,6 +86,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
+        self.encoder_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -119,7 +121,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate_decoder(self, seq_group: SequenceGroup) -> None:
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
@@ -139,6 +141,28 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # Assign the block table for each sequence.
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
+
+    def allocate_encoder(self, seq_group: SequenceGroup) -> None:
+        # NOTE: Here we assume that all sequences in the group have the same
+        # prompt.
+        request_id = seq_group.request_id
+        seq = seq_group.encoder_seq
+
+        assert not (request_id in self.encoder_block_tables), "block table already exists"
+
+        seq = seq_group.get_encoder_seq()
+        if seq is not None:
+            block_table = BlockTable(
+                block_size=self.block_size,
+                block_allocator=self.block_allocator,
+            )
+            assert self.block_sliding_window is None
+            block_table.allocate(seq.get_token_ids())
+            self.encoder_block_tables[request_id] = block_table
+
+    def allocate(self, seq_group: SequenceGroup) -> None:
+        self.allocate_decoder(seq_group)
+        self.allocate_encoder(seq_group)
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -193,11 +217,28 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables[seq.seq_id].free()
         del self.block_tables[seq.seq_id]
 
+    def free_encoder(self, seq_group: SequenceGroup) -> None:
+        request_id = seq_group.request_id
+        if request_id not in self.encoder_block_tables:
+            # Already freed or hasn't ben scheduled yet.
+            return
+        self.encoder_block_tables[request_id].free()
+        del self.encoder_block_tables[request_id]
+
+        del self.encoder_block_tables[seq_group.request_id]
+
     def get_block_table(self, seq: Sequence) -> List[int]:
         assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
         assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
+
+    def get_encoder_block_table(self, seq_group: SequenceGroup) -> List[int]:
+        request_id = seq_group.request_id
+        assert request_id in self.encoder_block_tables
+        block_ids = self.block_tables[request_id].physical_block_ids
+        assert all(b is not None for b in block_ids)
+        return block_ids
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
         # Update the last accessed time of all the blocks accessed
@@ -208,6 +249,22 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # at max extend.
         if self.enable_caching:
             block_table = self.block_tables[seq.seq_id]
+            block_ids = []
+            for block_id in block_table.physical_block_ids:
+                block_ids.append(block_id)
+            self.block_allocator.mark_blocks_as_accessed(
+                block_ids,  # type: ignore
+                now)
+
+    def access_all_encoder_blocks_in_seq_group(
+        self,
+        seq_group: SequenceGroup,
+        now: float,
+    ) -> None:
+        if self.enable_caching:
+            # Update the last accessed time of all the blocks accessed
+            # in this step.
+            block_table = self.encoder_block_tables[seq_group.request_id]
             block_ids = []
             for block_id in block_table.physical_block_ids:
                 block_ids.append(block_id)

@@ -319,14 +319,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def allocate_encoder(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # encoder prompt.
-        seq = seq_group.get_encoder_seq()
 
         # Allocate new physical token blocks that will store the prompt tokens.
-        block_table: BlockTable = []        
-        if seq is None:
-            # Assign empty encoder block table for the SequenceGroup
-            self.encoder_block_tables[seq_group.request_id] = block_table
-        else: 
+        seq = seq_group.get_encoder_seq()
+        if seq is not None:
+            block_table: BlockTable = []
             num_prompt_blocks = len(seq.logical_token_blocks)
             for logical_idx in range(num_prompt_blocks):
                 if (self.block_sliding_window is not None
