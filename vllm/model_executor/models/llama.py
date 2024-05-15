@@ -203,7 +203,7 @@ class LlamaAttention(nn.Module):
             
             # batch size = num sequences
             batch_size = block_tables_tensor.shape[0]
-            original_keys: List[dict] = []
+            original_keys: List[torch.Tensor] = []
             for i in range(batch_size):
                 # see paged_attn.py line 19 for context_lens definition
                 num_past_tokens = context_lens[i] - 1
@@ -213,40 +213,59 @@ class LlamaAttention(nn.Module):
                 block_table = block_tables_tensor[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
-                abs_pos = start
-                # loop should have 4096 - 1 iterations if not within_context_len
-                while abs_pos < end:
-                    logic_bnum = abs_pos // block_size
-                    phys_bnum = block_table[logic_bnum]
-                    if phys_bnum==3392 and not within_context_len: print("abs pos", abs_pos)
-                    offset_start = abs_pos % block_size
-                    offset_end = min(end - abs_pos, block_size)
-                    num_tokens = offset_end - offset_start
 
-                    # past_key shape: [num_heads, head_size/x, num_tokens, x]
-                    past_key = key_cache[phys_bnum, :, :, offset_start : offset_end, :]
-                    past_keys[logic_bnum] = past_key.clone()
+                # rewrite while loop with torch.index_select
+                # we can just rotate entire blocks, don't care about token-level granularity
+                start = (start // block_size) * block_size
+                phys_bnums = [block_table[abs_pos // block_size] for abs_pos in range(start, end, block_size)]
+                
+                # shape: [num_selected_blocks, num_heads, head_size/x, block_size, x]
+                past_keys_tensor = torch.index_select(key_cache, 0, phys_bnums)
+                original_keys.append(past_keys_tensor.clone())
+                
+                pos_start = 0 if within_context_len else block_size
+                pos = torch.arange(pos_start, pos_start + len(phys_bnums) * block_size, device=positions.device)
 
-                    # rotate k based on new relative pos
-                    p = abs_pos if within_context_len else abs_pos - start + block_size
-                    pos = torch.arange(p, p + num_tokens, device=positions.device)
+                # shape: [num_selected_blocks*block_size, num_heads, head_size/x, x]
+                past_keys_tensor = past_keys_tensor.permute((0, 3, 1, 2, 4)).reshape(len(phys_bnums) * block_size, -1)
+                dummy_q = torch.zeros_like(past_keys_tensor)
+                _, past_keys_tensor = self.rotary_emb(pos, dummy_q, past_keys_tensor)
+                past_keys_tensor = past_keys_tensor.reshape(len(phys_bnums), block_size, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
+                past_keys_tensor = past_keys_tensor.permute((0, 2, 3, 1, 4))
+                key_cache.index_put_((torch.tensor(phys_bnums),), past_keys_tensor)
 
-                    # sus reshapes
-                    past_key = past_key.permute((2, 0, 1, 3)).reshape(num_tokens, -1)
-                    dummy_q = torch.zeros_like(past_key)
-                    _, past_key = self.rotary_emb(pos, dummy_q, past_key)
-                    past_key = past_key.reshape(num_tokens, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
-                    key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_key.permute((1, 2, 0, 3))
+                # abs_pos = start
+                # # loop should have 4096 - 1 iterations if not within_context_len
+                # while abs_pos < end:
+                #     logic_bnum = abs_pos // block_size
+                #     phys_bnum = block_table[logic_bnum]
+                #     offset_start = abs_pos % block_size
+                #     offset_end = min(end - abs_pos, block_size)
+                #     num_tokens = offset_end - offset_start
+
+                #     # past_key shape: [num_heads, head_size/x, num_tokens, x]
+                #     past_key = key_cache[phys_bnum, :, :, offset_start : offset_end, :]
+                #     past_keys[logic_bnum] = past_key.clone()
+
+                #     # rotate k based on new relative pos
+                #     p = abs_pos if within_context_len else abs_pos - start + block_size
+                #     pos = torch.arange(p, p + num_tokens, device=positions.device)
+
+                #     # sus reshapes
+                #     past_key = past_key.permute((2, 0, 1, 3)).reshape(num_tokens, -1)
+                #     dummy_q = torch.zeros_like(past_key)
+                #     _, past_key = self.rotary_emb(pos, dummy_q, past_key)
+                #     past_key = past_key.reshape(num_tokens, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
+                #     key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_key.permute((1, 2, 0, 3))
                     
-                    abs_pos += num_tokens
+                #     abs_pos += num_tokens
 
-                original_keys.append(past_keys)
+                # original_keys.append(past_keys)
                 
                 if not within_context_len:
                     blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
                     # block_table[0] is attention sink
                     capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
-                    print("attn block table", capped_block_table[-10:])
                     block_tables.append(capped_block_table)
 
             if block_tables:
@@ -273,16 +292,21 @@ class LlamaAttention(nn.Module):
                 block_table = original_block_tables[i]
                 start = 0 if within_context_len else num_past_tokens - llama_context_len + 1 + block_size
                 end = num_past_tokens
-                abs_pos = start
-                while abs_pos < end:
-                    logic_bnum = abs_pos // block_size
-                    phys_bnum = block_table[logic_bnum]
-                    offset_start = abs_pos % block_size
-                    offset_end = block_size if end - abs_pos > block_size else end - abs_pos
-                    num_tokens = offset_end - offset_start
+
+                start = (start // block_size) * block_size
+                phys_bnums = [block_table[abs_pos // block_size] for abs_pos in range(start, end, block_size)]
+                key_cache.index_put_((torch.tensor(phys_bnums),), past_keys)
+
+                # abs_pos = start
+                # while abs_pos < end:
+                #     logic_bnum = abs_pos // block_size
+                #     phys_bnum = block_table[logic_bnum]
+                #     offset_start = abs_pos % block_size
+                #     offset_end = block_size if end - abs_pos > block_size else end - abs_pos
+                #     num_tokens = offset_end - offset_start
                     
-                    key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_keys[logic_bnum]
-                    abs_pos += num_tokens
+                #     key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_keys[logic_bnum]
+                #     abs_pos += num_tokens
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields
