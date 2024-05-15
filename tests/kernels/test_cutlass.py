@@ -47,9 +47,6 @@ def cutlass_fp8_gemm_helper(m: int,
     a = to_fp8(torch.randn((m, k), device=device))
     b = to_fp8(torch.randn((n, k), device=device).t())
 
-    print(a.device)
-    print(device)
-
     m_a_scales = m if per_token_act_quant else 1
     n_b_scales = n if per_out_channel_weight_quant else 1
 
@@ -134,6 +131,7 @@ def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
                             out_dtype)
 
+
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
@@ -144,15 +142,14 @@ def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
                             torch.bfloat16, device)
 
+
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.skipif(capability < 89,
-                    reason="FP8 is not supported on this GPU type.")
 def test_cutlass_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
-                                  device: str):
+                                   device: str):
     cutlass_int8_gemm_helper(512, 512, 512, per_act_token, per_out_ch,
-                            torch.bfloat16, device)
+                             torch.bfloat16, device)
 
 
 # For the following two tests:

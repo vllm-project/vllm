@@ -176,7 +176,7 @@ def cutlass_scaled_mm_dq(
     else:
         m = a.shape[0]
         n = b.shape[1]
-        out = torch.empty((m, n), dtype=out_dtype, device="cuda")
+        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
         vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
 
