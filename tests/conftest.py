@@ -177,7 +177,7 @@ class HfRunner:
                 trust_remote_code=True,
             )
         except Exception:
-            logger.warn(
+            logger.warning(
                 "Unable to auto-load processor from HuggingFace for "
                 "model %s. Using tokenizer instead.", model_name)
             self.processor = self.tokenizer
