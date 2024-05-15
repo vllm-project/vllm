@@ -22,6 +22,7 @@ K_FULL_OPTS = [False, True]
 def bench_run(results, model, act_order, is_k_full, num_bits, group_size,
               size_m, size_k, size_n):
     label = "Quant Matmul"
+
     sub_label = ("{}, act={} k_full={}, b={}, g={}, "
                  "MKN=({}x{}x{})".format(model, act_order, is_k_full, num_bits,
                                          group_size, size_m, size_k, size_n))
