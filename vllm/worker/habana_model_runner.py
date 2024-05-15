@@ -402,15 +402,6 @@ class HabanaModelRunner:
                                     dtype=torch.int32,
                                     device=self.device)
 
-        torch.cumsum(query_lens_tensor,
-                     dim=0,
-                     dtype=subquery_start_loc.dtype,
-                     out=subquery_start_loc[1:])
-
-        torch.cumsum(seq_lens_tensor,
-                     dim=0,
-                     dtype=seq_start_loc.dtype,
-                     out=seq_start_loc[1:])
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             seq_lens=seq_lens,
