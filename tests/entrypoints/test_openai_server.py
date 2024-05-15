@@ -783,6 +783,36 @@ async def test_complex_message_content(server, client: openai.AsyncOpenAI):
     assert content == "2"
 
 
+async def test_custom_role(server, client: openai.AsyncOpenAI):
+    # Not sure how the model handles custom roles so we just check that
+    # both string and complex message content are handled in the same way
+
+    resp1 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": "what is 1+1?",
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    resp2 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": [{
+                "type": "text",
+                "text": "what is 1+1?"
+            }]
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    content1 = resp1.choices[0].message.content
+    content2 = resp2.choices[0].message.content
+    assert content1 == content2
+
+
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
