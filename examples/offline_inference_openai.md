@@ -10,7 +10,7 @@
  
  Each line represents a separate request. See the [OpenAI package reference](https://platform.openai.com/docs/api-reference/batch/requestInput) for more details.
  
- *NOTE:* We currently only suuport to `/v1/chat/completions` endpoint (embeddings and completions coming soon).
+ *NOTE:* We currently only support to `/v1/chat/completions` endpoint (embeddings and completions coming soon).
  
  ## Pre-requisites
  
