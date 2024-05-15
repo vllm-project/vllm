@@ -654,8 +654,9 @@ class SequenceGroupMetadata:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     @property
-    def token_chunk_size(self) -> Optional[int]:
+    def token_chunk_size(self) -> int:
         """Return the number of tokens to be processed (chunk size)."""
+        assert self._token_chunk_size is not None
         return self._token_chunk_size
 
 
