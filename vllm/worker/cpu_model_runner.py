@@ -159,12 +159,10 @@ class CPUModelRunner:
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
-            max_seq_len=None,
+            max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
         )
@@ -213,7 +211,7 @@ class CPUModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_seq_len = max(seq_lens)
+        max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -243,12 +241,10 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_seq_len=max_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=block_tables,
         )
         return (
