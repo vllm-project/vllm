@@ -293,21 +293,30 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         prompt_token_ids = seq_data.get_prompt_token_ids()
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
 
+        new_seq_data_dict = {
+            target_seq_id:
+            SequenceData(
+                prompt_token_ids=prompt_token_ids,
+                output_token_ids=new_output_token_ids,
+            ),
+        }
+        # This is a hack. Technically, spec decoding should compute
+        # num_lookahead slots at one shot, but instead, it expands the batch
+        # and evaluate one by one right now. context_len is seq_len - 1 because
+        # the kv cache is filled by a previous batch in the batch expansion.
+        for data in new_seq_data_dict.values():
+            data.update_num_computed_tokens(data.get_len() - 1)
+
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
             is_prompt=seq_group_metadata.is_prompt,
-            seq_data={
-                target_seq_id:
-                SequenceData(
-                    prompt_token_ids=prompt_token_ids,
-                    output_token_ids=new_output_token_ids,
-                ),
-            },
+            seq_data=new_seq_data_dict,
             sampling_params=seq_group_metadata.sampling_params,
             block_tables={
                 target_seq_id: seq_group_metadata.block_tables[seq_id],
             },
             lora_request=None,
+            token_chunk_size=1,
         )
 
     def _split_scoring_output(

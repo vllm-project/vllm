@@ -28,7 +28,7 @@ USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
-        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.distributed_executor_backend == "ray"
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -269,7 +269,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                              f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
-        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.distributed_executor_backend == "ray"
 
         # Right now, compiled DAG requires at least 1 arg. We send
         # a dummy value for now. It will be fixed soon.

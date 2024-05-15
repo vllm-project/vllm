@@ -34,6 +34,7 @@ class EngineArgs:
     seed: int = 0
     max_model_len: Optional[int] = None
     worker_use_ray: bool = False
+    distributed_executor_backend: Optional[str] = None
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -221,10 +222,17 @@ class EngineArgs:
             ' Can be overridden per request via guided_decoding_backend'
             ' parameter.')
         # Parallel arguments
-        parser.add_argument('--worker-use-ray',
-                            action='store_true',
-                            help='Use Ray for distributed serving, will be '
-                            'automatically set when using more than 1 GPU.')
+        parser.add_argument(
+            '--distributed-executor-backend',
+            choices=['ray', 'mp'],
+            default=EngineArgs.distributed_executor_backend,
+            help='Backend to use for distributed serving. When more than 1 GPU '
+            'is used, will be automatically set to "ray" if installed '
+            'or "mp" (multiprocessing) otherwise.')
+        parser.add_argument(
+            '--worker-use-ray',
+            action='store_true',
+            help='Deprecated, use --distributed-executor-backend=ray.')
         parser.add_argument('--pipeline-parallel-size',
                             '-pp',
                             type=int,
@@ -540,14 +548,18 @@ class EngineArgs:
                                    model_config.get_sliding_window(),
                                    self.enable_prefix_caching)
         parallel_config = ParallelConfig(
-            self.pipeline_parallel_size, self.tensor_parallel_size,
-            self.worker_use_ray, self.max_parallel_loading_workers,
+            self.pipeline_parallel_size,
+            self.tensor_parallel_size,
+            self.worker_use_ray,
+            self.max_parallel_loading_workers,
             self.disable_custom_all_reduce,
             TokenizerPoolConfig.create_config(
                 self.tokenizer_pool_size,
                 self.tokenizer_pool_type,
                 self.tokenizer_pool_extra_config,
-            ), self.ray_workers_use_nsight)
+            ),
+            self.ray_workers_use_nsight,
+            distributed_executor_backend=self.distributed_executor_backend)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
@@ -609,6 +621,11 @@ class EngineArgs:
 
         decoding_config = DecodingConfig(
             guided_decoding_backend=self.guided_decoding_backend)
+
+        if (model_config.get_sliding_window() is not None
+                and scheduler_config.chunked_prefill_enabled):
+            raise ValueError(
+                "Chunked prefill is not supported with sliding window.")
 
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,
