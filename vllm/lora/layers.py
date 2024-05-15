@@ -2,15 +2,14 @@
 # SANG-TODO fix this.
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.model_executor.utils import set_default_torch_dtype
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PagedAttention
-from vllm.model_executor.layers.rotary_embedding import LinearScalingRotaryEmbedding, RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import LinearScalingRotaryEmbedding
 
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -1205,21 +1204,26 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class LoRALinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
+class MultiLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
+
     Since multiple LoRA adapters may have different scaling factors, we need
-    mutliple cos/sin caches.
+    multiple cos/sin caches.
+
     In addition to that, we also keep the cos/sin cache for the scaling factor
     of 1 (default) at all times.
-    Examplary for two scaling factors x=1, y and z with embeddings
+
+    Exemplary for two scaling factors x=1, y and z with embeddings
     [[x11, x12, ... x1m], ..., [xn1, xn2, ..., xnm]] and
     [[y11, y12, ... y1o], ..., [yn1, yn2, ..., yno]], and
     [[z11, z12, ... z1p], ..., [zn1, zn2, ..., znp]],
+
     we construct the cos/sin cache as follows:
     [[x11, x12, ... x1m, y11, y12, ... y1o, z11, z12, ... z1p],
         ...
      [xn1, xn2, ... xnm, yn1, yn2, ... yno, zn1, zn2, ... znp]]
+
     We then use offsets to index into the cos/sin cache for
     the respective scaling factors.
     """
@@ -1236,8 +1240,8 @@ class LoRALinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
         # maximum length before applying the rope scaling.
         # Thus, the maximum length after applying the rope scaling is
         # self.max_position_embeddings * self.scaling_factor.
-        all_caches = []
-        self.offsets = []
+        all_caches: List[torch.Tensor] = []
+        self.offsets: List[int] = []
         for scaling_factor in sorted(self.scaling_factor):
             max_len = self.max_position_embeddings * scaling_factor
             t = torch.arange(max_len, dtype=torch.float,
@@ -1250,57 +1254,52 @@ class LoRALinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
             self.offsets.append(self.offsets[-1] +
                                 all_caches[-1].shape[0] if all_caches else 0)
             all_caches.append(cos_sin)
-        self.scaling_factor_to_offset = {
+        self.scaling_factor_to_offset: Dict[float, int] = {
             float(scaling_factor): self.offsets[i]
             for i, scaling_factor in enumerate(sorted(self.scaling_factor))
         }
         return torch.cat(all_caches)
 
-    def get_scaling_factor_to_offset(self):
+    @property
+    def get_scaling_factor_to_offset(self) -> Dict[float, int]:
         return self.scaling_factor_to_offset
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        offsets: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Use specialized kernel that indexes int the cos/sin cache.
-        ops.batched_rotary_embedding(positions, query, key, self.head_size,
-                                     self.cos_sin_cache, self.is_neox_style,
-                                     self.rotary_dim, offsets)
-        return query, key
 
+class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+    """Implements RoPE-scaled embeddings with linear scaling for
+    multiple LoRA adapters with a specialized kernel.
 
-# SANG-TODO This needs to be changed. RoPE is separated from paged attention now.
-class LoRAPagedAttentionWithRoPE(LoRALayer):
+    Replace LinearScalingRotaryEmbedding to MultiLinearScalingRotaryEmbedding
+    which can handle multi lora adapters in a specialied kernel.
+    """
 
-    def __init__(self, base_layer: PagedAttentionWithRoPE) -> None:
+    def __init__(self, base_layer: LinearScalingRotaryEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
-        assert type(
-            self.base_layer.rotary_emb) in (RotaryEmbedding,
-                                            LinearScalingRotaryEmbedding)
+        # Lazily initialized
+        self.long_lora_indices: torch.Tensor
+        self.indices_len: List[int]
 
-    def create_lora_weights(self, max_loras: int, lora_config: LoRAConfig,
-                            model_config: PretrainedConfig) -> None:
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
         scaling_factors = list(
             lora_config.long_lora_scaling_factors
         ) if lora_config.long_lora_scaling_factors else []
-        base_scaling_factor = (self.base_layer.rotary_emb.scaling_factor
-                               if isinstance(self.base_layer.rotary_emb,
-                                             LinearScalingRotaryEmbedding) else
-                               1.0)
+        base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
+            self.rotary_emb, LinearScalingRotaryEmbedding) else 1.0)
         scaling_factors = list(set([base_scaling_factor] + scaling_factors))
-        with set_default_torch_dtype(
-                self.base_layer.rotary_emb.cos_sin_cache.dtype):
-            self.base_layer.rotary_emb = LoRALinearScalingRotaryEmbedding(
-                self.base_layer.rotary_emb.head_size,
-                self.base_layer.rotary_emb.rotary_dim,
-                self.base_layer.rotary_emb.max_position_embeddings,
-                self.base_layer.rotary_emb.base,
-                self.base_layer.rotary_emb.is_neox_style,
+        # Replace the base layer.
+        with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
+            self.base_layer = MultiLinearScalingRotaryEmbedding(
+                self.base_layer.head_size,
+                self.base_layer.rotary_dim,
+                self.base_layer.max_position_embeddings,
+                self.base_layer.base,
+                self.base_layer.is_neox_style,
                 scaling_factors=scaling_factors)
 
     def reset_lora(self, index: int):
@@ -1332,76 +1331,23 @@ class LoRAPagedAttentionWithRoPE(LoRALayer):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:
-        # Apply rotary embedding to the query and key before passing them
-        # to the attention op.
-        query, key = self.base_layer.rotary_emb(
-            positions, query, key,
-            self.long_lora_indices[:self.indices_len[4]])
-        return PagedAttention.forward(
-            self,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.base_layer(
+            positions,
             query,
             key,
-            value,
-            key_cache,
-            value_cache,
-            input_metadata,
-            cache_event,
-        )
-
-    @property
-    def scaling_factor(self):
-        return self.base_layer.rotary_emb.scaling_factor
-
-    @property
-    def offsets(self):
-        return self.base_layer.rotary_emb.offsets
-
-    @property
-    def rotary_dim(self):
-        return self.base_layer.rotary_emb.rotary_dim
-
-    @property
-    def num_heads(self):
-        return self.base_layer.num_heads
-
-    @property
-    def head_size(self):
-        return self.base_layer.head_size
-
-    @property
-    def num_kv_heads(self):
-        return self.base_layer.num_kv_heads
-
-    @property
-    def update_cache(self):
-        return self.base_layer.update_cache
-
-    @property
-    def set_attn_bias(self):
-        return self.base_layer.set_attn_bias
-
-    @property
-    def single_query_kv_attention(self):
-        return self.base_layer.single_query_kv_attention
-
-    @property
-    def single_query_cached_kv_attention(self):
-        return self.base_layer.single_query_cached_kv_attention
-
-    @property
-    def multi_query_kv_attention(self):
-        return self.base_layer.multi_query_kv_attention
-
-    @property
-    def get_alibi_slopes(self):
-        return self.base_layer.get_alibi_slopes
+            offsets=self.long_lora_indices[:self.indices_len[4]])
 
     @property
     def get_scaling_factor_to_offset(self):
-        return self.base_layer.rotary_emb.get_scaling_factor_to_offset
+        return self.base_layer.scaling_factor_to_offset
+
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        return type(source_layer) is LinearScalingRotaryEmbedding
+
+    def extra_repr(self) -> str:
+        return self.base_layer.extra_repr()

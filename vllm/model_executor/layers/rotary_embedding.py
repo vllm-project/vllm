@@ -89,7 +89,6 @@ class RotaryEmbedding(nn.Module):
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
-        breakpoint()
         return cache
 
     def _forward(

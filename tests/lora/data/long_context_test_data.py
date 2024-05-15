@@ -1,3 +1,4 @@
+# ruff: noqa
 """This file contains a dictionary of prompts and golden responses."""
 
 prompts_and_responses = {

@@ -650,11 +650,14 @@ class Scheduler:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
 
-            if num_new_tokens > self.prompt_limit:
+            prompt_limit = (seq_group.lora_request.long_lora_max_len
+                            if seq_group.lora_request
+                            and seq_group.lora_request.long_lora_max_len else
+                            self.prompt_limit)
+            if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
-                    " and exceeds limit of %d", num_new_tokens,
-                    self.prompt_limit)
+                    " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)

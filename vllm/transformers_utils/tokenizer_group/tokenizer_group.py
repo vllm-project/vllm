@@ -11,6 +11,10 @@ from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
 from vllm.utils import LRUCache
 
 
+class InputTooLongError(ValueError):
+    ...
+
+
 class TokenizerGroup(BaseTokenizerGroup):
     """A group of tokenizers that can be used for LoRA adapters."""
 
@@ -39,7 +43,17 @@ class TokenizerGroup(BaseTokenizerGroup):
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
-        return tokenizer.encode(prompt)
+        ret = tokenizer.encode(prompt)
+        input_length = len(ret)
+        if lora_request:
+            max_input_length = (lora_request.long_lora_max_len
+                                or self.max_input_length)
+        else:
+            max_input_length = self.max_input_length
+        if (max_input_length is not None and input_length > max_input_length):
+            raise InputTooLongError("Input too long.", input_length,
+                                    max_input_length)
+        return ret
 
     async def encode_async(
             self,
@@ -47,7 +61,17 @@ class TokenizerGroup(BaseTokenizerGroup):
             request_id: Optional[str] = None,
             lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
-        return tokenizer.encode(prompt)
+        ret = tokenizer.encode(prompt)
+        input_length = len(ret)
+        if lora_request:
+            max_input_length = (lora_request.long_lora_max_len
+                                or self.max_input_length)
+        else:
+            max_input_length = self.max_input_length
+        if (max_input_length is not None and input_length > max_input_length):
+            raise InputTooLongError("Input too long.", input_length,
+                                    max_input_length)
+        return ret
 
     def get_lora_tokenizer(
             self,

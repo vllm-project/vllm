@@ -398,10 +398,11 @@ class EngineArgs:
             choices=['auto', 'float16', 'bfloat16', 'float32'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
-        parser.add_argument('--long-lora-scaling-factors',
-                            type=Tuple[float],
-                            default=EngineArgs.long_lora_scaling_factors,
-                            help='Scaling factors of long LoRAs')
+        # Q: Do we need it? We can't pass tuple to cli args?
+        # parser.add_argument('--long-lora-scaling-factors',
+        #                     type=Tuple[float],
+        #                     default=EngineArgs.long_lora_scaling_factors,
+        #                     help='Scaling factors of long LoRAs')
         parser.add_argument(
             '--max-cpu-loras',
             type=int,

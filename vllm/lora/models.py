@@ -3,7 +3,7 @@ import json
 import math
 import os
 import re
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import safetensors.torch
 import torch
@@ -12,7 +12,11 @@ from torch import nn
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAPagedAttentionWithRoPE
+from vllm.lora.layers import (
+    BaseLayerWithLoRA,
+    LoRAMapping,
+    MultiLinearScalingRotaryEmbeddingWithLora,
+)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -38,7 +42,8 @@ def convert_mapping(
     vocab_size: int,
     extra_vocab_size: int,
     long_lora_metadata: Optional[LongContextLoRAMetadata] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, List[int]]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           Optional[torch.Tensor], List[int]]:
     """Converts LoRAMapping to index tensors.
 
     Args:
@@ -67,6 +72,7 @@ def convert_mapping(
                 embeddings.
             long_lora_indices: Tensor of shape [2, batch_size] mapping
                 requests to RoPE offsets and rot dims for long LoRAs.
+                None if long context lora doesn't exist.
             indices_len: List of lengths of the above tensors.
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
@@ -98,13 +104,13 @@ def convert_mapping(
         # do we need this?
         index_mapping_indices[i] = i
 
-    indices_list = [index_mapping_indices, lora_indices, embedding_indices]
+    indices_list: List[Union[List[int], torch.Tensor]] = [
+        index_mapping_indices, lora_indices, embedding_indices
+    ]
     if long_lora_metadata:
-        indices_list += [long_lora_offsets]
-    indices = torch.tensor(
-        [index_mapping_indices, lora_indices, embedding_indices],
-        dtype=torch.long,
-        device="cuda")
+        assert long_lora_offsets is not None
+        indices_list.append(long_lora_offsets)
+    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
                                          device="cuda",
                                          dtype=torch.long)
@@ -352,7 +358,7 @@ class LoRAModelManager:
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: List[Optional[int]] = [None] * self.lora_slots
         self.vocab_size = vocab_size
-        self.long_lora_config = None
+        self.long_lora_config: Optional[LongContextLoRAMetadata] = None
         self.base_indices = torch.empty(self.max_num_batched_tokens,
                                         dtype=torch.long,
                                         device="cuda")
@@ -369,7 +375,7 @@ class LoRAModelManager:
         self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
                                              dtype=torch.long,
                                              device="cuda")
-        self.scaling_factor_to_offset = {}
+        self.scaling_factor_to_offset: Dict[float, int] = {}
         # 4 is the number of indicies tensors defined above
         # base_indices, sampler_indices, sampler_indices_padded,
         # embeddings_indices
@@ -387,9 +393,6 @@ class LoRAModelManager:
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
-        # For the case of scaling factors, we need to replace attention layers
-        if lora_config.long_lora_scaling_factors:
-            self.lora_target_modules.append(self.model.attention_layer_name)
         self._create_lora_modules()
         self.model.lora_manager = self
 
@@ -454,9 +457,10 @@ class LoRAModelManager:
                 raise ValueError(
                     f"Long LoRA scaling factor {lora.long_lora_scaling_factor}"
                     " has not been initialized.")
-            self.long_lora_config.offsets_by_lora_id[
-                lora.id] = self.scaling_factor_to_offset.get(
-                    lora.long_lora_scaling_factor)
+            offsets = self.scaling_factor_to_offset.get(
+                lora.long_lora_scaling_factor)
+            if offsets:
+                self.long_lora_config.offsets_by_lora_id[lora.id] = offsets
 
     def _add_lora(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
@@ -531,14 +535,15 @@ class LoRAModelManager:
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
-            if isinstance(new_module, LoRAPagedAttentionWithRoPE):
+            if isinstance(new_module,
+                          MultiLinearScalingRotaryEmbeddingWithLora):
                 self.long_lora_config = LongContextLoRAMetadata(
                     new_module.scaling_factor, new_module.offsets,
                     new_module.rotary_dim)
                 assert len(new_module.scaling_factor) == len(
                     new_module.offsets)
                 self.scaling_factor_to_offset = \
-                    new_module.get_scaling_factor_to_offset()
+                    new_module.get_scaling_factor_to_offset
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
                 logits_processor_module = self.model.get_submodule(
@@ -571,7 +576,7 @@ class LoRAModelManager:
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name) or not isinstance(
                     module, BaseLayerWithLoRA) or isinstance(
-                        module, LoRAPagedAttentionWithRoPE):
+                        module, MultiLinearScalingRotaryEmbeddingWithLora):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:

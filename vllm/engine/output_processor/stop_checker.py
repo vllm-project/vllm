@@ -4,6 +4,7 @@ from transformers import PreTrainedTokenizer
 
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
+from vllm.lora.request import LoRARequest
 
 
 class StopChecker:
@@ -19,8 +20,13 @@ class StopChecker:
         self.max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
 
-    def maybe_stop_sequence(self, seq: Sequence, new_char_count: int,
-                            sampling_params: SamplingParams) -> None:
+    def maybe_stop_sequence(
+        self,
+        seq: Sequence,
+        new_char_count: int,
+        sampling_params: SamplingParams,
+        lora_req: Optional[LoRARequest] = None,
+    ) -> None:
         """Stop the finished sequences.
 
        new_char_count is the number of chars added to the
@@ -59,7 +65,9 @@ class StopChecker:
             return
 
         # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.max_model_len:
+        max_len = (lora_req.long_lora_max_len if lora_req
+                   and lora_req.long_lora_max_len else self.max_model_len)
+        if seq.get_len() > max_len:
             seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
             return
 

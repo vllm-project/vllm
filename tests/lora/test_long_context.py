@@ -5,6 +5,7 @@ import ast
 
 from vllm import SamplingParams
 
+import torch
 from typing import List, Optional, Tuple
 from vllm.lora.request import LoRARequest
 # from vllm.anyscale.tokenization import InputTooLongError
@@ -73,18 +74,21 @@ def evaluate_json_response(model_response, golden_response):
 
 def generate(
     llm,
-    prompts: Tuple[str, SamplingParams, Optional[LoRARequest]],
+    inputs: Tuple[str, SamplingParams, Optional[LoRARequest]],
 ):
-    outputs = llm.generate(prompts)
+    prompts, sampling_param, lora_request = inputs
+    outputs = llm.generate(prompts, sampling_param, lora_request=lora_request)
     return outputs[0].outputs[0].text.strip()
 
 
 def batched_generate(
     llm,
-    prompts: List[Tuple[str, SamplingParams, Optional[LoRARequest]]],
+    inputs: List[Tuple[str, SamplingParams, Optional[LoRARequest]]],
 ):
-    # Each prompt must be (prompt, prompt_sampling_params, prompt_lora_request)
-    outputs = llm.generate(prompts)
+    for input in inputs:
+        prompt, sampling_param, lora_req = input
+        llm._add_request(prompt, sampling_param, lora_request=lora_req)
+    outputs = llm._run_engine()
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 
@@ -104,7 +108,6 @@ class TestLongContext:
             long_lora_scaling_factors=tuple(scaling_factors),
             max_num_batched_tokens=4096 * 8,
             tensor_parallel_size=4,
-            worker_use_ray=False,
         )
         return lora_llm
 
@@ -120,7 +123,7 @@ class TestLongContext:
             lora_prompt = (prompts_and_responses[context_len][0]["prompt"],
                            sampling_params,
                            _create_lora_request(lora_id, long_context_infos))
-            lora_output = generate(lora_llm, [lora_prompt])
+            lora_output = generate(lora_llm, lora_prompt)
             non_batched_results.append(lora_output)
 
         # Create batched results
@@ -139,6 +142,7 @@ class TestLongContext:
         # Results should be the same
         for non_batched, batched in zip(non_batched_results, batched_results):
             assert non_batched == batched, f"Non batched and batched results should be the same:\n{batched}\n{non_batched}"
+
 
 #     def test_self_consistency(self, long_context_infos):
 #         """We test consistency of the batched kernel by permuting batched inputs and comparing the results to the non-permuted batched results."""
@@ -180,7 +184,7 @@ class TestLongContext:
 
 #     def test_quality(self, long_context_infos):
 #         """We test the quality of the answers given by the LoRA model by comparing the generated text to the merged model's outputs.
-        
+
 #         This is effectively a mini-benchmark over four prompts.
 #         If this test fails, this indicates that the quality of the LoRA model is suboptimal compared to the merged model.
 #         For example, if the model does not output valid dictionaries, this test will fail.
