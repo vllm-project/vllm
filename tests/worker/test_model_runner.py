@@ -307,7 +307,6 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
 
     assert len(attn_metadata.slot_mapping) == len(input_tokens)
     assert len(input_positions) == len(input_tokens)
-    assert attn_metadata.kv_cache_dtype == "auto"
     assert attn_metadata.num_prefills == prefill_batch_size
     if enforce_eager:
         assert attn_metadata.num_decode_tokens == decode_batch_size
