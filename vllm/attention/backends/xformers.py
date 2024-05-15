@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple, Type
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
+                                         BlockDiagonalMask,
                                          BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
@@ -107,6 +108,14 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     use_cuda_graph: bool
     _cached_prefill_metadata: Optional["XFormersMetadata"] = None
     _cached_decode_metadata: Optional["XFormersMetadata"] = None
+
+    # Need to make KV cache read-only for cross-attention
+    is_cross_attn: bool = False
+
+    # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
+    # sequence length (usually encoder sequence length) in the cross-attention
+    # computation. None if this is self-attention
+    cross_seq_lens: Optional[List[int]] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -270,16 +279,20 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+
+        is_cross_attn = (attn_metadata.prefill_metadata is not None and attn_metadata.prefill_metadata.is_cross_attn) or (attn_metadata.decode_metadata is not None and attn_metadata.decode_metadata.is_cross_attn)
+        assert is_cross_attn or (key.shape[0] == num_prefill_tokens + num_decode_tokens)
+        assert is_cross_attn or (value.shape[0] == num_prefill_tokens + num_decode_tokens)
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_tokens]
-        key = key[:num_prefill_tokens]
-        value = value[:num_prefill_tokens]
+
+        if not is_cross_attn:
+            key = key[:num_prefill_tokens]
+            value = value[:num_prefill_tokens]
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens
@@ -374,8 +387,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                    attn_metadata.seq_lens)
+                if attn_metadata.is_cross_attn:
+                    attn_bias = BlockDiagonalMask.from_seqlens(
+                        attn_metadata.seq_lens,attn_metadata.cross_seq_lens)
+                else:
+                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                        attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)
