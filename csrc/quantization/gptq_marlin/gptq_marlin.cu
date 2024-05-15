@@ -22,6 +22,10 @@
 #include "gptq_marlin.cuh"
 #include "gptq_marlin_dtypes.cuh"
 
+#define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t) static_assert(\
+  std::is_same<scalar_t, half>::value || std::is_same<scalar_t, nv_bfloat16>::value, \
+  "only float16 and bfloat16 is supported");
+
 template <typename T> inline std::string str(T x) { return std::to_string(x); }
 
 namespace gptq_marlin {
@@ -95,6 +99,8 @@ __device__ inline void mma(const typename ScalarType<scalar_t>::FragA &a_frag,
                 : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]),
                   "r"(b[1]), "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+  } else {
+    STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
   }
 }
 
@@ -134,10 +140,11 @@ __device__ inline uint32_t prmt(uint32_t a) {
 // Efficiently dequantize an int32 value into a full B-fragment of 4 fp16
 // values. We mostly follow the strategy in the link below, with some small
 // changes:
-// https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
+// - FP16: https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L215-L287
+// - BF16: https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L327-L385
 template <typename scalar_t>
 __device__ inline typename ScalarType<scalar_t>::FragB dequant_4bit(int q) {
-  throw std::runtime_error("unsupported");
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
 }
 
 template <>
@@ -162,7 +169,6 @@ __device__ inline typename ScalarType<half>::FragB dequant_4bit<half>(int q) {
   return frag_b;
 }
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_4bit<nv_bfloat16>(int q) {
   static constexpr uint32_t MASK = 0x000f000f;
@@ -186,7 +192,6 @@ __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_4bit<nv_bfloat
                       *reinterpret_cast<const nv_bfloat162*>(&ADD));
   return frag_b;
 }
-#endif
 
 // Fast Int8ToFp16/Int8ToBf16: Efficiently dequantize 8bit int values to fp16 or bf16
 // Reference:
@@ -194,7 +199,7 @@ __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_4bit<nv_bfloat
 // - BF16: https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h#L125-L175
 template <typename scalar_t>
 __device__ inline typename ScalarType<scalar_t>::FragB dequant_8bit(int q) {
-  throw std::runtime_error("unsupported");
+  STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t);
 }
 
 template <>
@@ -216,7 +221,6 @@ __device__ inline typename ScalarType<half>::FragB dequant_8bit<half>(int q) {
   return frag_b;
 }
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 template <>
 __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_8bit<nv_bfloat16>(int q) {
   typename ScalarType<nv_bfloat16>::FragB frag_b;
@@ -241,7 +245,6 @@ __device__ inline typename ScalarType<nv_bfloat16>::FragB dequant_8bit<nv_bfloat
 
   return frag_b;
 }
-#endif
 
 // Multiply dequantized values by the corresponding quantization scale; used
 // only for grouped quantization.
@@ -1824,7 +1827,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
 
   int dev = a.get_device();
   if (a.scalar_type() == at::ScalarType::Half) {
-    printf("123");
     gptq_marlin::marlin_mm_f16i4<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(), b_scales.data_ptr<at::Half>(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n,
@@ -1832,7 +1834,6 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
-    printf("123456");
     gptq_marlin::marlin_mm_f16i4<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(), c.data_ptr<at::BFloat16>(), b_scales.data_ptr<at::BFloat16>(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n,
@@ -1840,7 +1841,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor &a, torch::Tensor &b_q_weight,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, gptq_marlin::max_par);
   } else {
-    throw std::runtime_error("gpt_marlin_gemm only supports bfloat16 and float16");
+    TORCH_CHECK(false, "gpt_marlin_gemm only supports bfloat16 and float16");
   }
 
   return c;
