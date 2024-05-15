@@ -474,7 +474,7 @@ def get_rope(
     else:
         rope_scaling_args = None
     key = (head_size, rotary_dim, max_position, base, is_neox_style,
-           rope_scaling_args)
+           rope_scaling_args, torch.get_default_dtype())
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
     if rope_scaling is None:
