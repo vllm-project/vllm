@@ -74,7 +74,7 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int, num_seqs_per_gr
     num_output_blocks = num_output_blocks_per_seq
 
     for bdx,num_prompt_blocks in enumerate(range(1, num_gpu_blocks - num_output_blocks)):
-        num_encoder_blocks_per_seq = num_prompt_blocks
+        num_cross_blocks_per_seq = num_prompt_blocks
 
         seq_group = create_seq_group_encoder_decoder(
             seq_prompt_len=block_size * num_prompt_blocks,
@@ -89,7 +89,7 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int, num_seqs_per_gr
 
         can_allocate_result = block_manager.can_allocate(seq_group)
 
-        num_required_blocks = num_prompt_blocks + num_output_blocks + num_encoder_blocks_per_seq
+        num_required_blocks = num_prompt_blocks + num_output_blocks + num_cross_blocks_per_seq
 
         if num_gpu_blocks - num_required_blocks < num_watermark_blocks:
             assert can_allocate_result == AllocStatus.NEVER

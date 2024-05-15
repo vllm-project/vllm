@@ -258,7 +258,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # Mapping: req_id -> BlockTable
         # Note that each SequenceGroup has a unique
         # request ID
-        self.encoder_block_tables: Dict[str, BlockTable] = {}
+        self.cross_block_tables: Dict[str, BlockTable] = {}
 
     def get_seq_num_required_blocks(self, seq: Sequence) -> int:
         if seq is None:
@@ -269,9 +269,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        decoder_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
-        encoder_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_encoder_seq())
-        num_required_blocks = decoder_num_required_blocks+encoder_num_required_blocks
+        self_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
+        cross_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_encoder_seq())
+        num_required_blocks = self_num_required_blocks+cross_num_required_blocks
 
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -287,7 +287,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate_decoder(self, seq_group: SequenceGroup) -> None:
+    def allocate_self_block_tables(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # decoder prompt.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
@@ -316,7 +316,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def allocate_encoder(self, seq_group: SequenceGroup) -> None:
+    def allocate_cross_block_table(self, seq_group: SequenceGroup) -> None:
         # NOTE: Here we assume that all sequences in the group have the same
         # encoder prompt.
 
@@ -342,12 +342,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     block.ref_count = seq_group.num_seqs()
                 block_table.append(block)
 
-            # Assign the encoder block table for the SequenceGroup.
-            self.encoder_block_tables[seq_group.request_id] = block_table
+            # Assign the cross-attention block table for the SequenceGroup.
+            self.cross_block_tables[seq_group.request_id] = block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        self.allocate_decoder(seq_group)
-        self.allocate_encoder(seq_group)
+        self.allocate_self_block_tables(seq_group)
+        self.allocate_cross_block_table(seq_group)
 
     def can_append_slots(self,
                          seq_group: SequenceGroup,
@@ -495,9 +495,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             if seq.is_finished():
                 continue
             blocks.update(self.block_tables[seq.seq_id])
-        # Encoder blocks
+        # Cross-attention blocks
         if seq_group.encoder_seq is not None:
-            blocks.update(self.encoder_block_tables[request_id])
+            blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 
     def can_swap_in(self,
@@ -551,7 +551,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if seq_group.encoder_seq is not None:
             new_block_table: BlockTable = []
-            block_table = self.encoder_block_tables[request_id]
+            block_table = self.cross_block_tables[request_id]
 
             for cpu_block in block_table:
                 if cpu_block in mapping:
@@ -564,7 +564,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 new_block_table.append(gpu_block)
                 # Free the CPU block swapped in to GPU.
                 self.cpu_allocator.free(cpu_block)
-            self.encoder_block_tables[request_id] = new_block_table
+            self.cross_block_tables[request_id] = new_block_table
 
         block_number_mapping = {
             cpu_block.block_number: gpu_block.block_number
@@ -602,7 +602,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if seq_group.encoder_seq is not None:
             new_block_table: BlockTable = []
-            block_table = self.encoder_block_tables[request_id]
+            block_table = self.cross_block_tables[request_id]
 
             for gpu_block in block_table:
                 if gpu_block in mapping:
@@ -615,7 +615,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 new_block_table.append(cpu_block)
                 # Free the GPU block swapped out to CPU.
                 self.gpu_allocator.free(gpu_block)
-            self.encoder_block_tables[request_id] = new_block_table
+            self.cross_block_tables[request_id] = new_block_table
 
         block_number_mapping = {
             gpu_block.block_number: cpu_block.block_number
@@ -647,30 +647,30 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
-    def free_encoder(self, seq_group: SequenceGroup) -> None:
-        if seq_group.request_id not in self.encoder_block_tables:
+    def free_cross(self, seq_group: SequenceGroup) -> None:
+        if seq_group.request_id not in self.cross_block_tables:
             # Already freed or hasn't ben scheduled yet.
             return
-        block_table = self.encoder_block_tables[seq_group.request_id]
+        block_table = self.cross_block_tables[seq_group.request_id]
         self._free_block_table(block_table)
-        del self.encoder_block_tables[seq_group.request_id]
+        del self.cross_block_tables[seq_group.request_id]
 
     def reset(self) -> None:
         # Free decoder block tables
         for block_table in self.block_tables.values():
             self._free_block_table(block_table)
         self.block_tables.clear()
-        # Free encoder block tables
-        for block_table in self.encoder_block_tables.values():
+        # Free cross-attention block tables
+        for block_table in self.cross_block_tables.values():
             self._free_block_table(block_table)
-        self.encoder_block_tables.clear()
+        self.cross_block_tables.clear()
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]
         return [block.block_number for block in block_table]
 
-    def get_encoder_block_table(self, seq_group: SequenceGroup) -> List[int]:
-        block_table = self.encoder_block_tables[seq_group.request_id]
+    def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
+        block_table = self.cross_block_tables[seq_group.request_id]
         return [block.block_number for block in block_table]
 
     def get_num_free_gpu_blocks(self) -> int:
@@ -691,7 +691,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for block in block_table:
                 block.last_accessed = access_time
 
-    def access_all_encoder_blocks_in_seq_group(
+    def access_all_cross_blocks_in_seq_group(
         self,
         seq_group: SequenceGroup,
         access_time: float,
@@ -699,7 +699,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if self.enable_caching:
             # Update the last accessed time of all the blocks accessed
             # in this step.
-            block_table = self.encoder_block_tables[seq_group.request_id]
+            block_table = self.cross_block_tables[seq_group.request_id]
             for block in block_table:
                 block.last_accessed = access_time
 

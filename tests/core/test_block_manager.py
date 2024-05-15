@@ -293,8 +293,8 @@ def test_swap_encoder_decoder():
 
     # Swap encoder/decoder seq group from GPU -> CPU.
     decoder_gpu_blocks = block_manager.get_block_table(decoder_prompt)
-    encoder_gpu_blocks = block_manager.get_encoder_block_table(seq_group)
-    gpu_blocks = decoder_gpu_blocks + encoder_gpu_blocks
+    cross_gpu_blocks = block_manager.get_cross_block_table(seq_group)
+    gpu_blocks = decoder_gpu_blocks + cross_gpu_blocks
     assert block_manager.can_swap_out(seq_group)
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -309,8 +309,8 @@ def test_swap_encoder_decoder():
 
     # Swap decoder seq group from CPU -> GPU.
     decoder_cpu_blocks = block_manager.get_block_table(decoder_prompt)
-    encoder_cpu_blocks = block_manager.get_encoder_block_table(seq_group)
-    cpu_blocks = decoder_cpu_blocks + encoder_cpu_blocks
+    cross_cpu_blocks = block_manager.get_cross_block_table(seq_group)
+    cpu_blocks = decoder_cpu_blocks + cross_cpu_blocks
     assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
@@ -360,11 +360,11 @@ def test_free_encoder_decoder():
 
     # Free allocated seq.
     decoder_prompt_blocks = len(block_manager.get_block_table(decoder_prompt))
-    encoder_prompt_blocks = len(block_manager.get_encoder_block_table(seq_group))
+    encoder_prompt_blocks = len(block_manager.get_cross_block_table(seq_group))
     prompt_blocks = decoder_prompt_blocks + encoder_prompt_blocks
     before_blocks = block_manager.get_num_free_gpu_blocks()
     block_manager.free(decoder_prompt)
-    block_manager.free_encoder(seq_group)
+    block_manager.free_cross(seq_group)
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert after_blocks == before_blocks + prompt_blocks
 
