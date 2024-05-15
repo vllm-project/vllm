@@ -138,14 +138,14 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
             w_scales = torch.FloatTensor(w_scales, device=torch.device("cpu"))
             w_q = self._quantize(weight, w_scales, logical_widths)
         else:
-            w_q = weight # already quantized
+            w_q = weight  # already quantized
 
         # Gemm and dq
         # TODO (varun) : cutlass epilogues are interpreted differently when
-        # there is only a single prompt. 
+        # there is only a single prompt.
         # Consider the case, M, N {*, 2560} and weight_scale is a vector of
         # 2560 elements.
-        # differently when, 
+        # differently when,
         #  - When M > 1 - The result is correctly multiplied column wise.
         #  - When M == 1, the result is not a columnwise multiplication.
         #
@@ -154,6 +154,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         # (CPP cutlass kernels) land.
         num_prompts = x_q.shape[0]
         if num_prompts == 1:
-            return cutlass_gemm_dq(x_q, w_q, x.dtype, None) * weight_scale * act_scale
+            return cutlass_gemm_dq(x_q, w_q, x.dtype,
+                                   None) * weight_scale * act_scale
         else:
             return cutlass_gemm_dq(x_q, w_q, x.dtype, weight_scale, act_scale)
