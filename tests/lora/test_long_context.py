@@ -108,6 +108,7 @@ class TestLongContext:
             long_lora_scaling_factors=tuple(scaling_factors),
             max_num_batched_tokens=4096 * 8,
             tensor_parallel_size=4,
+            enforce_eager=True,
         )
         return lora_llm
 
@@ -125,7 +126,7 @@ class TestLongContext:
                            _create_lora_request(lora_id, long_context_infos))
             lora_output = generate(lora_llm, lora_prompt)
             non_batched_results.append(lora_output)
-
+        breakpoint()
         # Create batched results
         # Each element of the batch must be (prompt, prompt_sampling_params, prompt_lora_request)
         batched_prompts = []

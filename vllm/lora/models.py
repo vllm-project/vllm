@@ -527,6 +527,7 @@ class LoRAModelManager:
 
     def _create_lora_modules(self):
         for module_name, module in self.model.named_modules():
+            print(f"SANG-TODO {module_name=}")
             if not self._match_target_modules(module_name):
                 continue
             parts = module_name.split(".")[-1]
@@ -535,6 +536,8 @@ class LoRAModelManager:
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
+            if module_name == "model.layers.0.self_attn.rotary_emb":
+                breakpoint()
             if isinstance(new_module,
                           MultiLinearScalingRotaryEmbeddingWithLora):
                 self.long_lora_config = LongContextLoRAMetadata(

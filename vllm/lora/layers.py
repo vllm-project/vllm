@@ -1,5 +1,4 @@
 # pylint: disable=unused-argument
-# SANG-TODO fix this.
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Dict
@@ -9,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.model_executor.utils import set_default_torch_dtype
-from vllm.model_executor.layers.rotary_embedding import LinearScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import LinearScalingRotaryEmbedding, RotaryEmbedding
 
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -1242,7 +1241,7 @@ class MultiLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
         # self.max_position_embeddings * self.scaling_factor.
         all_caches: List[torch.Tensor] = []
         self.offsets: List[int] = []
-        for scaling_factor in sorted(self.scaling_factor):
+        for scaling_factor in sorted(self.scaling_factors):
             max_len = self.max_position_embeddings * scaling_factor
             t = torch.arange(max_len, dtype=torch.float,
                              device="cuda") / scaling_factor
@@ -1290,7 +1289,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
             lora_config.long_lora_scaling_factors
         ) if lora_config.long_lora_scaling_factors else []
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
-            self.rotary_emb, LinearScalingRotaryEmbedding) else 1.0)
+            self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
         scaling_factors = list(set([base_scaling_factor] + scaling_factors))
         # Replace the base layer.
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
@@ -1332,6 +1331,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        print("SANG-TODO lora rope")
         return self.base_layer(
             positions,
             query,
@@ -1347,7 +1347,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        return type(source_layer) is LinearScalingRotaryEmbedding
+        return type(source_layer) is LinearScalingRotaryEmbedding or type(source_layer) is RotaryEmbedding
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()

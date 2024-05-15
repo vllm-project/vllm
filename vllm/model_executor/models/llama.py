@@ -327,6 +327,7 @@ class LlamaForCausalLM(nn.Module):
         "down_proj",
         "embed_tokens",
         "lm_head",
+        "rotary_emb"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",

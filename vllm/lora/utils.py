@@ -53,6 +53,7 @@ def from_layer(layer: nn.Module,
                                       lora_config=lora_config,
                                       packed_modules_list=packed_modules_list,
                                       model_config=model_config):
+            # print(f"SANG-TODO {lora_cls=} source layer: {layer}")
             ret = lora_cls(layer)
             ret.create_lora_weights(max_loras, lora_config, model_config)
             return ret
