@@ -4,10 +4,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class GPTQMarlin24Config(QuantizationConfig):
@@ -73,14 +76,19 @@ class GPTQMarlin24Config(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def is_checkpoint(self, hf_quant_cfg) -> bool:
-        return hf_quant_cfg.get("checkpoint_format") == "marlin_24"
-
-    @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlin24Config":
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
+
+    @classmethod
+    def supports_checkpoint(cls, quant_cfg) -> bool:
+        ret = quant_cfg.get("checkpoint_format") == "marlin_24"
+
+        if ret:
+            logger.info("The model is serialized in gptq_marlin_24 format. "
+                        "Using gptq_marlin_24 kernel.")
+        return ret
 
     def get_quant_method(
             self,

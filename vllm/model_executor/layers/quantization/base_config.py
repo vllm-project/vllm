@@ -66,6 +66,11 @@ class QuantizationConfig(ABC):
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
+    @classmethod
+    def supports_checkpoint(cls, quant_cfg) -> bool:
+        """Detects if quant_cfg represents a supported checkpoint."""
+        return False
+
     @staticmethod
     def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
         """Get a value from the model's quantization config."""

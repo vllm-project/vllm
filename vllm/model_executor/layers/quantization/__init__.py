@@ -20,10 +20,12 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "awq": AWQConfig,
     "deepspeedfp": DeepSpeedFPConfig,
     "fp8": Fp8Config,
-    "gptq": GPTQConfig,
-    "gptq_marlin": GPTQMarlinConfig,
-    "gptq_marlin_24": GPTQMarlin24Config,
+    # The order of gptq methods is important for config.py iteration over
+    # supports_checkpoint(..)
     "marlin": MarlinConfig,
+    "gptq_marlin_24": GPTQMarlin24Config,
+    "gptq_marlin": GPTQMarlinConfig,
+    "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
 }
 

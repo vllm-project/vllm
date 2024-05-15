@@ -6,10 +6,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+
+logger = init_logger(__name__)
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -116,6 +119,17 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
         return cls(weight_bits, group_size, desc_act, is_sym)
+
+    @classmethod
+    def supports_checkpoint(cls, quant_cfg) -> bool:
+        # compat: autogptq >=0.8.0 use checkpoint_format: str
+        # compat: autogptq <=0.7.1 is_marlin_format: bool
+        ret = cls.is_marlin_compatible(quant_cfg)
+
+        if ret:
+            logger.info("The model is convertible to gptq_marlin on-the-fly."
+                        " Using gptq_marlin kernel.")
+        return ret
 
     def get_quant_method(
             self,

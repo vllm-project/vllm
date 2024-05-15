@@ -158,40 +158,24 @@ class ModelConfig:
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
 
-            # Check which LinearMethod the GPTQ model should use.
-            if quant_method == "gptq":
-                # If serialized in Marlin format, use MarlinLinearMethod.
-                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
-                if MarlinConfig.is_checkpoint(quant_cfg):
-                    logger.info("The model is serialized in Marlin format. "
-                                "Using Marlin kernel.")
-                    quant_method = "marlin"
-                    if self.quantization == "gptq":
-                        self.quantization = quant_method
+            # Detect which checkpoint is it
+            for name, method in QUANTIZATION_METHODS.items():
+                if method.supports_checkpoint(quant_cfg):
+                    quant_method = name
+                    break
 
-                # If serialized in 2:4 Marlin format, use Marlin2:4.
-                elif GPTQMarlin24Config.is_checkpoint(quant_cfg):
-                    logger.info("The model is serialized in Marlin_24 format. "
-                                "Using Marlin_24 kernel.")
-                    quant_method = "gptq_marlin_24"
-                    if self.quantization == "gptq":
-                        self.quantization = quant_method
+            # Allow override of gptq_marlin to gptq (if set explicitly)
+            if self.quantization == "gptq" and quant_method == "gptq_marlin":
+                logger.warning(
+                    "Detected that the model can run with gptq_marlin"
+                    ", however you specified quantization=gptq explicitly,"
+                    " so forcing gptq. Use quantization=gptq_marlin for"
+                    " faster inference")
+                quant_method = "gptq"
 
-                # If convertible to Marlin format, use GPTQMarlinLinearMethod
-                # unless the user explicitly specified GPTQLinearMethod.
-                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
-                    if self.quantization == "gptq":
-                        logger.warning(
-                            "The model is convertible to Marlin format, but "
-                            "you specified quantization=gptq. Use "
-                            "quantization=marlin for faster inference.")
-                    else:
-                        logger.info(
-                            "The model is convertible to Marlin format. "
-                            "Using Marlin kernel.")
-                        quant_method = "gptq_marlin"
-                        if self.quantization == "marlin":
-                            self.quantization = quant_method
+            # Choose gptq_marlin if marlin is specified
+            if self.quantization == "marlin" and quant_method == "gptq_marlin":
+                self.quantization = quant_method
 
             # Verify quantization configurations.
             if self.quantization is None:
