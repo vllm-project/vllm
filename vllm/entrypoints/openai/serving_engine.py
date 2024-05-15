@@ -230,7 +230,7 @@ class OpenAIServing:
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for embedding "
-                    f"generation. Please reduce the length of the input.", )
+                    f"generation. Please reduce the length of the input.")
             return input_ids, input_text
 
         if request.max_tokens is None:
@@ -239,7 +239,7 @@ class OpenAIServing:
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the messages, "
-                    f"Please reduce the length of the messages.", )
+                    f"Please reduce the length of the messages.")
             request.max_tokens = self.max_model_len - token_num
 
         if token_num + request.max_tokens > self.max_model_len:
@@ -249,7 +249,7 @@ class OpenAIServing:
                 f"{request.max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
                 f"{request.max_tokens} in the completion). "
-                f"Please reduce the length of the messages or completion.", )
+                f"Please reduce the length of the messages or completion.")
 
         return input_ids, input_text
 
