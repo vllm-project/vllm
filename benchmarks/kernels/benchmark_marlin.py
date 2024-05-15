@@ -122,6 +122,7 @@ def main(args):
         print(f"[{i}]  {model}")
 
     results = []
+
     for model in args.models:
         for layer in WEIGHT_SHAPES[model]:
             size_k = layer[0]
