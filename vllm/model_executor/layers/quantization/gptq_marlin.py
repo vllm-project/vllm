@@ -122,8 +122,6 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def supports_checkpoint(cls, quant_cfg) -> bool:
-        # compat: autogptq >=0.8.0 use checkpoint_format: str
-        # compat: autogptq <=0.7.1 is_marlin_format: bool
         ret = cls.is_marlin_compatible(quant_cfg)
 
         if ret:
