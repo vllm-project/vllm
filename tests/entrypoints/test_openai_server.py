@@ -120,9 +120,11 @@ def embedding_server(zephyr_lora_files):
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         "--max-model-len",
         "8192",
-        "--enforce-eager",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
