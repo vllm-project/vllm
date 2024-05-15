@@ -94,6 +94,9 @@ COPY . .
 
 RUN python3 -m pip install --upgrade pip numba
 
+# make sure punica kernels are built (for LoRA)
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \

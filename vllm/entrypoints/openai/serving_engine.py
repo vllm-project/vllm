@@ -11,7 +11,8 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest, ErrorResponse,
+                                              CompletionRequest,
+                                              EmbeddingRequest, ErrorResponse,
                                               LogProbs, ModelCard, ModelList,
                                               ModelPermission)
 from vllm.logger import init_logger
@@ -151,7 +152,8 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -163,7 +165,8 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
@@ -175,7 +178,8 @@ class OpenAIServing:
 
     def _normalize_prompt_text_to_input(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         prompt: str,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
@@ -195,7 +199,8 @@ class OpenAIServing:
 
     def _normalize_prompt_tokens_to_input(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         prompt_ids: List[int],
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
@@ -211,11 +216,22 @@ class OpenAIServing:
 
     def _validate_input(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         input_ids: List[int],
         input_text: str,
     ) -> Tuple[List[int], str]:
         token_num = len(input_ids)
+
+        # Note: EmbeddingRequest doesn't have max_tokens
+        if isinstance(request, EmbeddingRequest):
+            if token_num > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
 
         if request.max_tokens is None:
             if token_num >= self.max_model_len:
@@ -239,7 +255,8 @@ class OpenAIServing:
 
     def _tokenize_prompt_input(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         prompt_input: Union[str, List[int]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Tuple[List[int], str]:
@@ -255,7 +272,8 @@ class OpenAIServing:
 
     def _tokenize_prompt_inputs(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         prompt_inputs: Iterable[Union[str, List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Iterator[Tuple[List[int], str]]:
@@ -314,7 +332,8 @@ class OpenAIServing:
 
     def _tokenize_prompt_input_or_inputs(
         self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
+        request: Union[ChatCompletionRequest, CompletionRequest,
+                       EmbeddingRequest],
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> Iterator[Tuple[List[int], str]]:

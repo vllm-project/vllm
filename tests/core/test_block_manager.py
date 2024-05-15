@@ -142,8 +142,10 @@ def test_append_slot_cow():
     child = prompt.fork(new_seq_id=2)
 
     # Allocate space for the sequence group.
-    seq_group = SequenceGroup("1", [prompt, child], SamplingParams(),
-                              time.time(), time.perf_counter)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[prompt, child],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams())
     block_manager.allocate(seq_group)
 
     # Fork and append a new token id. We expect a COW to be scheduled.
@@ -303,8 +305,11 @@ def test_sliding_window_multi_seq():
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
     parent = Sequence(1, "one two three", [0, 1, 2], block_size)
-    seq_group = SequenceGroup("1", [parent], SamplingParams(), time.time(),
-                              None)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[parent],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(),
+                              lora_request=None)
     block_manager.allocate(seq_group)
 
     # assert the number of blocks allocated is correct

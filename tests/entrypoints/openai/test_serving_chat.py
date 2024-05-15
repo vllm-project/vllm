@@ -14,6 +14,7 @@ class MockModelConfig:
     tokenizer_mode = "auto"
     max_model_len = 100
     tokenizer_revision = None
+    embedding_mode = False
 
 
 @dataclass

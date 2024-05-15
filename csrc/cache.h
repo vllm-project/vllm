@@ -34,5 +34,7 @@ void reshape_and_cache_flash(
 
 // Just for unittest
 void convert_fp8(
+  torch::Tensor& dst_cache,
   torch::Tensor& src_cache,
-  torch::Tensor& dst_cache);
+  const float scale,
+  const std::string& kv_cache_dtype);

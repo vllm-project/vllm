@@ -385,11 +385,11 @@ ext_modules = []
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
-    if _install_punica():
-        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
-
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+
+    if _install_punica():
+        ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
@@ -426,7 +426,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0"],
+        "tensorizer": ["tensorizer>=2.9.0"],
     },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,

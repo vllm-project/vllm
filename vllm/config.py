@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _GB = 1 << 30
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 
 class ModelConfig:
@@ -126,6 +128,7 @@ class ModelConfig:
                                                        served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -136,6 +139,11 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+
+    def _verify_embedding_mode(self) -> None:
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.embedding_mode = any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
@@ -513,9 +521,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -525,22 +531,27 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -548,14 +559,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -567,7 +593,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -591,6 +618,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -602,6 +630,7 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
@@ -610,6 +639,10 @@ class SchedulerConfig:
                 # It is the values that have the best balance between ITL
                 # and TTFT on A100. Note it is not optimized for throughput.
                 self.max_num_batched_tokens = 512
+            elif embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                self.max_num_batched_tokens = max(
+                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -623,6 +656,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.embedding_mode = embedding_mode
 
         self._verify_args()
 
@@ -769,12 +803,15 @@ class SpeculativeConfig:
         draft_quantization = None
 
         if speculative_model == "[ngram]":
-            assert (ngram_prompt_lookup_max is not None
-                    and ngram_prompt_lookup_max > 0)
             if ngram_prompt_lookup_min is None:
-                ngram_prompt_lookup_min = 0
-            else:
-                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -869,7 +906,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
@@ -1063,6 +1101,7 @@ def _get_and_verify_dtype(
             if config_dtype == torch.float32:
                 # Following the common practice, we use float16 for float32
                 # models.
+                logger.info("Casting torch.float32 to torch.float16.")
                 torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
@@ -1087,9 +1126,11 @@ def _get_and_verify_dtype(
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
+            logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)
             pass
         elif config_dtype == torch.float32:
             # Downcasting from float32 to float16 or bfloat16 is allowed.
+            logger.info("Downcasting %s to %s.", config_dtype, torch_dtype)
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
