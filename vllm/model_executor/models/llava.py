@@ -1,4 +1,4 @@
-from typing import ClassVar, Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -18,6 +18,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+
+from .base import VLMBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -65,27 +67,16 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
     return inputs_embeds
 
 
-class LlavaForConditionalGeneration(nn.Module):
-
-    is_vlm: ClassVar[bool] = True
-    """Indicates that the model is a vision-language model and thus accepts
-    the `vision_language_config` parameter.
-    """
+class LlavaForConditionalGeneration(VLMBase):
 
     def __init__(self,
-                 config: "LlavaConfig",
+                 config: LlavaConfig,
                  vision_language_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional["QuantizationConfig"] = None) -> None:
-        super().__init__()
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(vision_language_config)
+
         self.config = config
-
-        self.vision_language_config = vision_language_config
-
-        assert self.vision_language_config, (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
