@@ -1,5 +1,6 @@
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -13,17 +14,31 @@ from .parallel_state import (get_cpu_world_group,
                              get_tp_pynccl_communicator)
 
 
+@dataclass
+class GraphCaptureContext:
+    stream: torch.cuda.Stream
+
+
 @contextmanager
 def graph_capture():
     """
-    `graph_capture` is a context manager which should include the code that
+    `graph_capture` is a context manager which should surround the code that
     is capturing the CUDA graph. Its main purpose is to ensure that the
     some operations will be run after the graph is captured, before the graph
-    is replayed.
+    is replayed. It returns a `GraphCaptureContext` object which contains the
+    necessary data for the graph capture. Currently, it only contains the
+    stream that the graph capture is running on. This stream is set to the
+    current CUDA stream when the context manager is entered and reset to the
+    default stream when the context manager is exited. This is to ensure that
+    the graph capture is running on a separate stream from the default stream,
+    in order to explicitly distinguish the kernels to capture
+    from other kernels possibly launched on background in the default stream.
     """
+    stream = torch.cuda.Stream()
+    graph_capture_context = GraphCaptureContext(stream)
     ca_comm = get_tp_ca_communicator()
     maybe_ca_context = nullcontext() if ca_comm is None else ca_comm.capture()
-    with maybe_ca_context:
+    with torch.cuda.stream(stream), maybe_ca_context:
         # In graph mode, we have to be very careful about the collective
         # operations. The current status is:
         #     allreduce \ Mode   |  Eager  |  Graph  |
@@ -46,7 +61,7 @@ def graph_capture():
             maybe_pynccl_context = pynccl_comm.change_state(
                 enable=True, stream=torch.cuda.current_stream())
         with maybe_pynccl_context:
-            yield
+            yield graph_capture_context
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
