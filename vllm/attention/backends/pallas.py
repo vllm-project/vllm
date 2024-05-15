@@ -137,6 +137,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 attn_metadata.context_lens,
                 attn_metadata.block_tables,
                 16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
+                megacore_mode="kv_head",  # FIXME(woosuk): Must be None for TPUv5e.
             )
 
         # Reshape the output tensor.
