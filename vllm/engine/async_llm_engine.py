@@ -584,7 +584,7 @@ class AsyncLLMEngine:
     async def generate(
         self,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        sampling_params: SamplingParams,
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncIterator[RequestOutput]:
@@ -596,9 +596,7 @@ class AsyncLLMEngine:
 
         Args:
             inputs: The inputs to the LLM.
-            params: Parameters for sampling or pooling.
-                :class:`~vllm.SamplingParams` for text generation.
-                :class:`~vllm.PoolingParams` for pooling.
+            sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
 
@@ -652,7 +650,7 @@ class AsyncLLMEngine:
         async for output in self.process_request(
                 request_id,
                 inputs,
-                params,
+                sampling_params,
                 lora_request=lora_request,
         ):
             yield output
