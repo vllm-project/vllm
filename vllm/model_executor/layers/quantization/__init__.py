@@ -21,7 +21,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "deepspeedfp": DeepSpeedFPConfig,
     "fp8": Fp8Config,
     # The order of gptq methods is important for config.py iteration over
-    # supports_checkpoint(..)
+    # override_quantization_method(..)
     "marlin": MarlinConfig,
     "gptq_marlin_24": GPTQMarlin24Config,
     "gptq_marlin": GPTQMarlinConfig,

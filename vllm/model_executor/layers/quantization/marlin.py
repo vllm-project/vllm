@@ -87,9 +87,10 @@ class MarlinConfig(QuantizationConfig):
                                or user_quant == "marlin")
 
         if is_marlin_format and is_valid_user_quant:
-            logger.info("The model is serialized in Marlin format. "
-                        "Using Marlin kernel.")
-            return "marlin"
+            msg = ("The model is serialized in {} format. Using {} kernel.".
+                   format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
 
         return None
 
