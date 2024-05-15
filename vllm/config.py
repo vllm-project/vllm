@@ -172,6 +172,10 @@ class ModelConfig:
             if self.quantization == "marlin" and quant_method == "gptq_marlin":
                 self.quantization = quant_method
 
+            # Choose marlin if gptq is specified
+            if self.quantization == "gptq" and quant_method == "marlin":
+                self.quantization = quant_method
+
             # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
