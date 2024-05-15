@@ -297,7 +297,7 @@ class CPUWorker(WorkerBase):
 
         # CPU worker only supports single-step execution.
         return [output]
-    
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
