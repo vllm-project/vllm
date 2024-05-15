@@ -165,7 +165,8 @@ class DeepSpeedFPParameter(nn.Parameter):
         self.fp_quantizer = FP_Quantize(group_size=self.quant_config.group_size)
         self.fp_quantizer.orig_shape = orig_shape
         self.fp_quantizer.orig_dtype = params_dtype
-        
+        self.fp_quantizer.scales = torch.empty(orig_shape.numel() // self.quant_config.group_size, 4, 
+                                        dtype=torch.uint8, device=self.data.device)
         return self
 
     def ds_quantize_(self, tensor: torch.Tensor):

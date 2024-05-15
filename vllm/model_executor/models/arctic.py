@@ -31,7 +31,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.transformers_utils.configs.arctic import ArcticConfig
-
+import gc
 logger = init_logger(__name__)
 
 
@@ -145,22 +145,53 @@ class ArcticMoE(nn.Module):
             set_weight_attrs(self.w2s, {
                 "weight_loader": self.weight_loader,
             })
+        self.load_completion_w1_w3 = 0
+        self.load_completion_w2 = 0
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
-        param_data = param.ds_dequantize() if self.is_quant else param.data
+        if not hasattr(param, 'shadow_data'):
+            param.shadow_data = [None] * self.num_experts
         shard_size = self.intermediate_size
+        if param.shadow_data[expert_id] is None:
+            param.shadow_data[expert_id] = torch.zeros(
+                (shard_size * 2 if (weight_name.endswith("w1.weight") or weight_name.endswith("w3.weight")) else loaded_weight.shape[0],
+                loaded_weight.shape[1] if (weight_name.endswith("w1.weight") or weight_name.endswith("w3.weight")) else shard_size), 
+                dtype=loaded_weight.dtype, 
+                device=loaded_weight.device)
         shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
         if weight_name.endswith("w1.weight"):
-            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
+            param.shadow_data[expert_id][0:shard_size, :] = loaded_weight[shard, :]
+            self.load_completion_w1_w3 += 1
         if weight_name.endswith("w3.weight"):
-            param_data[expert_id,
-                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
+            param.shadow_data[expert_id][shard_size:, :] = loaded_weight[shard, :]
+            self.load_completion_w1_w3 += 1
         if weight_name.endswith("w2.weight"):
-            param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if self.is_quant:
-            param.ds_quantize_(param_data)
+            param.shadow_data[expert_id][:, :shard_size] = loaded_weight[:, shard]
+            self.load_completion_w2 += 1
+        if (self.load_completion_w2 == self.num_experts or self.load_completion_w1_w3 == self.num_experts * 2):
+            new_data = torch.stack(param.shadow_data).to(param.data.device)
+
+            len_sd = len(param.shadow_data)
+            for _ in range(len_sd):
+                sd = param.shadow_data.pop()
+                del sd
+            del param.shadow_data
+            
+            if self.load_completion_w2 == self.num_experts:
+                self.load_completion_w2 = 0
+            if self.load_completion_w1_w3 == self.num_experts * 2:
+                self.load_completion_w1_w3 = 0 
+            
+            if self.is_quant:
+                param.ds_quantize_(new_data)
+                del new_data
+                new_data = None
+                gc.collect()
+                torch.cuda.empty_cache()
+            else:
+                param_data.copy_(new_data)
 
     def local_moe_fused(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -197,8 +228,8 @@ class ArcticMoE(nn.Module):
             topk_weights,
             topk_ids,
             inplace=True,
-            w1_scales=self.ws.quantization_scales(),
-            w2_scales=self.w2s.quantization_scales(),
+            w1_scale=self.ws.quantization_scales(),
+            w2_scale=self.w2s.quantization_scales(),
             quantization_group_size=self.ws.fp_quantizer.group_size,
             quantization_group_size2=self.w2s.fp_quantizer.group_size)
         if self.reduce_results and self.tp_size > 1:
@@ -508,6 +539,8 @@ class ArcticForCausalLM(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                # print(loaded_weight, param.data, param.data.shape)
+                # exit()
                 break
             else:
                 for param_name, weight_name, shard_id in mlp_params_mapping:

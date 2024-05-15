@@ -464,7 +464,6 @@ def invoke_fused_moe_kernel_fp8(A: torch.Tensor, B: torch.Tensor, C: torch.Tenso
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=tl.bfloat16 if A.dtype == torch.bfloat16 else tl.float16,
-        fp8_mantisa_bits=fp8_mantisa_bits,
         bf16_exponent_bits=bf16_exponent_bits,
         bf16_mantisa_bits=bf16_mantisa_bits,
         fp8_exponent_bits=fp8_exponent_bits,
