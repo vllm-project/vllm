@@ -93,7 +93,7 @@ class ArcticMoE(nn.Module):
         self.layer_id = layer_id
         self.top_k = config.num_experts_per_tok
         self.intermediate_size = config.intermediate_size // self.tp_size
-
+        self.enable_dequantization_fusion = config.enable_dequantization_fusion
         self.is_moe_layer = (layer_id + 1) % config.moe_layer_frequency == 0
         self.is_quant = isinstance(quant_config, DeepSpeedFPConfig)
         self.reduce_results = reduce_results
@@ -173,7 +173,7 @@ class ArcticMoE(nn.Module):
                                             self.top_k,
                                             renormalize=do_normalize)
         # topk_ids: (num_tokens, k)
-        if self.is_quant:
+        if self.is_quant and (not self.enable_dequantization_fusion):
             if 2 * num_tokens <= self.num_experts:
                 # If much fewer tokens than experts, use selective dequantize.
                 ws_dequantized = self.ws.ds_selective_dequantize(
@@ -192,11 +192,15 @@ class ArcticMoE(nn.Module):
 
         final_hidden_states = fused_experts(
             hidden_states,
-            ws_dequantized if self.is_quant else self.ws,
-            w2s_dequantized if self.is_quant else self.w2s,
+            ws_dequantized if (self.is_quant and not self.enable_dequantization_fusion) else self.ws,
+            w2s_dequantized if (self.is_quant and not self.enable_dequantization_fusion) else self.w2s,
             topk_weights,
             topk_ids,
-            inplace=True)
+            inplace=True,
+            w1_scales=self.ws.quantization_scales(),
+            w2_scales=self.w2s.quantization_scales(),
+            quantization_group_size=self.ws.fp_quantizer.group_size,
+            quantization_group_size2=self.w2s.fp_quantizer.group_size)
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
@@ -405,6 +409,12 @@ class ArcticForCausalLM(nn.Module):
                  quant_config: Optional[QuantizationConfig] = None,
                  **kwargs) -> None:
         super().__init__()
+
+        enable_dequantization_fusion = True
+        if 'enable_dequantization_fusion' in kwargs:
+            enable_dequantization_fusion = kwargs['enable_dequantization_fusion']
+        config.enable_dequantization_fusion = enable_dequantization_fusion
+        
         self.config = config
         self.model = ArcticModel(config, cache_config, quant_config)
         self.vocab_size = config.vocab_size
