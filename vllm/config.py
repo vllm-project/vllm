@@ -13,10 +13,6 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
-MarlinConfig = get_quantization_config("marlin")
-GPTQMarlinConfig = get_quantization_config("gptq_marlin")
-GPTQMarlin24Config = get_quantization_config("gptq_marlin_24")
-
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
