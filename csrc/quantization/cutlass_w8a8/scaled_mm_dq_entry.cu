@@ -1,5 +1,6 @@
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAGuard.h>
 
 void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
@@ -29,6 +30,8 @@ void cutlass_scaled_mm_dq(torch::Tensor &out, torch::Tensor const &a,
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor, 0);
   cudaDeviceGetAttribute(&minor_capability, cudaDevAttrComputeCapabilityMinor, 0);
   int32_t version_num = major_capability * 10 + minor_capability;
+
+  at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
 
   if (version_num >= 90) /* H100 */ {
     // TODO: This kernel only works for sm90a

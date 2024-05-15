@@ -16,7 +16,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11")
 
 # Supported NVIDIA architectures.
-set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0;9.0a")
+set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
@@ -190,9 +190,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
     "csrc/custom_all_reduce.cu"
-    "csrc/quantization/cutlass/scaled_mm_dq_entry.cu"
-    "csrc/quantization/cutlass/scaled_mm_dq_c2x.cu"
-    "csrc/quantization/cutlass/scaled_mm_dq_c3x.cu")
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_entry.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c2x.cu"
+    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu")
 
   #
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
