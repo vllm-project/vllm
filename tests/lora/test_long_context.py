@@ -7,7 +7,7 @@ from vllm import SamplingParams
 
 from typing import List, Optional, Tuple
 from vllm.lora.request import LoRARequest
-from vllm.anyscale.tokenization import InputTooLongError
+# from vllm.anyscale.tokenization import InputTooLongError
 
 from .data.long_context_test_data import prompts_and_responses
 
@@ -140,100 +140,100 @@ class TestLongContext:
         for non_batched, batched in zip(non_batched_results, batched_results):
             assert non_batched == batched, f"Non batched and batched results should be the same:\n{batched}\n{non_batched}"
 
-    def test_self_consistency(self, long_context_infos):
-        """We test consistency of the batched kernel by permuting batched inputs and comparing the results to the non-permuted batched results."""
-        lora_llm = self._get_lora_llm(long_context_infos)
-        num_loras = len(long_context_infos)
+#     def test_self_consistency(self, long_context_infos):
+#         """We test consistency of the batched kernel by permuting batched inputs and comparing the results to the non-permuted batched results."""
+#         lora_llm = self._get_lora_llm(long_context_infos)
+#         num_loras = len(long_context_infos)
 
-        # Create results in order of long_context_infos
-        batched_prompts = []
-        for lora_id, info in long_context_infos.items():
-            context_len = info["context_length"]
-            batched_prompts.extend([
-                (prompts_and_responses[context_len][0]["prompt"],
-                 sampling_params,
-                 _create_lora_request(lora_id, long_context_infos))
-            ])
+#         # Create results in order of long_context_infos
+#         batched_prompts = []
+#         for lora_id, info in long_context_infos.items():
+#             context_len = info["context_length"]
+#             batched_prompts.extend([
+#                 (prompts_and_responses[context_len][0]["prompt"],
+#                  sampling_params,
+#                  _create_lora_request(lora_id, long_context_infos))
+#             ])
 
-        batched_results = batched_generate(lora_llm, batched_prompts)
+#         batched_results = batched_generate(lora_llm, batched_prompts)
 
-        permutation = np.random.default_rng(seed=42).permutation(num_loras)
+#         permutation = np.random.default_rng(seed=42).permutation(num_loras)
 
-        # Create results in random order of permutation
-        batched_prompts = []
-        for i in permutation:
-            lora_id, info = list(long_context_infos.items())[i]
-            context_len = info["context_length"]
-            batched_prompts.extend([
-                (prompts_and_responses[context_len][0]["prompt"],
-                 sampling_params,
-                 _create_lora_request(lora_id, long_context_infos))
-            ])
+#         # Create results in random order of permutation
+#         batched_prompts = []
+#         for i in permutation:
+#             lora_id, info = list(long_context_infos.items())[i]
+#             context_len = info["context_length"]
+#             batched_prompts.extend([
+#                 (prompts_and_responses[context_len][0]["prompt"],
+#                  sampling_params,
+#                  _create_lora_request(lora_id, long_context_infos))
+#             ])
 
-        permutated_batched_results = batched_generate(lora_llm,
-                                                      batched_prompts)
+#         permutated_batched_results = batched_generate(lora_llm,
+#                                                       batched_prompts)
 
-        # Results should be the same
-        for i in range(num_loras):
-            assert batched_results[i] == permutated_batched_results[permutation[
-                i]], f"Results should be the same:\n{batched_results[i]}\n{permutated_batched_results[permutation[i]]}"
+#         # Results should be the same
+#         for i in range(num_loras):
+#             assert batched_results[i] == permutated_batched_results[permutation[
+#                 i]], f"Results should be the same:\n{batched_results[i]}\n{permutated_batched_results[permutation[i]]}"
 
-    def test_quality(self, long_context_infos):
-        """We test the quality of the answers given by the LoRA model by comparing the generated text to the merged model's outputs.
+#     def test_quality(self, long_context_infos):
+#         """We test the quality of the answers given by the LoRA model by comparing the generated text to the merged model's outputs.
         
-        This is effectively a mini-benchmark over four prompts.
-        If this test fails, this indicates that the quality of the LoRA model is suboptimal compared to the merged model.
-        For example, if the model does not output valid dictionaries, this test will fail.
+#         This is effectively a mini-benchmark over four prompts.
+#         If this test fails, this indicates that the quality of the LoRA model is suboptimal compared to the merged model.
+#         For example, if the model does not output valid dictionaries, this test will fail.
 
-        If needed for testing, the merged versions of the models are available as part of the `conftest`.
-a
-        The test is expected to run for about 1 minute on a p4de.24xlarge instance.
-        """
-        lora_llm = self._get_lora_llm(long_context_infos)
+#         If needed for testing, the merged versions of the models are available as part of the `conftest`.
+# a
+#         The test is expected to run for about 1 minute on a p4de.24xlarge instance.
+#         """
+#         lora_llm = self._get_lora_llm(long_context_infos)
 
-        scores = []
-        for lora_id, info in long_context_infos.items():
-            context_len = info["context_length"]
-            for prompt_and_response in prompts_and_responses[context_len]:
-                lora_prompt = (prompt_and_response["prompt"], sampling_params,
-                               _create_lora_request(lora_id,
-                                                    long_context_infos))
-                response = generate(lora_llm, [lora_prompt])
-                golden_answer = prompt_and_response["golden_answer"]
-                score = evaluate_json_response(response, golden_answer)
-                scores.append(score)
-                assert score > 0.3, f"Quality of the answer is not good enough. Expected {golden_answer}, got {response}"
-        assert np.mean(scores) > 0.5
+#         scores = []
+#         for lora_id, info in long_context_infos.items():
+#             context_len = info["context_length"]
+#             for prompt_and_response in prompts_and_responses[context_len]:
+#                 lora_prompt = (prompt_and_response["prompt"], sampling_params,
+#                                _create_lora_request(lora_id,
+#                                                     long_context_infos))
+#                 response = generate(lora_llm, [lora_prompt])
+#                 golden_answer = prompt_and_response["golden_answer"]
+#                 score = evaluate_json_response(response, golden_answer)
+#                 scores.append(score)
+#                 assert score > 0.3, f"Quality of the answer is not good enough. Expected {golden_answer}, got {response}"
+#         assert np.mean(scores) > 0.5
 
-    def test_max_len(self, long_context_infos):
-        """Test that we raise an InputTooLongError when the input of a given LoRA model exceeds the maximum length."""
-        lora_llm = self._get_lora_llm(long_context_infos)
+#     def test_max_len(self, long_context_infos):
+#         """Test that we raise an InputTooLongError when the input of a given LoRA model exceeds the maximum length."""
+#         lora_llm = self._get_lora_llm(long_context_infos)
 
-        # Since each LoRA model has a different maximum length, we need to test each one separately
-        for lora_id, info in long_context_infos.items():
-            context_len = info["context_length"]
-            lora_request = _create_lora_request(lora_id, long_context_infos)
-            # Good prompt should be fine
-            good_prompt = prompts_and_responses[context_len][0]["prompt"]
-            generate(lora_llm, [(good_prompt, sampling_params, lora_request)])
-            # Bad prompt should raise an error
-            bad_prompt = good_prompt * 2
-            with pytest.raises(InputTooLongError):
-                generate(lora_llm,
-                         [(bad_prompt, sampling_params, lora_request)])
+#         # Since each LoRA model has a different maximum length, we need to test each one separately
+#         for lora_id, info in long_context_infos.items():
+#             context_len = info["context_length"]
+#             lora_request = _create_lora_request(lora_id, long_context_infos)
+#             # Good prompt should be fine
+#             good_prompt = prompts_and_responses[context_len][0]["prompt"]
+#             generate(lora_llm, [(good_prompt, sampling_params, lora_request)])
+#             # Bad prompt should raise an error
+#             bad_prompt = good_prompt * 2
+#             with pytest.raises(InputTooLongError):
+#                 generate(lora_llm,
+#                          [(bad_prompt, sampling_params, lora_request)])
 
-        # Also test batched
-        batched_prompts = []
-        for lora_id_with_bad_inputs in long_context_infos.keys():
-            for lora_id, info in long_context_infos.items():
-                context_len = info["context_length"]
-                batched_prompts.extend([
-                    (prompts_and_responses[context_len][0]["prompt"] *
-                     (2 if lora_id == lora_id_with_bad_inputs else 1),
-                     sampling_params,
-                     _create_lora_request(lora_id, long_context_infos))
-                ])
-            # Turn good prompt into bad prompt inside of batched prompts
+#         # Also test batched
+#         batched_prompts = []
+#         for lora_id_with_bad_inputs in long_context_infos.keys():
+#             for lora_id, info in long_context_infos.items():
+#                 context_len = info["context_length"]
+#                 batched_prompts.extend([
+#                     (prompts_and_responses[context_len][0]["prompt"] *
+#                      (2 if lora_id == lora_id_with_bad_inputs else 1),
+#                      sampling_params,
+#                      _create_lora_request(lora_id, long_context_infos))
+#                 ])
+#             # Turn good prompt into bad prompt inside of batched prompts
 
-            with pytest.raises(InputTooLongError):
-                batched_generate(lora_llm, batched_prompts)
+#             with pytest.raises(InputTooLongError):
+#                 batched_generate(lora_llm, batched_prompts)

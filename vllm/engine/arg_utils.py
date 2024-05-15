@@ -1,7 +1,7 @@
 import argparse
 import dataclasses
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Tuple
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -63,6 +63,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
@@ -397,6 +398,10 @@ class EngineArgs:
             choices=['auto', 'float16', 'bfloat16', 'float32'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
+        parser.add_argument('--long-lora-scaling-factors',
+                            type=Tuple[float],
+                            default=EngineArgs.long_lora_scaling_factors,
+                            help='Scaling factors of long LoRAs')
         parser.add_argument(
             '--max-cpu-loras',
             type=int,
@@ -589,6 +594,7 @@ class EngineArgs:
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
+            long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None

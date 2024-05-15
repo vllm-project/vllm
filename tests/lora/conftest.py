@@ -21,6 +21,41 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 
+LONG_LORA_INFOS = [
+    {
+        "lora_id":
+        1,
+        "context_length":
+        "16k",
+        "local_path":
+        "/mnt/local_storage/long_context_checkpoint_16k",
+        "lora":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_1/lora/",
+        "merged":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_1/merged/"
+    },
+    {
+        "lora_id": 2,
+        "context_length": "16k",
+        "local_path": "/mnt/local_storage/long_context_checkpoint_16k_2/",
+        "lora":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_2/lora/",
+        "merged": None  # This model has not been merged
+    },
+    {
+        "lora_id":
+        3,
+        "context_length":
+        "32k",
+        "local_path":
+        "/mnt/local_storage/long_context_checkpoint_32k",
+        "lora":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/lora/",
+        "merged":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/merged/"
+    }
+]
+
 
 def cleanup():
     destroy_model_parallel()
@@ -157,6 +192,7 @@ def tinyllama_lora_files():
 # SANG-TODO Download long lora files.
 @pytest.fixture(scope="session")
 def long_context_infos():
+    import subprocess
     infos = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
