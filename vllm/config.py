@@ -521,9 +521,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -533,22 +531,27 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -556,14 +559,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -575,7 +593,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -887,7 +906,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
