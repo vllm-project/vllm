@@ -1082,9 +1082,6 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #["float", "float32"]
-
-
 def _get_and_verify_dtype(
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
@@ -1113,14 +1110,6 @@ def _get_and_verify_dtype(
         torch_dtype = dtype
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
-
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.
     if torch_dtype != config_dtype:
