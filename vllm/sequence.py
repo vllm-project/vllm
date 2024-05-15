@@ -614,7 +614,7 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional, the sequence data for the single encoder prompt.
-        encoder_block_table: Optional, the block table for the single encoder prompt.
+        cross_block_table: Optional, the cross-attention block table associated with the single encoder prompt.
     """
 
     def __init__(
@@ -632,7 +632,7 @@ class SequenceGroupMetadata:
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional[MultiModalData] = None,
         encoder_seq_data: Optional[SequenceData] = None,
-        encoder_block_table: Optional[Dict[int, List[int]]] = None,
+        cross_block_table: Optional[Dict[int, List[int]]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
@@ -645,7 +645,7 @@ class SequenceGroupMetadata:
         self.multi_modal_data = multi_modal_data
         self.state = SequenceGroupState() if state is None else state
         self.encoder_seq_data = encoder_seq_data
-        self.encoder_block_table = encoder_block_table
+        self.cross_block_table = cross_block_table
         self._token_chunk_size = token_chunk_size
         self.do_sample = do_sample
 
