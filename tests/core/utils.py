@@ -32,6 +32,35 @@ def create_dummy_prompt(
 
     return prompt, seq_group
 
+def create_dummy_prompt_encoder_decoder(
+    request_id: str,
+    decoder_prompt_length: int,
+    encoder_prompt_length: int,
+    block_size: Optional[int] = None,
+    lora_request: Optional[LoRARequest] = None,
+    use_beam_search: bool = False,
+    best_of: int = 1,
+) -> Tuple[Sequence, SequenceGroup]:
+    if not block_size:
+        block_size = decoder_prompt_length
+
+    # Create dummy prompt sequence with tokens 0...block_size-1
+    # and prompt "0 ... block_size".
+    decoder_prompt_tokens = list(range(decoder_prompt_length))
+    decoder_prompt_str = " ".join([str(t) for t in decoder_prompt_tokens])
+    decoder_prompt = Sequence(int(request_id), decoder_prompt_str, decoder_prompt_tokens, block_size)
+    encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
+    encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
+    encoder_prompt = Sequence(int(request_id), encoder_prompt_str, encoder_prompt_tokens, block_size)
+    seq_group = SequenceGroup(
+        request_id=request_id, 
+        seqs=[decoder_prompt],
+        sampling_params=SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
+        arrival_time=time.time(), 
+        lora_request=lora_request, 
+        encoder_seq=encoder_prompt)
+
+    return decoder_prompt, encoder_prompt, seq_group
 
 def create_seq_group(
         seq_prompt_len: int = 1024,
