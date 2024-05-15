@@ -96,6 +96,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
+        if seq_group.encoder_seq is not None:
+            num_required_blocks += BlockTable.get_num_required_blocks(
+                seq_group.encoder_seq.get_token_ids(),
+                block_size=self.block_size,
+            )
+
         assert self.block_sliding_window is None
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
