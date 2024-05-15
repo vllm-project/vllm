@@ -1079,7 +1079,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float16": torch.float16,
     "float": torch.float32,
     "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
+    "bfloat16": torch.bfloat16
 }
 
 def _get_and_verify_dtype(
