@@ -7,8 +7,7 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataPerStage)
+                                              AttentionMetadata)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
@@ -54,8 +53,7 @@ class TorchSDPABackend(AttentionBackend):
 
 
 @dataclass
-class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
-                        AttentionMetadataPerStage):
+class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     """Metadata for TorchSDPABackend.
     """
     # Currently, input sequences can only contain all prompts
@@ -72,8 +70,26 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
         # will not appear in the __repr__ and __init__
         self.attn_bias: Optional[List[torch.Tensor]] = None
 
+    @property
+    def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_decode_tokens == 0:
+            assert self.num_prefills > 0
+            return self
 
-class TorchSDPABackendImpl(AttentionImpl):
+        return None
+
+    @property
+    def decode_metadata(self) -> Optional["TorchSDPAMetadata"]:
+        # Currently chunked prefill is not supported
+        if self.num_prefills > 0:
+            assert self.num_decode_tokens == 0
+            return None
+
+        return self
+
+
+class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def __init__(
         self,
@@ -200,7 +216,7 @@ class TorchSDPABackendImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.block_tables,
                 attn_metadata.seq_lens_tensor,
-                attn_metadata.max_seq_len,
+                attn_metadata.max_decode_seq_len,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
