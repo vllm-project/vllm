@@ -650,10 +650,23 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self._free_block_table(block_table)
         del self.block_tables[seq.seq_id]
 
+    def free_encoder(self, seq_group: SequenceGroup) -> None:
+        if seq_group.request_id not in self.encoder_block_tables:
+            # Already freed or hasn't ben scheduled yet.
+            return
+        block_table = self.encoder_block_tables[seq_group.request_id]
+        self._free_block_table(block_table)
+        del self.encoder_block_tables[seq_group.request_id]
+
     def reset(self) -> None:
+        # Free decoder block tables
         for block_table in self.block_tables.values():
             self._free_block_table(block_table)
         self.block_tables.clear()
+        # Free encoder block tables
+        for block_table in self.encoder_block_tables.values():
+            self._free_block_table(block_table)
+        self.encoder_block_tables.clear()
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         block_table = self.block_tables[seq.seq_id]

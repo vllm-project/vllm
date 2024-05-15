@@ -278,8 +278,8 @@ def test_swap_encoder_decoder():
                                         watermark=0)
 
     decoder_prompt, encoder_prompt, seq_group = create_dummy_prompt_encoder_decoder("1", 
-                                                                                    decoder_prompt_length=block_size//2, 
-                                                                                    encoder_prompt_length=block_size//2)
+                                                                                    decoder_prompt_length=block_size, 
+                                                                                    encoder_prompt_length=block_size)
     decoder_prompt.status = SequenceStatus.WAITING
     encoder_prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)
@@ -360,11 +360,11 @@ def test_free_encoder_decoder():
 
     # Free allocated seq.
     decoder_prompt_blocks = len(block_manager.get_block_table(decoder_prompt))
-    encoder_prompt_blocks = len(block_manager.get_block_table(encoder_prompt))
+    encoder_prompt_blocks = len(block_manager.get_encoder_block_table(seq_group))
     prompt_blocks = decoder_prompt_blocks + encoder_prompt_blocks
     before_blocks = block_manager.get_num_free_gpu_blocks()
     block_manager.free(decoder_prompt)
-    block_manager.free(encoder_prompt)
+    block_manager.free_encoder(seq_group)
     after_blocks = block_manager.get_num_free_gpu_blocks()
     assert after_blocks == before_blocks + prompt_blocks
 
@@ -397,6 +397,7 @@ def test_reset_encoder_decoder():
     block_size = 4
     num_cpu_blocks = 4
     num_gpu_blocks = 4
+    block_req_per_seq_group = 2
     block_manager = BlockSpaceManagerV1(block_size,
                                         num_cpu_blocks,
                                         num_gpu_blocks,
@@ -404,10 +405,10 @@ def test_reset_encoder_decoder():
 
     # Allocate same seq group on all available gpu blocks.
     original_blocks = block_manager.get_num_free_gpu_blocks()
-    for i in range(num_gpu_blocks):
-        _, _, seq_group = create_dummy_prompt_encoder_decoder("1", 
-                                                              decoder_prompt_length=block_size//2, 
-                                                              encoder_prompt_length=block_size//2)
+    for i in range(num_gpu_blocks//block_req_per_seq_group):
+        _, _, seq_group = create_dummy_prompt_encoder_decoder(f"{i}", 
+                                                              decoder_prompt_length=block_size, 
+                                                              encoder_prompt_length=block_size)
         block_manager.allocate(seq_group)
     assert block_manager.get_num_free_gpu_blocks() == 0
 
