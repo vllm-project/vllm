@@ -528,7 +528,7 @@ class SequenceGroup:
         ]
 
     def get_encoder_seq(self) -> Sequence:
-        return self.encoder_seq
+        return self.encoder_seq  # type: ignore
 
     def get_unfinished_seqs(self) -> List[Sequence]:
         return [
@@ -613,8 +613,11 @@ class SequenceGroupMetadata:
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
-        encoder_seq_data: Optional, the sequence data for the single encoder prompt.
-        cross_block_table: Optional, the cross-attention block table associated with the single encoder prompt.
+        encoder_seq_data: Optional, the sequence data
+                          for the single encoder prompt.
+        cross_block_table: Optional, the cross-attention 
+                           block table associated with 
+                           the single encoder prompt.
     """
 
     def __init__(

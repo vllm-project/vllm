@@ -32,6 +32,7 @@ def create_dummy_prompt(
 
     return prompt, seq_group
 
+
 def create_dummy_prompt_encoder_decoder(
     request_id: str,
     decoder_prompt_length: int,
@@ -48,19 +49,23 @@ def create_dummy_prompt_encoder_decoder(
     # and prompt "0 ... block_size".
     decoder_prompt_tokens = list(range(decoder_prompt_length))
     decoder_prompt_str = " ".join([str(t) for t in decoder_prompt_tokens])
-    decoder_prompt = Sequence(int(request_id), decoder_prompt_str, decoder_prompt_tokens, block_size)
+    decoder_prompt = Sequence(int(request_id), decoder_prompt_str,
+                              decoder_prompt_tokens, block_size)
     encoder_prompt_tokens = list(reversed(list(range(encoder_prompt_length))))
     encoder_prompt_str = " ".join([str(t) for t in encoder_prompt_tokens])
-    encoder_prompt = Sequence(int(request_id), encoder_prompt_str, encoder_prompt_tokens, block_size)
-    seq_group = SequenceGroup(
-        request_id=request_id, 
-        seqs=[decoder_prompt],
-        sampling_params=SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        arrival_time=time.time(), 
-        lora_request=lora_request, 
-        encoder_seq=encoder_prompt)
+    encoder_prompt = Sequence(int(request_id), encoder_prompt_str,
+                              encoder_prompt_tokens, block_size)
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[decoder_prompt],
+                              sampling_params=SamplingParams(
+                                  use_beam_search=use_beam_search,
+                                  best_of=best_of),
+                              arrival_time=time.time(),
+                              lora_request=lora_request,
+                              encoder_seq=encoder_prompt)
 
     return decoder_prompt, encoder_prompt, seq_group
+
 
 def create_seq_group(
         seq_prompt_len: int = 1024,
@@ -134,19 +139,17 @@ def create_seq_group_encoder_decoder(
 
     # Encoder sequence
     encoder_seq = Sequence(
-            seq_id=seq_id_start + len(seq_output_lens),
-            prompt="",
-            prompt_token_ids=prompt_token_ids,
-            block_size=16,
-        )
-
-    seq_group = SequenceGroup(
-        request_id=request_id,
-        seqs=seqs,
-        sampling_params=sampling_params,
-        arrival_time=time.time(),
-        encoder_seq=encoder_seq
+        seq_id=seq_id_start + len(seq_output_lens),
+        prompt="",
+        prompt_token_ids=prompt_token_ids,
+        block_size=16,
     )
+
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=seqs,
+                              sampling_params=sampling_params,
+                              arrival_time=time.time(),
+                              encoder_seq=encoder_seq)
 
     return seq_group
 

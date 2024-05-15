@@ -263,15 +263,18 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def get_seq_num_required_blocks(self, seq: Sequence) -> int:
         if seq is None:
             return 0
-        return len(seq.logical_token_blocks)  
+        return len(seq.logical_token_blocks)
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        self_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
-        cross_num_required_blocks = self.get_seq_num_required_blocks(seq_group.get_encoder_seq())
-        num_required_blocks = self_num_required_blocks+cross_num_required_blocks
+        self_num_required_blocks = self.get_seq_num_required_blocks(
+            seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
+        cross_num_required_blocks = self.get_seq_num_required_blocks(
+            seq_group.get_encoder_seq())
+        num_required_blocks = self_num_required_blocks + \
+                              cross_num_required_blocks
 
         if self.block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -328,7 +331,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             for logical_idx in range(num_prompt_blocks):
                 if (self.block_sliding_window is not None
                         and logical_idx >= self.block_sliding_window):
-                    block = block_table[logical_idx % self.block_sliding_window]
+                    block = block_table[logical_idx %
+                                        self.block_sliding_window]
                     # Set the reference counts of the token blocks.
                     block.ref_count = seq_group.num_seqs()
                 elif self.enable_caching:
@@ -550,7 +554,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self.block_tables[seq.seq_id] = new_block_table
 
         if seq_group.encoder_seq is not None:
-            new_block_table: BlockTable = []
+            new_block_table = []
             block_table = self.cross_block_tables[request_id]
 
             for cpu_block in block_table:
@@ -601,7 +605,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self.block_tables[seq.seq_id] = new_block_table
 
         if seq_group.encoder_seq is not None:
-            new_block_table: BlockTable = []
+            new_block_table = []
             block_table = self.cross_block_tables[request_id]
 
             for gpu_block in block_table:

@@ -56,8 +56,10 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
 @pytest.mark.parametrize("num_gpu_blocks", [16, 80, 160])
 @pytest.mark.parametrize("num_seqs_per_group", [1, 4])
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_can_allocate_seq_group_encoder_decoder(block_size: int, num_seqs_per_group: int,
-                                                num_gpu_blocks: int, watermark: float):
+def test_can_allocate_seq_group_encoder_decoder(block_size: int,
+                                                num_seqs_per_group: int,
+                                                num_gpu_blocks: int,
+                                                watermark: float):
     block_manager = BlockSpaceManagerV2(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
@@ -73,7 +75,8 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int, num_seqs_per_gr
     # different output lens.
     num_output_blocks = num_output_blocks_per_seq
 
-    for bdx,num_prompt_blocks in enumerate(range(1, num_gpu_blocks - num_output_blocks)):
+    for bdx, num_prompt_blocks in enumerate(
+            range(1, num_gpu_blocks - num_output_blocks)):
         num_cross_blocks_per_seq = num_prompt_blocks
 
         seq_group = create_seq_group_encoder_decoder(
@@ -82,14 +85,15 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int, num_seqs_per_gr
                 block_size * num_output_blocks_per_seq
                 for _ in range(num_seqs_per_group)
             ],
-            request_id=str(bdx)
-        )
+            request_id=str(bdx))
 
         assert num_prompt_blocks + num_output_blocks <= num_gpu_blocks
 
         can_allocate_result = block_manager.can_allocate(seq_group)
 
-        num_required_blocks = num_prompt_blocks + num_output_blocks + num_cross_blocks_per_seq
+        num_required_blocks = num_prompt_blocks + \
+                              num_output_blocks + \
+                              num_cross_blocks_per_seq
 
         if num_gpu_blocks - num_required_blocks < num_watermark_blocks:
             assert can_allocate_result == AllocStatus.NEVER

@@ -148,7 +148,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         request_id = seq_group.request_id
         seq = seq_group.encoder_seq
 
-        assert not (request_id in self.cross_block_tables), "block table already exists"
+        assert (request_id
+                not in self.cross_block_tables), \
+                "block table already exists"
 
         seq = seq_group.get_encoder_seq()
         if seq is not None:
@@ -236,9 +238,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
         request_id = seq_group.request_id
         assert request_id in self.cross_block_tables
-        block_ids = self.block_tables[request_id].physical_block_ids
+        block_ids = self.cross_block_tables[request_id].physical_block_ids
         assert all(b is not None for b in block_ids)
-        return block_ids
+        return block_ids  # type: ignore
 
     def access_all_blocks_in_seq(self, seq: Sequence, now: float):
         # Update the last accessed time of all the blocks accessed
