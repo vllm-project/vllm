@@ -27,16 +27,15 @@
 
 using namespace cute;
 
-/////////////////////////////////////////
-
 /*
    This defines a quantized GEMM operation with dequantized output, similar to
    torch._scaled_mm. It is defined using the CUTLASS 2.x API, and is used for
    NVIDIA GPUs with SM versions prior to sm90 (Hopper).
 
-   A and B may be either int8 or fp8_e4m3. A can be quantized per-tensor or
-   per-row. B can be quantized per-tensor or per-column. They must have
-   symmetric quantization.
+   A and B may be both either int8 or fp8_e4m3. A can be quantized per-tensor or
+   per-row. B can be quantized per-tensor or per-column.
+   Any combination of per-tensor and per-row or column is supported.
+   A and B must have symmetric quantization (zero point == 0).
 
    So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
    scales are applied elementwise with numpy-style broadcasting.
@@ -92,8 +91,7 @@ struct cutlass_2x_gemm {
       cutlass::epilogue::threadblock::Sm80EVT<Compute1, ScaleA, EVTCompute0>;
 
   using D = cutlass::epilogue::threadblock::VisitorAuxStore<
-      OutputTileThreadMap, ElementD,
-      cutlass::FloatRoundStyle::round_to_nearest,
+      OutputTileThreadMap, ElementD, cutlass::FloatRoundStyle::round_to_nearest,
       Stride<int64_t, Int<1>, Int<0>>>;
 
   using EVTD = cutlass::epilogue::threadblock::Sm80EVT<D, EVTCompute1>;
@@ -118,8 +116,6 @@ struct cutlass_2x_gemm {
 
   using Op = cutlass::gemm::device::GemmUniversalAdapter<KernelType>;
 };
-
-/////////////////////////////////////////
 
 template <typename Gemm>
 void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
@@ -172,9 +168,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   };
 
   typename Gemm::Op::Arguments args{
-      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel, // universal mode
-      problem_size,                                          // problem size
-      1,                                                     // batch count
+      cutlass::gemm::GemmUniversalMode::kGemmSplitKParallel,  // universal mode
+      problem_size,                                           // problem size
+      1,                                                      // batch count
       epilogue_args,
       a_ptr,
       b_ptr,
@@ -199,7 +195,7 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   CUTLASS_CHECK(status);
 }
 
-} // namespace
+}  // namespace
 
 void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
@@ -274,6 +270,7 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
                           TileShape, WarpShape, InstructionShape, 5>>(
           out, a, b, a_scales, b_scales);
     } else {
+      assert(out.dtype() == torch::kFloat16);
       return cutlass_scaled_mm_dq_dispatcher<
           cutlass_2x_gemm<cutlass::arch::Sm89, int8_t, cutlass::half_t,
                           TileShape, WarpShape, InstructionShape, 5>>(

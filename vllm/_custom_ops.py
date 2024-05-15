@@ -154,33 +154,19 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 
 
 # cutlass
-def cutlass_scaled_mm_dq(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_scales: torch.Tensor,
-        b_scales: torch.Tensor,
-        out_dtype: Type[torch.dtype] = torch.bfloat16) -> torch.Tensor:
-    shape_fallback = b.shape[0] % 16 != 0 or b.shape[1] % 16 != 0
+def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
+                         a_scales: torch.Tensor, b_scales: torch.Tensor,
+                         out_dtype: Type[torch.dtype]) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
 
-    capability = torch.cuda.get_device_capability()
-    capability = capability[0] * 10 + capability[1]
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    if capability < 75 or shape_fallback:
-        a_float = a.to(out_dtype)
-        b_float = b.to(out_dtype)
+    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
 
-        return (b_scales *
-                (a_scales * torch.mm(a_float, b_float))).to(dtype=out_dtype)
-
-    else:
-        m = a.shape[0]
-        n = b.shape[1]
-        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-        vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
-
-        return out
+    return out
 
 
 # aqlm

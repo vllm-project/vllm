@@ -22,16 +22,15 @@
 
 using namespace cute;
 
-/////////////////////////////////////////
-
 /*
    This defines a quantized GEMM operation with dequantized output, similar to
    torch._scaled_mm. It is defined using the CUTLASS 3.x API, and is used for
    NVIDIA GPUs with sm90a (Hopper) or later.
 
-   A and B may be either int8 or fp8_e4m3. A can be quantized per-tensor or
-   per-row. B can be quantized per-tensor or per-column. They must have
-   symmetric quantization.
+   A and B may be both either int8 or fp8_e4m3. A can be quantized per-tensor or
+   per-row. B can be quantized per-tensor or per-column.
+   Any combination of per-tensor and per-row or column is supported.
+   A and B must have symmetric quantization (zero point == 0).
 
    So the GEMM operation is D = (a_scales * A) (b_scales * B), where the
    scales are applied elementwise with numpy-style broadcasting.
@@ -120,8 +119,6 @@ struct cutlass_3x_gemm {
   struct GemmKernel : public KernelType {};
 };
 
-/////////////////////////////////////////
-
 template <typename Gemm>
 void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
                                      torch::Tensor const &b,
@@ -184,7 +181,7 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   cutlass::Status status = gemm_op.run(args);
   CUTLASS_CHECK(status);
 }
-} // namespace
+}  // namespace
 
 void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,

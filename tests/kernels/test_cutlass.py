@@ -18,21 +18,13 @@ capability = capability[0] * 10 + capability[1]
 
 
 def to_fp8(tensor: torch.tensor):
-    # Assuming input tensor is float32
-    # Scale tensor to range of FP8 E4M3
-    # by clamping exponent and truncating mantissa
-    max_exp = 2**4 - 1  # Maximum exponent for E4M3
-    max_mantissa = 2**3 - 1  # Maximum mantissa for E4M3
-    base = 2**max_exp
-    # Scale the mantissa
-    scaled = torch.clamp(tensor, -base, base)
-    # Quantize the mantissa
-    quantized = torch.round(scaled * max_mantissa) / max_mantissa
-    return quantized.to(dtype=torch.float8_e4m3fn)
+    finfo = torch.finfo(torch.float8_e4m3fn)
+    return torch.round(tensor.clamp(
+        min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
 
 def to_int8(tensor: torch.tensor):
-    return torch.round(torch.clamp(tensor, -128, 127)).to(dtype=torch.int8)
+    return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
 
 
 def cutlass_fp8_gemm_helper(m: int,
@@ -92,7 +84,7 @@ def cutlass_int8_gemm_helper(m: int,
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.skipif(capability < 89,
@@ -104,7 +96,7 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 def test_cutlass_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
@@ -188,7 +180,11 @@ def test_cutlass_subset():
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    out = ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b)
+    out = ops.cutlass_scaled_mm_dq(a,
+                                   b,
+                                   scale_a,
+                                   scale_b,
+                                   out_dtype=torch.bfloat16)
     baseline = torch.mm(scale_a * a.to(dtype=torch.float32),
                         scale_b *
                         b.to(dtype=torch.float32)).to(dtype=torch.bfloat16)
