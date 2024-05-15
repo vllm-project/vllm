@@ -27,18 +27,21 @@ import torch
 from torch import nn
 from transformers import MixtralConfig
 
+from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               QKVParallelLinear,
+from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -47,6 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
+from vllm.utils import print_warning_once
 
 
 class MixtralMoE(nn.Module):
@@ -66,6 +70,7 @@ class MixtralMoE(nn.Module):
         intermediate_size: int,
         params_dtype: Optional[torch.dtype] = None,
         tp_size: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -73,36 +78,89 @@ class MixtralMoE(nn.Module):
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
+        self.quant_config = quant_config
+
+        # FIXME(pcmoritz): Make this more general to support different
+        # quantization schemes
+        self.use_fp8 = isinstance(quant_config, Fp8Config)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
                                      params_dtype=self.params_dtype,
-                                     linear_method=None)
+                                     quant_config=None)
 
-        self.ws = nn.Parameter(
+        if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
+            params_dtype = torch.float8_e4m3fn
+
+        self.w13_weight = nn.Parameter(
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
-                        device="cuda",
-                        dtype=self.params_dtype))
-        self.w2s = nn.Parameter(
+                        dtype=params_dtype))
+        self.w2_weight = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device="cuda",
-                        dtype=self.params_dtype))
+                        dtype=params_dtype))
 
-        set_weight_attrs(self.ws, {
+        set_weight_attrs(self.w13_weight, {
             "weight_loader": self.weight_loader,
         })
-        set_weight_attrs(self.w2s, {
+        set_weight_attrs(self.w2_weight, {
             "weight_loader": self.weight_loader,
         })
+
+        # Used for fp8.
+        self.w13_scale = None
+        self.w2_scale = None
+        self.a13_scale = None
+        self.a2_scale = None
+
+        if self.use_fp8:
+            # WEIGHT_SCALE (for fp8)
+            self.w13_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                     dtype=torch.float32),
+                                          requires_grad=False)
+            self.w2_scale = nn.Parameter(torch.ones(self.num_total_experts,
+                                                    dtype=torch.float32),
+                                         requires_grad=False)
+
+            # If loading fp8 checkpoint, pass the weight loaders.
+            # If loading an fp16 checkpoint, do not (we will quantize in
+            #   process_weights_after_loading()
+            if quant_config.is_checkpoint_fp8_serialized:
+                set_weight_attrs(self.w13_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+                set_weight_attrs(self.w2_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+
+            # ACT_SCALE (for fp8)
+            if quant_config.activation_scheme == "static":
+                if not quant_config.is_checkpoint_fp8_serialized:
+                    raise ValueError(
+                        "Found static activation scheme for checkpoint that "
+                        "was not serialized fp8.")
+                self.a13_scale = nn.Parameter(torch.zeros(
+                    self.num_total_experts, dtype=torch.float32),
+                                              requires_grad=False)
+                self.a2_scale = nn.Parameter(torch.zeros(
+                    self.num_total_experts, dtype=torch.float32),
+                                             requires_grad=False)
+
+                set_weight_attrs(self.a13_scale, {
+                    "weight_loader": self.weight_loader,
+                })
+                set_weight_attrs(self.a2_scale, {
+                    "weight_loader": self.weight_loader,
+                })
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
                       weight_name: str, expert_id: int):
@@ -117,6 +175,49 @@ class MixtralMoE(nn.Module):
                        shard_size:2 * shard_size, :] = loaded_weight[shard, :]
         if weight_name.endswith("w2.weight"):
             param_data[expert_id, :, :] = loaded_weight[:, shard]
+        if "act_scale" in weight_name or "weight_scale" in weight_name:
+            param_data[expert_id] = loaded_weight
+
+    def process_weights_after_loading(self):
+        # Fp8 is the only case where we need to process after loading.
+        if not self.use_fp8:
+            return
+
+        # If checkpoint is fp16, quantize here.
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            w13_weight = torch.empty_like(self.w13_weight.data,
+                                          dtype=torch.float8_e4m3fn)
+            w2_weight = torch.empty_like(self.w2_weight.data,
+                                         dtype=torch.float8_e4m3fn)
+            for expert in range(self.num_total_experts):
+                w13_weight[expert, :, :], self.w13_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        self.w13_weight.data[expert, :, :])
+                w2_weight[expert, :, :], self.w2_scale[
+                    expert] = ops.scaled_fp8_quant(
+                        self.w2_weight.data[expert, :, :])
+            self.w13_weight = nn.Parameter(w13_weight, requires_grad=False)
+            self.w2_weight = nn.Parameter(w2_weight, requires_grad=False)
+
+        # If checkpoint is fp8 + static, cleanup act_scales.
+        #   Since state_dict has an act_scale per expert but our kernels
+        #   are passed one act_scale shared across all experts.
+        elif self.quant_config.activation_scheme == "static":
+            if self.a13_scale is None or self.a2_scale is None:
+                raise ValueError(
+                    "QuantConfig has static quantization, but found "
+                    "activation scales are None.")
+
+            if (not all_close_1d(self.a13_scale)
+                    or not all_close_1d(self.a2_scale)):
+                print_warning_once(
+                    "Found act_scales that are not equal for fp8 MoE layer. "
+                    "Using the maximum across experts for each layer. ")
+
+            self.a13_scale = nn.Parameter(self.a13_scale.max(),
+                                          requires_grad=False)
+            self.a2_scale = nn.Parameter(self.a2_scale.max(),
+                                         requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
@@ -124,12 +225,17 @@ class MixtralMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = fused_moe(hidden_states,
-                                        self.ws,
-                                        self.w2s,
+                                        self.w13_weight,
+                                        self.w2_weight,
                                         router_logits,
                                         self.top_k,
                                         renormalize=True,
-                                        inplace=True)
+                                        inplace=True,
+                                        use_fp8=self.use_fp8,
+                                        w1_scale=self.w13_scale,
+                                        w2_scale=self.w2_scale,
+                                        a1_scale=self.a13_scale,
+                                        a2_scale=self.a2_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
@@ -146,7 +252,8 @@ class MixtralAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
-                 linear_method: Optional[LinearMethodBase] = None,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -171,19 +278,28 @@ class MixtralAttention(nn.Module):
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
 
+        if isinstance(
+                quant_config,
+                Fp8Config) and not quant_config.is_checkpoint_fp8_serialized:
+            print_warning_once(
+                "For Mixtral FP8 quantization, we currently do not quantize "
+                "the attention layers until their FP8 performance is improved."
+            )
+            quant_config = None
+
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -198,6 +314,7 @@ class MixtralAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             sliding_window=self.sliding_window,
+            cache_config=cache_config,
         )
 
     def forward(
@@ -220,7 +337,8 @@ class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -233,12 +351,14 @@ class MixtralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
-            linear_method=linear_method)
+            cache_config=cache_config,
+            quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size)
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config)
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -278,7 +398,8 @@ class MixtralModel(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
@@ -294,7 +415,9 @@ class MixtralModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config, linear_method=linear_method)
+            MixtralDecoderLayer(config,
+                                cache_config,
+                                quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -344,14 +467,15 @@ class MixtralForCausalLM(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
         self.model = MixtralModel(config,
-                                  linear_method,
+                                  cache_config,
+                                  quant_config,
                                   lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -403,9 +527,24 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weight scales for the experts
             # (param_name, weight_name, expert_id)
-            ("ws" if weight_name in ["w1", "w3"] else "w2s",
+            ("w13_scale" if weight_name in ["w1", "w3"] else "w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the weights for the experts
+            # (param_name, weight_name, expert_id)
+            ("w13_weight" if weight_name in ["w1", "w3"] else "w2_weight",
              f"experts.{expert_id}.{weight_name}.weight", expert_id)
+            for expert_id in range(self.config.num_local_experts)
+            for weight_name in ["w1", "w2", "w3"]
+        ] + [
+            # These are the activation scales for the experts
+            # (param_name, weight_name, expert_id)
+            ("a13_scale" if weight_name in ["w1", "w3"] else "a2_scale",
+             f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
             for expert_id in range(self.config.num_local_experts)
             for weight_name in ["w1", "w2", "w3"]
         ]
@@ -446,3 +585,8 @@ class MixtralForCausalLM(nn.Module):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+
+
+def all_close_1d(x: torch.Tensor) -> bool:
+    assert len(x.shape) == 1
+    return all(torch.allclose(x[0], x[i]) for i in range(x.shape[0]))
