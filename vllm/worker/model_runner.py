@@ -266,27 +266,20 @@ class ModelRunner:
                 # Prefix is not supported with sliding_window
                 context_len = len(computed_block_nums) * self.block_size
                 prompt_tokens = prompt_tokens[context_len:]
-                if self.attn_backend.get_name() == "flash-attn":
-                    # NOTE(woosuk): For flash-attn, the block table should
-                    # include the entries for the incoming prefill tokens.
-                    # TODO(woosuk): This is a temporary fix. We should
-                    # provide a unified interface for different backends.
-                    block_table = seq_group_metadata.block_tables[seq_id]
-                else:
-                    block_table = computed_block_nums
+                prefix_block_tables.append(computed_block_nums)
             elif self.scheduler_config.chunked_prefill_enabled:
                 if seq_group_metadata.block_tables is not None:
                     # Prefill has chunked before.
                     block_table = seq_group_metadata.block_tables[seq_id]
+                    prefix_block_tables.append(block_table)
                 else:
                     # The first prefill.
-                    block_table = []
+                    prefix_block_tables.append([])
             else:
-                block_table = []
+                prefix_block_tables.append([])
                 # Right now, prefill start is always 0. However, this
                 # assumption can be changed once chunked prefill is introduced.
                 assert context_len == 0
-            prefix_block_tables.append(block_table)
 
             # actual prompt lens
             context_lens.append(context_len)
