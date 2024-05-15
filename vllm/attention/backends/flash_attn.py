@@ -327,7 +327,7 @@ class FlashAttentionImpl(AttentionImpl):
                 value_cache,
                 decode_meta.block_tables,
                 decode_meta.seq_lens_tensor,
-                decode_meta.max_seq_len,
+                decode_meta.max_decode_seq_len,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,

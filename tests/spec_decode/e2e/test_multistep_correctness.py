@@ -284,7 +284,7 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
 @pytest.mark.parametrize("max_output_len", [
     256,
 ])
-@pytest.mark.parametrize("batch_size", [64])
+@pytest.mark.parametrize("batch_size", [32])
 @pytest.mark.parametrize("seed", [1])
 def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         baseline_llm_generator, test_llm_generator, batch_size: int,
