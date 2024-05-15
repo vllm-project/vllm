@@ -5,11 +5,12 @@ from collections import defaultdict
 from itertools import islice, repeat
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
@@ -21,10 +22,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# If the env var is set, it uses the Ray's compiled DAG API
-# which optimizes the control plane overhead.
-# Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
+USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 
 
 class RayGPUExecutor(DistributedGPUExecutor):
@@ -145,7 +143,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
             "VLLM_INSTANCE_ID":
             VLLM_INSTANCE_ID,
             "VLLM_TRACE_FUNCTION":
-            os.getenv("VLLM_TRACE_FUNCTION", "0"),
+            str(envs.VLLM_TRACE_FUNCTION),
         }, ) for (node_id, _) in worker_node_and_gpu_ids]
         self._run_workers("update_environment_variables",
                           all_args=all_args_to_update_environment_variables)
@@ -153,29 +151,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 
-        def collect_arg_helper_func(**kwargs):
-            # avoid writing `{"name": value}` manually
-            return kwargs
-
         # Initialize the actual workers inside worker wrapper.
-        init_worker_all_kwargs = []
-        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
-            local_rank = node_workers[node_id].index(rank)
-            init_worker_all_kwargs.append(
-                collect_arg_helper_func(
-                    model_config=self.model_config,
-                    parallel_config=self.parallel_config,
-                    scheduler_config=self.scheduler_config,
-                    device_config=self.device_config,
-                    cache_config=self.cache_config,
-                    load_config=self.load_config,
-                    local_rank=local_rank,
-                    rank=rank,
-                    distributed_init_method=distributed_init_method,
-                    lora_config=self.lora_config,
-                    vision_language_config=self.vision_language_config,
-                    is_driver_worker=rank == 0,
-                ))
+        init_worker_all_kwargs = [
+            self._get_worker_kwargs(
+                local_rank=node_workers[node_id].index(rank),
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+            ) for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids)
+        ]
         self._run_workers("init_worker", all_kwargs=init_worker_all_kwargs)
 
         self._run_workers("init_device")
@@ -183,25 +166,16 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int = 0) -> List[SamplerOutput]:
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         all_outputs = self._run_workers(
             "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            },
+            driver_kwargs={"execute_model_req": execute_model_req},
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
         # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output
+        return all_outputs[0]
 
     def _run_workers(
         self,

@@ -61,6 +61,7 @@ def _normalize_json_schema_object(schema: Union[str, dict, BaseModel]) -> dict:
         return schema
     if isinstance(schema, BaseModel):
         return schema.model_json_schema()
+    raise AssertionError(f"Unsupported schema type {schema}")
 
 
 @lru_cache

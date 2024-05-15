@@ -1,13 +1,14 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -79,7 +80,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
@@ -146,6 +149,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be either "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-chat-completion-extra-params
 
@@ -223,7 +231,9 @@ class CompletionRequest(OpenAIBaseModel):
     max_tokens: Optional[int] = 16
     n: int = 1
     presence_penalty: Optional[float] = 0.0
-    seed: Optional[int] = None
+    seed: Optional[int] = Field(None,
+                                ge=torch.iinfo(torch.long).min,
+                                le=torch.iinfo(torch.long).max)
     stop: Optional[Union[str, List[str]]] = Field(default_factory=list)
     stream: Optional[bool] = False
     suffix: Optional[str] = None
@@ -285,6 +295,11 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified, will override the default guided decoding backend "
             "of the server for this specific request. If set, must be one of "
             "'outlines' / 'lm-format-enforcer'"))
+    guided_whitespace_pattern: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, will override the default whitespace pattern "
+            "for guided json decoding."))
 
     # doc: end-completion-extra-params
 
@@ -349,6 +364,24 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
+class EmbeddingRequest(BaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/embeddings
+    model: str
+    input: Union[List[int], List[List[int]], str, List[str]]
+    encoding_format: Optional[str] = Field('float', pattern='^(float|base64)$')
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+
+    # doc: begin-embedding-pooling-params
+    additional_data: Optional[Any] = None
+
+    # doc: end-embedding-pooling-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
 class LogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -400,6 +433,21 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+
+class EmbeddingResponseData(BaseModel):
+    index: int
+    object: str = "embedding"
+    embedding: List[float]
+
+
+class EmbeddingResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[EmbeddingResponseData]
+    usage: UsageInfo
 
 
 class ChatMessage(OpenAIBaseModel):
