@@ -121,13 +121,24 @@ class GPTQMarlinConfig(QuantizationConfig):
         return cls(weight_bits, group_size, desc_act, is_sym)
 
     @classmethod
-    def supports_checkpoint(cls, quant_cfg) -> bool:
-        ret = cls.is_marlin_compatible(quant_cfg)
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
 
-        if ret:
-            logger.info("The model is convertible to gptq_marlin on-the-fly."
-                        " Using gptq_marlin kernel.")
-        return ret
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+
+        if can_convert and is_valid_user_quant:
+            msg = ("The model is convertible to {} during runtime."
+                   " Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        if can_convert and user_quant == "gptq":
+            logger.info("Detected that the model can run with gptq_marlin"
+                        ", however you specified quantization=gptq explicitly,"
+                        " so forcing gptq. Use quantization=gptq_marlin for"
+                        " faster inference")
+        return None
 
     def get_quant_method(
             self,

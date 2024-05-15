@@ -82,13 +82,21 @@ class GPTQMarlin24Config(QuantizationConfig):
         return cls(weight_bits, group_size)
 
     @classmethod
-    def supports_checkpoint(cls, quant_cfg) -> bool:
-        ret = quant_cfg.get("checkpoint_format") == "marlin_24"
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        is_marlin_24_format = (
+            hf_quant_cfg.get("checkpoint_format") == "marlin_24")
 
-        if ret:
-            logger.info("The model is serialized in gptq_marlin_24 format. "
-                        "Using gptq_marlin_24 kernel.")
-        return ret
+        is_valid_user_quant = (user_quant is None or user_quant == "gptq"
+                               or user_quant == "gptq_marlin_24")
+
+        if is_marlin_24_format and is_valid_user_quant:
+            msg = ("The model is serialized in {} format. "
+                   "Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        return None
 
     def get_quant_method(
             self,

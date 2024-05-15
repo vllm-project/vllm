@@ -155,26 +155,12 @@ class ModelConfig:
 
             # Detect which checkpoint is it
             for name, method in QUANTIZATION_METHODS.items():
-                if method.supports_checkpoint(quant_cfg):
-                    quant_method = name
+                quantization_override = method.override_quantization_method(
+                    quant_cfg, self.quantization)
+                if quantization_override:
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
                     break
-
-            # Allow override of gptq_marlin to gptq (if set explicitly)
-            if self.quantization == "gptq" and quant_method == "gptq_marlin":
-                logger.warning(
-                    "Detected that the model can run with gptq_marlin"
-                    ", however you specified quantization=gptq explicitly,"
-                    " so forcing gptq. Use quantization=gptq_marlin for"
-                    " faster inference")
-                quant_method = "gptq"
-
-            # Choose gptq_marlin if marlin is specified
-            if self.quantization == "marlin" and quant_method == "gptq_marlin":
-                self.quantization = quant_method
-
-            # Choose marlin if gptq is specified
-            if self.quantization == "gptq" and quant_method == "marlin":
-                self.quantization = quant_method
 
             # Verify quantization configurations.
             if self.quantization is None:
