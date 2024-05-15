@@ -1073,12 +1073,17 @@ class VisionLanguageConfig:
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
 
+
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
     "float": torch.float32,
     "float32": torch.float32,
-    "bfloat16": torch.bfloat16}
+    "bfloat16": torch.bfloat16,
+}
+
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
+
 
 def _get_and_verify_dtype(
     config: PretrainedConfig,
