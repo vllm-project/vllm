@@ -12,9 +12,9 @@ from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
+from vllm.logger import init_logger
 from vllm.multimodal import MultiModalData
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
-from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
