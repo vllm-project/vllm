@@ -217,7 +217,9 @@ class LlamaAttention(nn.Module):
                 # rewrite while loop with torch.index_select
                 # we can just rotate entire blocks, don't care about token-level granularity
                 start = (start // block_size) * block_size
-                phys_bnums = [block_table[abs_pos // block_size] for abs_pos in range(start, end, block_size)]
+                phys_bnums = torch.tensor([
+                    block_table[abs_pos // block_size] for abs_pos in range(start, end, block_size)
+                ], device=positions.device)
                 
                 # shape: [num_selected_blocks, num_heads, head_size/x, block_size, x]
                 past_keys_tensor = torch.index_select(key_cache, 0, phys_bnums)
@@ -232,7 +234,7 @@ class LlamaAttention(nn.Module):
                 _, past_keys_tensor = self.rotary_emb(pos, dummy_q, past_keys_tensor)
                 past_keys_tensor = past_keys_tensor.reshape(len(phys_bnums), block_size, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
                 past_keys_tensor = past_keys_tensor.permute((0, 2, 3, 1, 4))
-                key_cache.index_put_((torch.tensor(phys_bnums),), past_keys_tensor)
+                key_cache.index_put_((phys_bnums,), past_keys_tensor)
 
                 # abs_pos = start
                 # # loop should have 4096 - 1 iterations if not within_context_len
