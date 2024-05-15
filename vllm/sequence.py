@@ -121,6 +121,7 @@ class SequenceData:
             output_token_ids = []
 
         self.prompt_token_ids = prompt_token_ids
+        self._prompt_token_ids_tuple: Tuple[int, ...] = tuple(prompt_token_ids)
         self.output_token_ids = output_token_ids
         self.cumulative_logprob = 0.0
         # The number of tokens that are computed (that run against the model).
@@ -142,6 +143,17 @@ class SequenceData:
 
     def get_token_ids(self) -> List[int]:
         return self.prompt_token_ids + self.output_token_ids
+
+    def get_prefix_token_ids(
+            self, num_tokens: int
+    ) -> Tuple[Tuple[int, ...], Optional[Tuple[int, ...]]]:
+        """Get prefix tokens, and make the return value hashable"""
+        prompt_length = len(self.prompt_token_ids)
+        if num_tokens > prompt_length:
+            return (self._prompt_token_ids_tuple,
+                    tuple(self.output_token_ids[:num_tokens - prompt_length]))
+        else:
+            return (self._prompt_token_ids_tuple[:num_tokens], None)
 
     def get_num_computed_tokens(self) -> int:
         """Return the number of prefill tokens that are already computed."""
@@ -253,8 +265,8 @@ class Sequence:
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
         num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        return hash(
-            (tuple(self.data.get_token_ids()[0:num_tokens]), self.lora_int_id))
+        hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
+        return hash((hashed_tokens, self.lora_int_id))
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
@@ -642,8 +654,9 @@ class SequenceGroupMetadata:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
     @property
-    def token_chunk_size(self) -> Optional[int]:
+    def token_chunk_size(self) -> int:
         """Return the number of tokens to be processed (chunk size)."""
+        assert self._token_chunk_size is not None
         return self._token_chunk_size
 
 
