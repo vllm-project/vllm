@@ -28,4 +28,4 @@ jobs:
         pip install clang-format==18.1.5
     - name: Running clang-format
       run: |
-        clang-format --dry-run --Werror $(find . \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print)
+        clang-format --dry-run --Werror $(find csrc/ \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print)

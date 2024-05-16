@@ -1,6 +1,8 @@
 /*
- * Adapted from https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
- * and https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h
+ * Adapted from
+ * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention/decoder_masked_multihead_attention_template.hpp
+ * and
+ * https://github.com/NVIDIA/FasterTransformer/blob/release/v5.3_tag/src/fastertransformer/kernels/decoder_masked_multihead_attention_utils.h
  * Copyright (c) 2023, The vLLM team.
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -30,37 +32,37 @@
 namespace vllm {
 
 // FP16 vector types for Q, K, V.
-template<>
+template <>
 struct Vec<uint16_t, 1> {
   using Type = uint16_t;
 };
-template<>
+template <>
 struct Vec<uint16_t, 2> {
   using Type = uint32_t;
 };
-template<>
+template <>
 struct Vec<uint16_t, 4> {
   using Type = uint2;
 };
-template<>
+template <>
 struct Vec<uint16_t, 8> {
   using Type = uint4;
 };
 
 // FP32 accumulator vector types corresponding to Vec.
-template<>
+template <>
 struct FloatVec<uint16_t> {
   using Type = float;
 };
-template<>
+template <>
 struct FloatVec<uint32_t> {
   using Type = float2;
 };
-template<>
+template <>
 struct FloatVec<uint2> {
   using Type = Float4_;
 };
-template<>
+template <>
 struct FloatVec<uint4> {
   using Type = Float8_;
 };
@@ -73,8 +75,8 @@ inline __device__ uint32_t h0_h0(uint16_t a) {
   return b;
 #else
   union {
-   uint32_t u32;
-   uint16_t u16[2];
+    uint32_t u32;
+    uint16_t u16[2];
   } tmp;
   tmp.u16[0] = a;
   tmp.u16[1] = a;
@@ -130,10 +132,10 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
   } tmp;
 #ifndef USE_ROCM
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-    asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
+  asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
   #else
-    asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
-    asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
+  asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
+  asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
   #endif
 #else
   tmp.u16[0] = float_to_half(f.x);
@@ -201,7 +203,7 @@ inline __device__ Float8_ add(uint4 a, Float8_ fb) {
 }
 
 // Vector multiplication.
-template<>
+template <>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
   uint16_t c;
 #ifndef USE_ROCM
@@ -212,7 +214,7 @@ inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   uint32_t c;
 #ifndef USE_ROCM
@@ -223,12 +225,12 @@ inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ uint32_t mul(uint16_t a, uint32_t b) {
   return mul<uint32_t, uint32_t, uint32_t>(h0_h0(a), b);
 }
 
-template<>
+template <>
 inline __device__ uint2 mul(uint2 a, uint2 b) {
   uint2 c;
   c.x = mul<uint32_t, uint32_t, uint32_t>(a.x, b.x);
@@ -236,7 +238,7 @@ inline __device__ uint2 mul(uint2 a, uint2 b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ uint2 mul(uint16_t a, uint2 b) {
   uint32_t s = h0_h0(a);
   uint2 c;
@@ -245,7 +247,7 @@ inline __device__ uint2 mul(uint16_t a, uint2 b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ uint4 mul(uint4 a, uint4 b) {
   uint4 c;
   c.x = mul<uint32_t, uint32_t, uint32_t>(a.x, b.x);
@@ -255,7 +257,7 @@ inline __device__ uint4 mul(uint4 a, uint4 b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ uint4 mul(uint16_t a, uint4 b) {
   uint32_t s = h0_h0(a);
   uint4 c;
@@ -266,26 +268,26 @@ inline __device__ uint4 mul(uint16_t a, uint4 b) {
   return c;
 }
 
-template<>
+template <>
 inline __device__ float mul(uint16_t a, uint16_t b) {
   float fa = half_to_float(a);
   float fb = half_to_float(b);
   return fa * fb;
 }
 
-template<>
+template <>
 inline __device__ float2 mul(uint32_t a, uint32_t b) {
   float2 fa = half2_to_float2(a);
   float2 fb = half2_to_float2(b);
   return mul<float2, float2, float2>(fa, fb);
 }
 
-template<>
+template <>
 inline __device__ float2 mul(uint16_t a, uint32_t b) {
   return mul<float2, uint32_t, uint32_t>(h0_h0(a), b);
 }
 
-template<>
+template <>
 inline __device__ Float4_ mul(uint2 a, uint2 b) {
   Float4_ fc;
   fc.x = mul<float2, uint32_t, uint32_t>(a.x, b.x);
@@ -293,7 +295,7 @@ inline __device__ Float4_ mul(uint2 a, uint2 b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float4_ mul(uint16_t a, uint2 b) {
   uint32_t s = h0_h0(a);
   Float4_ fc;
@@ -302,7 +304,7 @@ inline __device__ Float4_ mul(uint16_t a, uint2 b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float8_ mul(uint4 a, uint4 b) {
   Float8_ fc;
   fc.x = mul<float2, uint32_t, uint32_t>(a.x, b.x);
@@ -312,7 +314,7 @@ inline __device__ Float8_ mul(uint4 a, uint4 b) {
   return fc;
 }
 
-template<>
+template <>
 inline __device__ Float8_ mul(uint16_t a, uint4 b) {
   uint32_t s = h0_h0(a);
   Float8_ fc;
@@ -334,9 +336,7 @@ inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
   return d;
 }
 
-inline __device__ uint32_t fma(uint16_t a, uint32_t b, uint32_t c) {
-  return fma(h0_h0(a), b, c);
-}
+inline __device__ uint32_t fma(uint16_t a, uint32_t b, uint32_t c) { return fma(h0_h0(a), b, c); }
 
 inline __device__ uint2 fma(uint2 a, uint2 b, uint2 c) {
   uint2 d;
@@ -384,9 +384,7 @@ inline __device__ float2 fma(uint32_t a, uint32_t b, float2 fc) {
   return fma(fa, fb, fc);
 }
 
-inline __device__ float2 fma(uint16_t a, uint32_t b, float2 fc) {
-  return fma(h0_h0(a), b, fc);
-}
+inline __device__ float2 fma(uint16_t a, uint32_t b, float2 fc) { return fma(h0_h0(a), b, fc); }
 
 inline __device__ Float4_ fma(uint2 a, uint2 b, Float4_ fc) {
   Float4_ fd;
@@ -423,24 +421,24 @@ inline __device__ Float8_ fma(uint16_t a, uint4 b, Float8_ fc) {
 }
 
 // Vector sum.
-template<>
+template <>
 inline __device__ float sum(uint16_t v) {
   return half_to_float(v);
 }
 
-template<>
+template <>
 inline __device__ float sum(uint32_t v) {
   float2 tmp = half2_to_float2(v);
   return tmp.x + tmp.y;
 }
 
-template<>
+template <>
 inline __device__ float sum(uint2 v) {
   uint32_t c = add(v.x, v.y);
   return sum(c);
 }
 
-template<>
+template <>
 inline __device__ float sum(uint4 v) {
   uint32_t c = add(v.x, v.y);
   c = add(c, v.z);
@@ -449,13 +447,9 @@ inline __device__ float sum(uint4 v) {
 }
 
 // From float32 to float16.
-inline __device__ void from_float(uint16_t& dst, float src) {
-  dst = float_to_half(src);
-}
+inline __device__ void from_float(uint16_t& dst, float src) { dst = float_to_half(src); }
 
-inline __device__ void from_float(uint32_t& dst, float2 src) {
-  dst = float2_to_half2(src);
-}
+inline __device__ void from_float(uint32_t& dst, float2 src) { dst = float2_to_half2(src); }
 
 inline __device__ void from_float(uint2& dst, Float4_ src) {
   dst.x = float2_to_half2(src.x);
@@ -470,13 +464,9 @@ inline __device__ void from_float(uint4& dst, Float8_ src) {
 }
 
 // From float16 to float32.
-inline __device__ float to_float(uint16_t u) {
-  return half_to_float(u);
-}
+inline __device__ float to_float(uint16_t u) { return half_to_float(u); }
 
-inline __device__ float2 to_float(uint32_t u) {
-  return half2_to_float2(u);
-}
+inline __device__ float2 to_float(uint32_t u) { return half2_to_float2(u); }
 
 inline __device__ Float4_ to_float(uint2 u) {
   Float4_ tmp;
@@ -495,8 +485,6 @@ inline __device__ Float8_ to_float(uint4 u) {
 }
 
 // Zero-out a variable.
-inline __device__ void zero(uint16_t& dst) {
-  dst = uint16_t(0);
-}
+inline __device__ void zero(uint16_t& dst) { dst = uint16_t(0); }
 
-} // namespace vllm
+}  // namespace vllm

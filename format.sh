@@ -241,7 +241,7 @@ CLANG_FORMAT_EXTENSION_TARGETS=('*.h' '*.cpp' '*.cu' '*.cuh')
 
 # Format specified files with clang-format
 clang_format() {
-    clang-format --style=file -i "$@"
+    clang-format -i "$@"
 }
 
 # Format files that differ from main branch with clang-format.
@@ -256,14 +256,13 @@ clang_format_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" | xargs -P 5 \
-             clang-format --style=file -i
+             clang-format -i
     fi
 }
 
 # Format all files with clang-format
 clang_format_all() {
-    find . \( "${CLANG_FORMAT_EXTENSION_TARGETS[@]/#/-name }" \) -print0 | xargs -0 -P 5 \
-         clang-format --style=file -i
+    clang-format -i $(find csrc/ \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print)
 }
 
 # Run clang-format
