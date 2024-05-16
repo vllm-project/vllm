@@ -2,21 +2,22 @@ import argparse
 import dataclasses
 import json
 import os
-import time
-from typing import List
 import threading
-
+import time
 import uuid
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, Response, JSONResponse
+from contextlib import AsyncExitStack
+from typing import List
+
 import httpx
 import numpy as np
 import requests
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from vllm.entrypoints.openai.serving_engine import LoRAModulePath
-from vllm.entrypoints.openai.protocol import ErrorResponse
 import vllm.envs as envs
+from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.entrypoints.openai.serving_engine import LoRAModulePath
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -29,7 +30,7 @@ WORKER_HEART_BEAT_INTERVAL = envs.VLLM_WORKER_HEART_BEAT_INTERVAL
 class WorkerInfo:
     model_names: List[str]
     check_heart_beat: bool
-    last_heart_beat: str
+    last_heart_beat: float
     req_cnt: int
     speed: float
 
@@ -51,7 +52,7 @@ class Controller:
         self.heart_beat_thread.start()
 
     def register_worker(self, worker_addr: str, check_heart_beat: bool,
-                        model_names: str, queue_length: int):
+                        model_names: List[str], queue_length: int):
         if worker_addr not in self.worker_info:
             logger.info("Register a new worker: %s", worker_addr)
         else:
@@ -241,7 +242,7 @@ def create_controller():
         "'SSL_KEYFILE' and 'SSL_CERTFILE'.",
     )
     args = parser.parse_args()
-    logger.info("Start up controller: ", args)
+    logger.info("Start up controller: %s", str(args))
 
     controller = Controller()
     return args, controller
@@ -271,29 +272,13 @@ async def show_available_workers():
     return controller.list_workers()
 
 
-class MultiContextManager:
-
-    def __init__(self, client, method, url, json_data):
-        self.client = client
-        self.method = method
-        self.url = url
-        self.json_data = json_data
-        self.response = None
-
-    async def __aenter__(self):
-        self.response = await self.client.stream(self.method,
-                                                 self.url,
-                                                 json=self.json_data)
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        await self.response.aclose()
-
-
 async def generate_completions_stream(worker_addr, data, api):
-    async with MultiContextManager(httpx.AsyncClient(), "POST",
-                                   f"http://{worker_addr}/{api}", data) as mcm:
-        async for chunk in mcm.response.aiter_raw():
+    async with AsyncExitStack() as stack:
+        client = await stack.enter_async_context(httpx.AsyncClient())
+        response = await stack.enter_async_context(
+            client.stream("POST", f"http://{worker_addr}/{api}", json=data))
+
+        async for chunk in response.aiter_raw():
             yield chunk
 
 

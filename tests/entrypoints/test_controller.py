@@ -18,13 +18,14 @@ import subprocess
 import sys
 import time
 
+import openai  # use the official client for correctness check
+import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
 import requests
-import openai  # use the official client for correctness check
-import pytest
 from huggingface_hub import snapshot_download
+
 from vllm.utils import get_ip
 
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
