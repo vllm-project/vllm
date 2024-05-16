@@ -25,7 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
-from vllm.model_executor.models.base import VLMBase
+from vllm.model_executor.models.vlm_base import VLMBase
 
 logger = init_logger(__name__)
 
