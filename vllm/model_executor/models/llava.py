@@ -19,7 +19,7 @@ from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-from .vlm_base import VLMBase
+from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -67,7 +67,7 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
     return inputs_embeds
 
 
-class LlavaForConditionalGeneration(VLMBase):
+class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,
                  config: LlavaConfig,
