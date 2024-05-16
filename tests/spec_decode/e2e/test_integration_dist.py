@@ -5,6 +5,7 @@ tensor parallelism.
 import pytest
 import torch
 
+from vllm.utils import is_hip
 from .conftest import run_greedy_equality_correctness_test
 
 
@@ -54,6 +55,8 @@ def test_target_model_tp_gt_1(baseline_llm_generator, test_llm_generator,
                               batch_size: int, output_len: int):
     """Verify greedy equality when tensor parallelism is used.
     """
+    if is_hip():
+        pytest.skip("hip is not well-supported yet")
     run_greedy_equality_correctness_test(baseline_llm_generator,
                                          test_llm_generator,
                                          batch_size,
