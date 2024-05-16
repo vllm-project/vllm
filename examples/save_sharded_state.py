@@ -1,11 +1,3 @@
-import argparse
-import dataclasses
-import os
-import shutil
-from pathlib import Path
-
-from vllm import LLM, EngineArgs
-
 """
 Saves each worker's model state dict directly to a checkpoint, which enables a
 fast load path for large tensor-parallel models where each worker only needs to
@@ -28,6 +20,13 @@ llm = LLM(
     tensor_parallel_size=8,
 )
 """
+import argparse
+import dataclasses
+import os
+import shutil
+from pathlib import Path
+
+from vllm import LLM, EngineArgs
 
 parser = argparse.ArgumentParser()
 EngineArgs.add_cli_args(parser)
@@ -41,7 +40,7 @@ parser.add_argument("--file-pattern",
                     help="string pattern of saved filenames")
 parser.add_argument("--max-file-size",
                     type=str,
-                    default=5 * 1024 ** 3,
+                    default=5 * 1024**3,
                     help="max size (in bytes) of each safetensors file")
 
 

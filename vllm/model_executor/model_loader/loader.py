@@ -389,8 +389,7 @@ class ShardedStateLoader(BaseModelLoader):
 
     @staticmethod
     def _filter_subtensors(
-        tensors: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
+            tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Filter out all tensors that share the same memory or a subset of the
         memory of another tensor.
@@ -448,8 +447,7 @@ class ShardedStateLoader(BaseModelLoader):
                 # TODO: support un-sharded checkpoints too
                 raise ValueError(
                     f"Could not find checkpoint files '{pattern}', only "
-                    f"pre-sharded checkpoints are currently supported!"
-                )
+                    f"pre-sharded checkpoints are currently supported!")
             state_dict = self._filter_subtensors(model.state_dict())
             for path in filepaths:
                 with safe_open(path, framework="pt") as f:
@@ -464,9 +462,10 @@ class ShardedStateLoader(BaseModelLoader):
                             if size < param_shape[dim]:
                                 param_data = param_data.narrow(dim, 0, size)
                         if tensor.shape != param_shape:
-                            logger.warning("loading tensor of shape %s into "
-                                           "parameter '%s' of shape %s",
-                                           tensor.shape, key, param_shape)
+                            logger.warning(
+                                "loading tensor of shape %s into "
+                                "parameter '%s' of shape %s", tensor.shape,
+                                key, param_shape)
                         param_data.copy_(tensor)
                         state_dict.pop(key)
             if state_dict:
