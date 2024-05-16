@@ -151,7 +151,6 @@ class TestLongContext:
         for non_batched, batched in zip(non_batched_results, batched_results):
             assert non_batched == batched, f"Non batched and batched results should be the same:\n{batched}\n{non_batched}"
 
-
 #     def test_self_consistency(self, long_context_infos):
 #         """We test consistency of the batched kernel by permuting batched inputs and comparing the results to the non-permuted batched results."""
 #         lora_llm = self._get_lora_llm(long_context_infos)
@@ -217,6 +216,7 @@ a
                 scores.append(score)
                 assert score > 0.3, f"Quality of the answer is not good enough. Expected {golden_answer}, got {response}"
         assert np.mean(scores) > 0.5
+
 
 #     def test_max_len(self, long_context_infos):
 #         """Test that we raise an InputTooLongError when the input of a given LoRA model exceeds the maximum length."""

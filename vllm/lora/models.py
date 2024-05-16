@@ -554,8 +554,7 @@ class LoRAModelManager:
                            packed_moduled_lst, self.model.config))
             # LinearScalingRotaryEmbeddingWithLora is used to handle
             # long context lora. Register relevant metadata.
-            if isinstance(new_module,
-                          LinearScalingRotaryEmbeddingWithLora):
+            if isinstance(new_module, LinearScalingRotaryEmbeddingWithLora):
                 self.long_lora_context = LongContextLoRAContext(
                     new_module.scaling_factors, new_module.rotary_dim)
                 self.scaling_factor_to_offset = \

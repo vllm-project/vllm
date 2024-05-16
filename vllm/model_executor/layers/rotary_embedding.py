@@ -212,7 +212,7 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.base)
-        cache_list = []
+        cache_list: List[torch.Tensor] = []
         # offsets to the next cache in a tensor.
         # Each offset corresponds to the same index in scaling_factors.
         offsets: List[int] = []
