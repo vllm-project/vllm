@@ -29,6 +29,10 @@ def make_arg_parser():
                         type=nullable_str,
                         default=None,
                         help="host name")
+    parser.add_argument("--controller",
+                        type=nullable_str,
+                        default=None,
+                        help="controller addr")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument(
         "--uvicorn-log-level",
