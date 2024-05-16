@@ -57,60 +57,69 @@ static constexpr int max_par = 16;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
-template <const int num_bits,          // weight bits
-          const int threads,           // number of threads in a threadblock
-          const int thread_m_blocks,   // number of 16x16 blocks in the m
-                                       // dimension (batchsize) of the threadblock
-          const int thread_n_blocks,   // same for n dimension (output)
-          const int thread_k_blocks,   // same for k dimension (reduction)
-          const int stages,            // number of stages for the async global->shared
-                                       // fetch pipeline
-          const int group_blocks = -1  // number of consecutive 16x16 blocks with
-                                       // a separate quantization scale
+template <const int num_bits,         // weight bits
+          const int threads,          // number of threads in a threadblock
+          const int thread_m_blocks,  // number of 16x16 blocks in the m
+                                      // dimension (batchsize) of the
+                                      // threadblock
+          const int thread_n_blocks,  // same for n dimension (output)
+          const int thread_k_blocks,  // same for k dimension (reduction)
+          const int stages,  // number of stages for the async global->shared
+                             // fetch pipeline
+          const int group_blocks = -1  // number of consecutive 16x16 blocks
+                                       // with a separate quantization scale
           >
 __global__ void Marlin_24(
     const int4* __restrict__ A,     // fp16 input matrix of shape mxk
     const int4* __restrict__ B,     // 4bit quantized weight matrix of shape kxn
-    const int4* __restrict__ meta,  // 2bit metadata information about 2:4 format on B
+    const int4* __restrict__ meta,  // 2bit metadata information about 2:4
+                                    // format on B
     int4* __restrict__ C,           // fp16 output buffer of shape mxn
-    const int4* __restrict__ s,     // fp16 quantization scales of shape (k/groupsize)xn
+    const int4* __restrict__ s,     // fp16 quantization scales of shape
+                                    // (k/groupsize)xn
     int prob_m,                     // batch dimension m
     int prob_n,                     // output dimension n
     int prob_k,                     // reduction dimension k
-    int* locks                      // extra global storage for barrier synchronization
+    int* locks  // extra global storage for barrier synchronization
 ) {}
 
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                  torch::Tensor& b_meta, torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits, int64_t size_m,
-                                  int64_t size_n, int64_t size_k) {
-  TORCH_CHECK_NOT_IMPLEMENTED(false, "gptq_marlin_24_gemm(..) requires CUDA_ARCH >= 8.0");
+                                  torch::Tensor& b_meta,
+                                  torch::Tensor& b_scales,
+                                  torch::Tensor& workspace, int64_t num_bits,
+                                  int64_t size_m, int64_t size_n,
+                                  int64_t size_k) {
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "gptq_marlin_24_gemm(..) requires CUDA_ARCH >= 8.0");
   return torch::empty({1, 1});
 }
 
 #else
 
-template <const int num_bits,          // weight bits
-          const int threads,           // number of threads in a threadblock
-          const int thread_m_blocks,   // number of 16x16 blocks in the m
-                                       // dimension (batchsize) of the threadblock
-          const int thread_n_blocks,   // same for n dimension (output)
-          const int thread_k_blocks,   // same for k dimension (reduction)
-          const int stages,            // number of stages for the async global->shared
-                                       // fetch pipeline
-          const int group_blocks = -1  // number of consecutive 16x16 blocks with
-                                       // a separate quantization scale
+template <const int num_bits,         // weight bits
+          const int threads,          // number of threads in a threadblock
+          const int thread_m_blocks,  // number of 16x16 blocks in the m
+                                      // dimension (batchsize) of the
+                                      // threadblock
+          const int thread_n_blocks,  // same for n dimension (output)
+          const int thread_k_blocks,  // same for k dimension (reduction)
+          const int stages,  // number of stages for the async global->shared
+                             // fetch pipeline
+          const int group_blocks = -1  // number of consecutive 16x16 blocks
+                                       // with a separate quantization scale
           >
 __global__ void Marlin_24(
     const int4* __restrict__ A,     // fp16 input matrix of shape mxk
     const int4* __restrict__ B,     // 4bit quantized weight matrix of shape kxn
-    const int4* __restrict__ meta,  // 2bit metadata information about 2:4 format on B
+    const int4* __restrict__ meta,  // 2bit metadata information about 2:4
+                                    // format on B
     int4* __restrict__ C,           // fp16 output buffer of shape mxn
-    const int4* __restrict__ s,     // fp16 quantization scales of shape (k/groupsize)xn
+    const int4* __restrict__ s,     // fp16 quantization scales of shape
+                                    // (k/groupsize)xn
     int prob_m,                     // batch dimension m
     int prob_n,                     // output dimension n
     int prob_k,                     // reduction dimension k
-    int* locks                      // extra global storage for barrier synchronization
+    int* locks  // extra global storage for barrier synchronization
 ) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
@@ -143,7 +152,8 @@ __global__ void Marlin_24(
   // groupsize; this avoids an annoying special case where a stripe starts in
   // the middle of group.
   if (group_blocks != -1)
-    iters = (group_blocks / thread_k_blocks) * ceildiv(iters, (group_blocks / thread_k_blocks));
+    iters = (group_blocks / thread_k_blocks) *
+            ceildiv(iters, (group_blocks / thread_k_blocks));
 
   int slice_row = (iters * blockIdx.x) % k_tiles;
   int slice_col_par = (iters * blockIdx.x) / k_tiles;
@@ -167,7 +177,8 @@ __global__ void Marlin_24(
   // Compute all information about the current slice which is required for
   // synchronization.
   auto init_slice = [&]() {
-    slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
+    slice_iters =
+        iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
     if (slice_iters < 0 || slice_col_par >= n_tiles * parallel) slice_iters = 0;
     if (slice_iters == 0) return;
     if (slice_row + slice_iters > k_tiles) slice_iters = k_tiles - slice_row;
@@ -228,8 +239,9 @@ __global__ void Marlin_24(
   constexpr int b_sh_stage = b_sh_stride * thread_k_blocks;
   constexpr int b_sh_wr_iters = b_sh_stage / b_sh_wr_delta;
 
-  int m_gl_stride = 2 * prob_n / 8;                        // (16*2*4 / 8) = 16
-  constexpr int m_sh_stride = (16 * thread_n_blocks) / 4;  // #warps n-dim * threads/warp
+  int m_gl_stride = 2 * prob_n / 8;  // (16*2*4 / 8) = 16
+  constexpr int m_sh_stride =
+      (16 * thread_n_blocks) / 4;  // #warps n-dim * threads/warp
   int m_gl_rd_delta_o = m_gl_stride * thread_k_blocks;
   int m_gl_rd_delta_i = m_gl_stride * (threads / m_sh_stride);
   constexpr int m_sh_wr_delta = threads / 2;
@@ -243,12 +255,15 @@ __global__ void Marlin_24(
   int s_gl_rd_delta = s_gl_stride;
 
   // Global A read index of current thread.
-  int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
+  int a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) +
+                (threadIdx.x % a_gl_rd_delta_o);
   a_gl_rd += a_gl_rd_delta_o * slice_row;
   // Shared write index of current thread.
-  int a_sh_wr = a_sh_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
+  int a_sh_wr = a_sh_stride * (threadIdx.x / a_gl_rd_delta_o) +
+                (threadIdx.x % a_gl_rd_delta_o);
   // Shared read index.
-  int a_sh_rd = a_sh_stride * ((threadIdx.x % 32) % 16) + (threadIdx.x % 32) / 16;
+  int a_sh_rd =
+      a_sh_stride * ((threadIdx.x % 32) % 16) + (threadIdx.x % 32) / 16;
   a_sh_rd += 4 * ((threadIdx.x / 32) / (thread_n_blocks / 4));
 
   int b_gl_rd = b_gl_stride * (threadIdx.x / b_sh_stride_threads) +
@@ -258,7 +273,8 @@ __global__ void Marlin_24(
   int b_sh_wr = threadIdx.x * b_thread_vecs;
   int b_sh_rd = threadIdx.x * b_thread_vecs;
 
-  int m_gl_rd = m_gl_stride * (threadIdx.x / (m_sh_stride)) + (threadIdx.x % (m_sh_stride));
+  int m_gl_rd = m_gl_stride * (threadIdx.x / (m_sh_stride)) +
+                (threadIdx.x % (m_sh_stride));
   m_gl_rd += (m_sh_stride)*slice_col;
   m_gl_rd += m_gl_rd_delta_o * slice_row;
   int m_sh_wr = threadIdx.x;
@@ -278,9 +294,11 @@ __global__ void Marlin_24(
   // we scale a `half2` tile in column-major layout in the former and in
   // row-major in the latter case.
   if (group_blocks != -1) {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) + (threadIdx.x % 32) / 4;
+    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+              (threadIdx.x % 32) / 4;
   } else {
-    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) + (threadIdx.x % 32) / 4;
+    s_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
+              (threadIdx.x % 32) / 4;
   }
 
   // Precompute which thread should not read memory in which iterations; this is
@@ -315,8 +333,10 @@ __global__ void Marlin_24(
   for (int i = 0; i < b_sh_wr_iters; i++) {
   #pragma unroll
     for (int j = 0; j < thread_m_blocks; j++) {
-      a_sh_rd_trans[0][i][j] = transform_a(a_sh_rd_delta_o * i + a_sh_rd_delta_i * j + a_sh_rd);
-      a_sh_rd_trans[1][i][j] = transform_a(a_sh_rd_delta_o * i + a_sh_rd_delta_i * j + a_sh_rd + 2);
+      a_sh_rd_trans[0][i][j] =
+          transform_a(a_sh_rd_delta_o * i + a_sh_rd_delta_i * j + a_sh_rd);
+      a_sh_rd_trans[1][i][j] =
+          transform_a(a_sh_rd_delta_o * i + a_sh_rd_delta_i * j + a_sh_rd + 2);
     }
   }
 
@@ -326,12 +346,14 @@ __global__ void Marlin_24(
   // optimization.
   const int4* B_ptr[b_sh_wr_iters];
   #pragma unroll
-  for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] = B + b_gl_rd_delta_i * i + b_gl_rd;
+  for (int i = 0; i < b_sh_wr_iters; i++)
+    B_ptr[i] = B + b_gl_rd_delta_i * i + b_gl_rd;
 
   bool m_sh_wr_pred = threadIdx.x < m_sh_wr_delta;
   const int4* meta_ptr[m_sh_iters];
   #pragma unroll
-  for (int i = 0; i < m_sh_iters; i++) meta_ptr[i] = meta + m_gl_rd_delta_i * i + m_gl_rd;
+  for (int i = 0; i < m_sh_iters; i++)
+    meta_ptr[i] = meta + m_gl_rd_delta_i * i + m_gl_rd;
 
   extern __shared__ int4 sh[];
   // Shared memory storage for global fetch pipelines.
@@ -349,7 +371,8 @@ __global__ void Marlin_24(
   // Zero accumulators.
   auto zero_accums = [&]() {
   #pragma unroll
-    for (int i = 0; i < thread_m_blocks * 4 * 2 * 4; i++) reinterpret_cast<float*>(frag_c)[i] = 0;
+    for (int i = 0; i < thread_m_blocks * 4 * 2 * 4; i++)
+      reinterpret_cast<float*>(frag_c)[i] = 0;
   };
 
   // Asynchronously fetch the next A, B and s tile from global to the next
@@ -359,9 +382,10 @@ __global__ void Marlin_24(
       int4* sh_a_stage = sh_a + a_sh_stage * pipe;
   #pragma unroll
       for (int i = 0; i < a_sh_wr_iters; i++) {
-        cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]],
-                       &A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off],
-                       a_sh_wr_pred[i]);
+        cp_async4_pred(
+            &sh_a_stage[a_sh_wr_trans[i]],
+            &A[a_gl_rd_delta_i * i + a_gl_rd + a_gl_rd_delta_o * a_off],
+            a_sh_wr_pred[i]);
       }
       int4* sh_b_stage = sh_b + b_sh_stage * pipe;
   #pragma unroll
@@ -375,7 +399,8 @@ __global__ void Marlin_24(
       int4* sh_meta_stage = sh_m + m_sh_stage * pipe;
   #pragma unroll
       for (int i = 0; i < m_sh_iters; i++) {
-        if (m_sh_wr_pred) cp_async4(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr], meta_ptr[i]);
+        if (m_sh_wr_pred)
+          cp_async4(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr], meta_ptr[i]);
         meta_ptr[i] += m_gl_rd_delta_o;
       }
       // Only fetch scales if this tile starts a new group
@@ -408,27 +433,31 @@ __global__ void Marlin_24(
     // theoretically better attempts have lead to bad instruction ordering by
     // the compiler and correspondingly a noticeable drop in performance.
     if (group_blocks != -1) {
-      int4* sh_s_stage = sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
-                                              (pipe / (group_blocks / thread_k_blocks)));
+      int4* sh_s_stage =
+          sh_s + s_sh_stage * ((group_blocks / thread_k_blocks) *
+                               (pipe / (group_blocks / thread_k_blocks)));
       reinterpret_cast<int4*>(&frag_s[k % 2])[0] = sh_s_stage[s_sh_rd];
     }
     int4* sh_a_stage = sh_a + a_sh_stage * pipe;
   #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++) {
-      ldsm4(frag_a[k % 2][i][0], &sh_a_stage[a_sh_rd_trans[0][k % b_sh_wr_iters][i]]);
-      ldsm4(frag_a[k % 2][i][1], &sh_a_stage[a_sh_rd_trans[1][k % b_sh_wr_iters][i]]);
+      ldsm4(frag_a[k % 2][i][0],
+            &sh_a_stage[a_sh_rd_trans[0][k % b_sh_wr_iters][i]]);
+      ldsm4(frag_a[k % 2][i][1],
+            &sh_a_stage[a_sh_rd_trans[1][k % b_sh_wr_iters][i]]);
     }
 
     int4* sh_b_stage = sh_b + b_sh_stage * pipe;
   #pragma unroll
     for (int i = 0; i < b_thread_vecs; i++) {
-      frag_b_quant[k % 2][i] =
-          *reinterpret_cast<I4*>(&sh_b_stage[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd + i]);
+      frag_b_quant[k % 2][i] = *reinterpret_cast<I4*>(
+          &sh_b_stage[b_sh_rd_delta * (k % b_sh_wr_iters) + b_sh_rd + i]);
     }
 
     // Load meta with ldsm4
     int4* sh_m_stage = sh_m + m_sh_stage * pipe;
-    ldsm4_m(frag_m[k % 2][0], &sh_m_stage[m_sh_rd_delta * (k % m_sh_iters) + m_sh_rd]);
+    ldsm4_m(frag_m[k % 2][0],
+            &sh_m_stage[m_sh_rd_delta * (k % m_sh_iters) + m_sh_rd]);
   };
 
   // Execute the actual tensor core matmul of a sub-tile.
@@ -467,7 +496,8 @@ __global__ void Marlin_24(
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
-        mma_sp(frag_b0, frag_b1, frag_a[k % 2][i][0], frag_c[i][j][0], frag_m[k % 2][j / 2], j % 2);
+        mma_sp(frag_b0, frag_b1, frag_a[k % 2][i][0], frag_c[i][j][0],
+               frag_m[k % 2][j / 2], j % 2);
       }
     }
   };
@@ -482,12 +512,12 @@ __global__ void Marlin_24(
       int red_idx = threadIdx.x / b_sh_stride_threads;
       constexpr int red_sh_stride = b_sh_stride_threads * 4 * 2;
       constexpr int red_sh_delta = b_sh_stride_threads;
-      int red_sh_rd =
-          red_sh_stride * (threadIdx.x / b_sh_stride_threads) + (threadIdx.x % b_sh_stride_threads);
+      int red_sh_rd = red_sh_stride * (threadIdx.x / b_sh_stride_threads) +
+                      (threadIdx.x % b_sh_stride_threads);
 
   // Parallel logarithmic shared memory reduction. We make sure to avoid any
-  // unnecessary read or write iterations, e.g., for two warps we write only once
-  // by warp 1 and read only once by warp 0.
+  // unnecessary read or write iterations, e.g., for two warps we write only
+  // once by warp 1 and read only once by warp 0.
   #pragma unroll
       for (int m_block = 0; m_block < thread_m_blocks; m_block++) {
   #pragma unroll
@@ -495,15 +525,19 @@ __global__ void Marlin_24(
           if (i <= red_idx && red_idx < 2 * i) {
   #pragma unroll
             for (int j = 0; j < 4 * 2; j++) {
-              int red_sh_wr = red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
+              int red_sh_wr =
+                  red_sh_delta * j + (red_sh_rd - red_sh_stride * i);
               if (i < red_off) {
-                float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * j + red_sh_rd]);
+                float* c_rd =
+                    reinterpret_cast<float*>(&sh[red_sh_delta * j + red_sh_rd]);
                 float* c_wr = reinterpret_cast<float*>(&sh[red_sh_wr]);
   #pragma unroll
                 for (int k = 0; k < 4; k++)
-                  reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + j][k] += c_rd[k] + c_wr[k];
+                  reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + j][k] +=
+                      c_rd[k] + c_wr[k];
               }
-              sh[red_sh_wr] = reinterpret_cast<int4*>(&frag_c)[4 * 2 * m_block + j];
+              sh[red_sh_wr] =
+                  reinterpret_cast<int4*>(&frag_c)[4 * 2 * m_block + j];
             }
           }
           __syncthreads();
@@ -511,10 +545,12 @@ __global__ void Marlin_24(
         if (red_idx == 0) {
   #pragma unroll
           for (int i = 0; i < 4 * 2; i++) {
-            float* c_rd = reinterpret_cast<float*>(&sh[red_sh_delta * i + red_sh_rd]);
+            float* c_rd =
+                reinterpret_cast<float*>(&sh[red_sh_delta * i + red_sh_rd]);
   #pragma unroll
             for (int j = 0; j < 4; j++)
-              reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + i][j] += c_rd[j];
+              reinterpret_cast<FragC*>(frag_c)[4 * 2 * m_block + i][j] +=
+                  c_rd[j];
           }
         }
         __syncthreads();
@@ -523,9 +559,9 @@ __global__ void Marlin_24(
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partitioning
-  // minimizes the number of such reductions and our outputs are usually rather
-  // small, we perform this reduction serially in L2 cache.
+  // finally have to globally reduce over the results. As the striped
+  // partitioning minimizes the number of such reductions and our outputs are
+  // usually rather small, we perform this reduction serially in L2 cache.
   auto global_reduce = [&](bool first = false, bool last = false) {
     // We are very careful here to reduce directly in the output buffer to
     // maximize L2 cache utilization in this step. To do this, we write out
@@ -534,9 +570,10 @@ __global__ void Marlin_24(
     if (threadIdx.x < active_threads) {
       int c_gl_stride = prob_n / 8;
       int c_gl_wr_delta_o = 2 * 4 * c_gl_stride;
-      int c_gl_wr_delta_i = c_gl_stride;  // 8 threads (e.g., 0,4,8,12,16,20,24,28)
-      int c_gl_wr =
-          2 * c_gl_stride * (threadIdx.x % 4) + 8 * (threadIdx.x / 32) + (threadIdx.x % 32) / 4;
+      int c_gl_wr_delta_i =
+          c_gl_stride;  // 8 threads (e.g., 0,4,8,12,16,20,24,28)
+      int c_gl_wr = 2 * c_gl_stride * (threadIdx.x % 4) +
+                    8 * (threadIdx.x / 32) + (threadIdx.x % 32) / 4;
       c_gl_wr += (2 * thread_n_blocks) * slice_col;
       constexpr int c_sh_wr_delta = active_threads;
       int c_sh_wr = threadIdx.x;
@@ -544,14 +581,16 @@ __global__ void Marlin_24(
       int col = 2 * ((threadIdx.x % 32) % 4);
 
       if (!first) {
-  // Interestingly, doing direct global accesses here really seems to mess up the
-  // compiler and lead to slowdowns, hence we also use async-copies even though
-  // these fetches are not actually asynchronous.
+  // Interestingly, doing direct global accesses here really seems to mess up
+  // the compiler and lead to slowdowns, hence we also use async-copies even
+  // though these fetches are not actually asynchronous.
   #pragma unroll
         for (int i = 0; i < thread_m_blocks * 4; i++) {
           cp_async4_pred(&sh[c_sh_wr + c_sh_wr_delta * i],
-                         &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)],
-                         i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + col + (i % 2) < prob_m);
+                         &C[c_gl_wr + c_gl_wr_delta_o * (i / 2) +
+                            c_gl_wr_delta_i * (i % 2)],
+                         i < (thread_m_blocks - 1) * 4 ||
+                             8 * (i / 2) + col + (i % 2) < prob_m);
         }
         cp_async_fence();
         cp_async_wait<0>();
@@ -559,7 +598,8 @@ __global__ void Marlin_24(
 
   #pragma unroll
       for (int i = 0; i < thread_m_blocks * 4; i++) {
-        if (i < (thread_m_blocks - 1) * 4 || 8 * (i / 2) + col + (i % 2) < prob_m) {
+        if (i < (thread_m_blocks - 1) * 4 ||
+            8 * (i / 2) + col + (i % 2) < prob_m) {
           if (!first) {
             int4 c_red = sh[c_sh_wr + i * c_sh_wr_delta];
   #pragma unroll
@@ -567,8 +607,10 @@ __global__ void Marlin_24(
   #pragma unroll
               for (int j1 = 0; j1 < 4; j1++) {
                 reinterpret_cast<float*>(
-                    &frag_c)[4 * 2 * 4 * (i / 4) + 8 * j1 + 2 * j2 + 4 * ((i % 4) / 2) + i % 2] +=
-                    __half2float(reinterpret_cast<__half*>(&c_red)[(j2 * 4 + j1)]);
+                    &frag_c)[4 * 2 * 4 * (i / 4) + 8 * j1 + 2 * j2 +
+                             4 * ((i % 4) / 2) + i % 2] +=
+                    __half2float(
+                        reinterpret_cast<__half*>(&c_red)[(j2 * 4 + j1)]);
               }
             }
           }
@@ -578,12 +620,14 @@ __global__ void Marlin_24(
             for (int j2 = 0; j2 < 2; j2++) {
   #pragma unroll
               for (int j1 = 0; j1 < 4; j1++) {
-                reinterpret_cast<__half*>(&c)[(j2 * 4 + j1)] = __float2half(
-                    reinterpret_cast<float*>(&frag_c)[4 * 2 * 4 * (i / 4) + 8 * j1 + 2 * j2 +
-                                                      4 * ((i % 4) / 2) + i % 2]);
+                reinterpret_cast<__half*>(&c)[(j2 * 4 + j1)] =
+                    __float2half(reinterpret_cast<float*>(
+                        &frag_c)[4 * 2 * 4 * (i / 4) + 8 * j1 + 2 * j2 +
+                                 4 * ((i % 4) / 2) + i % 2]);
               }
             }
-            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] = c;
+            C[c_gl_wr + c_gl_wr_delta_o * (i / 2) + c_gl_wr_delta_i * (i % 2)] =
+                c;
           }
         }
       }
@@ -602,21 +646,23 @@ __global__ void Marlin_24(
 
     int c_gl_wr_delta = c_gl_stride * (threads / (2 * thread_n_blocks));
 
-    int c_gl_wr =
-        c_gl_stride * (threadIdx.x / (2 * thread_n_blocks)) + (threadIdx.x % (2 * thread_n_blocks));
+    int c_gl_wr = c_gl_stride * (threadIdx.x / (2 * thread_n_blocks)) +
+                  (threadIdx.x % (2 * thread_n_blocks));
     c_gl_wr += (2 * thread_n_blocks) * slice_col;
 
-    int c_sh_wr = c_sh_stride_2 * ((threadIdx.x % 32) % 4) + ((threadIdx.x % 32) / 4);  // RLC:
-    c_sh_wr += 8 * (threadIdx.x / 32);  // 128/4(half4)
+    int c_sh_wr = c_sh_stride_2 * ((threadIdx.x % 32) % 4) +
+                  ((threadIdx.x % 32) / 4);  // RLC:
+    c_sh_wr += 8 * (threadIdx.x / 32);       // 128/4(half4)
 
-    constexpr int c_sh_rd_delta = c_sh_stride_3 * (threads / (2 * 2 * thread_n_blocks));  // RLC:
+    constexpr int c_sh_rd_delta =
+        c_sh_stride_3 * (threads / (2 * 2 * thread_n_blocks));  // RLC:
     int c_sh_rd = c_sh_stride_3 * (threadIdx.x / (2 * 2 * thread_n_blocks)) +
                   (threadIdx.x % (2 * 2 * thread_n_blocks));
 
     int c_gl_wr_end = c_gl_stride * prob_m;
 
-    auto write = [&](int idx, float c0, float c1, float c2, float c3, FragS& s0, float c4, float c5,
-                     float c6, float c7, FragS& s1) {
+    auto write = [&](int idx, float c0, float c1, float c2, float c3, FragS& s0,
+                     float c4, float c5, float c6, float c7, FragS& s1) {
       uint2 res[2];
       res[0] = to_half4(c0, c1, c2, c3);
       res[1] = to_half4(c4, c5, c6, c7);
@@ -636,18 +682,22 @@ __global__ void Marlin_24(
   #pragma unroll
       for (int i = 0; i < thread_m_blocks; i++) {
         int wr = c_sh_wr;
-        write(wr, frag_c[i][0][0][0], frag_c[i][1][0][0], frag_c[i][2][0][0], frag_c[i][3][0][0],
-              frag_s[0][0], frag_c[i][0][0][2], frag_c[i][1][0][2], frag_c[i][2][0][2],
-              frag_c[i][3][0][2], frag_s[0][2]);
-        write(wr + c_sh_stride, frag_c[i][0][0][1], frag_c[i][1][0][1], frag_c[i][2][0][1],
-              frag_c[i][3][0][1], frag_s[0][0], frag_c[i][0][0][3], frag_c[i][1][0][3],
-              frag_c[i][2][0][3], frag_c[i][3][0][3], frag_s[0][2]);
-        write(wr + 4 * c_sh_stride_2, frag_c[i][0][1][0], frag_c[i][1][1][0], frag_c[i][2][1][0],
-              frag_c[i][3][1][0], frag_s[0][0], frag_c[i][0][1][2], frag_c[i][1][1][2],
-              frag_c[i][2][1][2], frag_c[i][3][1][2], frag_s[0][2]);
-        write(wr + 4 * c_sh_stride_2 + c_sh_stride, frag_c[i][0][1][1], frag_c[i][1][1][1],
-              frag_c[i][2][1][1], frag_c[i][3][1][1], frag_s[0][0], frag_c[i][0][1][3],
-              frag_c[i][1][1][3], frag_c[i][2][1][3], frag_c[i][3][1][3], frag_s[0][2]);
+        write(wr, frag_c[i][0][0][0], frag_c[i][1][0][0], frag_c[i][2][0][0],
+              frag_c[i][3][0][0], frag_s[0][0], frag_c[i][0][0][2],
+              frag_c[i][1][0][2], frag_c[i][2][0][2], frag_c[i][3][0][2],
+              frag_s[0][2]);
+        write(wr + c_sh_stride, frag_c[i][0][0][1], frag_c[i][1][0][1],
+              frag_c[i][2][0][1], frag_c[i][3][0][1], frag_s[0][0],
+              frag_c[i][0][0][3], frag_c[i][1][0][3], frag_c[i][2][0][3],
+              frag_c[i][3][0][3], frag_s[0][2]);
+        write(wr + 4 * c_sh_stride_2, frag_c[i][0][1][0], frag_c[i][1][1][0],
+              frag_c[i][2][1][0], frag_c[i][3][1][0], frag_s[0][0],
+              frag_c[i][0][1][2], frag_c[i][1][1][2], frag_c[i][2][1][2],
+              frag_c[i][3][1][2], frag_s[0][2]);
+        write(wr + 4 * c_sh_stride_2 + c_sh_stride, frag_c[i][0][1][1],
+              frag_c[i][1][1][1], frag_c[i][2][1][1], frag_c[i][3][1][1],
+              frag_s[0][0], frag_c[i][0][1][3], frag_c[i][1][1][3],
+              frag_c[i][2][1][3], frag_c[i][3][1][3], frag_s[0][2]);
 
         c_sh_wr += 8 * c_sh_stride_2;
       }
@@ -655,7 +705,9 @@ __global__ void Marlin_24(
     __syncthreads();
 
   #pragma unroll
-    for (int i = 0; i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks)); i++) {
+    for (int i = 0;
+         i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks));
+         i++) {
       if (c_gl_wr < c_gl_wr_end) {
         C[c_gl_wr] = sh[c_sh_rd];
         c_gl_wr += c_gl_wr_delta;
@@ -677,12 +729,13 @@ __global__ void Marlin_24(
 
   // Main loop.
   while (slice_iters) {
-  // We unroll over both the global fetch and the register load pipeline to ensure
-  // all shared memory accesses are static. Note that both pipelines have even
-  // length meaning that the next iteration will always start at index 0.
+  // We unroll over both the global fetch and the register load pipeline to
+  // ensure all shared memory accesses are static. Note that both pipelines have
+  // even length meaning that the next iteration will always start at index 0.
   #pragma unroll
     for (int pipe = 0; pipe < stages;) {
-      fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages);
+      fetch_to_shared((pipe + stages - 1) % stages, pipe,
+                      slice_iters >= stages);
       wait_for_stage();
 
       fetch_to_registers(pipe + 1, (pipe + 1) % stages);
@@ -740,24 +793,28 @@ __global__ void Marlin_24(
         if (threadIdx.x / 32 < thread_n_blocks / 4) {
   #pragma unroll
           for (int i = 0; i < thread_m_blocks; i++) {
-            scale_floats(&frag_c[i][0][0][0], &frag_c[i][1][0][0], &frag_c[i][2][0][0],
-                         &frag_c[i][3][0][0], frag_s[0][0], &frag_c[i][0][0][2],
-                         &frag_c[i][1][0][2], &frag_c[i][2][0][2], &frag_c[i][3][0][2],
+            scale_floats(&frag_c[i][0][0][0], &frag_c[i][1][0][0],
+                         &frag_c[i][2][0][0], &frag_c[i][3][0][0], frag_s[0][0],
+                         &frag_c[i][0][0][2], &frag_c[i][1][0][2],
+                         &frag_c[i][2][0][2], &frag_c[i][3][0][2],
                          frag_s[0][2]);
 
-            scale_floats(&frag_c[i][0][0][1], &frag_c[i][1][0][1], &frag_c[i][2][0][1],
-                         &frag_c[i][3][0][1], frag_s[0][0], &frag_c[i][0][0][3],
-                         &frag_c[i][1][0][3], &frag_c[i][2][0][3], &frag_c[i][3][0][3],
+            scale_floats(&frag_c[i][0][0][1], &frag_c[i][1][0][1],
+                         &frag_c[i][2][0][1], &frag_c[i][3][0][1], frag_s[0][0],
+                         &frag_c[i][0][0][3], &frag_c[i][1][0][3],
+                         &frag_c[i][2][0][3], &frag_c[i][3][0][3],
                          frag_s[0][2]);
 
-            scale_floats(&frag_c[i][0][1][0], &frag_c[i][1][1][0], &frag_c[i][2][1][0],
-                         &frag_c[i][3][1][0], frag_s[0][0], &frag_c[i][0][1][2],
-                         &frag_c[i][1][1][2], &frag_c[i][2][1][2], &frag_c[i][3][1][2],
+            scale_floats(&frag_c[i][0][1][0], &frag_c[i][1][1][0],
+                         &frag_c[i][2][1][0], &frag_c[i][3][1][0], frag_s[0][0],
+                         &frag_c[i][0][1][2], &frag_c[i][1][1][2],
+                         &frag_c[i][2][1][2], &frag_c[i][3][1][2],
                          frag_s[0][2]);
 
-            scale_floats(&frag_c[i][0][1][1], &frag_c[i][1][1][1], &frag_c[i][2][1][1],
-                         &frag_c[i][3][1][1], frag_s[0][0], &frag_c[i][0][1][3],
-                         &frag_c[i][1][1][3], &frag_c[i][2][1][3], &frag_c[i][3][1][3],
+            scale_floats(&frag_c[i][0][1][1], &frag_c[i][1][1][1],
+                         &frag_c[i][2][1][1], &frag_c[i][3][1][1], frag_s[0][0],
+                         &frag_c[i][0][1][3], &frag_c[i][1][1][3],
+                         &frag_c[i][2][1][3], &frag_c[i][3][1][3],
                          frag_s[0][2]);
           }
         }
@@ -777,11 +834,14 @@ __global__ void Marlin_24(
       slice_col++;
       init_slice();
       if (slice_iters) {
-        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) + (threadIdx.x % a_gl_rd_delta_o);
+        a_gl_rd = a_gl_stride * (threadIdx.x / a_gl_rd_delta_o) +
+                  (threadIdx.x % a_gl_rd_delta_o);
   #pragma unroll
-        for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
+        for (int i = 0; i < b_sh_wr_iters; i++)
+          B_ptr[i] += b_sh_stride - b_gl_rd_delta_o * k_tiles;
   #pragma unroll
-        for (int i = 0; i < m_sh_iters; i++) meta_ptr[i] += (m_sh_stride)-m_gl_rd_delta_o * k_tiles;
+        for (int i = 0; i < m_sh_iters; i++)
+          meta_ptr[i] += (m_sh_stride)-m_gl_rd_delta_o * k_tiles;
         if (slice_col == 0) {
   #pragma unroll
           for (int i = 0; i < b_sh_wr_iters; i++) B_ptr[i] -= b_gl_stride;
@@ -797,22 +857,28 @@ __global__ void Marlin_24(
 
 #endif
 
-#define CALL_IF_2_4(NUM_BITS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, GROUP_BLOCKS) \
-  else if (num_bits == NUM_BITS && thread_m_blocks == THREAD_M_BLOCKS &&                       \
-           thread_n_blocks == THREAD_N_BLOCKS && thread_k_blocks == THREAD_K_BLOCKS &&         \
-           group_blocks == GROUP_BLOCKS) {                                                     \
-    cudaFuncSetAttribute(Marlin_24<NUM_BITS, THREADS, THREAD_N_BLOCKS, THREAD_M_BLOCKS,        \
-                                   THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>,                     \
-                         cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);         \
-    Marlin_24<NUM_BITS, THREADS, THREAD_N_BLOCKS, THREAD_M_BLOCKS, THREAD_K_BLOCKS, STAGES,    \
-              GROUP_BLOCKS><<<blocks, THREADS, max_shared_mem, stream>>>(                      \
-        A_ptr, B_ptr, meta_ptr, C_ptr, s_ptr, prob_n, prob_m, prob_k, locks);                  \
+#define CALL_IF_2_4(NUM_BITS, THREAD_M_BLOCKS, THREAD_N_BLOCKS,               \
+                    THREAD_K_BLOCKS, GROUP_BLOCKS)                            \
+  else if (num_bits == NUM_BITS && thread_m_blocks == THREAD_M_BLOCKS &&      \
+           thread_n_blocks == THREAD_N_BLOCKS &&                              \
+           thread_k_blocks == THREAD_K_BLOCKS &&                              \
+           group_blocks == GROUP_BLOCKS) {                                    \
+    cudaFuncSetAttribute(                                                     \
+        Marlin_24<NUM_BITS, THREADS, THREAD_N_BLOCKS, THREAD_M_BLOCKS,        \
+                  THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>,                     \
+        cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);         \
+    Marlin_24<NUM_BITS, THREADS, THREAD_N_BLOCKS, THREAD_M_BLOCKS,            \
+              THREAD_K_BLOCKS, STAGES, GROUP_BLOCKS>                          \
+        <<<blocks, THREADS, max_shared_mem, stream>>>(A_ptr, B_ptr, meta_ptr, \
+                                                      C_ptr, s_ptr, prob_n,   \
+                                                      prob_m, prob_k, locks); \
   }
 
-void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C, void* s, int prob_m,
-                     int prob_n, int prob_k, void* workspace, int num_bits, int groupsize = -1,
-                     int dev = 0, cudaStream_t stream = 0, int thread_k = -1, int thread_m = -1,
-                     int sms = -1, int max_par = 16) {
+void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
+                     void* s, int prob_m, int prob_n, int prob_k,
+                     void* workspace, int num_bits, int groupsize = -1,
+                     int dev = 0, cudaStream_t stream = 0, int thread_k = -1,
+                     int thread_m = -1, int sms = -1, int max_par = 16) {
   int tot_n = prob_n;
   int tot_n_blocks = ceildiv(tot_n, 16);
   int pad = 16 * tot_n_blocks - tot_n;
@@ -823,13 +889,14 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C, vo
   TORCH_CHECK(sms > 0);
 
   int max_shared_mem = 0;
-  cudaDeviceGetAttribute(&max_shared_mem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+  cudaDeviceGetAttribute(&max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   TORCH_CHECK(max_shared_mem > 0);
 
   if (thread_k == -1 || thread_m == -1) {
     if (prob_n <= 16) {
-      // For small batchizes, better partitioningif is slightly more important than
-      // better compute utilization
+      // For small batchizes, better partitioningif is slightly more important
+      // than better compute utilization
       thread_k = 128;
       thread_m = 128;
     } else {
@@ -852,8 +919,8 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C, vo
                 " is not divisible by group_blocks = ", group_blocks);
   }
 
-  TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m, ", ", prob_n, ", ",
-              prob_k, "]");
+  TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
+              ", ", prob_n, ", ", prob_k, "]");
 
   const int4* A_ptr = (const int4*)A;
   const int4* B_ptr = (const int4*)B;
@@ -907,8 +974,9 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C, vo
     CALL_IF_2_4(8, 16, 4, 2, -1)
     CALL_IF_2_4(8, 16, 4, 2, 4)
     else {
-      throw std::runtime_error("Unsupported shapes: MKN = [" + str(prob_m) + ", " + str(prob_k) +
-                               ", " + str(prob_n) + "]" + ", groupsize = " + str(groupsize) +
+      throw std::runtime_error("Unsupported shapes: MKN = [" + str(prob_m) +
+                               ", " + str(prob_k) + ", " + str(prob_n) + "]" +
+                               ", groupsize = " + str(groupsize) +
                                ", thread_m_blocks = " + str(thread_m_blocks) +
                                ", thread_n_blocks = " + str(thread_n_blocks) +
                                ", thread_k_blocks = " + str(thread_k_blocks));
@@ -922,40 +990,50 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C, vo
 }  // namespace marlin_24
 
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                  torch::Tensor& b_meta, torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits, int64_t size_m,
-                                  int64_t size_n, int64_t size_k) {
+                                  torch::Tensor& b_meta,
+                                  torch::Tensor& b_scales,
+                                  torch::Tensor& workspace, int64_t num_bits,
+                                  int64_t size_m, int64_t size_n,
+                                  int64_t size_k) {
   // Verify num_bits
-  TORCH_CHECK(num_bits == 4 || num_bits == 8, "num_bits must be 4 or 8. Got = ", num_bits);
+  TORCH_CHECK(num_bits == 4 || num_bits == 8,
+              "num_bits must be 4 or 8. Got = ", num_bits);
   int pack_factor = 32 / num_bits;
 
   // Verify M
   TORCH_CHECK(size_m == a.size(0),
-              "Shape mismatch: a.size(0) = " + str(a.size(0)) + ", size_m = " + str(size_m));
+              "Shape mismatch: a.size(0) = " + str(a.size(0)) +
+                  ", size_m = " + str(size_m));
 
   // Verify K
   TORCH_CHECK(size_k == a.size(1),
-              "Shape mismatch: a.size(1) = " + str(a.size(1)) + ", size_k = " + str(size_k));
-  TORCH_CHECK(
-      size_k % marlin_24::tile_size == 0,
-      "size_k = " + str(size_k) + " is not divisible by tile_size = " + str(marlin_24::tile_size));
+              "Shape mismatch: a.size(1) = " + str(a.size(1)) +
+                  ", size_k = " + str(size_k));
+  TORCH_CHECK(size_k % marlin_24::tile_size == 0,
+              "size_k = " + str(size_k) + " is not divisible by tile_size = " +
+                  str(marlin_24::tile_size));
   TORCH_CHECK((size_k / marlin_24::tile_size / 2) == b_q_weight.size(0),
-              "Shape mismatch: b_q_weight.size(0) = " + str(b_q_weight.size(0)) +
-                  ", size_k = " + str(size_k) + ", tile_size = " + str(marlin_24::tile_size));
+              "Shape mismatch: b_q_weight.size(0) = " +
+                  str(b_q_weight.size(0)) + ", size_k = " + str(size_k) +
+                  ", tile_size = " + str(marlin_24::tile_size));
 
   // Verify N
   TORCH_CHECK(b_scales.size(1) == size_n,
-              "b_scales.size(1) = " + str(b_scales.size(1)) + ", size_n = " + str(size_n));
-  TORCH_CHECK(b_q_weight.size(1) % marlin_24::tile_size == 0,
-              "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
-                  " is not divisible by tile_size = " + str(marlin_24::tile_size));
+              "b_scales.size(1) = " + str(b_scales.size(1)) +
+                  ", size_n = " + str(size_n));
+  TORCH_CHECK(
+      b_q_weight.size(1) % marlin_24::tile_size == 0,
+      "b_q_weight.size(1) = " + str(b_q_weight.size(1)) +
+          " is not divisible by tile_size = " + str(marlin_24::tile_size));
 
   int actual_size_n = (b_q_weight.size(1) / marlin_24::tile_size) * pack_factor;
-  TORCH_CHECK(size_n == actual_size_n,
-              "size_n = " + str(size_n) + ", actual_size_n = " + str(actual_size_n));
+  TORCH_CHECK(
+      size_n == actual_size_n,
+      "size_n = " + str(size_n) + ", actual_size_n = " + str(actual_size_n));
 
   // Verify meta
-  TORCH_CHECK(b_meta.size(0) == size_k / 8 / 2 / 2, "b_meta.size(0) = ", b_meta.size(0),
+  TORCH_CHECK(b_meta.size(0) == size_k / 8 / 2 / 2,
+              "b_meta.size(0) = ", b_meta.size(0),
               " is not size_k / 8 / 2 / 2 = ", size_k / 8 / 2 / 2);
   TORCH_CHECK(b_meta.size(1) == size_n * 2, "b_meta.size(1) = ", b_meta.size(1),
               " is not size_n * 2 = ", size_n * 2);
@@ -990,28 +1068,33 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   if (b_scales.size(0) > 1) {
     TORCH_CHECK(size_k % b_scales.size(0) == 0,
                 "size_k = " + str(size_k) +
-                    ", is not divisible by b_scales.size(0) = " + str(b_scales.size(0)));
+                    ", is not divisible by b_scales.size(0) = " +
+                    str(b_scales.size(0)));
     groupsize = size_k / b_scales.size(0);
     groupsize /= 2;  // Because of 24
   }
 
   // Verify groupsize
-  TORCH_CHECK(groupsize == -1 || groupsize == 64, "Unexpected groupsize = " + str(groupsize));
+  TORCH_CHECK(groupsize == -1 || groupsize == 64,
+              "Unexpected groupsize = " + str(groupsize));
 
   // Verify workspace size
   TORCH_CHECK(size_n % marlin_24::min_thread_n == 0,
               "size_n = " + str(size_n) +
-                  ", is not divisible by min_thread_n = " + str(marlin_24::min_thread_n));
-  int min_workspace_size = (size_n / marlin_24::min_thread_n) * marlin_24::max_par;
+                  ", is not divisible by min_thread_n = " +
+                  str(marlin_24::min_thread_n));
+  int min_workspace_size =
+      (size_n / marlin_24::min_thread_n) * marlin_24::max_par;
   TORCH_CHECK(workspace.numel() >= min_workspace_size,
               "workspace.numel = " + str(workspace.numel()) +
                   " is below min_workspace_size = " + str(min_workspace_size));
 
   int dev = a.get_device();
-  marlin_24::marlin_cuda_2_4(a.data_ptr(), b_q_weight.data_ptr(), b_meta.data_ptr(), c.data_ptr(),
-                             b_scales.data_ptr(), size_n, size_m, size_k, workspace.data_ptr(),
-                             num_bits, groupsize, dev, at::cuda::getCurrentCUDAStream(dev),
-                             thread_k, thread_m, sms, max_par);
+  marlin_24::marlin_cuda_2_4(
+      a.data_ptr(), b_q_weight.data_ptr(), b_meta.data_ptr(), c.data_ptr(),
+      b_scales.data_ptr(), size_n, size_m, size_k, workspace.data_ptr(),
+      num_bits, groupsize, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
+      thread_m, sms, max_par);
 
   return c;
 }

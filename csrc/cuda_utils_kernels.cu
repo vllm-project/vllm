@@ -9,7 +9,8 @@ int get_device_attribute(int attribute, int device_id) {
   } else {
     device = device_id;
   }
-  cudaDeviceGetAttribute(&value, static_cast<cudaDeviceAttr>(attribute), device);
+  cudaDeviceGetAttribute(&value, static_cast<cudaDeviceAttr>(attribute),
+                         device);
   return value;
 }
 

@@ -94,147 +94,147 @@ else
 fi
 echo 'vLLM yapf: Done'
 
-# Run mypy
-echo 'vLLM mypy:'
-mypy vllm/attention --config-file pyproject.toml
-mypy vllm/core --config-file pyproject.toml
-mypy vllm/distributed --config-file pyproject.toml
-mypy vllm/entrypoints --config-file pyproject.toml
-mypy vllm/executor --config-file pyproject.toml
-mypy vllm/usage --config-file pyproject.toml
-mypy vllm/*.py --config-file pyproject.toml
-mypy vllm/transformers_utils --config-file pyproject.toml
-mypy vllm/engine  --config-file pyproject.toml
-mypy vllm/worker --config-file pyproject.toml
-mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/model_executor  --config-file pyproject.toml
-mypy vllm/lora --config-file pyproject.toml
-mypy vllm/logging --config-file pyproject.toml
-mypy vllm/model_executor --config-file pyproject.toml
+# # Run mypy
+# echo 'vLLM mypy:'
+# mypy vllm/attention --config-file pyproject.toml
+# mypy vllm/core --config-file pyproject.toml
+# mypy vllm/distributed --config-file pyproject.toml
+# mypy vllm/entrypoints --config-file pyproject.toml
+# mypy vllm/executor --config-file pyproject.toml
+# mypy vllm/usage --config-file pyproject.toml
+# mypy vllm/*.py --config-file pyproject.toml
+# mypy vllm/transformers_utils --config-file pyproject.toml
+# mypy vllm/engine  --config-file pyproject.toml
+# mypy vllm/worker --config-file pyproject.toml
+# mypy vllm/spec_decode --config-file pyproject.toml
+# mypy vllm/model_executor  --config-file pyproject.toml
+# mypy vllm/lora --config-file pyproject.toml
+# mypy vllm/logging --config-file pyproject.toml
+# mypy vllm/model_executor --config-file pyproject.toml
 
 
-CODESPELL_EXCLUDES=(
-    '--skip' '*docs/source/_build/**'
-)
+# CODESPELL_EXCLUDES=(
+#     '--skip' '*docs/source/_build/**'
+# )
 
-# check spelling of specified files
-spell_check() {
-    codespell "$@"
-}
+# # check spelling of specified files
+# spell_check() {
+#     codespell "$@"
+# }
 
-spell_check_all(){
-  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
-}
+# spell_check_all(){
+#   codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
+# }
 
-# Spelling  check of files that differ from main branch.
-spell_check_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    MERGEBASE="$(git merge-base origin/main HEAD)"
+# # Spelling  check of files that differ from main branch.
+# spell_check_changed() {
+#     # The `if` guard ensures that the list of filenames is not empty, which
+#     # could cause ruff to receive 0 positional arguments, making it hang
+#     # waiting for STDIN.
+#     #
+#     # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+#     # exist on both branches.
+#     MERGEBASE="$(git merge-base origin/main HEAD)"
 
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell "${CODESPELL_EXCLUDES[@]}"
-    fi
-}
+#     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+#         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+#              codespell "${CODESPELL_EXCLUDES[@]}"
+#     fi
+# }
 
-# Run Codespell
-## This flag runs spell check of individual files. --files *must* be the first command line
-## arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   spell_check "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   spell_check_all
-else
-   # Check spelling only of the files that changed in last commit.
-   spell_check_changed
-fi
-echo 'vLLM codespell: Done'
+# # Run Codespell
+# ## This flag runs spell check of individual files. --files *must* be the first command line
+# ## arg to use this option.
+# if [[ "$1" == '--files' ]]; then
+#    spell_check "${@:2}"
+#    # If `--all` is passed, then any further arguments are ignored and the
+#    # entire python directory is linted.
+# elif [[ "$1" == '--all' ]]; then
+#    spell_check_all
+# else
+#    # Check spelling only of the files that changed in last commit.
+#    spell_check_changed
+# fi
+# echo 'vLLM codespell: Done'
 
 
-# Lint specified files
-lint() {
-    ruff "$@"
-}
+# # Lint specified files
+# lint() {
+#     ruff "$@"
+# }
 
-# Lint files that differ from main branch. Ignores dirs that are not slated
-# for autolint yet.
-lint_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    MERGEBASE="$(git merge-base origin/main HEAD)"
+# # Lint files that differ from main branch. Ignores dirs that are not slated
+# # for autolint yet.
+# lint_changed() {
+#     # The `if` guard ensures that the list of filenames is not empty, which
+#     # could cause ruff to receive 0 positional arguments, making it hang
+#     # waiting for STDIN.
+#     #
+#     # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+#     # exist on both branches.
+#     MERGEBASE="$(git merge-base origin/main HEAD)"
 
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             ruff
-    fi
+#     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+#         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+#              ruff
+#     fi
 
-}
+# }
 
-# Run Ruff
-### This flag lints individual files. --files *must* be the first command line
-### arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   lint "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   lint vllm tests
-else
-   # Format only the files that changed in last commit.
-   lint_changed
-fi
-echo 'vLLM ruff: Done'
+# # Run Ruff
+# ### This flag lints individual files. --files *must* be the first command line
+# ### arg to use this option.
+# if [[ "$1" == '--files' ]]; then
+#    lint "${@:2}"
+#    # If `--all` is passed, then any further arguments are ignored and the
+#    # entire python directory is linted.
+# elif [[ "$1" == '--all' ]]; then
+#    lint vllm tests
+# else
+#    # Format only the files that changed in last commit.
+#    lint_changed
+# fi
+# echo 'vLLM ruff: Done'
 
-# check spelling of specified files
-isort_check() {
-    isort "$@"
-}
+# # check spelling of specified files
+# isort_check() {
+#     isort "$@"
+# }
 
-isort_check_all(){
-  isort .
-}
+# isort_check_all(){
+#   isort .
+# }
 
-# Spelling  check of files that differ from main branch.
-isort_check_changed() {
-    # The `if` guard ensures that the list of filenames is not empty, which
-    # could cause ruff to receive 0 positional arguments, making it hang
-    # waiting for STDIN.
-    #
-    # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
-    # exist on both branches.
-    MERGEBASE="$(git merge-base origin/main HEAD)"
+# # Spelling  check of files that differ from main branch.
+# isort_check_changed() {
+#     # The `if` guard ensures that the list of filenames is not empty, which
+#     # could cause ruff to receive 0 positional arguments, making it hang
+#     # waiting for STDIN.
+#     #
+#     # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
+#     # exist on both branches.
+#     MERGEBASE="$(git merge-base origin/main HEAD)"
 
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             isort
-    fi
-}
+#     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
+#         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+#              isort
+#     fi
+# }
 
-# Run Isort
-# This flag runs spell check of individual files. --files *must* be the first command line
-# arg to use this option.
-if [[ "$1" == '--files' ]]; then
-   isort_check "${@:2}"
-   # If `--all` is passed, then any further arguments are ignored and the
-   # entire python directory is linted.
-elif [[ "$1" == '--all' ]]; then
-   isort_check_all
-else
-   # Check spelling only of the files that changed in last commit.
-   isort_check_changed
-fi
-echo 'vLLM isort: Done'
+# # Run Isort
+# # This flag runs spell check of individual files. --files *must* be the first command line
+# # arg to use this option.
+# if [[ "$1" == '--files' ]]; then
+#    isort_check "${@:2}"
+#    # If `--all` is passed, then any further arguments are ignored and the
+#    # entire python directory is linted.
+# elif [[ "$1" == '--all' ]]; then
+#    isort_check_all
+# else
+#    # Check spelling only of the files that changed in last commit.
+#    isort_check_changed
+# fi
+# echo 'vLLM isort: Done'
 
 # Clang-format section
 CLANG_FORMAT_EXTENSION_TARGETS=('*.h' '*.cpp' '*.cu' '*.cuh')

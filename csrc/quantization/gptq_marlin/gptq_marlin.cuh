@@ -11,12 +11,13 @@
 
 namespace gptq_marlin {
 
-// 8 warps are a good choice since every SM has 4 schedulers and having more than 1 warp per
-// schedule allows some more latency hiding. At the same time, we want relatively few warps to have
-// many registers per warp and small tiles.
+// 8 warps are a good choice since every SM has 4 schedulers and having more
+// than 1 warp per schedule allows some more latency hiding. At the same time,
+// we want relatively few warps to have many registers per warp and small tiles.
 static constexpr int default_threads = 256;
 
-static constexpr int pipe_stages = 4;  // 4 pipeline stages fit into shared memory
+static constexpr int pipe_stages =
+    4;  // 4 pipeline stages fit into shared memory
 
 static constexpr int min_thread_n = 64;
 static constexpr int min_thread_k = 64;
@@ -38,7 +39,8 @@ constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
 // No support for async
 #else
 
-__device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool pred = true) {
+__device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr,
+                                      bool pred = true) {
   const int BYTES = 16;
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
   asm volatile(
@@ -60,7 +62,9 @@ __device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
       "l"(glob_ptr), "n"(BYTES));
 }
 
-__device__ inline void cp_async_fence() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ inline void cp_async_fence() {
+  asm volatile("cp.async.commit_group;\n" ::);
+}
 
 template <int n>
 __device__ inline void cp_async_wait() {

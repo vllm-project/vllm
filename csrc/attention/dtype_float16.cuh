@@ -132,7 +132,9 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
   } tmp;
 #ifndef USE_ROCM
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-  asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n" : "=r"(tmp.u32) : "f"(f.y), "f"(f.x));
+  asm volatile("cvt.rn.f16x2.f32 %0, %1, %2;\n"
+               : "=r"(tmp.u32)
+               : "f"(f.y), "f"(f.x));
   #else
   asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[0]) : "f"(f.x));
   asm volatile("cvt.rn.f16.f32 %0, %1;\n" : "=h"(tmp.u16[1]) : "f"(f.y));
@@ -329,14 +331,20 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t d;
 #ifndef USE_ROCM
-  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n" : "=r"(d) : "r"(a), "r"(b), "r"(c));
+  asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
+               : "=r"(d)
+               : "r"(a), "r"(b), "r"(c));
 #else
-  asm volatile("v_pk_fma_f16 %0, %1, %2, %3;\n" : "=v"(d) : "v"(a), "v"(b), "v"(c));
+  asm volatile("v_pk_fma_f16 %0, %1, %2, %3;\n"
+               : "=v"(d)
+               : "v"(a), "v"(b), "v"(c));
 #endif
   return d;
 }
 
-inline __device__ uint32_t fma(uint16_t a, uint32_t b, uint32_t c) { return fma(h0_h0(a), b, c); }
+inline __device__ uint32_t fma(uint16_t a, uint32_t b, uint32_t c) {
+  return fma(h0_h0(a), b, c);
+}
 
 inline __device__ uint2 fma(uint2 a, uint2 b, uint2 c) {
   uint2 d;
@@ -384,7 +392,9 @@ inline __device__ float2 fma(uint32_t a, uint32_t b, float2 fc) {
   return fma(fa, fb, fc);
 }
 
-inline __device__ float2 fma(uint16_t a, uint32_t b, float2 fc) { return fma(h0_h0(a), b, fc); }
+inline __device__ float2 fma(uint16_t a, uint32_t b, float2 fc) {
+  return fma(h0_h0(a), b, fc);
+}
 
 inline __device__ Float4_ fma(uint2 a, uint2 b, Float4_ fc) {
   Float4_ fd;
@@ -447,9 +457,13 @@ inline __device__ float sum(uint4 v) {
 }
 
 // From float32 to float16.
-inline __device__ void from_float(uint16_t& dst, float src) { dst = float_to_half(src); }
+inline __device__ void from_float(uint16_t& dst, float src) {
+  dst = float_to_half(src);
+}
 
-inline __device__ void from_float(uint32_t& dst, float2 src) { dst = float2_to_half2(src); }
+inline __device__ void from_float(uint32_t& dst, float2 src) {
+  dst = float2_to_half2(src);
+}
 
 inline __device__ void from_float(uint2& dst, Float4_ src) {
   dst.x = float2_to_half2(src.x);

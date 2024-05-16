@@ -19,10 +19,11 @@ namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
 template <typename scalar_t>
-__global__ void rms_norm_kernel(scalar_t* __restrict__ out,           // [..., hidden_size]
-                                const scalar_t* __restrict__ input,   // [..., hidden_size]
-                                const scalar_t* __restrict__ weight,  // [hidden_size]
-                                const float epsilon, const int num_tokens, const int hidden_size) {
+__global__ void rms_norm_kernel(
+    scalar_t* __restrict__ out,           // [..., hidden_size]
+    const scalar_t* __restrict__ input,   // [..., hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -38,7 +39,8 @@ __global__ void rms_norm_kernel(scalar_t* __restrict__ out,           // [..., h
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)input[blockIdx.x * hidden_size + idx];
-    out[blockIdx.x * hidden_size + idx] = ((scalar_t)(x * s_variance)) * weight[idx];
+    out[blockIdx.x * hidden_size + idx] =
+        ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
 
@@ -66,9 +68,15 @@ struct _typeConvert<c10::Half> {
   using packed_hip_type = __half2;
 
   __device__ static inline float convert(hip_type x) { return __half2float(x); }
-  __device__ static inline float2 convert(packed_hip_type x) { return __half22float2(x); }
-  __device__ static inline hip_type convert(float x) { return __float2half_rn(x); }
-  __device__ static inline packed_hip_type convert(float2 x) { return __float22half2_rn(x); }
+  __device__ static inline float2 convert(packed_hip_type x) {
+    return __half22float2(x);
+  }
+  __device__ static inline hip_type convert(float x) {
+    return __float2half_rn(x);
+  }
+  __device__ static inline packed_hip_type convert(float2 x) {
+    return __float22half2_rn(x);
+  }
 };
 
   #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -80,13 +88,22 @@ struct _typeConvert<c10::BFloat16> {
   using hip_type = __nv_bfloat16;
   using packed_hip_type = __nv_bfloat162;
 
-  __device__ static inline float convert(hip_type x) { return __bfloat162float(x); }
-  __device__ static inline float2 convert(packed_hip_type x) { return __bfloat1622float2(x); }
-  __device__ static inline hip_type convert(float x) { return __float2bfloat16(x); }
-  __device__ static inline packed_hip_type convert(float2 x) { return __float22bfloat162_rn(x); }
+  __device__ static inline float convert(hip_type x) {
+    return __bfloat162float(x);
+  }
+  __device__ static inline float2 convert(packed_hip_type x) {
+    return __bfloat1622float2(x);
+  }
+  __device__ static inline hip_type convert(float x) {
+    return __float2bfloat16(x);
+  }
+  __device__ static inline packed_hip_type convert(float2 x) {
+    return __float22bfloat162_rn(x);
+  }
 };
   #endif  // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-#endif    // defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >= 12000))
+#endif    // defined(USE_ROCM) || (defined(CUDA_VERSION) && (CUDA_VERSION >=
+          // 12000))
 
 /* Vector POD struct to generate vectorized and packed FP16/BF16 ops
    for appropriate specializations of fused_add_rms_norm_kernel.
@@ -97,7 +114,8 @@ template <typename scalar_t, int width>
 struct alignas(16) _f16Vec {
   /* Not theoretically necessary that width is a power of 2 but should
      almost always be the case for optimization purposes */
-  static_assert(width > 0 && (width & (width - 1)) == 0, "Width is not a positive power of 2!");
+  static_assert(width > 0 && (width & (width - 1)) == 0,
+                "Width is not a positive power of 2!");
   using Converter = _typeConvert<scalar_t>;
   using T1 = typename Converter::hip_type;
   using T2 = typename Converter::packed_hip_type;
@@ -181,10 +199,11 @@ struct alignas(16) _f16Vec {
    memory latency bottleneck. */
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
-fused_add_rms_norm_kernel(scalar_t* __restrict__ input,         // [..., hidden_size]
-                          scalar_t* __restrict__ residual,      // [..., hidden_size]
-                          const scalar_t* __restrict__ weight,  // [hidden_size]
-                          const float epsilon, const int num_tokens, const int hidden_size) {
+fused_add_rms_norm_kernel(
+    scalar_t* __restrict__ input,         // [..., hidden_size]
+    scalar_t* __restrict__ residual,      // [..., hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const float epsilon, const int num_tokens, const int hidden_size) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
@@ -195,9 +214,12 @@ fused_add_rms_norm_kernel(scalar_t* __restrict__ input,         // [..., hidden_
   /* These and the argument pointers are all declared `restrict` as they are
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
-  auto* __restrict__ input_v = reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
-  auto* __restrict__ residual_v = reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
-  auto* __restrict__ weight_v = reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
+  auto* __restrict__ input_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+  auto* __restrict__ residual_v =
+      reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
+  auto* __restrict__ weight_v =
+      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
@@ -231,10 +253,11 @@ fused_add_rms_norm_kernel(scalar_t* __restrict__ input,         // [..., hidden_
  */
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
-fused_add_rms_norm_kernel(scalar_t* __restrict__ input,         // [..., hidden_size]
-                          scalar_t* __restrict__ residual,      // [..., hidden_size]
-                          const scalar_t* __restrict__ weight,  // [hidden_size]
-                          const float epsilon, const int num_tokens, const int hidden_size) {
+fused_add_rms_norm_kernel(
+    scalar_t* __restrict__ input,         // [..., hidden_size]
+    scalar_t* __restrict__ residual,      // [..., hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
@@ -258,7 +281,8 @@ fused_add_rms_norm_kernel(scalar_t* __restrict__ input,         // [..., hidden_
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * hidden_size + idx] = ((scalar_t)(x * s_variance)) * weight[idx];
+    input[blockIdx.x * hidden_size + idx] =
+        ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
 
@@ -276,18 +300,21 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-    vllm::rms_norm_kernel<scalar_t>
-        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-                                     weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
+    vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                                        \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "fused_add_rms_norm_kernel", [&] {          \
-    vllm::fused_add_rms_norm_kernel<scalar_t, width><<<grid, block, 0, stream>>>(               \
-        input.data_ptr<scalar_t>(), residual.data_ptr<scalar_t>(), weight.data_ptr<scalar_t>(), \
-        epsilon, num_tokens, hidden_size);                                                      \
-  });
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
+  VLLM_DISPATCH_FLOATING_TYPES(                                                \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                  \
+        vllm::fused_add_rms_norm_kernel<scalar_t, width>                       \
+            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),           \
+                                         residual.data_ptr<scalar_t>(),        \
+                                         weight.data_ptr<scalar_t>(), epsilon, \
+                                         num_tokens, hidden_size);             \
+      });
 
 void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
@@ -315,7 +342,8 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
   auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
   auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
-  bool ptrs_are_aligned = inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
+  bool ptrs_are_aligned =
+      inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
   if (ptrs_are_aligned && hidden_size % 8 == 0) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {

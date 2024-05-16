@@ -78,8 +78,10 @@ __forceinline__ __device__ void shuffle_3bit_32(uint32_t* q, int stride) {
   q[2 * stride] = zc;
 }
 
-__forceinline__ __device__ void dequant_3bit_32(const uint32_t q_0, const uint32_t q_1,
-                                                const uint32_t q_2, half2 (&dq)[16], int stride,
+__forceinline__ __device__ void dequant_3bit_32(const uint32_t q_0,
+                                                const uint32_t q_1,
+                                                const uint32_t q_2,
+                                                half2 (&dq)[16], int stride,
                                                 const uint32_t zero) {
   const uint32_t c0 = 0x64006400;
   const half y8_ = __float2half_rn(1.0f / 8.0f);

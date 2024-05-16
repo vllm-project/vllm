@@ -1,7 +1,7 @@
 BasedOnStyle: Google
 UseTab: Never
 IndentWidth: 2
-ColumnLimit: 100
+ColumnLimit: 80
 
 # Force pointers to the type for C++.
 DerivePointerAlignment: false

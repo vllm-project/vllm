@@ -31,7 +31,8 @@ __forceinline__ __device__ half dq_scale(const int qs, const half max_scale) {
   return qs_h;
 }
 
-__forceinline__ __device__ half dq(const int q, const int qzero, const half scale) {
+__forceinline__ __device__ half dq(const int q, const int qzero,
+                                   const half scale) {
   return __hmul(__int2half_rn(q - qzero), scale);
 }
 
@@ -40,12 +41,13 @@ __forceinline__ __device__ half dq_ns(const int q, const int qzero) {
   return __int2half_rn(q - qzero);
 }
 
-__forceinline__ __device__ int exb(const uint32_t q, const int shift, const int mask) {
+__forceinline__ __device__ int exb(const uint32_t q, const int shift,
+                                   const int mask) {
   return (int)((q >> shift) & mask);
 }
 
-__forceinline__ __device__ int exb(const uint32_t q1, const uint32_t q0, const int shift,
-                                   const int mask) {
+__forceinline__ __device__ int exb(const uint32_t q1, const uint32_t q0,
+                                   const int shift, const int mask) {
   return (int)(__funnelshift_rc(q0, q1, shift) & mask);
 }
 

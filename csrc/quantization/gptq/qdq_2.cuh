@@ -29,7 +29,8 @@ __forceinline__ __device__ void shuffle_2bit_16(uint32_t* q, int stride) {
   q[0] = qb;
 }
 
-__forceinline__ __device__ void dequant_2bit_16(const uint32_t q_0, half2 (&dq)[8], int stride,
+__forceinline__ __device__ void dequant_2bit_16(const uint32_t q_0,
+                                                half2 (&dq)[8], int stride,
                                                 const uint32_t zero) {
   const uint32_t c0 = 0x64006400;
   const half y4_ = __float2half_rn(1.0f / 4.0f);

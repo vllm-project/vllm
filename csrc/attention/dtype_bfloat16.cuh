@@ -282,7 +282,8 @@ inline __device__ Float8_ mul(__nv_bfloat16 a, bf16_8_t b) {
 }
 
 // Vector fused multiply-add.
-inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b,
+                                     __nv_bfloat162 c) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
@@ -290,7 +291,8 @@ inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bf
 #endif
 }
 
-inline __device__ __nv_bfloat162 fma(__nv_bfloat16 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+inline __device__ __nv_bfloat162 fma(__nv_bfloat16 a, __nv_bfloat162 b,
+                                     __nv_bfloat162 c) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
   assert(false);
 #else
@@ -403,7 +405,9 @@ inline __device__ float sum(bf16_8_t v) {
 }
 
 // From float32 to bfloat16.
-inline __device__ void from_float(__nv_bfloat16& dst, float src) { dst = __float2bfloat16(src); }
+inline __device__ void from_float(__nv_bfloat16& dst, float src) {
+  dst = __float2bfloat16(src);
+}
 
 inline __device__ void from_float(__nv_bfloat162& dst, float2 src) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
@@ -434,7 +438,9 @@ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
 }
 
 // From bfloat16 to float32.
-inline __device__ float to_float(__nv_bfloat16 u) { return __bfloat162float(u); }
+inline __device__ float to_float(__nv_bfloat16 u) {
+  return __bfloat162float(u);
+}
 
 // Zero-out a variable.
 inline __device__ void zero(__nv_bfloat16& dst) {

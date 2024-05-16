@@ -1,7 +1,8 @@
 #include "cpu_types.hpp"
 
 namespace {
-template <typename scalar_t, vec_op::FP32Vec8 (*func)(const vec_op::FP32Vec8&), bool is_gated>
+template <typename scalar_t, vec_op::FP32Vec8 (*func)(const vec_op::FP32Vec8&),
+          bool is_gated>
 void activation_kernel(int num_tokens, int d, scalar_t* __restrict__ input,
                        scalar_t* __restrict__ output) {
   using scalar_vec_t = vec_op::vec_t<scalar_t>;
@@ -82,8 +83,8 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input) {
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "silu_and_mul_impl", [&] {
     CPU_KERNEL_GUARD_IN(silu_and_mul_impl)
-    activation_kernel<scalar_t, silu_act, true>(num_tokens, d, input.data_ptr<scalar_t>(),
-                                                out.data_ptr<scalar_t>());
+    activation_kernel<scalar_t, silu_act, true>(
+        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
     CPU_KERNEL_GUARD_OUT(silu_and_mul_impl)
   });
 }
@@ -96,8 +97,8 @@ void gelu_and_mul(torch::Tensor& out,    // [..., d]
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_and_mul_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_and_mul_impl)
-    activation_kernel<scalar_t, gelu_act, true>(num_tokens, d, input.data_ptr<scalar_t>(),
-                                                out.data_ptr<scalar_t>());
+    activation_kernel<scalar_t, gelu_act, true>(
+        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
     CPU_KERNEL_GUARD_OUT(gelu_and_mul_impl)
   });
 }
@@ -108,12 +109,14 @@ void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
   int num_tokens = input.numel() / input.size(-1);
   int d = input.size(-1) / 2;
 
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_tanh_and_mul_impl", [&] {
-    CPU_KERNEL_GUARD_IN(gelu_tanh_and_mul_impl)
-    activation_kernel<scalar_t, gelu_tanh_act, true>(num_tokens, d, input.data_ptr<scalar_t>(),
-                                                     out.data_ptr<scalar_t>());
-    CPU_KERNEL_GUARD_OUT(gelu_tanh_and_mul_impl)
-  });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "gelu_tanh_and_mul_impl", [&] {
+        CPU_KERNEL_GUARD_IN(gelu_tanh_and_mul_impl)
+        activation_kernel<scalar_t, gelu_tanh_act, true>(
+            num_tokens, d, input.data_ptr<scalar_t>(),
+            out.data_ptr<scalar_t>());
+        CPU_KERNEL_GUARD_OUT(gelu_tanh_and_mul_impl)
+      });
 }
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input) {
@@ -122,8 +125,8 @@ void gelu_new(torch::Tensor& out, torch::Tensor& input) {
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_new_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_new_impl)
-    activation_kernel<scalar_t, gelu_new_act, false>(num_tokens, d, input.data_ptr<scalar_t>(),
-                                                     out.data_ptr<scalar_t>());
+    activation_kernel<scalar_t, gelu_new_act, false>(
+        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
     CPU_KERNEL_GUARD_OUT(gelu_new_impl)
   });
 }
@@ -134,8 +137,8 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input) {
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "gelu_fast_impl", [&] {
     CPU_KERNEL_GUARD_IN(gelu_fast_impl)
-    activation_kernel<scalar_t, gelu_fast_act, false>(num_tokens, d, input.data_ptr<scalar_t>(),
-                                                      out.data_ptr<scalar_t>());
+    activation_kernel<scalar_t, gelu_fast_act, false>(
+        num_tokens, d, input.data_ptr<scalar_t>(), out.data_ptr<scalar_t>());
     CPU_KERNEL_GUARD_OUT(gelu_fast_impl)
   });
 }

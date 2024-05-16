@@ -11,9 +11,10 @@ namespace vllm {
 
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
-__global__ void act_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
-                                   const scalar_t* __restrict__ input,  // [..., 2, d]
-                                   const int d) {
+__global__ void act_and_mul_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = VLLM_LDG(&input[token_idx * 2 * d + idx]);
@@ -54,17 +55,19 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 }  // namespace vllm
 
 // Launch activation and gating kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                                                  \
-  int d = input.size(-1) / 2;                                                                  \
-  int64_t num_tokens = input.numel() / input.size(-1);                                         \
-  dim3 grid(num_tokens);                                                                       \
-  dim3 block(std::min(d, 1024));                                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                                \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "act_and_mul_kernel", [&] {                \
-    vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>                                       \
-        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d); \
-  });
+#define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL)                            \
+  int d = input.size(-1) / 2;                                            \
+  int64_t num_tokens = input.numel() / input.size(-1);                   \
+  dim3 grid(num_tokens);                                                 \
+  dim3 block(std::min(d, 1024));                                         \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
+  VLLM_DISPATCH_FLOATING_TYPES(                                          \
+      input.scalar_type(), "act_and_mul_kernel", [&] {                   \
+        vllm::act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>             \
+            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
+                                         input.data_ptr<scalar_t>(), d); \
+      });
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
@@ -88,9 +91,10 @@ namespace vllm {
 
 // Element-wise activation kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&)>
-__global__ void activation_kernel(scalar_t* __restrict__ out,          // [..., d]
-                                  const scalar_t* __restrict__ input,  // [..., d]
-                                  const int d) {
+__global__ void activation_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., d]
+    const int d) {
   const int64_t token_idx = blockIdx.x;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     const scalar_t x = VLLM_LDG(&input[token_idx * d + idx]);
@@ -101,16 +105,17 @@ __global__ void activation_kernel(scalar_t* __restrict__ out,          // [..., 
 }  // namespace vllm
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                                       \
-  int d = input.size(-1);                                                                      \
-  int64_t num_tokens = input.numel() / d;                                                      \
-  dim3 grid(num_tokens);                                                                       \
-  dim3 block(std::min(d, 1024));                                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));                            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                                \
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] {                 \
-    vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                                        \
-        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d); \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                       \
+  int d = input.size(-1);                                                      \
+  int64_t num_tokens = input.numel() / d;                                      \
+  dim3 grid(num_tokens);                                                       \
+  dim3 block(std::min(d, 1024));                                               \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "activation_kernel", [&] { \
+    vllm::activation_kernel<scalar_t, KERNEL<scalar_t>>                        \
+        <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),                 \
+                                     input.data_ptr<scalar_t>(), d);           \
   });
 
 namespace vllm {
@@ -125,7 +130,8 @@ __device__ __forceinline__ T gelu_new_kernel(const T& x) {
 template <typename T>
 __device__ __forceinline__ T gelu_fast_kernel(const T& x) {
   const float f = (float)x;
-  const T t = (T)tanhf(((T)(f * 0.79788456f)) * (((T)1.0) + (T)(0.044715f * f) * x));
+  const T t =
+      (T)tanhf(((T)(f * 0.79788456f)) * (((T)1.0) + (T)(0.044715f * f) * x));
   return ((T)0.5) * x * (((T)1.0) + t);
 }
 

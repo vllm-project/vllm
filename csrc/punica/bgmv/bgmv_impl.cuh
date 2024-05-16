@@ -35,12 +35,16 @@ __host__ __device__ inline void* memcpy_blocking(void* dst, const void* src) {
 #ifndef USE_ROCM
 
 // nthrs = (32, 4)
-template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size, size_t W_copy_size,
-          int tx, int ty, int tz, typename in_T, typename out_T, typename W_T>
-__global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X,
-                                   const W_T* __restrict__ W, const int64_t* __restrict__ indicies,
-                                   int64_t y_offset, int64_t full_y_size, int64_t num_layers,
-                                   int64_t layer_idx, float scale) {
+template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
+          size_t W_copy_size, int tx, int ty, int tz, typename in_T,
+          typename out_T, typename W_T>
+__global__ void bgmv_shrink_kernel(out_T* __restrict__ Y,
+                                   const in_T* __restrict__ X,
+                                   const W_T* __restrict__ W,
+                                   const int64_t* __restrict__ indicies,
+                                   int64_t y_offset, int64_t full_y_size,
+                                   int64_t num_layers, int64_t layer_idx,
+                                   float scale) {
   size_t batch_idx = blockIdx.y;
   int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
   if (idx < 0) {
@@ -61,13 +65,14 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
   // pipeline load W/X and compute WX;
   pipe.producer_acquire();
+  cuda::memcpy_async(W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+                     W + (idx * feat_out + j) * feat_in +
+                         (threadIdx.y * tx + threadIdx.x) * vec_size,
+                     cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
   cuda::memcpy_async(
-      W_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-      W + (idx * feat_out + j) * feat_in + (threadIdx.y * tx + threadIdx.x) * vec_size,
-      cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
-  cuda::memcpy_async(X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     X + (batch_idx * feat_in) + (threadIdx.y * tx + threadIdx.x) * vec_size,
-                     cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
+      X_shared + (threadIdx.y * tx + threadIdx.x) * vec_size,
+      X + (batch_idx * feat_in) + (threadIdx.y * tx + threadIdx.x) * vec_size,
+      cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
   pipe.producer_commit();
   size_t copy_idx, compute_idx;
   float y = 0.f;
@@ -76,21 +81,23 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
   size_t tile_idx;
 
   #pragma unroll
-  for (tile_idx = 1; tile_idx < (feat_in + tile_size - 1) / tile_size; ++tile_idx) {
+  for (tile_idx = 1; tile_idx < (feat_in + tile_size - 1) / tile_size;
+       ++tile_idx) {
     copy_idx = tile_idx % num_pipeline_stages;
     // pipeline stage: async copy W fragment
     pipe.producer_acquire();
     if (tile_idx * tile_size + threadIdx.y * tx * vec_size < feat_in) {
-      cuda::memcpy_async(
-          W_shared + W_shared_offset[copy_idx] + (threadIdx.y * tx + threadIdx.x) * vec_size,
-          W + (idx * feat_out + j) * feat_in + tile_idx * tile_size +
-              (threadIdx.y * tx + threadIdx.x) * vec_size,
-          cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
-      cuda::memcpy_async(
-          X_shared + X_shared_offset[copy_idx] + (threadIdx.y * tx + threadIdx.x) * vec_size,
-          X + (batch_idx * feat_in) + tile_idx * tile_size +
-              (threadIdx.y * tx + threadIdx.x) * vec_size,
-          cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
+      cuda::memcpy_async(W_shared + W_shared_offset[copy_idx] +
+                             (threadIdx.y * tx + threadIdx.x) * vec_size,
+                         W + (idx * feat_out + j) * feat_in +
+                             tile_idx * tile_size +
+                             (threadIdx.y * tx + threadIdx.x) * vec_size,
+                         cuda::aligned_size_t<W_copy_size>(W_copy_size), pipe);
+      cuda::memcpy_async(X_shared + X_shared_offset[copy_idx] +
+                             (threadIdx.y * tx + threadIdx.x) * vec_size,
+                         X + (batch_idx * feat_in) + tile_idx * tile_size +
+                             (threadIdx.y * tx + threadIdx.x) * vec_size,
+                         cuda::aligned_size_t<X_copy_size>(X_copy_size), pipe);
     }
     pipe.producer_commit();
 
@@ -126,8 +133,10 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
   // final pipeline stage
   pipe.consumer_wait();
   block.sync();
-  x_vec.load(X_shared + X_shared_offset[compute_idx] + (threadIdx.y * tx + threadIdx.x) * vec_size);
-  w_vec.load(W_shared + W_shared_offset[compute_idx] + (threadIdx.y * tx + threadIdx.x) * vec_size);
+  x_vec.load(X_shared + X_shared_offset[compute_idx] +
+             (threadIdx.y * tx + threadIdx.x) * vec_size);
+  w_vec.load(W_shared + W_shared_offset[compute_idx] +
+             (threadIdx.y * tx + threadIdx.x) * vec_size);
   float sum = 0.f;
   #pragma unroll
   for (size_t i = 0; i < vec_size; ++i) {
@@ -138,7 +147,9 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
     sum += __shfl_down_sync(0xffffffff, sum, offset);
   }
   y_warpwise[threadIdx.y] =
-      ((tile_idx - 1) * tile_size + threadIdx.y * tx * vec_size < feat_in) ? sum : 0.f;
+      ((tile_idx - 1) * tile_size + threadIdx.y * tx * vec_size < feat_in)
+          ? sum
+          : 0.f;
   block.sync();
   #pragma unroll
   for (size_t i = 0; i < ty; ++i) {
@@ -156,12 +167,16 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
 #else
 
-template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size, size_t W_copy_size,
-          int tx, int ty, int tz, typename in_T, typename out_T, typename W_T>
-__global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X,
-                                   const W_T* __restrict__ W, const int64_t* __restrict__ indicies,
-                                   int64_t y_offset, int64_t full_y_size, int64_t num_layers,
-                                   int64_t layer_idx, float scale) {
+template <int feat_in, int feat_out, size_t vec_size, size_t X_copy_size,
+          size_t W_copy_size, int tx, int ty, int tz, typename in_T,
+          typename out_T, typename W_T>
+__global__ void bgmv_shrink_kernel(out_T* __restrict__ Y,
+                                   const in_T* __restrict__ X,
+                                   const W_T* __restrict__ W,
+                                   const int64_t* __restrict__ indicies,
+                                   int64_t y_offset, int64_t full_y_size,
+                                   int64_t num_layers, int64_t layer_idx,
+                                   float scale) {
   size_t batch_idx = blockIdx.y;
   int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
   if (idx < 0) {
@@ -180,7 +195,9 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
   #pragma unroll
   for (tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
-    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size -
+            1 <
+        feat_in) {
       x_vec.load(X + (batch_idx * feat_in) + tile_idx * tile_size +
                  (threadIdx.y * tx + threadIdx.x) * vec_size);
       w_vec.load(W + (idx * feat_out + j) * feat_in + tile_idx * tile_size +
@@ -190,7 +207,8 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
     float sum = 0.f;
   #pragma unroll
     for (size_t i = 0; i < vec_size; ++i) {
-      sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+      sum += convert_type<W_T, float>(w_vec[i]) *
+             convert_type<in_T, float>(x_vec[i]) * scale;
     }
   #pragma unroll
     for (size_t offset = tx / 2; offset > 0; offset /= 2) {
@@ -199,7 +217,9 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
     __syncthreads();
 
-    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size - 1 < feat_in) {
+    if (tile_idx * tile_size + (threadIdx.y * tx + threadIdx.x + 1) * vec_size -
+            1 <
+        feat_in) {
       y += sum;
     }
   }
@@ -225,12 +245,15 @@ __global__ void bgmv_shrink_kernel(out_T* __restrict__ Y, const in_T* __restrict
 #endif
 
 // nthrs = (2, 16, 4)
-template <int feat_in, int feat_out, size_t vec_size, int tx, int ty, int tz, typename in_T,
-          typename out_T, typename W_T>
-__global__ void bgmv_expand_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X,
-                                   const W_T* __restrict__ W, const int64_t* __restrict__ indicies,
-                                   int64_t y_offset, int64_t full_y_size, int64_t num_layers,
-                                   int64_t layer_idx, float scale) {
+template <int feat_in, int feat_out, size_t vec_size, int tx, int ty, int tz,
+          typename in_T, typename out_T, typename W_T>
+__global__ void bgmv_expand_kernel(out_T* __restrict__ Y,
+                                   const in_T* __restrict__ X,
+                                   const W_T* __restrict__ W,
+                                   const int64_t* __restrict__ indicies,
+                                   int64_t y_offset, int64_t full_y_size,
+                                   int64_t num_layers, int64_t layer_idx,
+                                   float scale) {
   size_t batch_idx = blockIdx.y;
   int64_t idx = indicies[batch_idx] * num_layers + layer_idx;
 
@@ -247,7 +270,8 @@ __global__ void bgmv_expand_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
   // load W;
   vec_t<W_T, vec_size> w_vec;
-  w_vec.load(W + (idx * feat_out + tile_idx * tz * ty) * feat_in + block.thread_rank() * vec_size);
+  w_vec.load(W + (idx * feat_out + tile_idx * tz * ty) * feat_in +
+             block.thread_rank() * vec_size);
 
   float sum = 0.f;
 #pragma unroll
@@ -255,7 +279,8 @@ __global__ void bgmv_expand_kernel(out_T* __restrict__ Y, const in_T* __restrict
 #ifndef USE_ROCM
     sum += float(w_vec[i]) * float(x_vec[i]) * scale;
 #else
-    sum += convert_type<W_T, float>(w_vec[i]) * convert_type<in_T, float>(x_vec[i]) * scale;
+    sum += convert_type<W_T, float>(w_vec[i]) *
+           convert_type<in_T, float>(x_vec[i]) * scale;
 #endif
   }
 
@@ -268,20 +293,23 @@ __global__ void bgmv_expand_kernel(out_T* __restrict__ Y, const in_T* __restrict
 
   if (threadIdx.x == 0) {
 #ifndef USE_ROCM
-    Y[batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) + threadIdx.z * ty + threadIdx.y] +=
-        static_cast<out_T>(sum);
+    Y[batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
+      threadIdx.z * ty + threadIdx.y] += static_cast<out_T>(sum);
 #else
-    size_t y_idx =
-        batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) + threadIdx.z * ty + threadIdx.y;
+    size_t y_idx = batch_idx * full_y_size + y_offset + tile_idx * (tz * ty) +
+                   threadIdx.z * ty + threadIdx.y;
     Y[y_idx] = vllm_add<out_T>(Y[y_idx], convert_type<float, out_T>(sum));
 #endif
   }
 }
 
-template <int feat_in, int feat_out, typename in_T, typename out_T, typename W_T>
-void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* __restrict__ W,
-                 const int64_t* __restrict__ indicies, int64_t y_offset, int64_t full_y_size,
-                 int64_t batch_size, int64_t num_layers, int64_t layer_idx, float scale) {
+template <int feat_in, int feat_out, typename in_T, typename out_T,
+          typename W_T>
+void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X,
+                 const W_T* __restrict__ W,
+                 const int64_t* __restrict__ indicies, int64_t y_offset,
+                 int64_t full_y_size, int64_t batch_size, int64_t num_layers,
+                 int64_t layer_idx, float scale) {
   constexpr size_t vec_size = 8;
   constexpr int tz = 4;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -299,26 +327,33 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
       dim3 nblks(feat_out / (ty * tz), batch_size);
       dim3 nthrs(tx, ty, tz);
 
-      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     } else if (16 % tx == 0 && feat_out % (16 / tx * tz) == 0) {
       constexpr int ty = 16 / tx;
       dim3 nblks(feat_out / (ty * tz), batch_size);
       dim3 nthrs(tx, ty, tz);
 
-      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     } else {
       constexpr int ty = 8 / tx;
       dim3 nblks(feat_out / (ty * tz), batch_size);
       dim3 nthrs(tx, ty, tz);
 
-      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+      bgmv_expand_kernel<feat_in, feat_out, vec_size, tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     }
   } else {
 #ifndef USE_ROCM
-    static_assert(feat_in % (vec_size * 32) == 0 || feat_in % (vec_size * 16) == 0 ||
+    static_assert(feat_in % (vec_size * 32) == 0 ||
+                  feat_in % (vec_size * 16) == 0 ||
                   feat_in % (vec_size * 8) == 0);
 
     if constexpr (feat_in % (vec_size * 32) == 0) {
@@ -329,8 +364,10 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
       dim3 nthrs(tx, ty);
 
       bgmv_shrink_kernel<feat_in, feat_out, vec_size, vec_size * sizeof(in_T),
-                         vec_size * sizeof(W_T), tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+                         vec_size * sizeof(W_T), tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     } else if constexpr (feat_in % (vec_size / 2 * 32) == 0) {
       constexpr int tx = 32;
       constexpr int ty = 4;
@@ -338,9 +375,12 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
       dim3 nblks(feat_out, batch_size);
       dim3 nthrs(tx, ty);
 
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size / 2, vec_size * sizeof(in_T) / 2,
-                         vec_size * sizeof(W_T) / 2, tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size / 2,
+                         vec_size * sizeof(in_T) / 2,
+                         vec_size * sizeof(W_T) / 2, tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     } else if constexpr (feat_in % (vec_size / 2 * 16) == 0) {
       constexpr int tx = 16;
       constexpr int ty = 4;
@@ -348,25 +388,32 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
       dim3 nblks(feat_out, batch_size);
       dim3 nthrs(tx, ty);
 
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size / 2, vec_size * sizeof(in_T) / 2,
-                         vec_size * sizeof(W_T) / 2, tx, ty, tz><<<nblks, nthrs, 0, stream>>>(
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size / 2,
+                         vec_size * sizeof(in_T) / 2,
+                         vec_size * sizeof(W_T) / 2, tx, ty, tz>
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,
+                                        full_y_size, num_layers, layer_idx,
+                                        scale);
     }
 #else
     constexpr size_t rocm_warp_size = warpSize;
 
-  #define CHECK_INPUT_TILEABLE_BY(vec_size_) feat_in % (rocm_warp_size * vec_size_) == 0
+  #define CHECK_INPUT_TILEABLE_BY(vec_size_) \
+    feat_in % (rocm_warp_size * vec_size_) == 0
 
-  #define LAUNCH_BGMV_SHRINK_KERNELS_ROCM(factor_, vec_size_, tx_, ty_)                           \
-    if constexpr (CHECK_INPUT_TILEABLE_BY(factor_)) {                                             \
-      constexpr size_t vec_size_shrink = vec_size_;                                               \
-      constexpr int tx = tx_;                                                                     \
-      constexpr int ty = ty_;                                                                     \
-      dim3 nblks(feat_out, batch_size);                                                           \
-      dim3 nthrs(tx, ty);                                                                         \
-      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink, vec_size_shrink * sizeof(in_T),      \
-                         vec_size_shrink * sizeof(W_T), tx, ty, tz><<<nblks, nthrs, 0, stream>>>( \
-          Y, X, W, indicies, y_offset, full_y_size, num_layers, layer_idx, scale);                \
+  #define LAUNCH_BGMV_SHRINK_KERNELS_ROCM(factor_, vec_size_, tx_, ty_)     \
+    if constexpr (CHECK_INPUT_TILEABLE_BY(factor_)) {                       \
+      constexpr size_t vec_size_shrink = vec_size_;                         \
+      constexpr int tx = tx_;                                               \
+      constexpr int ty = ty_;                                               \
+      dim3 nblks(feat_out, batch_size);                                     \
+      dim3 nthrs(tx, ty);                                                   \
+      bgmv_shrink_kernel<feat_in, feat_out, vec_size_shrink,                \
+                         vec_size_shrink * sizeof(in_T),                    \
+                         vec_size_shrink * sizeof(W_T), tx, ty, tz>         \
+          <<<nblks, nthrs, 0, stream>>>(Y, X, W, indicies, y_offset,        \
+                                        full_y_size, num_layers, layer_idx, \
+                                        scale);                             \
     }
 
     static_assert(CHECK_INPUT_TILEABLE_BY(32) || CHECK_INPUT_TILEABLE_BY(16) ||
@@ -377,7 +424,9 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
     else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(16, vec_size, rocm_warp_size, 16 / vec_size) else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(8, vec_size, rocm_warp_size, 8 / vec_size) else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(
         4, vec_size, rocm_warp_size / (vec_size / 4),
         vec_size /
-            4) else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(2, vec_size, rocm_warp_size / (vec_size / 2),
+            4) else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(2, vec_size,
+                                                    rocm_warp_size /
+                                                        (vec_size / 2),
                                                     vec_size /
                                                         2) else LAUNCH_BGMV_SHRINK_KERNELS_ROCM(1,
                                                                                                 vec_size,
@@ -393,11 +442,12 @@ void bgmv_kernel(out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* _
   }
 }
 
-#define INST_BGMV(feat_in, feat_out, in_T, out_T, W_T)                              \
-  template void bgmv_kernel<feat_in, feat_out>(                                     \
-      out_T* __restrict__ Y, const in_T* __restrict__ X, const W_T* __restrict__ W, \
-      const int64_t* __restrict__ indicies, int64_t y_offset, int64_t full_y_size,  \
-      int64_t batch_size, int64_t num_layers, int64_t layer_idx, float scale);
+#define INST_BGMV(feat_in, feat_out, in_T, out_T, W_T)                 \
+  template void bgmv_kernel<feat_in, feat_out>(                        \
+      out_T* __restrict__ Y, const in_T* __restrict__ X,               \
+      const W_T* __restrict__ W, const int64_t* __restrict__ indicies, \
+      int64_t y_offset, int64_t full_y_size, int64_t batch_size,       \
+      int64_t num_layers, int64_t layer_idx, float scale);
 
 #define INST_BGMV_ONESIDE(in_T, out_T, W_T, feat_in, feat_out) \
   INST_BGMV(feat_in, feat_out, in_T, out_T, W_T)

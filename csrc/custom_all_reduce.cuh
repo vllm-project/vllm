@@ -11,13 +11,14 @@
 #include <unordered_map>
 #include <vector>
 
-#define CUDACHECK(cmd)                                                                      \
-  do {                                                                                      \
-    cudaError_t e = cmd;                                                                    \
-    if (e != cudaSuccess) {                                                                 \
-      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, cudaGetErrorString(e)); \
-      exit(EXIT_FAILURE);                                                                   \
-    }                                                                                       \
+#define CUDACHECK(cmd)                                              \
+  do {                                                              \
+    cudaError_t e = cmd;                                            \
+    if (e != cudaSuccess) {                                         \
+      printf("Failed: Cuda error %s:%d '%s'\n", __FILE__, __LINE__, \
+             cudaGetErrorString(e));                                \
+      exit(EXIT_FAILURE);                                           \
+    }                                                               \
   } while (0)
 
 namespace vllm {
@@ -127,7 +128,8 @@ DINLINE O downcast(array_t<float, O::size> val) {
 // prior memory accesses. Note: volatile writes will not be reordered against
 // other volatile writes.
 template <int ngpus>
-DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg, int rank) {
+DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg,
+                        int rank) {
   if (threadIdx.x < ngpus) {
     // reset flag for next time
     self_sg->end[blockIdx.x][threadIdx.x] = 0;
@@ -144,7 +146,8 @@ DINLINE void start_sync(const RankSignals& sg, volatile Signal* self_sg, int ran
 // barrier in the all reduce kernel. If it's the final synchronization barrier,
 // we don't need to make any visibility guarantees for prior memory accesses.
 template <int ngpus, bool final_sync = false>
-DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg, int rank) {
+DINLINE void end_sync(const RankSignals& sg, volatile Signal* self_sg,
+                      int rank) {
   __syncthreads();
   // eliminate the case that prior writes are not visible after signals become
   // visible. Note that I did not managed to make this happen through a lot of
@@ -175,8 +178,9 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_1stage(RankData* _dp, RankSignals sg, volatile Signal* self_sg,
-                               T* __restrict__ result, int rank, int size) {
+    cross_device_reduce_1stage(RankData* _dp, RankSignals sg,
+                               volatile Signal* self_sg, T* __restrict__ result,
+                               int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
   // note: we don't reorder the address so the accumulation order is the same
@@ -184,7 +188,8 @@ __global__ void __launch_bounds__(512, 1)
   auto dp = *_dp;
   start_sync<ngpus>(sg, self_sg, rank);
   // do the actual reduction
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
+       idx += gridDim.x * blockDim.x) {
     ((P*)result)[idx] = packed_reduce<P, ngpus, A>((const P**)&dp.ptrs[0], idx);
   }
   end_sync<ngpus, true>(sg, self_sg, rank);
@@ -197,8 +202,9 @@ DINLINE P* get_tmp_buf(volatile Signal* sg) {
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_2stage(RankData* _dp, RankSignals sg, volatile Signal* self_sg,
-                               T* __restrict__ result, int rank, int size) {
+    cross_device_reduce_2stage(RankData* _dp, RankSignals sg,
+                               volatile Signal* self_sg, T* __restrict__ result,
+                               int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
@@ -271,7 +277,8 @@ class CustomAllreduce {
    * are passed in from the constructor
    */
   CustomAllreduce(Signal* meta, void* rank_data, size_t rank_data_sz,
-                  const cudaIpcMemHandle_t* handles, const std::vector<int64_t>& offsets, int rank,
+                  const cudaIpcMemHandle_t* handles,
+                  const std::vector<int64_t>& offsets, int rank,
                   bool full_nvlink = true)
       : rank_(rank),
         world_size_(offsets.size()),
@@ -293,17 +300,20 @@ class CustomAllreduce {
   }
 
   char* open_ipc_handle(const void* ipc_handle) {
-    auto [it, new_handle] = ipc_handles_.insert({*((IPC_KEY*)ipc_handle), nullptr});
+    auto [it, new_handle] =
+        ipc_handles_.insert({*((IPC_KEY*)ipc_handle), nullptr});
     if (new_handle) {
       char* ipc_ptr;
-      CUDACHECK(cudaIpcOpenMemHandle((void**)&ipc_ptr, *((const cudaIpcMemHandle_t*)ipc_handle),
+      CUDACHECK(cudaIpcOpenMemHandle((void**)&ipc_ptr,
+                                     *((const cudaIpcMemHandle_t*)ipc_handle),
                                      cudaIpcMemLazyEnablePeerAccess));
       it->second = ipc_ptr;
     }
     return it->second;
   }
 
-  std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
+  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
+  get_graph_buffer_ipc_meta() {
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
     std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
@@ -313,10 +323,12 @@ class CustomAllreduce {
       void* base_ptr;
       // note: must share the base address of each allocation, or we get wrong
       // address
-      if (cuPointerGetAttribute(&base_ptr, CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
+      if (cuPointerGetAttribute(&base_ptr,
+                                CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
-      CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
+      CUDACHECK(cudaIpcGetMemHandle(
+          (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
       offsets[i] = ((char*)ptr) - ((char*)base_ptr);
     }
     return std::make_pair(handles, offsets);
@@ -324,12 +336,13 @@ class CustomAllreduce {
 
   void check_rank_data_capacity(size_t num = 1) {
     if (d_rank_data_base_ + num > d_rank_data_end_)
-      throw std::runtime_error("Rank data buffer is overflowed by " +
-                               std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
+      throw std::runtime_error(
+          "Rank data buffer is overflowed by " +
+          std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
-  void register_buffer(const std::vector<std::string>& handles, const std::vector<int64_t>& offsets,
-                       void* self) {
+  void register_buffer(const std::vector<std::string>& handles,
+                       const std::vector<int64_t>& offsets, void* self) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
@@ -342,7 +355,8 @@ class CustomAllreduce {
       }
     }
     auto d_data = d_rank_data_base_++;
-    CUDACHECK(cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
+    CUDACHECK(
+        cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
     buffers_[self] = d_data;
   }
 
@@ -353,8 +367,9 @@ class CustomAllreduce {
   // rank 1 may get the same input address for the second allreduce, but rank 2
   // got a different address. IPC handles have internal reference counting
   // mechanism so overhead should be small.
-  void register_graph_buffers(const std::vector<std::string>& handles,
-                              const std::vector<std::vector<int64_t>>& offsets) {
+  void register_graph_buffers(
+      const std::vector<std::string>& handles,
+      const std::vector<std::vector<int64_t>>& offsets) {
     auto num_buffers = graph_unreg_buffers_.size();
     check_rank_data_capacity(num_buffers);
     std::vector<RankData> rank_data(num_buffers);
@@ -363,7 +378,8 @@ class CustomAllreduce {
       auto& rd = rank_data[i];
       for (int j = 0; j < world_size_; j++) {
         if (j != rank_) {
-          char* handle = open_ipc_handle(&handles[j][i * sizeof(cudaIpcMemHandle_t)]);
+          char* handle =
+              open_ipc_handle(&handles[j][i * sizeof(cudaIpcMemHandle_t)]);
           handle += offsets[j][i];
           rd.ptrs[j] = handle;
         } else {
@@ -371,7 +387,8 @@ class CustomAllreduce {
         }
       }
     }
-    CUDACHECK(cudaMemcpy(d_rank_data_base_, rank_data.data(), sizeof(RankData) * num_buffers,
+    CUDACHECK(cudaMemcpy(d_rank_data_base_, rank_data.data(),
+                         sizeof(RankData) * num_buffers,
                          cudaMemcpyHostToDevice));
     d_rank_data_base_ += num_buffers;
     graph_unreg_buffers_.clear();
@@ -385,8 +402,8 @@ class CustomAllreduce {
    * will cause contention on NVLink bus.
    */
   template <typename T>
-  void allreduce(cudaStream_t stream, T* input, T* output, int size, int threads = 512,
-                 int block_limit = 36) {
+  void allreduce(cudaStream_t stream, T* input, T* output, int size,
+                 int threads = 512, int block_limit = 36) {
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(
@@ -394,8 +411,9 @@ class CustomAllreduce {
           "of " +
           std::to_string(d));
     if (block_limit > kMaxBlocks)
-      throw std::runtime_error("max supported block limit is " + std::to_string(kMaxBlocks) +
-                               ". Got " + std::to_string(block_limit));
+      throw std::runtime_error("max supported block limit is " +
+                               std::to_string(kMaxBlocks) + ". Got " +
+                               std::to_string(block_limit));
 
     RankData* ptrs;
     cudaStreamCaptureStatus status;
@@ -406,29 +424,32 @@ class CustomAllreduce {
     } else {
       auto it = buffers_.find(input);
       if (it == buffers_.end())
-        throw std::runtime_error("buffer address " +
-                                 std::to_string(reinterpret_cast<uint64_t>(input)) +
-                                 " is not registered!");
+        throw std::runtime_error(
+            "buffer address " +
+            std::to_string(reinterpret_cast<uint64_t>(input)) +
+            " is not registered!");
       ptrs = it->second;
     }
 
     size /= d;
     auto bytes = size * sizeof(typename packed_t<T>::P);
     int blocks = std::min(block_limit, (size + threads - 1) / threads);
-#define KL(ngpus, name) \
-  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, rank_, size);
-#define REDUCE_CASE(ngpus)                                                                        \
-  case ngpus: {                                                                                   \
-    if (world_size_ == 2) {                                                                       \
-      KL(ngpus, cross_device_reduce_1stage);                                                      \
-    } else if (full_nvlink_) {                                                                    \
-      if ((world_size_ <= 4 && bytes < 512 * 1024) || (world_size_ <= 8 && bytes < 256 * 1024)) { \
-        KL(ngpus, cross_device_reduce_1stage);                                                    \
-      } else {                                                                                    \
-        KL(ngpus, cross_device_reduce_2stage);                                                    \
-      }                                                                                           \
-    }                                                                                             \
-    break;                                                                                        \
+#define KL(ngpus, name)                                                       \
+  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
+                                                 rank_, size);
+#define REDUCE_CASE(ngpus)                            \
+  case ngpus: {                                       \
+    if (world_size_ == 2) {                           \
+      KL(ngpus, cross_device_reduce_1stage);          \
+    } else if (full_nvlink_) {                        \
+      if ((world_size_ <= 4 && bytes < 512 * 1024) || \
+          (world_size_ <= 8 && bytes < 256 * 1024)) { \
+        KL(ngpus, cross_device_reduce_1stage);        \
+      } else {                                        \
+        KL(ngpus, cross_device_reduce_2stage);        \
+      }                                               \
+    }                                                 \
+    break;                                            \
   }
 
     switch (world_size_) {

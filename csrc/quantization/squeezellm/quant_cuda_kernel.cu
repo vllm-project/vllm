@@ -15,7 +15,9 @@
 namespace vllm {
 namespace squeezellm {
 
-__device__ inline unsigned int as_unsigned(int i) { return *reinterpret_cast<unsigned int*>(&i); }
+__device__ inline unsigned int as_unsigned(int i) {
+  return *reinterpret_cast<unsigned int*>(&i);
+}
 
 // 4-bit matvec kernel (LUT-based)
 __global__ void NUQ4MatMulKernel(
@@ -30,7 +32,8 @@ __global__ void NUQ4MatMulKernel(
 #else
     float2* __restrict__ mul,
 #endif
-    const __half* __restrict__ lookup_table, int height, int width, int batch, int vec_height) {
+    const __half* __restrict__ lookup_table, int height, int width, int batch,
+    int vec_height) {
 
   const int blockwidth2 = BLOCKWIDTH / 2;
 
@@ -74,7 +77,8 @@ __global__ void NUQ4MatMulKernel(
     __syncthreads();
     if (threadIdx.x < blockwidth2)
       blockvec[threadIdx.x] =
-          vec[b * vec_height / 2 + (row / BLOCKHEIGHT4) * blockwidth2 + threadIdx.x];
+          vec[b * vec_height / 2 + (row / BLOCKHEIGHT4) * blockwidth2 +
+              threadIdx.x];
     __syncthreads();
 
     while (k < blockwidth2) {
@@ -137,7 +141,8 @@ __global__ void NUQ4MatMulKernel(
 #ifndef USE_ROCM
       res = __hadd(__hadd(res2.x, res2.y), res);
 #else
-      res = __hadd(__hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)), res);
+      res = __hadd(__hadd(__ushort_as_half(res2.x), __ushort_as_half(res2.y)),
+                   res);
 #endif
 
       i += width;
@@ -185,7 +190,8 @@ void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
   int batch = vec.size(0);
   int vec_height = vec.size(1);
 
-  dim3 blocks((height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4, (width + BLOCKWIDTH - 1) / BLOCKWIDTH);
+  dim3 blocks((height + BLOCKHEIGHT4 - 1) / BLOCKHEIGHT4,
+              (width + BLOCKWIDTH - 1) / BLOCKWIDTH);
   dim3 threads(BLOCKWIDTH);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(vec));
@@ -200,7 +206,8 @@ void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
 #ifndef USE_ROCM
       (half2*)mul.data<at::Half>(), (__half*)lookup_table.data<at::Half>(),
 #else
-      (float2*)mul.data_ptr<float>(), (__half*)lookup_table.data_ptr<at::Half>(),
+      (float2*)mul.data_ptr<float>(),
+      (__half*)lookup_table.data_ptr<at::Half>(),
 #endif
       height, width, batch, vec_height);
 }

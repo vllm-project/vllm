@@ -3,9 +3,9 @@ Adapted from https://github.com/mit-han-lab/llm-awq
 Modified from NVIDIA FasterTransformer:
 https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/cutlass_extensions/include/cutlass_extensions/interleaved_numeric_conversion.h
 @article{lin2023awq,
-  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
-  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han,
-Song}, journal={arXiv}, year={2023}
+  title={AWQ: Activation-aware Weight Quantization for LLM Compression and
+Acceleration}, author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang,
+Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 }
 */
 
@@ -29,34 +29,40 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source) {
   static constexpr uint32_t TOP_MASK = 0x00f000f0;
   static constexpr uint32_t I4s_TO_F16s_MAGIC_NUM = 0x64006400;
 
-  // Note that the entire sequence only requires 1 shift instruction. This is thanks to the register
-  // packing format and the fact that we force our integers to be unsigned, and account for this in
-  // the fp16 subtractions. In addition, I exploit the fact that sub and fma have the same
-  // throughput in order to convert elt_23 and elt_67 to fp16 without having to shift them to the
-  // bottom bits before hand.
+  // Note that the entire sequence only requires 1 shift instruction. This is
+  // thanks to the register packing format and the fact that we force our
+  // integers to be unsigned, and account for this in the fp16 subtractions. In
+  // addition, I exploit the fact that sub and fma have the same throughput in
+  // order to convert elt_23 and elt_67 to fp16 without having to shift them to
+  // the bottom bits before hand.
 
-  // Shift right by 8 to now consider elt_45 and elt_67. Issue first to hide RAW dependency if we
-  // issue immediately before required.
+  // Shift right by 8 to now consider elt_45 and elt_67. Issue first to hide RAW
+  // dependency if we issue immediately before required.
   const uint32_t top_i4s = i4s >> 8;
   // Extract elt_01 - (i4s & 0x000f000f) | 0x64006400
   asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
                : "=r"(h[0])
-               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM), "n"(immLut));
+               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
   // Extract elt_23 (i4s & 0x00f000f0) | 0x64006400
   asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
                : "=r"(h[1])
-               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM), "n"(immLut));
+               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
   // Extract elt_45 (top_i4s & 0x000f000f) | 0x64006400
   asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
                : "=r"(h[2])
-               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM), "n"(immLut));
+               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
   // Extract elt_67 (top_i4s & 0x00f000f0) | 0x64006400
   asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
                : "=r"(h[3])
-               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM), "n"(immLut));
+               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
 
-  // I use inline PTX below because I am not sure if the compiler will emit float2half instructions
-  // if I use the half2 ctor. In this case, I chose performance reliability over code readability.
+  // I use inline PTX below because I am not sure if the compiler will emit
+  // float2half instructions if I use the half2 ctor. In this case, I chose
+  // performance reliability over code readability.
 
   // This is the half2 {1032, 1032} represented as an integer.
   // static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64086408;
@@ -71,13 +77,17 @@ __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source) {
 
   // Finally, we construct the output numbers.
   // Convert elt_01
-  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[0]) : "r"(h[0]), "r"(FP16_TOP_MAGIC_NUM));
+  asm volatile("sub.f16x2 %0, %1, %2;\n"
+               : "=r"(h[0])
+               : "r"(h[0]), "r"(FP16_TOP_MAGIC_NUM));
   // Convert elt_23
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                : "=r"(h[1])
                : "r"(h[1]), "r"(ONE_SIXTEENTH), "r"(NEG_64));
   // Convert elt_45
-  asm volatile("sub.f16x2 %0, %1, %2;\n" : "=r"(h[2]) : "r"(h[2]), "r"(FP16_TOP_MAGIC_NUM));
+  asm volatile("sub.f16x2 %0, %1, %2;\n"
+               : "=r"(h[2])
+               : "r"(h[2]), "r"(FP16_TOP_MAGIC_NUM));
   // Convert elt_67
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                : "=r"(h[3])

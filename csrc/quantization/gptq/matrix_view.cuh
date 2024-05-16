@@ -1,5 +1,6 @@
 /*
-Adapted from https://github.com/turboderp/exllamav2 and https://github.com/turboderp/exllama
+Adapted from https://github.com/turboderp/exllamav2 and
+https://github.com/turboderp/exllama
 */
 
 #ifndef _matrix_view_cuh
@@ -19,7 +20,8 @@ class MatrixView_half {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_half(const half* data, const int height, const int width)
+  __device__ __forceinline__ MatrixView_half(const half* data, const int height,
+                                             const int width)
       : data(data), height(height), width(width) {}
 
   __device__ __forceinline__ half item(int row, int column) const {
@@ -35,7 +37,8 @@ class MatrixView_half {
     return &data[row * width + column];
   }
 
-  __device__ __forceinline__ void item4(half (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4(half (&items)[4], int row,
+                                        int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
     half2 i01 = ptr[0];
     half2 i23 = ptr[1];
@@ -44,7 +47,8 @@ class MatrixView_half {
     items[2] = __low2half(i23);
     items[3] = __high2half(i23);
   }
-  __device__ __forceinline__ void item4_f(float (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4_f(float (&items)[4], int row,
+                                          int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
     half2 i01 = ptr[0];
     half2 i23 = ptr[1];
@@ -54,7 +58,8 @@ class MatrixView_half {
     items[3] = __half2float(__high2half(i23));
   }
 
-  __device__ __forceinline__ void item4_h2(half2 (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4_h2(half2 (&items)[4], int row,
+                                           int column) const {
     half2* ptr = (half2*)item_ptr(row, column);
     half2 i01 = ptr[0];
     half2 i23 = ptr[1];
@@ -71,7 +76,8 @@ class MatrixView_half_rw {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_half_rw(half* data, const int height, const int width)
+  __device__ __forceinline__ MatrixView_half_rw(half* data, const int height,
+                                                const int width)
       : data(data), height(height), width(width) {}
 
   __device__ __forceinline__ half item(int row, int column) const {
@@ -90,7 +96,8 @@ class MatrixView_half_rw {
     ((half2*)data)[(row * width + column) / 2] = value;
   }
 
-  __device__ __forceinline__ void set4(int row, int column, half v0, half v1, half v2, half v3) {
+  __device__ __forceinline__ void set4(int row, int column, half v0, half v1,
+                                       half v2, half v3) {
     half2 v01 = __halves2half2(v0, v1);
     half2 v23 = __halves2half2(v2, v3);
     half2* ptr = (half2*)item_ptr(row, column);
@@ -105,7 +112,8 @@ class MatrixView_q4_row {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_q4_row(const uint32_t* data, const int height,
+  __device__ __forceinline__ MatrixView_q4_row(const uint32_t* data,
+                                               const int height,
                                                const int width)
       : data(data), height(height), width(width) {}
 
@@ -114,14 +122,16 @@ class MatrixView_q4_row {
     return (data[row * width / 8 + column / 8] >> shift) & 0x0f;
   }
 
-  __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
+  __device__ __forceinline__ void item2(int (&items)[2], int row,
+                                        int column) const {
     int shift = (column & 0x07) * 4;
     uint32_t d = data[row * width / 8 + column / 8] >> shift;
     items[0] = d & 0x0f;
     items[1] = (d >> 4) & 0x0f;
   }
 
-  __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4(int (&items)[4], int row,
+                                        int column) const {
     int shift = (column & 0x07) * 4;
     uint32_t d = data[row * width / 8 + column / 8] >> shift;
     items[0] = d & 0x0f;
@@ -137,7 +147,8 @@ class MatrixView_q4_column {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_q4_column(const uint32_t* data, const int height,
+  __device__ __forceinline__ MatrixView_q4_column(const uint32_t* data,
+                                                  const int height,
                                                   const int width)
       : data(data), height(height), width(width) {}
 
@@ -149,7 +160,8 @@ class MatrixView_q4_column {
   __device__ __forceinline__ uint32_t item_uint32_t(int row, int column) {
     return data[row / 8 * width + column];
   }
-  __device__ __forceinline__ const uint32_t* item_uint32_ptr(int row, int column) {
+  __device__ __forceinline__ const uint32_t* item_uint32_ptr(int row,
+                                                             int column) {
     return &data[row / 8 * width + column];
   }
 };
@@ -160,7 +172,8 @@ class MatrixView_q2_row {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_q2_row(const uint32_t* data, const int height,
+  __device__ __forceinline__ MatrixView_q2_row(const uint32_t* data,
+                                               const int height,
                                                const int width)
       : data(data), height(height), width(width) {}
 
@@ -169,14 +182,16 @@ class MatrixView_q2_row {
     return (data[row * width / 16 + column / 16] >> shift) & 0x03;
   }
 
-  __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
+  __device__ __forceinline__ void item2(int (&items)[2], int row,
+                                        int column) const {
     int shift = (column & 0x0f) * 2;
     uint32_t d = data[row * width / 16 + column / 16] >> shift;
     items[0] = d & 0x03;
     items[1] = (d >> 2) & 0x03;
   }
 
-  __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4(int (&items)[4], int row,
+                                        int column) const {
     int shift = (column & 0x0f) * 2;
     uint32_t d = data[row * width / 16 + column / 16] >> shift;
     items[0] = d & 0x03;
@@ -192,7 +207,8 @@ class MatrixView_q3_row {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_q3_row(const uint32_t* data, const int height,
+  __device__ __forceinline__ MatrixView_q3_row(const uint32_t* data,
+                                               const int height,
                                                const int width)
       : data(data), height(height), width(width) {}
 
@@ -215,7 +231,8 @@ class MatrixView_q3_row {
     }
   }
 
-  __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4(int (&items)[4], int row,
+                                        int column) const {
     int shift = (column & 0x1f);
     uint32_t d;
     if (shift <= 4) {
@@ -244,7 +261,8 @@ class MatrixView_q8_row {
   const int height;
   const int width;
 
-  __device__ __forceinline__ MatrixView_q8_row(const uint32_t* data, const int height,
+  __device__ __forceinline__ MatrixView_q8_row(const uint32_t* data,
+                                               const int height,
                                                const int width)
       : data(data), height(height), width(width) {}
 
@@ -253,14 +271,16 @@ class MatrixView_q8_row {
     return (data[row * width / 4 + column / 4] >> shift) & 0xff;
   }
 
-  __device__ __forceinline__ void item2(int (&items)[2], int row, int column) const {
+  __device__ __forceinline__ void item2(int (&items)[2], int row,
+                                        int column) const {
     int shift = (column & 0x03) * 8;
     uint32_t d = data[row * width / 4 + column / 4] >> shift;
     items[0] = d & 0xff;
     items[1] = (d >> 8) & 0xff;
   }
 
-  __device__ __forceinline__ void item4(int (&items)[4], int row, int column) const {
+  __device__ __forceinline__ void item4(int (&items)[4], int row,
+                                        int column) const {
     int shift = (column & 0x03) * 2;
     uint32_t d = data[row * width / 4 + column / 4] >> shift;
     items[0] = d & 0xff;

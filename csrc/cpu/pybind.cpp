@@ -9,7 +9,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Attention ops
   ops.def("paged_attention_v1", &paged_attention_v1,
-          "Compute the attention between an input query and the cached keys/values using "
+          "Compute the attention between an input query and the cached "
+          "keys/values using "
           "PagedAttention.");
   ops.def("paged_attention_v2", &paged_attention_v2, "PagedAttention V2.");
 
@@ -23,9 +24,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("gelu_fast", &gelu_fast, "Approximate GELU implementation.");
 
   // Layernorm
-  ops.def("rms_norm", &rms_norm, "Apply Root Mean Square (RMS) Normalization to the input tensor.");
+  ops.def("rms_norm", &rms_norm,
+          "Apply Root Mean Square (RMS) Normalization to the input tensor.");
 
-  ops.def("fused_add_rms_norm", &fused_add_rms_norm, "In-place fused Add and RMS Normalization");
+  ops.def("fused_add_rms_norm", &fused_add_rms_norm,
+          "In-place fused Add and RMS Normalization");
 
   // Rotary embedding
   ops.def("rotary_embedding", &rotary_embedding,
@@ -33,8 +36,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
-  cache_ops.def("swap_blocks", &swap_blocks, "Swap in (out) the cache blocks from src to dst");
-  cache_ops.def("copy_blocks", &copy_blocks, "Copy the cache blocks from src to dst");
+  cache_ops.def("swap_blocks", &swap_blocks,
+                "Swap in (out) the cache blocks from src to dst");
+  cache_ops.def("copy_blocks", &copy_blocks,
+                "Copy the cache blocks from src to dst");
   cache_ops.def("reshape_and_cache", &reshape_and_cache,
                 "Reshape the key and value tensors and cache them");
 }

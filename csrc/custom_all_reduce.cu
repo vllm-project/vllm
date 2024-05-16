@@ -10,22 +10,27 @@ using fptr_t = uint64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
-                      const std::vector<std::string>& handles, const std::vector<int64_t>& offsets,
-                      int rank, bool full_nvlink) {
+                      const std::vector<std::string>& handles,
+                      const std::vector<int64_t>& offsets, int rank,
+                      bool full_nvlink) {
   int world_size = offsets.size();
-  if (world_size > 8) throw std::invalid_argument("world size > 8 is not supported");
-  if (world_size % 2 != 0) throw std::invalid_argument("Odd num gpus is not supported for now");
+  if (world_size > 8)
+    throw std::invalid_argument("world size > 8 is not supported");
+  if (world_size % 2 != 0)
+    throw std::invalid_argument("Odd num gpus is not supported for now");
   if (world_size != handles.size())
-    throw std::invalid_argument("handles length should equal to offsets length");
-  if (rank < 0 || rank >= world_size) throw std::invalid_argument("invalid rank passed in");
+    throw std::invalid_argument(
+        "handles length should equal to offsets length");
+  if (rank < 0 || rank >= world_size)
+    throw std::invalid_argument("invalid rank passed in");
 
   cudaIpcMemHandle_t ipc_handles[8];
   for (int i = 0; i < world_size; i++) {
     std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
   }
-  return (fptr_t) new vllm::CustomAllreduce(reinterpret_cast<vllm::Signal*>(meta.data_ptr()),
-                                            rank_data.data_ptr(), rank_data.numel(), ipc_handles,
-                                            offsets, rank, full_nvlink);
+  return (fptr_t) new vllm::CustomAllreduce(
+      reinterpret_cast<vllm::Signal*>(meta.data_ptr()), rank_data.data_ptr(),
+      rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
 }
 
 /**
@@ -45,11 +50,13 @@ fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
  * 6. A[:, 1:, 1:]: Not OK
  */
 bool _is_weak_contiguous(torch::Tensor& t) {
-  return t.is_contiguous() || (t.storage().nbytes() - t.storage_offset() * t.element_size() ==
-                               t.numel() * t.element_size());
+  return t.is_contiguous() ||
+         (t.storage().nbytes() - t.storage_offset() * t.element_size() ==
+          t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size, bool full_nvlink) {
+bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size,
+                      bool full_nvlink) {
   auto inp_size = inp.numel() * inp.element_size();
   // custom allreduce requires input byte size to be multiples of 16
   if (inp_size % 16 != 0) return false;
@@ -60,13 +67,15 @@ bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size, bool ful
   return false;
 }
 
-void _all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out, cudaStream_t stream) {
+void _all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                 cudaStream_t stream) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   TORCH_CHECK(_is_weak_contiguous(out));
   switch (out.scalar_type()) {
     case at::ScalarType::Float: {
       fa->allreduce<float>(stream, reinterpret_cast<float*>(inp.data_ptr()),
-                           reinterpret_cast<float*>(out.data_ptr()), out.numel());
+                           reinterpret_cast<float*>(out.data_ptr()),
+                           out.numel());
       break;
     }
     case at::ScalarType::Half: {
@@ -76,13 +85,15 @@ void _all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out, cudaStream_
     }
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
     case at::ScalarType::BFloat16: {
-      fa->allreduce<nv_bfloat16>(stream, reinterpret_cast<nv_bfloat16*>(inp.data_ptr()),
-                                 reinterpret_cast<nv_bfloat16*>(out.data_ptr()), out.numel());
+      fa->allreduce<nv_bfloat16>(
+          stream, reinterpret_cast<nv_bfloat16*>(inp.data_ptr()),
+          reinterpret_cast<nv_bfloat16*>(out.data_ptr()), out.numel());
       break;
     }
 #endif
     default:
-      throw std::runtime_error("custom allreduce only supports float32, float16 and bfloat16");
+      throw std::runtime_error(
+          "custom allreduce only supports float32, float16 and bfloat16");
   }
 }
 
@@ -104,8 +115,8 @@ void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
   TORCH_CHECK_EQ(inp.numel(), out.numel());
   TORCH_CHECK(input_size <= reg_buffer.numel() * reg_buffer.element_size(),
               "registered buffer is too small to contain the input");
-  AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer.data_ptr(), inp.data_ptr(), input_size,
-                                cudaMemcpyDeviceToDevice, stream));
+  AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer.data_ptr(), inp.data_ptr(),
+                                input_size, cudaMemcpyDeviceToDevice, stream));
   _all_reduce(_fa, reg_buffer, out, stream);
 }
 
@@ -116,13 +127,15 @@ void dispose(fptr_t _fa) {
 
 int meta_size() { return sizeof(vllm::Signal); }
 
-void register_buffer(fptr_t _fa, torch::Tensor& t, const std::vector<std::string>& handles,
+void register_buffer(fptr_t _fa, torch::Tensor& t,
+                     const std::vector<std::string>& handles,
                      const std::vector<int64_t>& offsets) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(fptr_t _fa) {
+std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+    fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   return fa->get_graph_buffer_ipc_meta();
 }
