@@ -162,6 +162,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                         workspace, num_bits, size_m, size_n,
                                         size_k)
 
+
 # cutlass
 def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
                          a_scales: torch.Tensor, b_scales: torch.Tensor,
