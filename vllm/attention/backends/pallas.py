@@ -119,9 +119,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
             # Handle GQA/MQA.
             if self.num_kv_heads != self.num_heads:
                 key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-                key = key.view(batch_size, seq_len, self.num_heads, self.head_size)
+                key = key.view(batch_size, seq_len, self.num_heads,
+                               self.head_size)
                 value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
-                value = value.view(batch_size, seq_len, self.num_heads, self.head_size)
+                value = value.view(batch_size, seq_len, self.num_heads,
+                                   self.head_size)
             output = torch.ops.xla.flash_attention(
                 query.permute(0, 2, 1, 3),
                 key.permute(0, 2, 1, 3),
@@ -139,7 +141,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 attn_metadata.context_lens,
                 attn_metadata.block_tables,
                 16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
-                megacore_mode="kv_head",  # FIXME(woosuk): Must be None for TPUv5e.
+                megacore_mode=
+                "kv_head",  # FIXME(woosuk): Must be None for TPUv5e.
             )
 
         # Reshape the output tensor.

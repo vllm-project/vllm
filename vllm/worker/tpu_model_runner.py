@@ -53,14 +53,16 @@ class TPUModelRunner:
         self.device = self.device_config.device
 
         from vllm.model_executor.models.tpu.gemma import GemmaForCausalLM
+        model_arch = self.model_config.hf_config.architectures[0]
+        if model_arch != "GemmaForCausalLM":
+            raise NotImplementedError("Currently, only Gemma is supported. "
+                                      f"Got {model_arch}.")
+
         model = GemmaForCausalLM.from_pretrained(
             self.model_config.model, config=self.model_config.hf_config)
         model = model.to(self.device)
         model = ModelWrapper(model)
-
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True)
+        self.model = torch.compile(model, backend="openxla", fullgraph=True)
 
     def warmup_model(
         self,
@@ -103,7 +105,8 @@ class TPUModelRunner:
                 xm.mark_step()
 
                 # Dummy run.
-                self.model(token_ids, position_ids, kv_caches, attn_metadata, input_lens)
+                self.model(token_ids, position_ids, kv_caches, attn_metadata,
+                           input_lens)
                 xm.mark_step()
                 xm.wait_device_ops()
                 logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
@@ -131,8 +134,8 @@ class TPUModelRunner:
                                       dtype=torch.int32,
                                       device=self.device)
             input_lens = torch.ones((batch_size, ),
-                                      dtype=torch.int32,
-                                      device=self.device)
+                                    dtype=torch.int32,
+                                    device=self.device)
             attn_metadata = self.attn_backend.make_metadata(
                 num_prefills=0,
                 num_prefill_tokens=0,
@@ -148,7 +151,8 @@ class TPUModelRunner:
             xm.mark_step()
 
             # Dummy run.
-            self.model(token_ids, position_ids, kv_caches, attn_metadata, input_lens)
+            self.model(token_ids, position_ids, kv_caches, attn_metadata,
+                       input_lens)
             xm.mark_step()
             xm.wait_device_ops()
             logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
@@ -334,8 +338,8 @@ class TPUModelRunner:
         # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
-        next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
-                                            inputs[2], inputs[3])
+        next_token_ids = self.model(inputs[0], inputs[1], kv_caches, inputs[2],
+                                    inputs[3])
         end = time.time()
         # print(f"model(): {(end - start) * 1000:.2f} ms")
 
@@ -378,18 +382,20 @@ class ModelWrapper(nn.Module):
         input_lens: torch.Tensor,
     ) -> torch.Tensor:
         batch_size, seq_len = token_ids.shape
-        base_indicies = torch.arange(batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
+        base_indicies = torch.arange(
+            batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
         num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
         slot_mapping = attn_metadata.slot_mapping
         slot_mapping = slot_mapping.flatten()
         head_indicies = torch.arange(0,
-                                    num_kv_heads,
-                                    device=slot_mapping.device,
-                                    dtype=slot_mapping.dtype)
+                                     num_kv_heads,
+                                     device=slot_mapping.device,
+                                     dtype=slot_mapping.dtype)
         head_indicies *= block_size * num_blocks
-        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(-1, num_kv_heads)
+        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+            -1, num_kv_heads)
         slot_mapping = slot_mapping + head_indicies.view(1, -1)
         slot_mapping = slot_mapping.flatten()
         attn_metadata.slot_mapping = slot_mapping
