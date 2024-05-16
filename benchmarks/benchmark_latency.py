@@ -103,7 +103,6 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
-        print(f"Latency results saved to {args.output_json}")
 
 
 if __name__ == '__main__':
