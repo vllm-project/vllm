@@ -908,8 +908,8 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        memory_pool,
-        stream,
+        memory_pool: Optional[Tuple[int, int]],
+        stream: torch.cuda.Stream,
         **kwargs,
     ) -> None:
         assert self._graph is None
