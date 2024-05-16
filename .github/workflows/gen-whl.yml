@@ -10,13 +10,13 @@ on:
 
 jobs:
 
-  AWS-AVX2-32G-A10G-24G:
+  GCP-K8S-BUILD:
     strategy:
       matrix:
             python: [3.8.17, 3.9.17, 3.10.12, 3.11.4]
     uses: ./.github/workflows/build.yml
     with:
-        build_label: aws-avx2-192G-4-a10g-96G
+        build_label: gcp-k8s-build
         timeout: 60
         gitref: ${{ inputs.gitref }}
         Gi_per_thread: 4
