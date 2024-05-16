@@ -887,16 +887,6 @@ class ModelRunner:
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
-    def __del__(self) -> None:
-        # Delete the CUDA graphs before deleting the pynccl communicator.
-        # NOTE(woosuk): This is necessary because otherwise deadlocks can
-        # happen.
-        # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
-        # TODO(youkaichao): when we get enough user feedback that pynccl is
-        # more stable than cupy, we can remove this, e.g. in v0.4.1.
-        self.graph_runners.clear()
-        self.pynccl_backend = None
-
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
