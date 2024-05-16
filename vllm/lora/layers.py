@@ -1239,6 +1239,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         ) if lora_config.long_lora_scaling_factors else []
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
+        # Q: Should we not sort?
         scaling_factors = sorted(list(set([base_scaling_factor] + scaling_factors)))
         # Replace the base layer.
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
@@ -1280,6 +1281,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        breakpoint()
         return self.base_layer(
             positions,
             query,

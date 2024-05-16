@@ -127,6 +127,7 @@ class TestLongContext:
             lora_output = generate(lora_llm, lora_prompt)
             non_batched_results.append(lora_output)
         breakpoint()
+
         # Create batched results
         # Each element of the batch must be (prompt, prompt_sampling_params, prompt_lora_request)
         batched_prompts = []
@@ -137,8 +138,8 @@ class TestLongContext:
                  sampling_params,
                  _create_lora_request(lora_id, long_context_infos))
             ])
-
         batched_results = batched_generate(lora_llm, batched_prompts)
+        breakpoint()
 
         # Results should be the same
         for non_batched, batched in zip(non_batched_results, batched_results):
