@@ -11,7 +11,8 @@ logger = init_logger(__name__)
 
 def _warn_import_error():
     if not torch.cuda.is_available():
-        logger.warning("punica LoRA kernels require a GPU to run. But you are using the CPU version vLLM")
+        logger.warning("punica LoRA kernels require a GPU to run. "
+                       "But you are using the CPU version vLLM")
         return
     # No need to check compute capability if no GPU is available.
     if torch.cuda.get_device_capability() < (8, 0):
