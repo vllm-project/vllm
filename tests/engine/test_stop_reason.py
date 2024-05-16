@@ -58,5 +58,4 @@ def test_stop_reason(vllm_model, example_prompts):
         output = output.outputs[0]
         assert output.finish_reason == "length" or (
             output.finish_reason == "stop" and output.stop_reason is None)
-    
-    del llm
+
