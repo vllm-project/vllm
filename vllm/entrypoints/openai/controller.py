@@ -57,7 +57,7 @@ class Controller:
         else:
             logger.info("Register an existing worker: %s", worker_addr)
 
-        # adjust new comming worker according its queue status
+        # adjust new coming worker according its queue status
         # normally if it is a fresh worker
         req_cnt = 0
         for w_info in self.worker_info.values():

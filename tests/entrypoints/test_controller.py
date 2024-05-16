@@ -4,7 +4,7 @@ entrance place, a.k.a service URL, and dispatch request to workers.
 
 To accomplish this job, it need to:
     1. make sure controller could correctly receive worker's join request
-    2. make sure worker would repeatly sending heart beat signal to controller
+    2. make sure worker would repeatedly sending heart beat signal to controller
     3. make sure remove stale worker if not receive worker's heart beat
 
 And by worker registration, it also could do the job as:
