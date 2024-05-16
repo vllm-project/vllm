@@ -25,7 +25,7 @@ _BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
 ]
 
 
-class XPUModelRunner():
+class XPUModelRunner:
 
     def __init__(
         self,
@@ -51,12 +51,8 @@ class XPUModelRunner():
         self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
 
-        # model_config can be None in tests/samplers/test_sampler.py.
-        # FIXME(woosuk): This is a hack to make the tests work. Refactor this.
-        self.sliding_window = (model_config.get_sliding_window()
-                               if model_config is not None else None)
-        self.device_config = (device_config
-                              if device_config is not None else DeviceConfig())
+        self.sliding_window = model_config.get_sliding_window()
+        self.device_config = device_config
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
@@ -75,12 +71,8 @@ class XPUModelRunner():
             self.block_size,
         )
 
-        # self.attn_backend = get_attn_backend(
-        #     self.model_config.dtype if model_config is not None else None)
-
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-        # self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -141,9 +133,6 @@ class XPUModelRunner():
         self.execute_model(seqs, kv_caches)
         torch.xpu.synchronize()
         return
-
-    def set_block_size(self, block_size: int) -> None:
-        self.block_size = block_size
 
     def prepare_input_tensors(
         self,

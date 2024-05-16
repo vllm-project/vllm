@@ -49,13 +49,13 @@ class XPUExecutor(GPUExecutor):
         self._init_executor()
 
     def _init_spec_worker(self):
-        logger.error("not support speculative for XPU executor!")
+        raise NotImplementedError("XPU does not support speculative decoding")
 
     def _init_non_spec_worker(self):
         from vllm.worker.xpu_worker import XPUWorker
 
         assert self.parallel_config.world_size == 1, (
-            "XPUExecutor only supports single GPU.")
+            "XPUExecutor only supports a single XPU.")
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
@@ -90,7 +90,7 @@ class XPUExecutorAsync(XPUExecutor, ExecutorAsyncBase):
         execute_model_req: ExecuteModelRequest,
     ) -> List[SamplerOutput]:
         output = await make_async(self.driver_worker.execute_model
-                                  )(execute_model_req=execute_model_req, )
+                                  )(execute_model_req=execute_model_req)
         return output
 
 

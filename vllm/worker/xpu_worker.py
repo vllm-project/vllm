@@ -1,6 +1,7 @@
 """A XPU worker class."""
 import gc
-from typing import Any, Dict, List, Optional, Tuple
+import os
+from typing import List, Optional, Tuple
 
 import intel_extension_for_pytorch  # noqa: F401
 import oneccl_bindings_for_pytorch  # noqa: F401
@@ -10,22 +11,20 @@ import torch.distributed
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import (broadcast_tensor_dict,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import is_xpu
 from vllm.worker.cache_engine import CacheEngine
-from vllm.worker.worker import raise_if_cache_size_invalid
+from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase
 from vllm.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class XPUWorker(LoraNotSupportedWorkerBase):
+class XPUWorker(LoraNotSupportedWorkerBase, Worker):
     """A worker class that executes (a partition of) the model on a GPU.
     
     Each worker is associated with a single XPU device. The worker is 
@@ -71,7 +70,7 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        self.model_runner = XPUModelRunner(
+        self.model_runner = XPUModelRunner(  # type: ignore
             model_config,
             parallel_config,
             scheduler_config,
@@ -99,13 +98,11 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        self.init_distributed_environment()
+        self.init_worker_distributed_environment()
         # Initialize the model.
         set_random_seed(self.model_config.seed)
 
-    def load_model(self):
-        self.model_runner.load_model()
-
+    # keep this method for `empty_cache` and `synchronize` api
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -154,101 +151,11 @@ class XPUWorker(LoraNotSupportedWorkerBase):
         torch.xpu.empty_cache()
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
-        """Allocate GPU and CPU KV cache with the specified number of blocks.
-
-        This also warms up the model, which may record CUDA graphs.
-        """
-        raise_if_cache_size_invalid(num_gpu_blocks,
-                                    self.cache_config.block_size,
-                                    self.model_config.max_model_len)
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self._init_cache_engine()
-        self._warm_up_model()
-
-    def _init_cache_engine(self) -> None:
-        assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = CacheEngine(self.cache_config, self.model_config,
-                                        self.parallel_config,
-                                        self.device_config)
-        self.gpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
-
     def _warm_up_model(self) -> None:
         # IPEX don't support capture graph yet
         pass
 
-    def get_cache_block_size_bytes(self) -> int:
-        """Get the size of the KV cache block size in bytes.
-        """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
-                                                self.parallel_config)
-
-    @torch.inference_mode()
-    def execute_model(
-        self,
-        execute_model_req: Optional[ExecuteModelRequest] = None,
-    ) -> List[SamplerOutput]:
-        if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
-
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            num_seq_groups = len(seq_group_metadata_list)
-            assert execute_model_req is not None
-            blocks_to_swap_in = execute_model_req.blocks_to_swap_in
-            blocks_to_swap_out = execute_model_req.blocks_to_swap_out
-            blocks_to_copy = execute_model_req.blocks_to_copy
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
-
-        assert blocks_to_swap_in is not None
-        assert blocks_to_swap_out is not None
-        assert blocks_to_copy is not None
-        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
-
-        # If there is no input, we don't need to execute the model.
-        if num_seq_groups == 0:
-            return []
-
-        output = self.model_runner.execute_model(seq_group_metadata_list,
-                                                 self.gpu_cache)
-        return [output]
-
-    def cache_swap(
-        self,
-        blocks_to_swap_in: Dict[int, int],
-        blocks_to_swap_out: Dict[int, int],
-        blocks_to_copy: Dict[int, List[int]],
-    ) -> None:
-        # Issue cache operations.
-        # TODO(woosuk): Profile swapping overhead and optimize if needed.
-        if blocks_to_swap_in:
-            self.cache_engine.swap_in(blocks_to_swap_in)
-        if blocks_to_swap_out:
-            self.cache_engine.swap_out(blocks_to_swap_out)
-        if blocks_to_copy:
-            self.cache_engine.copy(blocks_to_copy)
-
-    def init_distributed_environment(self) -> None:
+    def init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
 
         parallel_config = self.parallel_config
@@ -267,7 +174,6 @@ class XPUWorker(LoraNotSupportedWorkerBase):
                 "distributed_init_method must be set if torch.distributed "
                 "is not already initialized")
         else:
-            import os
             ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
                                                 "sockets")
             os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
@@ -277,8 +183,6 @@ class XPUWorker(LoraNotSupportedWorkerBase):
                 distributed_init_method=distributed_init_method,
                 local_rank=self.local_rank,
                 backend="ccl")
-        # A small all_reduce for warmup.
-        torch.distributed.all_reduce(torch.zeros(1).xpu())
 
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,

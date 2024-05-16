@@ -47,7 +47,7 @@ Build from source
 .. code-block:: console
 
     $ pip install --upgrade pip
-    $ pip install wheel packaging ninja setuptools>=49.4.0 numpy
+    $ pip install -v -r requirements-dev.txt
     $ pip install -v -r requirements-xpu.txt 
 
 - Finally, build and install vLLM XPU backend: 
