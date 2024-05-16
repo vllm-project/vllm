@@ -15,6 +15,7 @@ import torch
 
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -51,7 +52,7 @@ MODELS = [
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -75,11 +76,15 @@ def test_models(
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
         example_prompts[:-1], max_tokens, num_logprobs)
     del gptq_marlin_model
+    _ROPE_DICT.clear()  # clear rope cache to avoid rope dtype error
 
     # Run gptq.
+    # The naive gptq kernel doesn't support bf16 yet.
+    # Here we always compare fp16/bf16 gpt marlin kernel
+    # to fp16 gptq kernel.
     gptq_model = vllm_runner(model_name=model_name,
                              revision=revision,
-                             dtype=dtype,
+                             dtype="half",
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
                              tensor_parallel_size=1)
