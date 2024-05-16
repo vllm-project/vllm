@@ -29,10 +29,11 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    device=None,
 ) -> Type[AttentionBackend]:
     backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
                                  sliding_window, dtype, kv_cache_dtype,
-                                 block_size)
+                                 block_size, device)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
@@ -69,9 +70,10 @@ def _which_attn_to_use(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    device=None,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
-    if is_cpu():
+    if is_cpu() or device == "cpu":
         return _Backend.TORCH_SDPA
 
     if is_hip():

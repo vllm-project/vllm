@@ -34,8 +34,11 @@ class DistributedGPUExecutor(GPUExecutor):
 
         return num_gpu_blocks, num_cpu_blocks
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         draft_num_gpu_blocks=None,
+                         draft_num_cpu_blocks=None) -> None:
         """Initialize the KV cache in all workers.
         """
 
@@ -50,7 +53,9 @@ class DistributedGPUExecutor(GPUExecutor):
 
         self._run_workers("initialize_cache",
                           num_gpu_blocks=num_gpu_blocks,
-                          num_cpu_blocks=num_cpu_blocks)
+                          num_cpu_blocks=num_cpu_blocks,
+                          draft_num_gpu_blocks=draft_num_gpu_blocks,
+                          draft_num_cpu_blocks=draft_num_cpu_blocks)
 
     def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
         all_outputs = self._run_workers("execute_model",

@@ -149,6 +149,7 @@ class ModelRunner:
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            self.device.type,
         )
 
         # Lazy initialization
@@ -670,6 +671,7 @@ class ModelRunner:
             input_tokens = torch.tensor(input_tokens,
                                         dtype=torch.long,
                                         device=self.device)
+            # print(f"input_tokens is \n {input_tokens}")
             input_positions = torch.tensor(input_positions,
                                            dtype=torch.long,
                                            device=self.device)

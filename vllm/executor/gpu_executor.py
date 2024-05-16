@@ -1,3 +1,4 @@
+import copy
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
@@ -77,7 +78,8 @@ class GPUExecutor(ExecutorBase):
 
         target_worker = self._create_worker()
 
-        draft_worker_kwargs = self._get_worker_kwargs()
+        target_worker_kwargs = self._get_worker_kwargs()
+        draft_worker_kwargs = copy.deepcopy(target_worker_kwargs)
         # Override draft-model specific worker args.
         draft_worker_kwargs.update(
             model_config=self.speculative_config.draft_model_config,
@@ -111,16 +113,25 @@ class GPUExecutor(ExecutorBase):
         """
         return self.driver_worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+    def initialize_cache(self,
+                         num_gpu_blocks: int,
+                         num_cpu_blocks: int,
+                         draft_num_gpu_blocks=None,
+                         draft_num_cpu_blocks=None) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
-                    num_cpu_blocks)
+        logger.info(
+            "# GPU blocks: %d, # CPU blocks: %d, # draft GPU blocks: %d, \
+            # draft CPU blocks: %d"
+            , num_gpu_blocks, num_cpu_blocks, \
+            draft_num_gpu_blocks, draft_num_cpu_blocks)
 
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,
+                                            draft_num_gpu_blocks,
+                                            draft_num_cpu_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
