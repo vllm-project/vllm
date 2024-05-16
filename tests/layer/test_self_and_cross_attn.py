@@ -5,7 +5,7 @@ import itertools
 import pytest
 import torch
 import copy
-from vllm.attention import Attention, AttentionMetadata, AttentionMetadataPerStage
+from vllm.attention import Attention, AttentionMetadata #, AttentionMetadataPerStage
 
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.attention.backends.abstract import AttentionBackend
