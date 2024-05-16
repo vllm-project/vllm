@@ -1,7 +1,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -145,11 +145,15 @@ class LoRAMapping:
 
 class BaseLayerWithLoRA(nn.Module):
 
-    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+    def slice_lora_a(
+        self, lora_a: Union[torch.Tensor, List[Union[torch.Tensor, None]]]
+    ) -> Union[torch.Tensor, List[Union[torch.Tensor, None]]]:
         """Slice lora a if splitting for tensor parallelism."""
         ...
 
-    def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
+    def slice_lora_b(
+        self, lora_b: Union[torch.Tensor, List[Union[torch.Tensor, None]]]
+    ) -> Union[torch.Tensor, List[Union[torch.Tensor, None]]]:
         """Slice lora b if splitting with tensor parallelism."""
         ...
 
@@ -539,10 +543,16 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         self.lora_b_stacked[0][index] = 0
         self.lora_b_stacked[1][index] = 0
 
-    def slice_lora_a(self, lora_a: List[torch.Tensor]) -> List[torch.Tensor]:
+    def slice_lora_a(
+        self, lora_a: List[Union[torch.Tensor, None]]
+    ) -> List[Union[torch.Tensor, None]]:
         return lora_a
 
-    def slice_lora_b(self, lora_b: List[torch.Tensor]) -> List[torch.Tensor]:
+    def slice_lora_b(
+        self, lora_b: List[Union[torch.Tensor, None]]
+    ) -> List[Union[torch.Tensor, None]]:
+        if lora_b[0] is None or lora_b[1] is None:
+            return lora_b
         shard_size = self.output_dim
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
@@ -767,10 +777,15 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         self.lora_a_stacked[2][index] = 0
         self.lora_b_stacked[2][index] = 0
 
-    def slice_lora_a(self, lora_a: List[torch.Tensor]) -> List[torch.Tensor]:
+    def slice_lora_a(
+        self, lora_a: List[Union[torch.Tensor, None]]
+    ) -> List[Union[torch.Tensor, None]]:
         return lora_a
 
-    def slice_lora_b(self, lora_b: List[torch.Tensor]) -> List[torch.Tensor]:
+    def slice_lora_b(
+        self, lora_b: List[Union[torch.Tensor, None]]
+    ) -> List[Union[torch.Tensor, None]]:
+        lora_b_q, lora_b_k, lora_b_v = None, None, None
         if lora_b[0] is not None:
             lora_b_q = lora_b[0][:, self.q_proj_shard_size *
                                  self.q_shard_id:self.q_proj_shard_size *
@@ -992,7 +1007,6 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self):
-
         return self.base_layer.weight if hasattr(
             self.base_layer, "weight") else self.base_layer.qweight
 

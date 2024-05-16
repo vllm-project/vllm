@@ -1,17 +1,15 @@
 import enum
-import os
 from functools import lru_cache
-from typing import Type
+from typing import Optional, Type
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.utils import is_cpu, is_hip
 
 logger = init_logger(__name__)
-
-VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 
 class _Backend(enum.Enum):
@@ -19,11 +17,22 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    FLASHINFER = enum.auto()
 
 
 @lru_cache(maxsize=None)
-def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
-    backend = _which_attn_to_use(dtype)
+def get_attn_backend(
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    sliding_window: Optional[int],
+    dtype: torch.dtype,
+    kv_cache_dtype: Optional[str],
+    block_size: int,
+) -> Type[AttentionBackend]:
+    backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
+                                 sliding_window, dtype, kv_cache_dtype,
+                                 block_size)
     if backend == _Backend.FLASH_ATTN:
         logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
@@ -43,11 +52,24 @@ def get_attn_backend(dtype: torch.dtype) -> Type[AttentionBackend]:
         logger.info("Using Torch SDPA backend.")
         from vllm.attention.backends.torch_sdpa import TorchSDPABackend
         return TorchSDPABackend
+    elif backend == _Backend.FLASHINFER:
+        logger.info("Using Flashinfer backend.")
+        logger.warning("Eager mode is enforced for the Flashinfer backend.")
+        from vllm.attention.backends.flashinfer import FlashInferBackend
+        return FlashInferBackend
     else:
         raise ValueError("Invalid attention backend.")
 
 
-def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
+def _which_attn_to_use(
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    sliding_window: Optional[int],
+    dtype: torch.dtype,
+    kv_cache_dtype: Optional[str],
+    block_size: int,
+) -> _Backend:
     """Returns which flash attention backend to use."""
     if is_cpu():
         return _Backend.TORCH_SDPA
@@ -72,14 +94,15 @@ def _which_attn_to_use(dtype: torch.dtype) -> _Backend:
         return _Backend.XFORMERS
 
     try:
-        import flash_attn  # noqa: F401
+        import vllm_flash_attn  # noqa: F401
     except ImportError:
         logger.info(
-            "Cannot use FlashAttention-2 backend because the flash_attn "
-            "package is not found. Please install it for better performance.")
+            "Cannot use FlashAttention-2 backend because the vllm_flash_attn "
+            "package is not found. `pip install vllm-flash-attn` for better "
+            "performance.")
         return _Backend.XFORMERS
 
-    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    backend_by_env_var = envs.VLLM_ATTENTION_BACKEND
     if backend_by_env_var is not None:
         return _Backend[backend_by_env_var]
 

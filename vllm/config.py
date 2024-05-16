@@ -1,18 +1,19 @@
 import enum
 import json
-import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
 
 import torch
-from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     get_quantization_config)
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
-                        is_neuron)
+from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
+
+GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -20,10 +21,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
 
 logger = init_logger(__name__)
-
-# If true, will load models from ModelScope instead of Hugging Face Hub.
-VLLM_USE_MODELSCOPE = os.environ.get("VLLM_USE_MODELSCOPE",
-                                     "False").lower() == "true"
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
@@ -34,8 +31,8 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 _ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
-
 _GB = 1 << 30
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 
 class ModelConfig:
@@ -43,6 +40,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+            It is also used as the content for `model_name` tag in metrics
+            output when `served_model_name` is not specified.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -75,13 +74,20 @@ class ModelConfig:
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode
         disable_sliding_window: Whether to disable sliding window. If True,
             we will disable the sliding window functionality of the model.
-            If the model does not support sliding window, this argument is 
+            If the model does not support sliding window, this argument is
             ignored.
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
+        served_model_name: The model name used in metrics tag `model_name`,
+            matches the model name exposed via the APIs. If multiple model
+            names provided, the first name will be used. If not specified,
+            the model name will be the same as `model`.
     """
 
     def __init__(
@@ -100,9 +106,11 @@ class ModelConfig:
         quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
         disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -116,6 +124,11 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        if self.max_context_len_to_capture is not None:
+            raise ValueError("`max_context_len_to_capture` is deprecated. "
+                             "Use `max_seq_len_to_capture` instead.")
+        self.max_seq_len_to_capture = (max_seq_len_to_capture
+                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
@@ -126,8 +139,11 @@ class ModelConfig:
         self.dtype = self._get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = self._get_and_verify_max_len(
             self.hf_text_config, self.disable_sliding_window, max_model_len)
+        self.served_model_name = get_served_model_name(model,
+                                                       served_model_name)
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
+        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
 
@@ -138,6 +154,11 @@ class ModelConfig:
                 f"Unknown tokenizer mode: {self.tokenizer_mode}. Must be "
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
+
+    def _verify_embedding_mode(self) -> None:
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.embedding_mode = any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
@@ -154,14 +175,34 @@ class ModelConfig:
             is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
                                 or quant_cfg.get("is_marlin_format", False))
 
-            # Use marlin if the GPTQ model is serialized in marlin format.
-            if quant_method == "gptq" and is_format_marlin:
-                logger.info("The model is serialized in Marlin format. "
-                            "Using Marlin kernel.")
-                quant_method = "marlin"
-                if self.quantization == "gptq":
-                    self.quantization = quant_method
+            # Check which LinearMethod the GPTQ model should use.
+            if quant_method == "gptq":
+                # If serialized in Marlin format, use MarlinLinearMethod.
+                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
+                if is_format_marlin:
+                    logger.info("The model is serialized in Marlin format. "
+                                "Using Marlin kernel.")
+                    quant_method = "marlin"
+                    if self.quantization == "gptq":
+                        self.quantization = quant_method
 
+                # If convertible to Marlin format, use GPTQMarlinLinearMethod
+                # unless the user explicitly specified GPTQLinearMethod.
+                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
+                    if self.quantization == "gptq":
+                        logger.warning(
+                            "The model is convertible to Marlin format, but "
+                            "you specified quantization=gptq. Use "
+                            "quantization=marlin for faster inference.")
+                    else:
+                        logger.info(
+                            "The model is convertible to Marlin format. "
+                            "Using Marlin kernel.")
+                        quant_method = "gptq_marlin"
+                        if self.quantization == "marlin":
+                            self.quantization = quant_method
+
+            # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:
@@ -181,17 +222,17 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if self.quantization != "marlin":
+            if (self.quantization not in ["marlin", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        if self.max_context_len_to_capture is None:
-            self.max_context_len_to_capture = self.max_model_len
-        self.max_context_len_to_capture = min(self.max_context_len_to_capture,
-                                              self.max_model_len)
+        if self.max_seq_len_to_capture is None:
+            self.max_seq_len_to_capture = self.max_model_len
+        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
+                                          self.max_model_len)
 
     def verify_with_parallel_config(
         self,
@@ -295,6 +336,11 @@ class ModelConfig:
         # parallel size so each GPU has at least one KV head.
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
+
+    def get_num_attention_heads(self,
+                                parallel_config: "ParallelConfig") -> int:
+        return self.hf_text_config.num_attention_heads // \
+                    parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
@@ -508,12 +554,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8":
-            if not is_hip():
-                nvcc_cuda_version = get_nvcc_cuda_version()
-                if nvcc_cuda_version < Version("11.8"):
-                    raise ValueError(
-                        "FP8 is not supported when cuda version is"
-                        "lower than 11.8.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -673,9 +713,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -685,22 +723,28 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        placement_group: ray distributed model workers placement group.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -708,14 +752,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -727,7 +786,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -751,6 +811,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -762,13 +823,19 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
             if enable_chunked_prefill:
-                # For chunked prefill, choose the well-tuned batch size.
-                self.max_num_batched_tokens = 768
+                # It is the values that have the best balance between ITL
+                # and TTFT on A100. Note it is not optimized for throughput.
+                self.max_num_batched_tokens = 512
+            elif embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                self.max_num_batched_tokens = max(
+                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -782,6 +849,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.embedding_mode = embedding_mode
 
         self._verify_args()
 
@@ -851,6 +919,9 @@ class SpeculativeConfig:
         speculative_max_model_len: Optional[int],
         enable_chunked_prefill: bool,
         use_v2_block_manager: bool,
+        speculative_disable_by_batch_size: Optional[int],
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -877,13 +948,20 @@ class SpeculativeConfig:
             use_v2_block_manager (bool): Whether vLLM is configured to use the
                 v2 block manager or not. Used for raising an error since the v2
                 block manager is required with spec decode.
+            speculative_disable_by_batch_size (Optional[int]): Disable
+                speculative decoding for new incoming requests when the number
+                of enqueue requests  is larger than this value, if provided.
+            ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
+                window, if provided.
+            ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
+                window, if provided.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
 
-        if (speculative_model is None and num_speculative_tokens is None):
+        if speculative_model is None and num_speculative_tokens is None:
             return None
 
         if speculative_model is not None and num_speculative_tokens is None:
@@ -891,6 +969,12 @@ class SpeculativeConfig:
                 "Expected both speculative_model and "
                 "num_speculative_tokens to be provided, but found "
                 f"{speculative_model=} and {num_speculative_tokens=}.")
+
+        if (speculative_disable_by_batch_size is not None
+                and speculative_disable_by_batch_size < 2):
+            raise ValueError("Expect the batch size threshold of disabling "
+                             "speculative decoding is > 1, but got "
+                             f"{speculative_disable_by_batch_size=}")
 
         assert (speculative_model is not None
                 and num_speculative_tokens is not None)
@@ -911,39 +995,61 @@ class SpeculativeConfig:
         draft_code_revision = None
         draft_quantization = None
 
-        draft_model_config = ModelConfig(
-            model=speculative_model,
-            tokenizer=target_model_config.tokenizer,
-            tokenizer_mode=target_model_config.tokenizer_mode,
-            trust_remote_code=target_model_config.trust_remote_code,
-            dtype=target_model_config.dtype,
-            seed=target_model_config.seed,
-            revision=draft_revision,
-            code_revision=draft_code_revision,
-            tokenizer_revision=target_model_config.tokenizer_revision,
-            max_model_len=None,
-            quantization=draft_quantization,
-            enforce_eager=target_model_config.enforce_eager,
-            max_context_len_to_capture=target_model_config.
-            max_context_len_to_capture,
-            max_logprobs=target_model_config.max_logprobs,
-        )
+        if speculative_model == "[ngram]":
+            if ngram_prompt_lookup_min is None:
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
-        draft_model_config.max_model_len = (
-            SpeculativeConfig._maybe_override_draft_max_model_len(
-                speculative_max_model_len,
-                draft_model_config.max_model_len,
-                target_model_config.max_model_len,
-            ))
+            # TODO: current we still need extract vocab_size from target model
+            # config, in future, we may try refactor it out, and set
+            # draft related config as None here.
+            draft_model_config = target_model_config
+            draft_parallel_config = target_parallel_config
+        else:
+            ngram_prompt_lookup_max = 0
+            ngram_prompt_lookup_min = 0
+            draft_model_config = ModelConfig(
+                model=speculative_model,
+                tokenizer=target_model_config.tokenizer,
+                tokenizer_mode=target_model_config.tokenizer_mode,
+                trust_remote_code=target_model_config.trust_remote_code,
+                dtype=target_model_config.dtype,
+                seed=target_model_config.seed,
+                revision=draft_revision,
+                code_revision=draft_code_revision,
+                tokenizer_revision=target_model_config.tokenizer_revision,
+                max_model_len=None,
+                quantization=draft_quantization,
+                enforce_eager=target_model_config.enforce_eager,
+                max_seq_len_to_capture=target_model_config.
+                max_seq_len_to_capture,
+                max_logprobs=target_model_config.max_logprobs,
+            )
 
-        draft_parallel_config = (
-            SpeculativeConfig.create_draft_parallel_config(
-                target_parallel_config))
+            draft_model_config.max_model_len = (
+                SpeculativeConfig._maybe_override_draft_max_model_len(
+                    speculative_max_model_len,
+                    draft_model_config.max_model_len,
+                    target_model_config.max_model_len,
+                ))
+
+            draft_parallel_config = (
+                SpeculativeConfig.create_draft_parallel_config(
+                    target_parallel_config))
 
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            speculative_disable_by_batch_size,
+            ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min,
         )
 
     @staticmethod
@@ -993,7 +1099,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
@@ -1011,6 +1118,9 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
+        speculative_disable_by_batch_size: Optional[int],
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ):
         """Create a SpeculativeConfig object.
 
@@ -1019,10 +1129,19 @@ class SpeculativeConfig:
             draft_parallel_config: ParallelConfig for the draft model.
             num_speculative_tokens: The number of tokens to sample from the
                 draft model before scoring with the target model.
+            speculative_disable_by_batch_size: Disable speculative
+                decoding for new incoming requests when the number of
+                enqueue requests is larger than this value.
+            ngram_prompt_lookup_max: Max size of ngram token window.
+            ngram_prompt_lookup_min: Min size of ngram token window.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
+        self.speculative_disable_by_batch_size = \
+            speculative_disable_by_batch_size
+        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
+        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
 
         self._verify_args()
 
@@ -1046,7 +1165,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        draft_model = self.draft_model_config.model
+        if self.ngram_prompt_lookup_max > 0:
+            draft_model = "[ngram]"
+        else:
+            draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 
@@ -1143,6 +1265,22 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+
+
+def get_served_model_name(model: str,
+                          served_model_name: Optional[Union[str, List[str]]]):
+    """
+    If the input is a non-empty list, the first model_name in
+    `served_model_name` is taken.
+    If the input is a non-empty string, it is used directly.
+    For cases where the input is either an empty string or an
+    empty list, the fallback is to use `self.model`.
+    """
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name
 
 
 @dataclass

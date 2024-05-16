@@ -1,14 +1,16 @@
 import codecs
 import time
-from typing import (AsyncGenerator, AsyncIterator, Awaitable, Iterable, List,
-                    Optional, Tuple, TypedDict, Union, final)
+from dataclasses import dataclass
+from typing import (AsyncGenerator, AsyncIterator, Iterable, List, Optional,
+                    TypedDict, Union, cast, final)
 
 from fastapi import Request
-from openai.types.chat import (ChatCompletionContentPartParam,
-                               ChatCompletionRole)
+from openai.types.chat import ChatCompletionContentPartTextParam
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionContentPartParam, ChatCompletionMessageParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
@@ -30,37 +32,96 @@ class ConversationMessage(TypedDict):
     content: str
 
 
+@dataclass(frozen=True)
+class ChatMessageParseResult:
+    messages: List[ConversationMessage]
+
+
 class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine: AsyncLLMEngine,
+                 model_config: ModelConfig,
                  served_model_names: List[str],
                  response_role: str,
                  lora_modules: Optional[List[LoRAModulePath]] = None,
                  chat_template: Optional[str] = None):
         super().__init__(engine=engine,
+                         model_config=model_config,
                          served_model_names=served_model_names,
                          lora_modules=lora_modules)
+
         self.response_role = response_role
         self._load_chat_template(chat_template)
 
+    def _load_chat_template(self, chat_template: Optional[str]):
+        tokenizer = self.tokenizer
+
+        if chat_template is not None:
+            try:
+                with open(chat_template, "r") as f:
+                    tokenizer.chat_template = f.read()
+            except OSError as e:
+                JINJA_CHARS = "{}\n"
+                if not any(c in chat_template for c in JINJA_CHARS):
+                    msg = (f"The supplied chat template ({chat_template}) "
+                           f"looks like a file path, but it failed to be "
+                           f"opened. Reason: {e}")
+                    raise ValueError(msg) from e
+
+                # If opening a file fails, set chat template to be args to
+                # ensure we decode so our escape are interpreted correctly
+                tokenizer.chat_template = codecs.decode(
+                    chat_template, "unicode_escape")
+
+            logger.info("Using supplied chat template:\n%s",
+                        tokenizer.chat_template)
+        elif tokenizer.chat_template is not None:
+            logger.info("Using default chat template:\n%s",
+                        tokenizer.chat_template)
+        else:
+            logger.warning(
+                "No chat template provided. Chat API will not work.")
+
+    def _parse_chat_message_content_parts(
+        self,
+        role: str,
+        parts: Iterable[ChatCompletionContentPartParam],
+    ) -> ChatMessageParseResult:
+        texts: List[str] = []
+
+        for _, part in enumerate(parts):
+            part_type = part["type"]
+            if part_type == "text":
+                text = cast(ChatCompletionContentPartTextParam, part)["text"]
+
+                texts.append(text)
+            else:
+                raise NotImplementedError(f"Unknown part type: {part_type}")
+
+        messages = [ConversationMessage(role=role, content="\n".join(texts))]
+
+        return ChatMessageParseResult(messages=messages)
+
     def _parse_chat_message_content(
         self,
-        role: ChatCompletionRole,
-        content: Optional[Union[str,
-                                Iterable[ChatCompletionContentPartParam]]],
-    ) -> Tuple[List[ConversationMessage], List[Awaitable[object]]]:
-        if content is None:
-            return [], []
-        if isinstance(content, str):
-            return [ConversationMessage(role=role, content=content)], []
+        message: ChatCompletionMessageParam,
+    ) -> ChatMessageParseResult:
+        role = message["role"]
+        content = message.get("content")
 
-        # To be implemented: https://github.com/vllm-project/vllm/pull/3467
-        # To be implemented: https://github.com/vllm-project/vllm/pull/4200
-        raise NotImplementedError("Complex input not supported yet")
+        if content is None:
+            return ChatMessageParseResult(messages=[])
+        if isinstance(content, str):
+            messages = [ConversationMessage(role=role, content=content)]
+            return ChatMessageParseResult(messages=messages)
+
+        return self._parse_chat_message_content_parts(role, content)
 
     async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Optional[Request] = None
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
@@ -79,11 +140,10 @@ class OpenAIServingChat(OpenAIServing):
         try:
             conversation: List[ConversationMessage] = []
 
-            for m in request.messages:
-                messages, _ = self._parse_chat_message_content(
-                    m["role"], m["content"])
+            for msg in request.messages:
+                parsed_msg = self._parse_chat_message_content(msg)
 
-                conversation.extend(messages)
+                conversation.extend(parsed_msg.messages)
 
             prompt = self.tokenizer.apply_chat_template(
                 conversation=conversation,
@@ -122,11 +182,12 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
-                request, result_generator, request_id)
+                request, result_generator, request_id, conversation)
         else:
             try:
                 return await self.chat_completion_full_generator(
-                    request, raw_request, result_generator, request_id)
+                    request, raw_request, result_generator, request_id,
+                    conversation)
             except ValueError as e:
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
@@ -139,8 +200,9 @@ class OpenAIServingChat(OpenAIServing):
 
     async def chat_completion_stream_generator(
             self, request: ChatCompletionRequest,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str) -> AsyncGenerator[str, None]:
+            result_generator: AsyncIterator[RequestOutput], request_id: str,
+            conversation: List[ConversationMessage]
+    ) -> AsyncGenerator[str, None]:
         model_name = self.served_model_names[0]
         created_time = int(time.time())
         chunk_object_type = "chat.completion.chunk"
@@ -179,12 +241,10 @@ class OpenAIServingChat(OpenAIServing):
                     # last message
                     if request.echo:
                         last_msg_content = ""
-                        if request.messages and isinstance(
-                                request.messages,
-                                list) and request.messages[-1].get(
-                                    "content") and request.messages[-1].get(
-                                        "role") == role:
-                            last_msg_content = request.messages[-1]["content"]
+                        if conversation and conversation[-1].get(
+                                "content") and conversation[-1].get(
+                                    "role") == role:
+                            last_msg_content = conversation[-1]["content"]
 
                         if last_msg_content:
                             for i in range(request.n):
@@ -279,16 +339,17 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-            self, request: ChatCompletionRequest, raw_request: Request,
-            result_generator: AsyncIterator[RequestOutput],
-            request_id: str) -> Union[ErrorResponse, ChatCompletionResponse]:
+        self, request: ChatCompletionRequest, raw_request: Optional[Request],
+        result_generator: AsyncIterator[RequestOutput], request_id: str,
+        conversation: List[ConversationMessage]
+    ) -> Union[ErrorResponse, ChatCompletionResponse]:
 
         model_name = self.served_model_names[0]
         created_time = int(time.time())
         final_res: Optional[RequestOutput] = None
 
         async for res in result_generator:
-            if await raw_request.is_disconnected():
+            if raw_request is not None and await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await self.engine.abort(request_id)
                 return self.create_error_response("Client disconnected")
@@ -322,11 +383,9 @@ class OpenAIServingChat(OpenAIServing):
 
         if request.echo:
             last_msg_content = ""
-            if request.messages and isinstance(
-                    request.messages, list) and request.messages[-1].get(
-                        "content") and request.messages[-1].get(
-                            "role") == role:
-                last_msg_content = request.messages[-1]["content"]
+            if conversation and conversation[-1].get(
+                    "content") and conversation[-1].get("role") == role:
+                last_msg_content = conversation[-1]["content"]
 
             for choice in choices:
                 full_message = last_msg_content + choice.message.content
@@ -349,32 +408,3 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         return response
-
-    def _load_chat_template(self, chat_template: Optional[str]):
-        tokenizer = self.tokenizer
-
-        if chat_template is not None:
-            try:
-                with open(chat_template, "r") as f:
-                    tokenizer.chat_template = f.read()
-            except OSError as e:
-                JINJA_CHARS = "{}\n"
-                if not any(c in chat_template for c in JINJA_CHARS):
-                    msg = (f"The supplied chat template ({chat_template}) "
-                           f"looks like a file path, but it failed to be "
-                           f"opened. Reason: {e}")
-                    raise ValueError(msg) from e
-
-                # If opening a file fails, set chat template to be args to
-                # ensure we decode so our escape are interpreted correctly
-                tokenizer.chat_template = codecs.decode(
-                    chat_template, "unicode_escape")
-
-            logger.info("Using supplied chat template:\n%s",
-                        tokenizer.chat_template)
-        elif tokenizer.chat_template is not None:
-            logger.info("Using default chat template:\n%s",
-                        tokenizer.chat_template)
-        else:
-            logger.warning(
-                "No chat template provided. Chat API will not work.")

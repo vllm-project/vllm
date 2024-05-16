@@ -95,7 +95,7 @@ echo 'vLLM yapf: Done'
 # Run mypy
 echo 'vLLM mypy:'
 mypy vllm/attention --config-file pyproject.toml
-mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/core --config-file pyproject.toml
 mypy vllm/distributed --config-file pyproject.toml
 mypy vllm/entrypoints --config-file pyproject.toml
 mypy vllm/executor --config-file pyproject.toml
@@ -105,8 +105,10 @@ mypy vllm/transformers_utils --config-file pyproject.toml
 mypy vllm/engine  --config-file pyproject.toml
 mypy vllm/worker --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/model_executor/*.py  --config-file pyproject.toml
+mypy vllm/model_executor  --config-file pyproject.toml
 mypy vllm/lora --config-file pyproject.toml
+mypy vllm/logging --config-file pyproject.toml
+mypy vllm/model_executor --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
