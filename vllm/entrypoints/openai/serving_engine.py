@@ -165,13 +165,14 @@ class OpenAIServing:
         raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
-        self,
-        request: Union[ChatCompletionRequest, CompletionRequest,
-                       EmbeddingRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-    ) -> Tuple[List[int], str]:
+            self,
+            request: Union[ChatCompletionRequest, CompletionRequest,
+                           EmbeddingRequest],
+            prompt: Optional[str] = None,
+            prompt_ids: Optional[List[int]] = None,
+            truncate_prompt_tokens: Optional[Annotated[int,
+                                                       Field(ge=1)]] = None,
+            add_special_tokens: bool = True) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -179,12 +180,14 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            # The special tokens (BOS) have already been included by
-            # the chat template at this point,
-            # so we don't add them again.
-            # See how it's done in huggingface/transformers:
-            # https://github.com/huggingface/transformers/blob/5962d62bac850cd01ee830ffba880469338c96fd/src/transformers/tokenization_utils_base.py#L1820-L1829
-            tokenizer_kwargs: Dict[str, Any] = {"add_special_tokens": False}
+            # When using OpenAIServingChat for chat completions, the
+            # special tokens (e.g., BOS) have already been added by the
+            # chat template. Therefore, we do not need to add them again.
+            # Set add_special_tokens to False to avoid adding the BOS tokens
+            # again.
+            tokenizer_kwargs: Dict[str, Any] = {
+                "add_special_tokens": add_special_tokens
+            }
             if truncate_prompt_tokens is not None:
                 tokenizer_kwargs.update({
                     "truncation": True,
