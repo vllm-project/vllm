@@ -15,56 +15,6 @@ from .conftest import get_output_from_llm_generator
         # Required for spec decode.
         "use_v2_block_manager": True
     }])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            # Expect failure as spec decode not supported by
-            # Ray backend.
-            "worker_use_ray": True,
-        },
-    ])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail_ray(test_llm_generator):
-    """Verify that speculative decoding with Ray fails.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-    ]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    try:
-        with pytest.raises(
-                AssertionError,
-                match="Speculative decoding not yet supported for "):
-            get_output_from_llm_generator(test_llm_generator, prompts,
-                                          sampling_params)
-    finally:
-        # we need to free up ray resource,
-        # so that latter test could use the gpu we allocated here
-        import ray
-        ray.shutdown()
-
-
-@pytest.mark.parametrize(
-    "common_llm_kwargs",
-    [{
-        "model": "JackFram/llama-68m",
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
-    }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
         "enable_chunked_prefill": True,

@@ -18,6 +18,8 @@ def main(args: argparse.Namespace):
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(model=args.model,
+              speculative_model=args.speculative_model,
+              num_speculative_tokens=args.num_speculative_tokens,
               tokenizer=args.tokenizer,
               quantization=args.quantization,
               tensor_parallel_size=args.tensor_parallel_size,
@@ -28,6 +30,7 @@ def main(args: argparse.Namespace):
               quantization_param_path=args.quantization_param_path,
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
+              use_v2_block_manager=args.use_v2_block_manager,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size)
@@ -99,6 +102,8 @@ if __name__ == '__main__':
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--speculative-model', type=str, default=None)
+    parser.add_argument('--num-speculative-tokens', type=int, default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -181,6 +186,7 @@ if __name__ == '__main__':
         action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
+    parser.add_argument('--use-v2-block-manager', action='store_true')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
