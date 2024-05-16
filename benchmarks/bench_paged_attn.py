@@ -36,6 +36,7 @@ def paged_attn(
         context_lens,
         block_tables,
         pages_per_compute_block=pages_per_compute_block,
+        megacore_mode="kv_head",
     )
     return output.reshape(q.shape[0], 1, q.shape[1], q.shape[2])
 
