@@ -24,8 +24,8 @@ VOLUME [ ${APP_MOUNT} ]
 WORKDIR ${APP_MOUNT}
 
 
-ARG BUILD_HIPBLASLT="0"
-ARG HIPBLASLT_BRANCH="develop"
+ARG BUILD_HIPBLASLT="1"
+ARG HIPBLASLT_BRANCH="ee51a9d1"
 
 RUN if [ "$BUILD_HIPBLASLT" = "1" ]; then \
     echo "HIPBLASLT_BRANCH is $HIPBLASLT_BRANCH"; \
@@ -50,7 +50,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
 
 ARG BUILD_RCCL="1"
-ARG RCCL_BRANCH="4ee96dd"
+ARG RCCL_BRANCH="eeea3b6"
 
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     echo "RCCL_BRANCH is $RCCL_BRANCH"; \
@@ -59,7 +59,7 @@ RUN if [ "$BUILD_RCCL" = "1" ]; then \
 RUN if [ "$BUILD_RCCL" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
-    && git clone https://github.com/mberenjk/rccl.git \
+    && git clone https://github.com/ROCm/rccl \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
     && ./install.sh -i --amdgpu_targets ${PYTORCH_ROCM_ARCH} \
@@ -183,10 +183,7 @@ RUN cd /app/vllm/gradlib \
 RUN python3 -m pip install --no-cache-dir 'ray[all]>=2.10.0'
 ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 
-# HIPgraph performance environment variables.
+# HIPgraph performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
-ENV DEBUG_CLR_GRAPH_PACKET_CAPTURE=1
-# Might help if one is running into RCCL issues
-#ENV NCCL_MAX_NCHANNELS=32
 
 CMD ["/bin/bash"]
