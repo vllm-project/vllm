@@ -18,7 +18,6 @@ class CPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "cpu"
-        # assert self.lora_config is None, "cpu backend doesn't support LoRA"
         self.model_config = _verify_and_get_model_config(self.model_config)
         self.cache_config = _verify_and_get_cache_config(self.cache_config)
         self.scheduler_config = _verify_and_get_scheduler_config(
