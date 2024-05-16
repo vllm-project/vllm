@@ -12,6 +12,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
+                              register_broadcast_callsite,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
@@ -88,6 +89,8 @@ class Worker(WorkerBase):
         self.cache_engine: CacheEngine
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[torch.tensor]] = None
+        # Register call site for sizing broadcast buffer.
+        self.execute_model_callsite_id = register_broadcast_callsite()
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -235,6 +238,7 @@ class Worker(WorkerBase):
         blocks_to_swap_in: torch.Tensor
         blocks_to_swap_out: torch.Tensor
         blocks_to_copy: torch.Tensor
+        callsite_id = self.execute_model_callsite_id
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             assert execute_model_req is not None
@@ -261,9 +265,9 @@ class Worker(WorkerBase):
                 "blocks_to_swap_out": blocks_to_swap_out,
                 "blocks_to_copy": blocks_to_copy,
             }
-            broadcast_tensor_dict(data, src=0)
+            broadcast_tensor_dict(data, src=0, callsite_id=callsite_id)
         else:
-            data = broadcast_tensor_dict(src=0)
+            data = broadcast_tensor_dict(src=0, callsite_id=callsite_id)
             num_seq_groups = data["num_seq_groups"]
             blocks_to_swap_in = data["blocks_to_swap_in"]
             blocks_to_swap_out = data["blocks_to_swap_out"]

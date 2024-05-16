@@ -9,8 +9,8 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
-from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture
+from vllm.distributed import (broadcast_tensor_dict, graph_capture,
+                              register_broadcast_callsite)
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -127,6 +127,8 @@ class ModelRunner:
         self.flashinfer_workspace_buffer: torch.Tensor
         # Set after load_model.
         self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+        # Register call site for sizing broadcast buffer.
+        self.prepare_input_tensors_callsite_id = register_broadcast_callsite()
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -634,9 +636,13 @@ class ModelRunner:
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
-            broadcast_tensor_dict(metadata_dict, src=0)
+            broadcast_tensor_dict(
+                metadata_dict,
+                src=0,
+                callsite_id=self.prepare_input_tensors_callsite_id)
         else:
-            metadata_dict = broadcast_tensor_dict(src=0)
+            metadata_dict = broadcast_tensor_dict(
+                src=0, callsite_id=self.prepare_input_tensors_callsite_id)
             input_tokens = metadata_dict.pop("input_tokens")
             input_positions = metadata_dict.pop("input_positions")
             selected_token_indices = metadata_dict.pop(

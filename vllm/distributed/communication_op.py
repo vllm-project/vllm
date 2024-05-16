@@ -1,9 +1,12 @@
+import pickle
+import struct
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from .parallel_state import (get_cpu_world_group,
@@ -194,8 +197,8 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 
 def _split_tensor_dict(
-    tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+    tensor_dict: Dict[str, Union[torch.Tensor, Any]]
+) -> Tuple[List[Any], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
@@ -218,94 +221,138 @@ def _split_tensor_dict(
     return metadata_list, tensor_list
 
 
+def _create_buffer(size: int) -> Tuple[memoryview, torch.Tensor]:
+    buffer = memoryview(bytearray(size))
+    return buffer, torch.frombuffer(buffer, dtype=torch.uint8)
+
+
+RESIZE_MESSAGE_FLAG = 1
+
+# Globals
+CALLSITE_TENSOR_SIZES = [16]
+BROADCAST_BUFFER, BROADCAST_TENSOR = _create_buffer(16)
+
+
+def register_broadcast_callsite() -> int:
+    """Obtain a unique call site id for use with broadcast_tensor_dict"""
+    global CALLSITE_TENSOR_SIZES
+    CALLSITE_TENSOR_SIZES.append(16)
+    return len(CALLSITE_TENSOR_SIZES) - 1
+
+
 def broadcast_tensor_dict(
     tensor_dict: Optional[Dict[Any, Union[torch.Tensor, Any]]] = None,
     src: int = 0,
     group: Optional[ProcessGroup] = None,
-    metadata_group: Optional[ProcessGroup] = None
+    metadata_group: Optional[ProcessGroup] = None,
+    callsite_id: int = 0,
 ) -> Optional[Dict[Any, Union[torch.Tensor, Any]]]:
     """Broadcast the input tensor dictionary.
     `group` is used to broadcast the tensors, while `metadata_group` is used
      to broadcast the metadata of the dict (e.g. dict structure, tensor sizes,
      dtypes).
+     `callsite_id` should be obtained for a particular call site by
+     calling register_broadcast_callsite()
     """
+    group = group or torch.distributed.group.WORLD
+
     # Bypass the function if we are using only 1 GPU.
     if (not torch.distributed.is_initialized()
             or torch.distributed.get_world_size(group=group) == 1):
         return tensor_dict
 
-    group = group or torch.distributed.group.WORLD
     metadata_group = metadata_group or get_cpu_world_group()
     ranks = torch.distributed.get_process_group_ranks(group)
     assert src in ranks, f"Invalid src rank ({src})"
 
+    global CALLSITE_TENSOR_SIZES, BROADCAST_BUFFER, BROADCAST_TENSOR
+    callsite_tensor_size = CALLSITE_TENSOR_SIZES[callsite_id]
+
     rank = torch.distributed.get_rank()
     if rank == src:
-        metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        # `metadata_list` lives in CPU memory.
-        # `broadcast_object_list` involves serialization and deserialization,
-        # all happening on CPU. Therefore, we can use the CPU group.
-        torch.distributed.broadcast_object_list([metadata_list],
-                                                src=src,
-                                                group=metadata_group)
+        pickled = pickle.dumps(metadata_list)
+        size = len(pickled) + 8
+
+        if callsite_tensor_size < size:
+            # Increase call site tensor size. First byte == 1 means resize.
+            BROADCAST_BUFFER[0] = RESIZE_MESSAGE_FLAG
+            BROADCAST_BUFFER[8:16] = struct.pack('<Q', size)
+            dist.broadcast(BROADCAST_TENSOR[:callsite_tensor_size],
+                           src=src,
+                           group=metadata_group)
+            callsite_tensor_size = size
+            # Grow buffer if needed.
+            if len(BROADCAST_BUFFER) < callsite_tensor_size:
+                BROADCAST_BUFFER, BROADCAST_TENSOR = _create_buffer(
+                    callsite_tensor_size)
+            else:
+                BROADCAST_BUFFER[0] = 0
+            CALLSITE_TENSOR_SIZES[callsite_id] = callsite_tensor_size
+
+        # Copy pickled metadata into buffer and broadcast it.
+        BROADCAST_BUFFER[8:size] = pickled
+        dist.broadcast(BROADCAST_TENSOR[:callsite_tensor_size],
+                       src=src,
+                       group=metadata_group)
+
         async_handles = []
         for tensor in tensor_list:
-            if tensor.numel() == 0:
-                # Skip broadcasting empty tensors.
-                continue
-            if tensor.is_cpu:
-                # use metadata_group for CPU tensors
-                handle = torch.distributed.broadcast(tensor,
-                                                     src=src,
-                                                     group=metadata_group,
-                                                     async_op=True)
-            else:
-                # use group for GPU tensors
-                handle = torch.distributed.broadcast(tensor,
-                                                     src=src,
-                                                     group=group,
-                                                     async_op=True)
-            async_handles.append(handle)
+            # Skip broadcasting empty tensors.
+            if tensor.numel() != 0:
+                # use metadata_group for CPU tensors, group for GPU tensors.
+                handle = dist.broadcast(
+                    tensor,
+                    src=src,
+                    group=metadata_group if tensor.is_cpu else group,
+                    async_op=True)
+                async_handles.append(handle)
         for async_handle in async_handles:
             async_handle.wait()
 
     else:
-        recv_metadata_list = [None]
-        torch.distributed.broadcast_object_list(recv_metadata_list,
-                                                src=src,
-                                                group=metadata_group)
-        assert recv_metadata_list[0] is not None
+        while True:
+            dist.broadcast(BROADCAST_TENSOR[:callsite_tensor_size],
+                           src=src,
+                           group=metadata_group)
+            if not BROADCAST_BUFFER[0]:
+                break
+            # Increase call site tensor size.
+            callsite_tensor_size, = struct.unpack('<Q', BROADCAST_BUFFER[8:16])
+            # Grow buffer if needed.
+            if len(BROADCAST_BUFFER) < callsite_tensor_size:
+                BROADCAST_BUFFER, BROADCAST_TENSOR = _create_buffer(
+                    callsite_tensor_size)
+            CALLSITE_TENSOR_SIZES[callsite_id] = callsite_tensor_size
+            # Repeat broadcast.
+
+        recv_metadata = pickle.loads(BROADCAST_BUFFER[8:callsite_tensor_size])
+
         tensor_dict = {}
         async_handles = []
-        for key, value in recv_metadata_list[0]:
-            if isinstance(value, TensorMetadata):
-                tensor = torch.empty(value.size,
-                                     dtype=value.dtype,
-                                     device=value.device)
-                if tensor.numel() == 0:
-                    # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
-                    continue
-                if tensor.is_cpu:
-                    # use metadata_group for CPU tensors
-                    handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
-                                                         group=metadata_group,
-                                                         async_op=True)
-                else:
-                    # use group for GPU tensors
-                    handle = torch.distributed.broadcast(tensor,
-                                                         src=src,
-                                                         group=group,
-                                                         async_op=True)
-                async_handles.append(handle)
-                tensor_dict[key] = tensor
-            else:
+        for key, value in recv_metadata:
+            if not isinstance(value, TensorMetadata):
                 tensor_dict[key] = value
+                continue
+
+            tensor = torch.empty(value.size,
+                                 dtype=value.dtype,
+                                 device=value.device)
+            # Skip broadcasting empty tensors.
+            if tensor.numel() != 0:
+                # use metadata_group for CPU tensors, group for GPU tensors.
+                handle = dist.broadcast(
+                    tensor,
+                    src=src,
+                    group=metadata_group if tensor.is_cpu else group,
+                    async_op=True)
+                async_handles.append(handle)
+
+            tensor_dict[key] = tensor
+
         for async_handle in async_handles:
             async_handle.wait()
     return tensor_dict
