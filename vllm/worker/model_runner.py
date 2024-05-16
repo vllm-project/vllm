@@ -886,9 +886,6 @@ class ModelRunner:
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
 
-    def __del__(self) -> None:
-        self.graph_runners.clear()
-
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
