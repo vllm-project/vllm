@@ -288,7 +288,6 @@ class LlamaModel(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
             for idx in range(config.num_hidden_layers)
-
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
