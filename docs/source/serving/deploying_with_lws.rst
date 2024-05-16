@@ -3,9 +3,10 @@
 Deploying with LWS
 ============================
 
-LeaderWorkerSet (LWS) is low level API aims to address common deploy patterns of AI/ML inference workloads,
-especially designed for multi-host distributed inference needs.
+LeaderWorkerSet (LWS) is a Kubernetes API that aims to address common deployment patterns of AI/ML inference workloads.
+A major use case is for multi-host/multi-node distributed inference.
 
 vLLM can be deployed with `LWS <https://github.com/kubernetes-sigs/lws>`_ on Kubernetes for distributed model serving.
 
-Please see `this guide <https://github.com/kubernetes-sigs/lws/tree/main/docs/examples/vllm>`_ for more details on using vLLM with LWS.
+Please see `this guide <https://github.com/kubernetes-sigs/lws/tree/main/docs/examples/vllm>`_ for more details on
+deploying vLLM on Kubernetes using LWS.
