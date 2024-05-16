@@ -7,6 +7,10 @@ ColumnLimit: 100
 DerivePointerAlignment: false
 PointerAlignment: Left
 
+# Reordering #include statements can (and currently will) introduce errors
+SortIncludes: false
+
+# Style choices
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
 IndentPPDirectives: BeforeHash
