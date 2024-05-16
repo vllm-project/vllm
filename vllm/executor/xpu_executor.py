@@ -9,8 +9,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
-from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
-                        make_async)
+from vllm.utils import make_async
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -48,33 +48,24 @@ class XPUExecutor(GPUExecutor):
         # Instantiate the worker and load the model to GPU.
         self._init_executor()
 
-    def _init_spec_worker(self):
-        raise NotImplementedError("XPU does not support speculative decoding")
+    def _create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
+        if self.speculative_config is None:
+            worker_module_name = "vllm.worker.xpu_worker"
+            worker_class_name = "XPUWorker"
+        else:
+            raise NotImplementedError(
+                "XPU does not support speculative decoding")
 
-    def _init_non_spec_worker(self):
-        from vllm.worker.xpu_worker import XPUWorker
-
-        assert self.parallel_config.world_size == 1, (
-            "XPUExecutor only supports a single XPU.")
-
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = XPUWorker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            vision_language_config=self.vision_language_config,
-            is_driver_worker=True,
+        wrapper = WorkerWrapperBase(
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
         )
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
+        wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
+                                                      distributed_init_method))
+        return wrapper.worker
 
     def execute_model(
             self,

@@ -10,7 +10,7 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -46,6 +46,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         assert device_config.device_type == "xpu"
