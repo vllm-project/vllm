@@ -2,9 +2,9 @@ from typing import Callable, Optional
 
 from transformers import PreTrainedTokenizer
 
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
-from vllm.lora.request import LoRARequest
 
 
 class StopChecker:

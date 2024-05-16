@@ -13,13 +13,13 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora)
+                              VocabParallelEmbeddingWithLoRA)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead

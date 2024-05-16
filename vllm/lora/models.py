@@ -3,20 +3,18 @@ import json
 import math
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple, Type, Union
 
 import safetensors.torch
 import torch
-from dataclasses import dataclass, field
 from torch import nn
 
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import (
-    BaseLayerWithLoRA,
-    LoRAMapping,
-    LinearScalingRotaryEmbeddingWithLora,
-)
+from vllm.lora.layers import (BaseLayerWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
+                              LoRAMapping)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
@@ -107,7 +105,7 @@ def convert_mapping(
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
-        index_mapping_indices[i] = i
+        # index_mapping_indices[i] = i
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
         index_mapping_indices, lora_indices, embedding_indices

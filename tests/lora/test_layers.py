@@ -2,7 +2,6 @@ import random
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from vllm.model_executor.layers.rotary_embedding import get_rope
 
 import pytest
 import torch
@@ -16,22 +15,22 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
                               LogitsProcessorWithLoRA, LoRAMapping,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
-                              VocabParallelEmbeddingWithLoRA,
-                              LinearScalingRotaryEmbeddingWithLora,)
+                              VocabParallelEmbeddingWithLoRA)
 # yapf: enable
-from vllm.lora.models import (LoRALayerWeights, PackedLoRALayerWeights,
-                              convert_mapping, LongContextLoRAContext,
-                              LoRAModel)
+from vllm.lora.models import (LongContextLoRAContext, LoRALayerWeights,
+                              PackedLoRALayerWeights, convert_mapping)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.utils import set_random_seed

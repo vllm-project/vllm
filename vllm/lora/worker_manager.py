@@ -195,7 +195,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._lora_manager.create_dummy_lora(
-                lora_request.lora_int_id, 1, rank, self.embedding_modules)
+                lora_request.lora_int_id, rank, 1, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._lora_manager.add_lora(dummy_lora)

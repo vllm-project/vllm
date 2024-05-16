@@ -166,9 +166,7 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # print(f"SANG-TODO {q.shape=} {k.shape=} {v.shape}")
         query, k = self.rotary_emb(positions, q, k)
-        # print(f"SANG-TODO {q.shape=} {k.shape=} {v.shape} after rotary embedding.")
         attn_output = self.attn(query, k, v, kv_cache, attn_metadata,
                                 self.kv_scale)
         output, _ = self.o_proj(attn_output)

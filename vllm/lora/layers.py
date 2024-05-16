@@ -1,17 +1,12 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union, Dict
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from vllm.model_executor.utils import set_default_torch_dtype
-from vllm.model_executor.layers.rotary_embedding import (
-    LinearScalingRotaryEmbedding,
-    RotaryEmbedding,
-)
 
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -27,8 +22,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import (
+    LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
+from vllm.model_executor.utils import set_default_torch_dtype
 
 if TYPE_CHECKING:
     pass
@@ -1239,7 +1237,6 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         ) if lora_config.long_lora_scaling_factors else []
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
-        # Q: Should we not sort?
         scaling_factors = list(set([base_scaling_factor] + scaling_factors))
         # Replace the base layer.
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):

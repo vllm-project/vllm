@@ -34,26 +34,26 @@ LONG_LORA_INFOS = [
         "merged":
         "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_1/merged/"
     },
-    # {
-    #     "lora_id": 2,
-    #     "context_length": "16k",
-    #     "local_path": "/mnt/local_storage/long_context_checkpoint_16k_2/",
-    #     "lora":
-    #     "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_2/lora/",
-    #     "merged": None  # This model has not been merged
-    # },
-    # {
-    #     "lora_id":
-    #     3,
-    #     "context_length":
-    #     "32k",
-    #     "local_path":
-    #     "/mnt/local_storage/long_context_checkpoint_32k",
-    #     "lora":
-    #     "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/lora/",
-    #     "merged":
-    #     "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/merged/"
-    # }
+    {
+        "lora_id": 2,
+        "context_length": "16k",
+        "local_path": "/mnt/local_storage/long_context_checkpoint_16k_2/",
+        "lora":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_2/lora/",
+        "merged": None  # This model has not been merged
+    },
+    {
+        "lora_id":
+        3,
+        "context_length":
+        "32k",
+        "local_path":
+        "/mnt/local_storage/long_context_checkpoint_32k",
+        "lora":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/lora/",
+        "merged":
+        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/merged/"
+    }
 ]
 
 
