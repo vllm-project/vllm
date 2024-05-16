@@ -1205,7 +1205,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
 
@@ -1240,7 +1240,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
         # Q: Should we not sort?
-        scaling_factors = sorted(list(set([base_scaling_factor] + scaling_factors)))
+        scaling_factors = list(set([base_scaling_factor] + scaling_factors))
         # Replace the base layer.
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
             self.base_layer = LinearScalingRotaryEmbedding(
@@ -1281,7 +1281,6 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        breakpoint()
         return self.base_layer(
             positions,
             query,

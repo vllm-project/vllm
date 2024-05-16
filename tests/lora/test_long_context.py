@@ -87,8 +87,16 @@ def batched_generate(
 ):
     for input in inputs:
         prompt, sampling_param, lora_req = input
-        llm._add_request(prompt, sampling_param, lora_request=lora_req)
-    outputs = llm._run_engine()
+        requests_data = llm._validate_and_prepare_requests(
+            prompt,
+            sampling_param,
+            lora_request=lora_req,
+        )
+
+        # Add requests to the engine and run the engine
+        for request_data in requests_data:
+            llm._add_request(**request_data)
+    outputs = llm._run_engine(use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 
@@ -107,7 +115,7 @@ class TestLongContext:
             max_loras=2,
             long_lora_scaling_factors=tuple(scaling_factors),
             max_num_batched_tokens=4096 * 8,
-            tensor_parallel_size=4,
+            tensor_parallel_size=1,
             enforce_eager=True,
         )
         return lora_llm
@@ -126,7 +134,6 @@ class TestLongContext:
                            _create_lora_request(lora_id, long_context_infos))
             lora_output = generate(lora_llm, lora_prompt)
             non_batched_results.append(lora_output)
-        breakpoint()
 
         # Create batched results
         # Each element of the batch must be (prompt, prompt_sampling_params, prompt_lora_request)
@@ -139,7 +146,6 @@ class TestLongContext:
                  _create_lora_request(lora_id, long_context_infos))
             ])
         batched_results = batched_generate(lora_llm, batched_prompts)
-        breakpoint()
 
         # Results should be the same
         for non_batched, batched in zip(non_batched_results, batched_results):
@@ -184,32 +190,33 @@ class TestLongContext:
 #             assert batched_results[i] == permutated_batched_results[permutation[
 #                 i]], f"Results should be the same:\n{batched_results[i]}\n{permutated_batched_results[permutation[i]]}"
 
-#     def test_quality(self, long_context_infos):
-#         """We test the quality of the answers given by the LoRA model by comparing the generated text to the merged model's outputs.
+    def test_quality(self, long_context_infos):
+        """We test the quality of the answers given by the LoRA model by comparing the generated text to the merged model's outputs.
 
-#         This is effectively a mini-benchmark over four prompts.
-#         If this test fails, this indicates that the quality of the LoRA model is suboptimal compared to the merged model.
-#         For example, if the model does not output valid dictionaries, this test will fail.
+        This is effectively a mini-benchmark over four prompts.
+        If this test fails, this indicates that the quality of the LoRA model is suboptimal compared to the merged model.
+        For example, if the model does not output valid dictionaries, this test will fail.
 
-#         If needed for testing, the merged versions of the models are available as part of the `conftest`.
-# a
-#         The test is expected to run for about 1 minute on a p4de.24xlarge instance.
-#         """
-#         lora_llm = self._get_lora_llm(long_context_infos)
+        If needed for testing, the merged versions of the models are available as part of the `conftest`.
+a
+        The test is expected to run for about 1 minute on a p4de.24xlarge instance.
+        """
+        lora_llm = self._get_lora_llm(long_context_infos)
 
-#         scores = []
-#         for lora_id, info in long_context_infos.items():
-#             context_len = info["context_length"]
-#             for prompt_and_response in prompts_and_responses[context_len]:
-#                 lora_prompt = (prompt_and_response["prompt"], sampling_params,
-#                                _create_lora_request(lora_id,
-#                                                     long_context_infos))
-#                 response = generate(lora_llm, [lora_prompt])
-#                 golden_answer = prompt_and_response["golden_answer"]
-#                 score = evaluate_json_response(response, golden_answer)
-#                 scores.append(score)
-#                 assert score > 0.3, f"Quality of the answer is not good enough. Expected {golden_answer}, got {response}"
-#         assert np.mean(scores) > 0.5
+        scores = []
+        for lora_id, info in long_context_infos.items():
+            context_len = info["context_length"]
+            for prompt_and_response in prompts_and_responses[context_len]:
+                lora_prompt = (prompt_and_response["prompt"], sampling_params,
+                               _create_lora_request(lora_id,
+                                                    long_context_infos))
+                response = generate(lora_llm, lora_prompt)
+                breakpoint()
+                golden_answer = prompt_and_response["golden_answer"]
+                score = evaluate_json_response(response, golden_answer)
+                scores.append(score)
+                assert score > 0.3, f"Quality of the answer is not good enough. Expected {golden_answer}, got {response}"
+        assert np.mean(scores) > 0.5
 
 #     def test_max_len(self, long_context_infos):
 #         """Test that we raise an InputTooLongError when the input of a given LoRA model exceeds the maximum length."""

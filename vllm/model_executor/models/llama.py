@@ -166,9 +166,9 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        breakpoint()
+        # print(f"SANG-TODO {q.shape=} {k.shape=} {v.shape}")
         query, k = self.rotary_emb(positions, q, k)
-        breakpoint()
+        # print(f"SANG-TODO {q.shape=} {k.shape=} {v.shape} after rotary embedding.")
         attn_output = self.attn(query, k, v, kv_cache, attn_metadata,
                                 self.kv_scale)
         output, _ = self.o_proj(attn_output)
@@ -324,7 +324,7 @@ class LlamaForCausalLM(nn.Module):
     # LoRA specific attributes
     supported_lora_modules = [
         "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens",
-        "lm_head", "rotary_emb"
+        "lm_head"
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",

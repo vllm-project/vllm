@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     LoRAMapping,
-    MultiLinearScalingRotaryEmbeddingWithLora,
+    LinearScalingRotaryEmbeddingWithLora,
 )
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
@@ -101,14 +101,12 @@ def convert_mapping(
         lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
                     if index_mapping_indices[i] > 0 else -1)
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
-        index_mapping_indices[i] = i
         lora_indices[i] = lora_idx
         if long_lora_context:
             assert long_lora_offsets is not None
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
-        # do we need this?
         index_mapping_indices[i] = i
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
@@ -397,6 +395,10 @@ class LoRAModelManager:
         if hasattr(self.model, "supported_lora_modules"):
             self.supported_lora_modules = copy.deepcopy(
                 self.model.supported_lora_modules)
+            if lora_config.long_lora_scaling_factors:
+                # We need to replace rotary emb layer to do batch computation
+                # for long lora.
+                self.supported_lora_modules.append("rotary_emb")
             self.packed_modules_mapping = copy.deepcopy(
                 self.model.packed_modules_mapping)
         self.packed_modules: Dict[str, List[str]] = {}
@@ -550,10 +552,10 @@ class LoRAModelManager:
                 self.model, module_name,
                 from_layer(module, self.lora_slots, self.lora_config,
                            packed_moduled_lst, self.model.config))
-            # MultiLinearScalingRotaryEmbeddingWithLora is used to handle
+            # LinearScalingRotaryEmbeddingWithLora is used to handle
             # long context lora. Register relevant metadata.
             if isinstance(new_module,
-                          MultiLinearScalingRotaryEmbeddingWithLora):
+                          LinearScalingRotaryEmbeddingWithLora):
                 self.long_lora_context = LongContextLoRAContext(
                     new_module.scaling_factors, new_module.rotary_dim)
                 self.scaling_factor_to_offset = \
@@ -590,7 +592,7 @@ class LoRAModelManager:
         for module_name, module in self.model.named_modules():
             if not self._match_target_modules(module_name) or not isinstance(
                     module, BaseLayerWithLoRA) or isinstance(
-                        module, MultiLinearScalingRotaryEmbeddingWithLora):
+                        module, LinearScalingRotaryEmbeddingWithLora):
                 continue
             parts = module_name.split(".")
             if module_name not in self.packed_modules:

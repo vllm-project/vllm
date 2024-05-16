@@ -19,7 +19,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               QKVParallelLinearWithLora,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA,
-                              MultiLinearScalingRotaryEmbeddingWithLora)
+                              LinearScalingRotaryEmbeddingWithLora)
 # yapf: enable
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -38,7 +38,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLora,
     RowParallelLinearWithShardedLoRA,
-    MultiLinearScalingRotaryEmbeddingWithLora,
+    LinearScalingRotaryEmbeddingWithLora,
 }
 
 
