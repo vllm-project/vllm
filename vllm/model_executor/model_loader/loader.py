@@ -429,7 +429,7 @@ class ShardedStateLoader(BaseModelLoader):
                    parallel_config: ParallelConfig,
                    scheduler_config: SchedulerConfig,
                    cache_config: CacheConfig) -> nn.Module:
-        from safetensors import safe_open
+        from safetensors.torch import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
         with set_default_torch_dtype(model_config.dtype):
