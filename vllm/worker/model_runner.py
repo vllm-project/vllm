@@ -10,7 +10,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
-from vllm.distributed.communication_op import graph_capture, graph_mode
+from vllm.distributed.communication_op import graph_capture
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
@@ -182,6 +182,20 @@ class ModelRunner:
             logger.warning("KV cache scaling factors provided, "
                            "but the KV cache data type is not FP8. "
                            "KV cache scaling factors will not be used.")
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
 
     def get_max_block_per_batch(self) -> int:
         block_size = self.block_size
@@ -828,7 +842,7 @@ class ModelRunner:
             bs for bs in _BATCH_SIZES_TO_CAPTURE if bs <= graph_batch_size
         ]
 
-        with graph_capture():
+        with graph_capture() as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
             for batch_size in reversed(batch_size_capture_list):
@@ -864,6 +878,7 @@ class ModelRunner:
                     kv_caches,
                     attn_metadata,
                     memory_pool=self.graph_memory_pool,
+                    stream=graph_capture_context.stream,
                 )
                 self.graph_memory_pool = graph_runner.graph.pool()
                 self.graph_runners[batch_size] = graph_runner
@@ -872,16 +887,6 @@ class ModelRunner:
         elapsed_time = end_time - start_time
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
-
-    def __del__(self) -> None:
-        # Delete the CUDA graphs before deleting the pynccl communicator.
-        # NOTE(woosuk): This is necessary because otherwise deadlocks can
-        # happen.
-        # FIXME(woosuk): This is a bit hacky. Find a more robust solution.
-        # TODO(youkaichao): when we get enough user feedback that pynccl is
-        # more stable than cupy, we can remove this, e.g. in v0.4.1.
-        self.graph_runners.clear()
-        self.pynccl_backend = None
 
     @property
     def vocab_size(self) -> int:
@@ -908,36 +913,33 @@ class CUDAGraphRunner:
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-        memory_pool,
+        memory_pool: Optional[Tuple[int, int]],
+        stream: torch.cuda.Stream,
         **kwargs,
     ) -> None:
         assert self._graph is None
         # Run the model once without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        with graph_mode():
-            self.model(
+        self.model(
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            **kwargs,
+        )
+        torch.cuda.synchronize()
+
+        # Capture the graph.
+        self._graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
+            hidden_states = self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 attn_metadata,
                 **kwargs,
             )
-        torch.cuda.synchronize()
-
-        # Capture the graph.
-        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
-        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
-        self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool):  # noqa: SIM117
-            with graph_mode():
-                hidden_states = self.model(
-                    input_ids,
-                    positions,
-                    kv_caches,
-                    attn_metadata,
-                    **kwargs,
-                )
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
