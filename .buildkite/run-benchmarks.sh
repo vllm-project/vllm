@@ -31,7 +31,6 @@ python3 benchmarks/benchmark_serving.py \
     --endpoint /v1/completions \
     --tokenizer meta-llama/Llama-2-7b-chat-hf \
     --save-result \
-    --output-json openai-serv.json \
     2>&1 | tee benchmark_serving.txt
 bench_serving_exit_code=$?
 kill $server_pid
@@ -75,4 +74,5 @@ if [ $bench_serving_exit_code -ne 0 ]; then
     exit $bench_serving_exit_code
 fi
 
-/workspace/buildkite-agent artifact upload latency_results.json throughput_results.json openai-serv.json
+rm ShareGPT_V3_unfiltered_cleaned_split.json
+/workspace/buildkite-agent artifact upload *.json

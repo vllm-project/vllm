@@ -203,9 +203,10 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
-    parser.add_argument('--output-json',
-                        type=str,
-                        default=None,
-                        help='Path to save the latency results in JSON format.')
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Path to save the latency results in JSON format.')
     args = parser.parse_args()
     main(args)
