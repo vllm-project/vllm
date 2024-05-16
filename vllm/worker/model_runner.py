@@ -926,11 +926,8 @@ class CUDAGraphRunner:
         torch.cuda.synchronize()
 
         # Capture the graph.
-        # NOTE(woosuk): Python 3.8 does not support multi-line with statements.
-        # https://stackoverflow.com/questions/31039022/python-multi-line-with-statement
         self._graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(self._graph, pool=memory_pool,
-                              stream=stream):  # noqa: SIM117
+        with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             hidden_states = self.model(
                 input_ids,
                 positions,
