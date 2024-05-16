@@ -463,6 +463,7 @@ class LoadFormat(str, enum.Enum):
     NPCACHE = "npcache"
     DUMMY = "dummy"
     TENSORIZER = "tensorizer"
+    SHARDED_STATE = "sharded_state"
 
 
 @dataclass
@@ -531,6 +532,7 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        placement_group: ray distributed model workers placement group.
         distributed_executor_backend: Backend to use for distributed model
             workers, either "ray" or "mp" (multiprocessing). If either
             pipeline_parallel_size or tensor_parallel_size is greater than 1,
