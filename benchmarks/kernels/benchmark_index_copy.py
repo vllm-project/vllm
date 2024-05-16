@@ -62,12 +62,13 @@ def benchmark(num_blocks: int):
     numel_per_head = k_cache.numel() // num_kv_heads
     slot_mapping = slot_mapping.flatten()
     head_indicies = torch.arange(0,
-                                num_kv_heads,
-                                device=slot_mapping.device,
-                                dtype=slot_mapping.dtype)
+                                 num_kv_heads,
+                                 device=slot_mapping.device,
+                                 dtype=slot_mapping.dtype)
     head_indicies = head_indicies * numel_per_head
     slot_mapping = slot_mapping.flatten()
-    slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(-1, num_kv_heads)
+    slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+        -1, num_kv_heads)
     slot_mapping = slot_mapping + head_indicies.view(1, -1)
     slot_mapping = slot_mapping.flatten()
 
