@@ -384,8 +384,8 @@ class AsyncLLMEngine:
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
         elif engine_config.device_config.device_type == "xpu":
-            assert not engine_config.parallel_config.worker_use_ray, (
-                "Ray is not supported with the XPU backend.")
+            assert distributed_executor_backend is None, (
+                "Distributed execution is not supported with the XPU backend.")
             from vllm.executor.xpu_executor import XPUExecutorAsync
             executor_class = XPUExecutorAsync
         elif distributed_executor_backend == "ray":

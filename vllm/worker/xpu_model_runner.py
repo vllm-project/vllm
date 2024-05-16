@@ -4,8 +4,9 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import get_attn_backend
-from vllm.config import (DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, VisionLanguageConfig)
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ParallelConfig, SchedulerConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -32,6 +33,7 @@ class XPUModelRunner():
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        cache_config: CacheConfig,
         load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig],
@@ -45,6 +47,7 @@ class XPUModelRunner():
         self.scheduler_config = scheduler_config
         self.lora_config = lora_config
         self.load_config = load_config
+        self.cache_config = cache_config
         self.vision_language_config = vision_language_config
         self.is_driver_worker = is_driver_worker
 
@@ -57,16 +60,27 @@ class XPUModelRunner():
         self.device = self.device_config.device
 
         self.kv_cache_dtype = kv_cache_dtype
+        self.block_size = cache_config.block_size
         self.max_context_len_to_capture = (
             self.model_config.max_context_len_to_capture
             if self.model_config is not None else 0)
 
         self.attn_backend = get_attn_backend(
-            self.model_config.dtype if model_config is not None else None)
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
+
+        # self.attn_backend = get_attn_backend(
+        #     self.model_config.dtype if model_config is not None else None)
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-        self.block_size: int  # Set after initial profiling.
+        # self.block_size: int  # Set after initial profiling.
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -78,6 +92,7 @@ class XPUModelRunner():
                 vision_language_config=self.vision_language_config,
                 parallel_config=self.parallel_config,
                 scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
             )
 
         self.model_memory_usage = m.consumed_memory
@@ -226,7 +241,7 @@ class XPUModelRunner():
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_seq_len = max(seq_lens)
+        max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -256,14 +271,11 @@ class XPUModelRunner():
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_seq_len=max_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,
@@ -395,15 +407,12 @@ class XPUModelRunner():
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
-            max_seq_len=None,
+            max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=torch.tensor([], device=self.device, dtype=torch.int),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_input)
