@@ -1,10 +1,6 @@
 # imports for guided decoding tests
 import json
-import os
 import re
-import subprocess
-import sys
-import time
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -12,7 +8,6 @@ import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
-import requests
 import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
@@ -20,7 +15,8 @@ from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
+from ..utils import ServerRunner
+
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
@@ -76,45 +72,6 @@ TEST_CHOICE = [
 ]
 
 pytestmark = pytest.mark.asyncio
-
-
-@ray.remote(num_gpus=1)
-class ServerRunner:
-
-    def __init__(self, args):
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        self._wait_for_server()
-
-    def ready(self):
-        return True
-
-    def _wait_for_server(self):
-        # run health check
-        start = time.time()
-        while True:
-            try:
-                if requests.get(
-                        "http://localhost:8000/health").status_code == 200:
-                    break
-            except Exception as err:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("Server exited unexpectedly.") from err
-
-                time.sleep(0.5)
-                if time.time() - start > MAX_SERVER_START_WAIT_S:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from err
-
-    def __del__(self):
-        if hasattr(self, "proc"):
-            self.proc.terminate()
 
 
 @pytest.fixture(scope="session")
@@ -824,6 +781,36 @@ async def test_complex_message_content(server, client: openai.AsyncOpenAI):
         seed=0)
     content = resp.choices[0].message.content
     assert content == "2"
+
+
+async def test_custom_role(server, client: openai.AsyncOpenAI):
+    # Not sure how the model handles custom roles so we just check that
+    # both string and complex message content are handled in the same way
+
+    resp1 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": "what is 1+1?",
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    resp2 = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "my-custom-role",
+            "content": [{
+                "type": "text",
+                "text": "what is 1+1?"
+            }]
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
+
+    content1 = resp1.choices[0].message.content
+    content2 = resp2.choices[0].message.content
+    assert content1 == content2
 
 
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):

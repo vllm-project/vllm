@@ -1,8 +1,9 @@
 import pytest
 
-from tests.core.utils import create_dummy_prompt
 from vllm.sequence import (CompletionSequenceGroupOutput, SamplerOutput,
                            SequenceData, SequenceOutput)
+
+from .core.utils import create_dummy_prompt
 
 
 @pytest.fixture

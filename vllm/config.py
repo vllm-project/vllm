@@ -7,13 +7,10 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
-
-GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -155,37 +152,15 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
 
-            # Check which LinearMethod the GPTQ model should use.
-            if quant_method == "gptq":
-                # If serialized in Marlin format, use MarlinLinearMethod.
-                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
-                if is_format_marlin:
-                    logger.info("The model is serialized in Marlin format. "
-                                "Using Marlin kernel.")
-                    quant_method = "marlin"
-                    if self.quantization == "gptq":
-                        self.quantization = quant_method
-
-                # If convertible to Marlin format, use GPTQMarlinLinearMethod
-                # unless the user explicitly specified GPTQLinearMethod.
-                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
-                    if self.quantization == "gptq":
-                        logger.warning(
-                            "The model is convertible to Marlin format, but "
-                            "you specified quantization=gptq. Use "
-                            "quantization=marlin for faster inference.")
-                    else:
-                        logger.info(
-                            "The model is convertible to Marlin format. "
-                            "Using Marlin kernel.")
-                        quant_method = "gptq_marlin"
-                        if self.quantization == "marlin":
-                            self.quantization = quant_method
+            # Detect which checkpoint is it
+            for name, method in QUANTIZATION_METHODS.items():
+                quantization_override = method.override_quantization_method(
+                    quant_cfg, self.quantization)
+                if quantization_override:
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
+                    break
 
             # Verify quantization configurations.
             if self.quantization is None:
@@ -207,7 +182,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization not in ["marlin", "gptq_marlin"]):
+            if (self.quantization
+                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -463,6 +439,7 @@ class LoadFormat(str, enum.Enum):
     NPCACHE = "npcache"
     DUMMY = "dummy"
     TENSORIZER = "tensorizer"
+    SHARDED_STATE = "sharded_state"
 
 
 @dataclass
@@ -521,9 +498,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -533,22 +508,28 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        placement_group: ray distributed model workers placement group.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -556,14 +537,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -575,7 +571,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -784,12 +781,15 @@ class SpeculativeConfig:
         draft_quantization = None
 
         if speculative_model == "[ngram]":
-            assert (ngram_prompt_lookup_max is not None
-                    and ngram_prompt_lookup_max > 0)
             if ngram_prompt_lookup_min is None:
-                ngram_prompt_lookup_min = 0
-            else:
-                assert ngram_prompt_lookup_max > ngram_prompt_lookup_min
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -884,7 +884,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.

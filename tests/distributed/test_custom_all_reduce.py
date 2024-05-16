@@ -10,8 +10,9 @@ from vllm.distributed.communication_op import (  # noqa
     graph_capture, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_ca_communicator)
-from vllm.test_utils import (init_test_distributed_environment,
-                             multi_process_tensor_parallel)
+
+from ..utils import (init_test_distributed_environment,
+                     multi_process_tensor_parallel)
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
@@ -49,7 +50,7 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
 
     for sz in test_sizes:
         for dtype in [torch.float32, torch.float16, torch.bfloat16]:
-            with graph_capture():
+            with graph_capture() as graph_capture_context:
                 # use integers so result matches NCCL exactly
                 inp1 = torch.randint(1,
                                      16, (sz, ),
@@ -61,7 +62,8 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
                                      device=torch.cuda.current_device())
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
+                with torch.cuda.graph(graph,
+                                      stream=graph_capture_context.stream):
                     for i in range(num_communication):
                         out1 = tensor_model_parallel_all_reduce(inp1)
                         # the input buffer is immediately modified to test
