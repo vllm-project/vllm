@@ -119,7 +119,9 @@ class OpenAIServingChat(OpenAIServing):
         return self._parse_chat_message_content_parts(role, content)
 
     async def create_chat_completion(
-        self, request: ChatCompletionRequest, raw_request: Request
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Optional[Request] = None
     ) -> Union[ErrorResponse, AsyncGenerator[str, None],
                ChatCompletionResponse]:
         """Completion API similar to OpenAI's API.
@@ -337,7 +339,7 @@ class OpenAIServingChat(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     async def chat_completion_full_generator(
-        self, request: ChatCompletionRequest, raw_request: Request,
+        self, request: ChatCompletionRequest, raw_request: Optional[Request],
         result_generator: AsyncIterator[RequestOutput], request_id: str,
         conversation: List[ConversationMessage]
     ) -> Union[ErrorResponse, ChatCompletionResponse]:
@@ -347,7 +349,7 @@ class OpenAIServingChat(OpenAIServing):
         final_res: Optional[RequestOutput] = None
 
         async for res in result_generator:
-            if await raw_request.is_disconnected():
+            if raw_request is not None and await raw_request.is_disconnected():
                 # Abort the request if the client disconnects.
                 await self.engine.abort(request_id)
                 return self.create_error_response("Client disconnected")
