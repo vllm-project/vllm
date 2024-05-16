@@ -13,7 +13,6 @@ from vllm import SamplingParams
 
 MODEL = "facebook/opt-350m"
 STOP_STR = "."
-#STOP_TOKENID = 6
 SEED = 42
 MAX_TOKENS = 1024
 
@@ -33,28 +32,23 @@ def test_stop_reason(vllm_model, example_prompts):
     # test stop token
     outputs = llm.generate(example_prompts,
                            sampling_params=SamplingParams(
-                               seed=SEED,
-                               max_tokens=MAX_TOKENS,
-                               ignore_eos=True,
-                               stop_token_ids=[stop_token_id]))
+                            seed=SEED,
+                            max_tokens=MAX_TOKENS,
+                            ignore_eos=True,
+                            stop_token_ids=[stop_token_id]))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"
         assert output.stop_reason == stop_token_id
-        #assert output.finish_reason == "length" or (
-        #    output.finish_reason == "stop" and output.stop_reason == stop_token_id) 
     # test stop string
     outputs = llm.generate(example_prompts,
-                           sampling_params=SamplingParams(
-                               #include_stop_str_in_output=True,
-                               ignore_eos=True,
-                               seed=SEED, max_tokens=MAX_TOKENS, stop=STOP_STR))
+                            sampling_params=SamplingParams(
+                            ignore_eos=True,
+                            seed=SEED, max_tokens=MAX_TOKENS, stop=STOP_STR))
     for output in outputs:
         output = output.outputs[0]
         assert output.finish_reason == "stop"
         assert output.stop_reason == STOP_STR
-        #assert output.finish_reason == "length" or (
-        #    output.finish_reason == "stop" and output.stop_reason == STOP_STR) 
 
     # test EOS token
     outputs = llm.generate(example_prompts,
