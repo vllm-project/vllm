@@ -1213,7 +1213,7 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
     which can handle multi lora adapters in a specialied kernel.
     """
 
-    def __init__(self, base_layer: LinearScalingRotaryEmbedding) -> None:
+    def __init__(self, base_layer: RotaryEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
         # Lazily initialized
@@ -1288,7 +1288,7 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
             offsets=self.long_lora_indices[:self.indices_len[4]])
 
     @property
-    def scaling_factor_to_offset(self):
+    def scaling_factor_to_offset(self) -> Dict[float, int]:
         return self.base_layer.scaling_factor_to_offset
 
     @classmethod

@@ -28,6 +28,7 @@ def test_load_checkpoints(
         # and the test should pass.
         LoRAModel.from_local_checkpoint(
             baichuan_lora_files,
+            4096,
             expected_lora_modules,
             lora_model_id=1,
             device="cpu",
@@ -39,6 +40,7 @@ def test_load_checkpoints(
         # the test should pass.
         LoRAModel.from_local_checkpoint(
             baichuan_zero_lora_files,
+            4096,
             expected_lora_modules,
             lora_model_id=1,
             device="cpu",
@@ -51,6 +53,7 @@ def test_load_checkpoints(
         with pytest.raises(ValueError, match=expected_error):
             LoRAModel.from_local_checkpoint(
                 chatglm3_lora_files,
+                4096,
                 expected_lora_modules,
                 lora_model_id=1,
                 device="cpu",
