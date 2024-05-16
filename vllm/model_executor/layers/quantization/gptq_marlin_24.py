@@ -13,32 +13,36 @@ from vllm.model_executor.utils import set_weight_attrs
 logger = init_logger(__name__)
 
 
-class MarlinConfig(QuantizationConfig):
-    """Config class for Marlin.
-
-    Reference: https://github.com/IST-DASLab/marlin/tree/master
+class GPTQMarlin24Config(QuantizationConfig):
+    """Config class for Marlin24.
     """
 
     def __init__(
         self,
+        weight_bits: int,
         group_size: int,
     ) -> None:
-        # Group size for the quantization.
+        self.weight_bits = weight_bits
         self.group_size = group_size
+
+        if self.weight_bits != 4 and self.weight_bits != 8:
+            raise ValueError("weight_bits must be 4 or 8. Got = {}".format(
+                self.weight_bits))
+
         if self.group_size != 128 and self.group_size != -1:
             raise ValueError(
                 "Currently, only group size 128 and -1 (channelwise) "
-                "is supported for Marlin, but got group_size of "
+                "is supported for Marlin24, but got group_size of "
                 f"{self.group_size}")
 
         # 4 Bits packed into 32 bit datatype.
-        self.pack_factor = 32 // 4
+        self.pack_factor = 32 // self.weight_bits
 
         # Tile size used by marlin kernels.
         self.tile_size = 16
 
         # Min out_features dim
-        self.min_n_threads = 64
+        self.min_n_threads = 128
 
         # Min in_features dim
         self.min_k_threads = 128
@@ -51,11 +55,12 @@ class MarlinConfig(QuantizationConfig):
         self.perm_len = 1024
 
     def __repr__(self) -> str:
-        return f"MarlinConfig(group_size={self.group_size})"
+        return "Marlin24Config(weight_bits={}, group_size={})".format(
+            self.weight_bits, self.group_size)
 
     @classmethod
     def get_name(cls) -> str:
-        return "marlin"
+        return "gptq_marlin_24"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -71,47 +76,47 @@ class MarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "GPTQMarlin24Config":
+        weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
-        return cls(group_size)
+        return cls(weight_bits, group_size)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        # compat: autogptq >=0.8.0 use checkpoint_format: str
-        # compat: autogptq <=0.7.1 is_marlin_format: bool
-        is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
-                            or hf_quant_cfg.get("is_marlin_format", False))
+        is_marlin_24_format = (
+            hf_quant_cfg.get("checkpoint_format") == "marlin_24")
 
         is_valid_user_quant = (user_quant is None or user_quant == "gptq"
-                               or user_quant == "marlin")
+                               or user_quant == "gptq_marlin_24")
 
-        if is_marlin_format and is_valid_user_quant:
-            msg = ("The model is serialized in {} format. Using {} kernel.".
-                   format(cls.get_name(), cls.get_name()))
+        if is_marlin_24_format and is_valid_user_quant:
+            msg = ("The model is serialized in {} format. "
+                   "Using {} kernel.".format(cls.get_name(), cls.get_name()))
             logger.info(msg)
             return cls.get_name()
 
         return None
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["MarlinLinearMethod"]:
+            self,
+            layer: torch.nn.Module) -> Optional["GPTQMarlin24LinearMethod"]:
         if isinstance(layer, LinearBase):
-            return MarlinLinearMethod(self)
+            return GPTQMarlin24LinearMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-class MarlinLinearMethod(LinearMethodBase):
-    """Linear method for Marlin.
+class GPTQMarlin24LinearMethod(LinearMethodBase):
+    """Linear method for Marlin24.
 
     Args:
-        quant_config: The Marlin quantization config.
+        quant_config: The Marlin24 quantization config.
     """
 
-    def __init__(self, quant_config: MarlinConfig):
+    def __init__(self, quant_config: GPTQMarlin24Config):
         self.quant_config = quant_config
 
     def create_weights(
@@ -165,7 +170,7 @@ class MarlinLinearMethod(LinearMethodBase):
         # Quantized 4Bit weights packed into Int32.
         qweight = Parameter(
             torch.empty(
-                input_size_per_partition // self.quant_config.tile_size,
+                input_size_per_partition // self.quant_config.tile_size // 2,
                 output_size_per_partition * self.quant_config.tile_size //
                 self.quant_config.pack_factor,
                 device="cuda",
@@ -181,6 +186,27 @@ class MarlinLinearMethod(LinearMethodBase):
                 "packed_dim": 1,
                 "pack_factor": self.quant_config.pack_factor,
                 "marlin_tile_size": self.quant_config.tile_size,
+            },
+        )
+
+        # Meta
+        meta = Parameter(
+            torch.empty(
+                input_size_per_partition // 8 // 2 // 2,
+                output_size_per_partition * 2,
+                device="cuda",
+                dtype=torch.int16,
+            ),
+            requires_grad=False,
+        )
+        set_weight_attrs(
+            meta,
+            {
+                "input_dim": 0,
+                "packed_dim": 1,
+                "pack_factor": 1,
+                "output_dim": 1,
+                "marlin_tile_size": 2,
             },
         )
 
@@ -215,8 +241,10 @@ class MarlinLinearMethod(LinearMethodBase):
                                           dtype=torch.int),
                               requires_grad=False)
 
-        layer.register_parameter("B", qweight)
+        layer.register_parameter("B_24", qweight)
         set_weight_attrs(qweight, extra_weight_attrs)
+        layer.register_parameter("B_meta", meta)
+        set_weight_attrs(meta, extra_weight_attrs)
         layer.register_parameter("s", scales)
         set_weight_attrs(scales, extra_weight_attrs)
         layer.register_parameter("workspace", workspace)
@@ -228,7 +256,8 @@ class MarlinLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qweight = layer.B
+        qweight = layer.B_24
+        meta = layer.B_meta
         scales = layer.s
         workspace = layer.workspace
 
@@ -238,8 +267,10 @@ class MarlinLinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = scales.shape[1]
 
-        output_2d = ops.marlin_gemm(x_2d, qweight, scales, workspace, size_m,
-                                    size_n, size_k)
+        output_2d = ops.gptq_marlin_24_gemm(x_2d, qweight, meta, scales,
+                                            workspace,
+                                            self.quant_config.weight_bits,
+                                            size_m, size_n, size_k)
 
         output = output_2d.view(x.shape[:-1] + (output_2d.shape[1], ))
 

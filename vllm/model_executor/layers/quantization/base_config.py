@@ -66,6 +66,17 @@ class QuantizationConfig(ABC):
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        """
+           Detects if this quantization method can support a given checkpoint
+           format by overriding the user specified quantization method -- 
+           this method should only be overwritten by subclasses in exceptional 
+           circumstances
+        """
+        return None
+
     @staticmethod
     def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
         """Get a value from the model's quantization config."""
