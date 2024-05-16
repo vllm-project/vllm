@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
@@ -35,17 +34,17 @@ void cutlass_scaled_mm_dq(torch::Tensor &c, torch::Tensor const &a,
   int32_t version_num = major_capability * 10 + minor_capability;
 
   // Checks for conformality
-  assert(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
-  assert(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
+  TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
+  TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
          b.size(1) == c.size(1));
-  assert(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
-  assert(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
+  TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
+  TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
 
   // Check for strides and alignment
-  assert(a.stride(1) == 1 && c.stride(1) == 1);           // Row-major
-  assert(b.stride(0) == 1);                               // Column-major
-  assert(c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0); // 16 Byte Alignment
-  assert(a_scales.is_contiguous() && b_scales.is_contiguous());
+  TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);           // Row-major
+  TORCH_CHECK(b.stride(0) == 1);                               // Column-major
+  TORCH_CHECK(c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0); // 16 Byte Alignment
+  TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
 

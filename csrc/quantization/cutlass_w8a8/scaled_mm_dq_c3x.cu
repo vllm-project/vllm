@@ -176,7 +176,7 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  assert(workspace_size == 0);
+  TORCH_CHECK(workspace_size == 0);
 
   cutlass::Status status = gemm_op.run(args);
   CUTLASS_CHECK(status);
@@ -187,7 +187,12 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                                torch::Tensor const &b,
                                torch::Tensor const &a_scales,
                                torch::Tensor const &b_scales) {
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
   if (a.dtype() == torch::kInt8) {
+    TORCH_CHECK(b.dtype() == torch::kInt8);
+
     using TileShape = Shape<_128, _128, _128>;
     using ClusterShape = Shape<_1, _2, _1>;
     using KernelSchedule =
@@ -200,7 +205,7 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                           KernelSchedule, EpilogueSchedule>>(
           out, a, b, a_scales, b_scales);
     } else {
-      assert(out.dtype() == torch::kFloat16);
+      TORCH_CHECK(out.dtype() == torch::kFloat16);
 
       return cutlass_scaled_mm_dq_dispatcher<
           cutlass_3x_gemm<int8_t, cutlass::half_t, TileShape, ClusterShape,
@@ -208,6 +213,9 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
           out, a, b, a_scales, b_scales);
     }
   } else {
+    TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+    TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+
     using TileShape = Shape<_128, _128, _128>;
     using ClusterShape = Shape<_1, _2, _1>;
     using KernelSchedule =
@@ -221,7 +229,7 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
                           ClusterShape, KernelSchedule, EpilogueSchedule>>(
           out, a, b, a_scales, b_scales);
     } else {
-      assert(out.dtype() == torch::kFloat16);
+      TORCH_CHECK(out.dtype() == torch::kFloat16);
 
       return cutlass_scaled_mm_dq_dispatcher<
           cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t, TileShape,
