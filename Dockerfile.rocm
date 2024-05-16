@@ -159,6 +159,9 @@ RUN python3 -m pip install --upgrade pip numba
 RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 # Install vLLM
+ARG VLLM_BUILD_MODE="install"
+# developer might choose to use "develop" mode. But for end-users, we should do an install mode.
+# the current "develop" mode has issues with ImportError: cannot import name '_custom_C' from 'vllm' (/app/vllm/vllm/__init__.py)
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
@@ -166,7 +169,7 @@ RUN cd /app \
     bash patch_xformers.rocm.sh; fi \
     && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
     patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
-    && python3 setup.py clean --all && python3 setup.py develop \
+    && python3 setup.py clean --all && python3 setup.py $VLLM_BUILD_MODE \
     && cd ..
 
 
