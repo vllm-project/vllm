@@ -392,7 +392,7 @@ __global__ void Marlin_24(
       for (int i = 0; i < b_sh_wr_iters; i++) {
 #pragma unroll
         for (int j = 0; j < b_thread_vecs; j++) {
-          cp_async4_stream(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j],
+          cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j],
                            B_ptr[i] + j);
         }
         B_ptr[i] += b_gl_rd_delta_o;
@@ -401,7 +401,7 @@ __global__ void Marlin_24(
 #pragma unroll
       for (int i = 0; i < m_sh_iters; i++) {
         if (m_sh_wr_pred)
-          cp_async4_stream(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr],
+          cp_async4(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr],
                            meta_ptr[i]);
         meta_ptr[i] += m_gl_rd_delta_o;
       }
@@ -409,7 +409,7 @@ __global__ void Marlin_24(
       if (group_blocks != -1 && pipe % (group_blocks / thread_k_blocks) == 0) {
         int4 *sh_s_stage = sh_s + s_sh_stage * pipe;
         if (s_sh_wr_pred)
-          cp_async4_stream(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
+          cp_async4(&sh_s_stage[s_sh_wr], &s[s_gl_rd]);
         s_gl_rd += s_gl_rd_delta;
       }
     }
@@ -763,12 +763,12 @@ __global__ void Marlin_24(
       if constexpr (group_blocks == -1) {
         if constexpr (num_bits == 8) {
           if (s_sh_wr_pred)
-            cp_async4_stream(&sh_s[s_sh_wr], &s[s_gl_rd]);
+            cp_async4(&sh_s[s_sh_wr], &s[s_gl_rd]);
           cp_async_fence();
         } else {
           if (last) {
             if (s_sh_wr_pred)
-              cp_async4_stream(&sh_s[s_sh_wr], &s[s_gl_rd]);
+              cp_async4(&sh_s[s_sh_wr], &s[s_gl_rd]);
             cp_async_fence();
           }
         }

@@ -45,19 +45,13 @@ __device__ inline void cp_async4_pred(void* smem_ptr, const void* glob_ptr, bool
   );
 }
 
-// Asynchronous global->shared copy with a cache hint indicating that the values may be evicted immediately; used for
-// quantized weights B, which are only accessed precisely once and should thus not pollute the L2 cache which we need
-// for inputs A and outputs C.
-__device__ inline void cp_async4_stream(void* smem_ptr, const void* glob_ptr) {
+// Asynchronous global->shared copy
+__device__ inline void cp_async4(void *smem_ptr, const void *glob_ptr) {
   const int BYTES = 16;
   uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-    "{\n"
-    "   .reg .b64 p;\n"
-    "   createpolicy.fractional.L2::evict_first.b64 p, 1.0;"
-    "   cp.async.cg.shared.global.L2::cache_hint [%0], [%1], %2, p;\n"
-    "}\n" :: "r"(smem), "l"(glob_ptr), "n"(BYTES)
-  );
+  asm volatile("{\n"
+               "   cp.async.cg.shared.global [%0], [%1], %2;\n"
+               "}\n" :: "r"(smem), "l"(glob_ptr), "n"(BYTES));
 }
 
 // Async copy fence.
