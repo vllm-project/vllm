@@ -28,6 +28,8 @@ from huggingface_hub import snapshot_download
 
 from vllm.utils import get_ip
 
+from ..utils import ServerRunner
+
 MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -87,46 +89,6 @@ class Controller:
             self.proc.terminate()
 
 
-@ray.remote(num_gpus=1)
-class Worker:
-
-    def __init__(self, args, port):
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        self.port = port
-        self.proc = subprocess.Popen(
-            ["python3", "-m", "vllm.entrypoints.openai.api_server"] + args,
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        self._wait_for_worker()
-
-    def ready(self):
-        return True
-
-    def _wait_for_worker(self):
-        # run health check
-        start = time.time()
-        while True:
-            try:
-                if requests.get("http://{}:{}/health".format(
-                        host_ip, self.port)).status_code == 200:
-                    break
-            except Exception as err:
-                if self.proc.poll() is not None:
-                    raise RuntimeError("Server exited unexpectedly.") from err
-
-                time.sleep(0.5)
-                if time.time() - start > MAX_SERVER_START_WAIT_S:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from err
-
-    def __del__(self):
-        if hasattr(self, "proc"):
-            self.proc.terminate()
-
-
 @pytest.fixture(scope="module")
 def client():
     client = openai.AsyncOpenAI(
@@ -148,7 +110,7 @@ def singleserver(zephyr_lora_files):
     # start controller first
     controller = Controller.remote(["--host", host_ip])
     ray.get(controller.ready.remote())
-    worker = Worker.remote(
+    worker = ServerRunner.remote(
         [
             "--model",
             MODEL_NAME,
@@ -176,6 +138,7 @@ def singleserver(zephyr_lora_files):
             "--max-num-seqs",
             "128",
         ],
+        host_ip,
         8001)
     ray.get(worker.ready.remote())
 
@@ -189,7 +152,7 @@ def doubleserver(zephyr_lora_files):
     # start controller first
     controller = Controller.remote(["--host", host_ip])
     ray.get(controller.ready.remote())
-    worker0 = Worker.remote(
+    worker0 = ServerRunner.remote(
         [
             "--model",
             MODEL_NAME,
@@ -217,10 +180,11 @@ def doubleserver(zephyr_lora_files):
             "--max-num-seqs",
             "128",
         ],
+        host_ip,
         8001)
     ray.get(worker0.ready.remote())
 
-    worker1 = Worker.remote(
+    worker1 = ServerRunner.remote(
         [
             "--model",
             MODEL_NAME,
@@ -248,6 +212,7 @@ def doubleserver(zephyr_lora_files):
             "--max-num-seqs",
             "128",
         ],
+        host_ip,
         8002)
     ray.get(worker1.ready.remote())
 
@@ -317,7 +282,7 @@ async def test_join_and_leave(singleserver):
     res = json.loads(res.content.decode('utf-8'))
     assert worker1_addr in res
 
-    worker1 = Worker.remote(
+    worker1 = ServerRunner.remote(
         [
             "--model",
             MODEL_NAME,
@@ -345,6 +310,7 @@ async def test_join_and_leave(singleserver):
             "--max-num-seqs",
             "128",
         ],
+        host_ip,
         8002)
     ray.get(worker1.ready.remote())
 

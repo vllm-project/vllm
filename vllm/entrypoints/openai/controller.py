@@ -161,8 +161,8 @@ def heart_beat_worker(obj):
 
 class Worker:
 
-    def __init__(self, controller_addr, worker_ip, worker_port, model_names,
-                 lora_modules: List[LoRAModulePath], engine):
+    def __init__(self, controller_addr: str, worker_ip: str, worker_port: int,
+                 model_names: str, lora_modules: List[LoRAModulePath], engine):
         self.controller_addr = controller_addr
         self.worker_addr = "{}:{}".format(worker_ip, worker_port)
         self.model_names = [model_names]

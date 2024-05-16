@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import time
+from typing import Optional
 
 import ray
 import requests
@@ -18,7 +19,10 @@ VLLM_PATH = os.path.abspath(os.path.join(__file__, os.pardir, os.pardir))
 class ServerRunner:
     MAX_SERVER_START_WAIT_S = 600  # wait for server to start for 60 seconds
 
-    def __init__(self, args):
+    def __init__(self,
+                 args,
+                 host: Optional[str] = "localhost",
+                 port: Optional[int] = 8000):
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         self.proc = subprocess.Popen(
@@ -27,18 +31,18 @@ class ServerRunner:
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
-        self._wait_for_server()
+        self._wait_for_server("{}:{}".format(host, port))
 
     def ready(self):
         return True
 
-    def _wait_for_server(self):
+    def _wait_for_server(self, server_addr: str):
         # run health check
         start = time.time()
         while True:
             try:
-                if requests.get(
-                        "http://localhost:8000/health").status_code == 200:
+                if requests.get("http://{}/health".format(
+                        server_addr)).status_code == 200:
                     break
             except Exception as err:
                 if self.proc.poll() is not None:
