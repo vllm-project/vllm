@@ -327,24 +327,22 @@ class TPUModelRunner:
 
         start = time.time()
         inputs = self.prepare_inputs(seq_group_metadata_list)
-        xm.mark_step()
         end = time.time()
-        phase = "prompt" if inputs[2].is_prompt else "decode"
-        batch_size, seq_len = inputs[0].shape
-        print(f"{phase} inputs: batch_size={batch_size}, seq_len={seq_len}")
-        print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
+        # phase = "prompt" if inputs[2].is_prompt else "decode"
+        # batch_size, seq_len = inputs[0].shape
+        # print(f"{phase} inputs: batch_size={batch_size}, seq_len={seq_len}")
+        # print(f"prepare_inputs(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
         next_token_ids = self.model(inputs[0], inputs[1], kv_caches,
                                             inputs[2], inputs[3])
-        xm.mark_step()
         end = time.time()
-        print(f"model(): {(end - start) * 1000:.2f} ms")
+        # print(f"model(): {(end - start) * 1000:.2f} ms")
 
         start = time.time()
         next_token_ids = next_token_ids.cpu()
         end = time.time()
-        print(f".cpu(): {(end - start) * 1000:.2f} ms")
+        # print(f".cpu(): {(end - start) * 1000:.2f} ms")
 
         next_token_ids = next_token_ids.tolist()
         i = 0
