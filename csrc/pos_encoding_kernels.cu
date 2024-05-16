@@ -38,9 +38,9 @@ inline __device__ void apply_rotary_embedding(
     scalar_t* __restrict__ query,  // [batch_size, seq_len, num_heads,
                                    // head_size] or [num_tokens, num_heads,
                                    // head_size]
-    scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
-                                 // head_size] or [num_tokens, num_kv_heads,
-                                 // head_size]
+    scalar_t* __restrict__ key,    // [batch_size, seq_len, num_kv_heads,
+                                   // head_size] or [num_tokens, num_kv_heads,
+                                   // head_size]
     const scalar_t* cache_ptr, const int head_size, const int num_heads,
     const int num_kv_heads, const int rot_dim, const int token_idx,
     const int64_t query_stride, const int64_t key_stride) {
@@ -168,7 +168,7 @@ void batched_rotary_embedding(
                            // [num_tokens, num_heads
                            // * head_size]
     torch::Tensor& key,    // [batch_size, seq_len, num_kv_heads * head_size] or
-                         // [num_tokens, num_kv_heads * head_size]
+                           // [num_tokens, num_kv_heads * head_size]
     int head_size,
     torch::Tensor& cos_sin_cache,  // [max_position, rot_dim]
     bool is_neox, int rot_dim,

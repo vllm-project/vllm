@@ -187,7 +187,7 @@ __global__ void Code1x16Dequant(
     const int4* __restrict__ codebook, int prob_m, int prob_k,
     const int4 codebook_a_sizes,  // cumulative sizes of A spanning each
                                   // codebook, at most 3 long, sums to m.
-    const int codebook_stride  // as int4
+    const int codebook_stride     // as int4
 ) {
   int a_gl_stride = prob_k / 8 / 8;
   int a_gl_rd = (blockDim.x / 32) * blockIdx.x + (threadIdx.x / 32);
