@@ -242,6 +242,18 @@ def main(args: argparse.Namespace):
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} tokens/s")
 
+    # Output JSON results if specified
+    if args.output_json:
+        results = {
+            "elapsed_time": elapsed_time,
+            "num_requests": len(requests),
+            "total_num_tokens": total_num_tokens,
+            "requests_per_second": len(requests) / elapsed_time,
+            "tokens_per_second": total_num_tokens / elapsed_time,
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark the throughput.")
@@ -353,6 +365,11 @@ if __name__ == "__main__":
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Path to save the throughput results in JSON format.')
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
