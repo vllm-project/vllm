@@ -1,7 +1,4 @@
 # torch implementation of LoRA kernels.
-
-from typing import Optional
-
 import torch
 
 
@@ -30,17 +27,14 @@ def dispatch_bgmv(
       layer_idx: Layer index of the weight matrices.
       scale: Scaling factor.
     """
-    y += (
-        x.unsqueeze(1)
-        @ w_t_all[indicies, layer_idx, :, :].transpose(-1, -2).to(x.dtype)
-        * scale
-    ).squeeze(1)
+    y += (x.unsqueeze(1) @ w_t_all[indicies, layer_idx, :, :].transpose(
+        -1, -2).to(x.dtype) * scale).squeeze(1)
 
 
 def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
                             w_t_all: torch.Tensor, indicies: torch.LongTensor,
-                            layer_idx: int, scale: float, h_in: int, h_out :int,
-                            y_offset: int):
+                            layer_idx: int, scale: float, h_in: int,
+                            h_out: int, y_offset: int):
     """
     Same as `bgmv` but you can operate on slices of y.
     Pass whole y, define y_offset and y_slice_size.
@@ -63,4 +57,7 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       y_offset: Offset to apply to the starting column of y.
       y_slice_size: Size of the y column slice.
     """
-    y[:, y_offset:y_offset+h_out] += (x[:, :h_in].unsqueeze(1) @ w_t_all[indicies, layer_idx, :, :].transpose(-1, -2).to(x.dtype) * scale).squeeze(1)
+    y[:, y_offset:y_offset + h_out] += (
+        x[:, :h_in].unsqueeze(1)
+        @ w_t_all[indicies, layer_idx, :, :].transpose(-1, -2).to(x.dtype) *
+        scale).squeeze(1)
