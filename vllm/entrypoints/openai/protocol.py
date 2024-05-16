@@ -3,14 +3,48 @@
 import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
+import openai.types.chat
 import torch
-from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Annotated
+# pydantic needs the TypedDict from typing_extensions
+from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+
+
+class CustomChatCompletionContentPartParam(TypedDict, total=False):
+    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+
+    type: Required[str]
+    """The type of the content part."""
+
+
+ChatCompletionContentPartParam = Union[
+    openai.types.chat.ChatCompletionContentPartParam,
+    CustomChatCompletionContentPartParam]
+
+
+class CustomChatCompletionMessageParam(TypedDict, total=False):
+    """Enables custom roles in the Chat Completion API."""
+    role: Required[str]
+    """The role of the message's author."""
+
+    content: Union[str, List[ChatCompletionContentPartParam]]
+    """The contents of the message."""
+
+    name: str
+    """An optional name for the participant.
+
+    Provides the model information to differentiate between participants of the
+    same role.
+    """
+
+
+ChatCompletionMessageParam = Union[
+    openai.types.chat.ChatCompletionMessageParam,
+    CustomChatCompletionMessageParam]
 
 
 class OpenAIBaseModel(BaseModel):
@@ -492,3 +526,44 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+
+
+class BatchRequestInput(OpenAIBaseModel):
+    """
+    The per-line object of the batch input file.
+
+    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
+    """
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs. Must be unique for each request in a batch.
+    custom_id: str
+
+    # The HTTP method to be used for the request. Currently only POST is
+    # supported.
+    method: str
+
+    # The OpenAI API relative URL to be used for the request. Currently
+    # /v1/chat/completions is supported.
+    url: str
+
+    # The parameteters of the request.
+    body: Union[ChatCompletionRequest, ]
+
+
+class BatchRequestOutput(OpenAIBaseModel):
+    """
+    The per-line object of the batch output and error files
+    """
+
+    id: str
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs.
+    custom_id: str
+
+    response: Optional[ChatCompletionResponse]
+
+    # For requests that failed with a non-HTTP error, this will contain more
+    # information on the cause of the failure.
+    error: Optional[Any]
