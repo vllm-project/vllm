@@ -116,7 +116,7 @@ class TestLongContext:
             max_loras=2,
             long_lora_scaling_factors=tuple(scaling_factors),
             max_num_batched_tokens=4096 * 8,
-            tensor_parallel_size=4,
+            tensor_parallel_size=1,
         )
         return lora_llm
 
@@ -223,7 +223,6 @@ class TestLongContext:
                                _create_lora_request(lora_id,
                                                     long_context_infos))
                 response = generate(lora_llm, lora_prompt)
-                breakpoint()
                 golden_answer = prompt_and_response["golden_answer"]
                 score = evaluate_json_response(response, golden_answer)
                 scores.append(score)
