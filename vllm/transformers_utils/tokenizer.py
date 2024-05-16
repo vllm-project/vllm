@@ -5,7 +5,7 @@ import huggingface_hub
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
-from vllm.config import VLLM_USE_MODELSCOPE
+from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.tokenizers import BaichuanTokenizer
@@ -79,7 +79,7 @@ def get_tokenizer(
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                 # Ignore weights - we only need the tokenizer.
-                ignore_file_pattern=["*.pt", "*.safetensors", "*.bin"])
+                ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"])
             tokenizer_name = tokenizer_path
 
     if tokenizer_mode == "slow":

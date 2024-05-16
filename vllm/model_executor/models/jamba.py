@@ -9,7 +9,7 @@ from torch import nn
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-
+from vllm.config import CacheConfig
 from transformers import JambaConfig
 from torch.nn.parameter import Parameter
 from vllm.config import LoRAConfig
@@ -48,12 +48,12 @@ class MambaCacheParams:
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 class JambaMambaMixer(nn.Module):
     """
-    Compute ∆, A, B, C, and D the state space parameters and compute 
-    the `contextualized_states`. A, D are input independent 
-    (see Mamba paper [1] Section 3.5.2 "Interpretation of A" 
-    for why A isn't selective) ∆, B, C are input-dependent 
-    (this is a key difference between Mamba and the linear time 
-    invariant S4, and is why Mamba is called 
+    Compute ∆, A, B, C, and D the state space parameters and compute
+    the `contextualized_states`. A, D are input independent
+    (see Mamba paper [1] Section 3.5.2 "Interpretation of A"
+    for why A isn't selective) ∆, B, C are input-dependent
+    (this is a key difference between Mamba and the linear time
+    invariant S4, and is why Mamba is called
     **selective** state spaces)
     """
 
@@ -397,7 +397,9 @@ class JambaMoE(nn.Module):
 
 class JambaMambaDecoderLayer(nn.Module):
     def __init__(
-            self, config: JambaConfig, layer_idx: int, quant_config: Optional[QuantizationConfig] = None
+            self, config: JambaConfig, layer_idx: int,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -437,7 +439,9 @@ class JambaMambaDecoderLayer(nn.Module):
 class JambaAttentionDecoderLayer(nn.Module):
 
     def __init__(
-            self, config: JambaConfig, layer_idx: int, quant_config: Optional[QuantizationConfig] = None,
+            self, config: JambaConfig, layer_idx: int,
+            cache_config: Optional[CacheConfig] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -479,6 +483,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
             sliding_window=self.sliding_window,
         )
 
@@ -539,6 +544,7 @@ class JambaModel(nn.Module):
         self,
         config: JambaConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
@@ -558,7 +564,9 @@ class JambaModel(nn.Module):
         decoder_layers = []
         for i in range(config.num_hidden_layers):
             layer_class = ALL_DECODER_LAYER_TYPES[config.layers_block_type[i]]
-            decoder_layers.append(layer_class(config, layer_idx=i, quant_config=quant_config))
+            decoder_layers.append(layer_class(config, layer_idx=i,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config))
         self.layers = nn.ModuleList(decoder_layers)
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -625,6 +633,7 @@ class JambaForCausalLM(nn.Module):
     def __init__(
         self,
         config: JambaConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -632,6 +641,7 @@ class JambaForCausalLM(nn.Module):
         self.config = config
         self.model = JambaModel(
             config,
+            cache_config=cache_config,
             quant_config=quant_config,
             lora_config=lora_config
         )
