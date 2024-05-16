@@ -58,7 +58,6 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.device_config = device_config
         self.vision_language_config = vision_language_config
 
-        assert self.parallel_config.worker_use_ray
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -166,13 +165,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         for node_id, gpu_ids in node_gpus.items():
             node_gpus[node_id] = sorted(gpu_ids)
 
-        # VLLM_INSTANCE_ID = get_vllm_instance_id()
-
         # TODO: add env var for xpu
-        # Set environment variables for the driver and workers.
-        # all_args_to_update_environment_variables = []
-        # self._run_workers("update_environment_variables",
-        #                   all_args=all_args_to_update_environment_variables)
 
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())

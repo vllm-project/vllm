@@ -174,6 +174,9 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
                 "distributed_init_method must be set if torch.distributed "
                 "is not already initialized")
         else:
+            # use sockets as default Level zero IPC exchange backend. By
+            # default oneccl will use `drmfd` as mechanism which need extra
+            # dependency (libdrm and drm headers) on your system.
             ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
                                                 "sockets")
             os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
