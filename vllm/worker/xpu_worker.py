@@ -76,6 +76,7 @@ class XPUWorker(LoraNotSupportedWorkerBase):
             parallel_config,
             scheduler_config,
             device_config,
+            cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
