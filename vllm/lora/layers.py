@@ -8,7 +8,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.model_executor.utils import set_default_torch_dtype
-from vllm.model_executor.layers.rotary_embedding import LinearScalingRotaryEmbedding, RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    LinearScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
 
 from vllm.config import LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -26,7 +29,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm._C import ops
 
 if TYPE_CHECKING:
     pass
@@ -1203,67 +1205,6 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         return False
 
 
-class MultiLinearScalingRotaryEmbedding(LinearScalingRotaryEmbedding):
-    """Implements RoPE-scaled embeddings with linear scaling for
-    multiple LoRA adapters with a specialized kernel.
-
-    Since multiple LoRA adapters may have different scaling factors, we need
-    multiple cos/sin caches.
-
-    In addition to that, we also keep the cos/sin cache for the scaling factor
-    of 1 (default) at all times.
-
-    Exemplary for two scaling factors x=1, y and z with embeddings
-    [[x11, x12, ... x1m], ..., [xn1, xn2, ..., xnm]] and
-    [[y11, y12, ... y1o], ..., [yn1, yn2, ..., yno]], and
-    [[z11, z12, ... z1p], ..., [zn1, zn2, ..., znp]],
-
-    we construct the cos/sin cache as follows:
-    [[x11, x12, ... x1m, y11, y12, ... y1o, z11, z12, ... z1p],
-        ...
-     [xn1, xn2, ... xnm, yn1, yn2, ... yno, zn1, zn2, ... znp]]
-
-    We then use offsets to index into the cos/sin cache for
-    the respective scaling factors.
-    """
-
-    def __init__(self, head_size: int, rotary_dim: int,
-                 max_position_embeddings: int, base: int, is_neox_style: bool,
-                 scaling_factors: List[float]) -> None:
-        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style, scaling_factors)
-
-    def _compute_cos_sin_cache(self) -> torch.Tensor:
-        inv_freq = self._compute_inv_freq(self.base)
-        # NOTE: self.max_position_embeddings is the original
-        # maximum length before applying the rope scaling.
-        # Thus, the maximum length after applying the rope scaling is
-        # self.max_position_embeddings * self.scaling_factor.
-        all_caches: List[torch.Tensor] = []
-        self.offsets: List[int] = []
-        for scaling_factor in sorted(self.scaling_factors):
-            max_len = self.max_position_embeddings * scaling_factor
-            t = torch.arange(max_len, dtype=torch.float,
-                             device="cuda") / scaling_factor
-
-            freqs = torch.einsum("i,j -> ij", t, inv_freq)
-            cos = freqs.cos()
-            sin = freqs.sin()
-            cos_sin = torch.cat((cos, sin), dim=-1)
-            self.offsets.append(self.offsets[-1] +
-                                all_caches[-1].shape[0] if all_caches else 0)
-            all_caches.append(cos_sin)
-        self.scaling_factor_to_offset: Dict[float, int] = {
-            float(scaling_factor): self.offsets[i]
-            for i, scaling_factor in enumerate(sorted(self.scaling_factor))
-        }
-        return torch.cat(all_caches)
-
-    @property
-    def get_scaling_factor_to_offset(self) -> Dict[float, int]:
-        return self.scaling_factor_to_offset
-
-
 class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
@@ -1279,6 +1220,14 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         self.long_lora_indices: torch.Tensor
         self.indices_len: List[int]
 
+    @property
+    def scaling_factors(self):
+        return self.base_layer.scaling_factors
+
+    @property
+    def rotary_dim(self):
+        return self.base_layer.rotary_dim
+
     def create_lora_weights(
         self,
         max_loras: int,
@@ -1290,10 +1239,10 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         ) if lora_config.long_lora_scaling_factors else []
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
-        scaling_factors = list(set([base_scaling_factor] + scaling_factors))
+        scaling_factors = sorted(list(set([base_scaling_factor] + scaling_factors)))
         # Replace the base layer.
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
-            self.base_layer = MultiLinearScalingRotaryEmbedding(
+            self.base_layer = LinearScalingRotaryEmbedding(
                 self.base_layer.head_size,
                 self.base_layer.rotary_dim,
                 self.base_layer.max_position_embeddings,
@@ -1331,7 +1280,6 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        print("SANG-TODO lora rope")
         return self.base_layer(
             positions,
             query,
@@ -1339,7 +1287,7 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
             offsets=self.long_lora_indices[:self.indices_len[4]])
 
     @property
-    def get_scaling_factor_to_offset(self):
+    def scaling_factor_to_offset(self):
         return self.base_layer.scaling_factor_to_offset
 
     @classmethod
@@ -1347,7 +1295,8 @@ class MultiLinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
                           lora_config: LoRAConfig, packed_modules_list: List,
                           model_config: Optional[PretrainedConfig]) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        return type(source_layer) is LinearScalingRotaryEmbedding or type(source_layer) is RotaryEmbedding
+        return type(source_layer) is LinearScalingRotaryEmbedding or type(
+            source_layer) is RotaryEmbedding
 
     def extra_repr(self) -> str:
         return self.base_layer.extra_repr()

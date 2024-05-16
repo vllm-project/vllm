@@ -11,10 +11,6 @@ from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
 from vllm.utils import LRUCache
 
 
-class InputTooLongError(ValueError):
-    ...
-
-
 class TokenizerGroup(BaseTokenizerGroup):
     """A group of tokenizers that can be used for LoRA adapters."""
 
@@ -51,8 +47,7 @@ class TokenizerGroup(BaseTokenizerGroup):
         else:
             max_input_length = self.max_input_length
         if (max_input_length is not None and input_length > max_input_length):
-            raise InputTooLongError("Input too long.", input_length,
-                                    max_input_length)
+            raise ValueError("Input too long.", input_length, max_input_length)
         return ret
 
     async def encode_async(
@@ -69,8 +64,7 @@ class TokenizerGroup(BaseTokenizerGroup):
         else:
             max_input_length = self.max_input_length
         if (max_input_length is not None and input_length > max_input_length):
-            raise InputTooLongError("Input too long.", input_length,
-                                    max_input_length)
+            raise ValueError("Input too long.", input_length, max_input_length)
         return ret
 
     def get_lora_tokenizer(
