@@ -9,10 +9,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
 # run python-based benchmarks and upload the result to buildkite
-python3 benchmarks/benchmark_latency.py 2>&1 | tee benchmark_latency.txt
+python3 benchmarks/benchmark_latency.py --output-json latency_results.json 2>&1 | tee benchmark_latency.txt
 bench_latency_exit_code=$?
 
-python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 2>&1 | tee benchmark_throughput.txt
+python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
@@ -74,4 +74,5 @@ if [ $bench_serving_exit_code -ne 0 ]; then
     exit $bench_serving_exit_code
 fi
 
-/workspace/buildkite-agent artifact upload openai-*.json
+rm ShareGPT_V3_unfiltered_cleaned_split.json
+/workspace/buildkite-agent artifact upload "*.json"

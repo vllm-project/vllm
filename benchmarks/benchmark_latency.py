@@ -1,5 +1,6 @@
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
+import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -96,6 +97,16 @@ def main(args: argparse.Namespace):
     for percentage, percentile in zip(percentages, percentiles):
         print(f'{percentage}% percentile latency: {percentile} seconds')
 
+    # Output JSON results if specified
+    if args.output_json:
+        results = {
+            "avg_latency": np.mean(latencies),
+            "latencies": latencies.tolist(),
+            "percentiles": dict(zip(percentages, percentiles.tolist())),
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
@@ -149,8 +160,8 @@ if __name__ == '__main__':
         help=
         'Data type for kv cache storage. If "auto", will use model data type. '
         'FP8_E5M2 (without scaling) is only supported on cuda version greater '
-        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
-        'common inference criteria.')
+        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is '
+        'instead supported for common inference criteria.')
     parser.add_argument(
         '--quantization-param-path',
         type=str,
@@ -197,5 +208,10 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Path to save the latency results in JSON format.')
     args = parser.parse_args()
     main(args)
