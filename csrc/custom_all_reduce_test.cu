@@ -33,14 +33,13 @@
     }                                                                  \
   } while (0)
 
-#define NCCLCHECK(cmd)                                              \
-  do {                                                              \
-    ncclResult_t r = cmd;                                           \
-    if (r != ncclSuccess) {                                         \
-      printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, \
-             ncclGetErrorString(r));                                \
-      exit(EXIT_FAILURE);                                           \
-    }                                                               \
+#define NCCLCHECK(cmd)                                                                      \
+  do {                                                                                      \
+    ncclResult_t r = cmd;                                                                   \
+    if (r != ncclSuccess) {                                                                 \
+      printf("Failed, NCCL error %s:%d '%s'\n", __FILE__, __LINE__, ncclGetErrorString(r)); \
+      exit(EXIT_FAILURE);                                                                   \
+    }                                                                                       \
   } while (0)
 
 __global__ void dummy_kernel() {
@@ -48,26 +47,23 @@ __global__ void dummy_kernel() {
 }
 
 template <typename T>
-__global__ void set_data(T *data, int size, int myRank) {
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
-       idx += gridDim.x * blockDim.x) {
+__global__ void set_data(T* data, int size, int myRank) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
     data[idx] = myRank * 0.11f;
   }
 }
 
 template <typename T>
-__global__ void convert_data(const T *data1, const T *data2, double *fdata1,
-                             double *fdata2, int size) {
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
-       idx += gridDim.x * blockDim.x) {
+__global__ void convert_data(const T* data1, const T* data2, double* fdata1, double* fdata2,
+                             int size) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
     fdata1[idx] = data1[idx];
     fdata2[idx] = data2[idx];
   }
 }
 
-__global__ void init_rand(curandState_t *state, int size, int nRanks) {
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
-       idx += gridDim.x * blockDim.x) {
+__global__ void init_rand(curandState_t* state, int size, int nRanks) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
     for (int i = 0; i < nRanks; i++) {
       curand_init(i + 1, idx, 0, &state[idx * nRanks + i]);
     }
@@ -75,10 +71,9 @@ __global__ void init_rand(curandState_t *state, int size, int nRanks) {
 }
 
 template <typename T>
-__global__ void gen_data(curandState_t *state, T *data, double *ground_truth,
-                         int myRank, int nRanks, int size) {
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
-       idx += gridDim.x * blockDim.x) {
+__global__ void gen_data(curandState_t* state, T* data, double* ground_truth, int myRank,
+                         int nRanks, int size) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size; idx += gridDim.x * blockDim.x) {
     double sum = 0.0;
     for (int i = 0; i < nRanks; i++) {
       double val = curand_uniform_double(&state[idx * nRanks + i]) * 4;
@@ -91,9 +86,9 @@ __global__ void gen_data(curandState_t *state, T *data, double *ground_truth,
 }
 
 template <typename T>
-void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
-         int data_size, bool performance_test) {
-  T *result;
+void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit, int data_size,
+         bool performance_test) {
+  T* result;
   cudaStream_t stream;
   CUDACHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
   CUDACHECK(cudaMalloc(&result, data_size * sizeof(T)));
@@ -101,8 +96,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
 
   cudaIpcMemHandle_t self_data_handle;
   cudaIpcMemHandle_t data_handles[8];
-  vllm::Signal *buffer;
-  T *self_data_copy;
+  vllm::Signal* buffer;
+  T* self_data_copy;
   /**
    * Allocate IPC buffer
    *
@@ -114,47 +109,40 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
    * registration, they are allocated and registered together in the test for
    * convenience.
    */
-  CUDACHECK(
-      cudaMalloc(&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
-  CUDACHECK(
-      cudaMemset(buffer, 0, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
+  CUDACHECK(cudaMalloc(&buffer, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
+  CUDACHECK(cudaMemset(buffer, 0, 2 * data_size * sizeof(T) + sizeof(vllm::Signal)));
   CUDACHECK(cudaMalloc(&self_data_copy, data_size * sizeof(T)));
   CUDACHECK(cudaIpcGetMemHandle(&self_data_handle, buffer));
 
-  MPICHECK(MPI_Allgather(&self_data_handle, sizeof(cudaIpcMemHandle_t),
-                         MPI_BYTE, data_handles, sizeof(cudaIpcMemHandle_t),
-                         MPI_BYTE, MPI_COMM_WORLD));
+  MPICHECK(MPI_Allgather(&self_data_handle, sizeof(cudaIpcMemHandle_t), MPI_BYTE, data_handles,
+                         sizeof(cudaIpcMemHandle_t), MPI_BYTE, MPI_COMM_WORLD));
 
-  void *rank_data;
+  void* rank_data;
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
   std::vector<int64_t> offsets(nRanks, 0);
-  vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles,
-                           offsets, myRank);
-  auto *self_data =
-      reinterpret_cast<T *>(reinterpret_cast<char *>(buffer) +
-                            sizeof(vllm::Signal) + data_size * sizeof(T));
+  vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles, offsets, myRank);
+  auto* self_data = reinterpret_cast<T*>(reinterpret_cast<char*>(buffer) + sizeof(vllm::Signal) +
+                                         data_size * sizeof(T));
   // hack buffer registration
   {
     std::vector<std::string> handles;
     handles.reserve(nRanks);
     for (int i = 0; i < nRanks; i++) {
-      char *begin = (char *)&data_handles[i];
-      char *end = (char *)&data_handles[i + 1];
+      char* begin = (char*)&data_handles[i];
+      char* end = (char*)&data_handles[i + 1];
       handles.emplace_back(begin, end);
     }
-    std::vector<int64_t> offsets(nRanks,
-                                 sizeof(vllm::Signal) + data_size * sizeof(T));
+    std::vector<int64_t> offsets(nRanks, sizeof(vllm::Signal) + data_size * sizeof(T));
     fa.register_buffer(handles, offsets, self_data);
   }
 
-  double *ground_truth;
+  double* ground_truth;
   CUDACHECK(cudaMallocHost(&ground_truth, data_size * sizeof(double)));
-  curandState_t *states;
+  curandState_t* states;
   CUDACHECK(cudaMalloc(&states, sizeof(curandState_t) * nRanks * data_size));
   init_rand<<<108, 1024, 0, stream>>>(states, data_size, nRanks);
-  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth, myRank,
-                                        nRanks, data_size);
+  gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth, myRank, nRanks, data_size);
   CUDACHECK(cudaMemcpyAsync(self_data_copy, self_data, data_size * sizeof(T),
                             cudaMemcpyDeviceToDevice, stream));
   cudaEvent_t start, stop;
@@ -178,13 +166,11 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     constexpr int num_iters = 100;
     // warmup
     for (int i = 0; i < warmup_iters; i++) {
-      NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum,
-                              comm, stream));
+      NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum, comm, stream));
     }
     CUDACHECK(cudaEventRecord(start, stream));
     for (int i = 0; i < num_iters; i++) {
-      NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum,
-                              comm, stream));
+      NCCLCHECK(ncclAllReduce(result, result, data_size, ncclDtype, ncclSum, comm, stream));
     }
     CUDACHECK(cudaEventRecord(stop, stream));
     CUDACHECK(cudaStreamSynchronize(stream));
@@ -194,13 +180,11 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     dummy_kernel<<<1, 1, 0, stream>>>();
     // warm up
     for (int i = 0; i < warmup_iters; i++) {
-      fa.allreduce<T>(stream, self_data, result, data_size, threads,
-                      block_limit);
+      fa.allreduce<T>(stream, self_data, result, data_size, threads, block_limit);
     }
     CUDACHECK(cudaEventRecord(start, stream));
     for (int i = 0; i < num_iters; i++) {
-      fa.allreduce<T>(stream, self_data, result, data_size, threads,
-                      block_limit);
+      fa.allreduce<T>(stream, self_data, result, data_size, threads, block_limit);
     }
     CUDACHECK(cudaEventRecord(stop, stream));
     CUDACHECK(cudaStreamSynchronize(stream));
@@ -217,18 +201,17 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     // And wait for all the queued up work to complete
     CUDACHECK(cudaStreamSynchronize(stream));
 
-    NCCLCHECK(ncclAllReduce(self_data_copy, self_data, data_size, ncclDtype,
-                            ncclSum, comm, stream));
+    NCCLCHECK(
+        ncclAllReduce(self_data_copy, self_data, data_size, ncclDtype, ncclSum, comm, stream));
 
-    convert_data<T><<<108, 1024, 0, stream>>>(self_data, result, nccl_result,
-                                              my_result, data_size);
+    convert_data<T><<<108, 1024, 0, stream>>>(self_data, result, nccl_result, my_result, data_size);
     CUDACHECK(cudaStreamSynchronize(stream));
 
     for (unsigned long j = 0; j < data_size; j++) {
       auto diff = abs(nccl_result[j] - my_result[j]);
       if (diff >= 4e-2) {
-        printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n",
-               myRank, j, nccl_result[j], my_result[j], ground_truth[j]);
+        printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n", myRank, j,
+               nccl_result[j], my_result[j], ground_truth[j]);
         break;
       }
     }
@@ -243,28 +226,26 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
                 << " me: " << my_diffs / data_size << std::endl;
   } else {
     for (int i = 0; i < 100; i++) {
-      fa.allreduce<T>(stream, self_data, result, data_size, threads,
-                      block_limit);
+      fa.allreduce<T>(stream, self_data, result, data_size, threads, block_limit);
       CUDACHECK(cudaStreamSynchronize(stream));
-      NCCLCHECK(ncclAllReduce(self_data, self_data_copy, data_size, ncclDtype,
-                              ncclSum, comm, stream));
-      convert_data<T><<<108, 1024, 0, stream>>>(
-          self_data_copy, result, nccl_result, my_result, data_size);
+      NCCLCHECK(
+          ncclAllReduce(self_data, self_data_copy, data_size, ncclDtype, ncclSum, comm, stream));
+      convert_data<T>
+          <<<108, 1024, 0, stream>>>(self_data_copy, result, nccl_result, my_result, data_size);
       CUDACHECK(cudaStreamSynchronize(stream));
 
       for (unsigned long j = 0; j < data_size; j++) {
         auto diff = abs(nccl_result[j] - my_result[j]);
         if (diff >= 4e-2) {
-          printf(
-              "Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n",
-              myRank, j, nccl_result[j], my_result[j], ground_truth[j]);
+          printf("Rank %d: Verification mismatch at %lld: %f != (my) %f, gt=%f\n", myRank, j,
+                 nccl_result[j], my_result[j], ground_truth[j]);
           break;
         }
       }
     }
     if (myRank == 0)
-      printf("Test passed: nGPUs:%d, sz (kb): %d, %d, %d\n", nRanks,
-             data_size * sizeof(T) / 1024, threads, block_limit);
+      printf("Test passed: nGPUs:%d, sz (kb): %d, %d, %d\n", nRanks, data_size * sizeof(T) / 1024,
+             threads, block_limit);
     // long double nccl_diffs = 0.0;
     // long double my_diffs = 0.0;
     // for (int j = 0; j < data_size; j++) {
@@ -287,7 +268,7 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   CUDACHECK(cudaStreamDestroy(stream));
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   int nRanks, myRank;
   MPICHECK(MPI_Init(&argc, &argv));
   MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
@@ -296,8 +277,7 @@ int main(int argc, char **argv) {
   ncclUniqueId id;
   ncclComm_t comm;
   if (myRank == 0) ncclGetUniqueId(&id);
-  MPICHECK(MPI_Bcast(static_cast<void *>(&id), sizeof(id), MPI_BYTE, 0,
-                     MPI_COMM_WORLD));
+  MPICHECK(MPI_Bcast(static_cast<void*>(&id), sizeof(id), MPI_BYTE, 0, MPI_COMM_WORLD));
   NCCLCHECK(ncclCommInitRank(&comm, nRanks, id, myRank));
 
   bool performance_test = true;

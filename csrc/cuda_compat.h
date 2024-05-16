@@ -1,7 +1,7 @@
 #pragma once
 
 #ifdef USE_ROCM
-#include <hip/hip_runtime.h>
+  #include <hip/hip_runtime.h>
 #endif
 
 #ifndef USE_ROCM
@@ -41,4 +41,3 @@
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
-
