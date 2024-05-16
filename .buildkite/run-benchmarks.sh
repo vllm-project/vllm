@@ -75,4 +75,4 @@ if [ $bench_serving_exit_code -ne 0 ]; then
 fi
 
 rm ShareGPT_V3_unfiltered_cleaned_split.json
-/workspace/buildkite-agent artifact upload *.json
+/workspace/buildkite-agent artifact upload "*.json"
