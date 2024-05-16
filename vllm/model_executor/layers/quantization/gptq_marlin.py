@@ -6,10 +6,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                set_weight_attrs)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+
+logger = init_logger(__name__)
 
 GPTQ_MARLIN_TILE = 16
 GPTQ_MARLIN_MIN_THREAD_N = 64
@@ -116,6 +119,26 @@ class GPTQMarlinConfig(QuantizationConfig):
         desc_act = cls.get_from_keys(config, ["desc_act"])
         is_sym = cls.get_from_keys(config, ["sym"])
         return cls(weight_bits, group_size, desc_act, is_sym)
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        can_convert = cls.is_marlin_compatible(hf_quant_cfg)
+
+        is_valid_user_quant = (user_quant is None or user_quant == "marlin")
+
+        if can_convert and is_valid_user_quant:
+            msg = ("The model is convertible to {} during runtime."
+                   " Using {} kernel.".format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        if can_convert and user_quant == "gptq":
+            logger.info("Detected that the model can run with gptq_marlin"
+                        ", however you specified quantization=gptq explicitly,"
+                        " so forcing gptq. Use quantization=gptq_marlin for"
+                        " faster inference")
+        return None
 
     def get_quant_method(
             self,
