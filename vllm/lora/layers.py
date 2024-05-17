@@ -1246,7 +1246,8 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
                 self.base_layer.max_position_embeddings,
                 self.base_layer.base,
                 self.base_layer.is_neox_style,
-                scaling_factors=scaling_factors)
+                scaling_factors,
+                self.base_layer.dtype,)
 
     def reset_lora(self, index: int):
         ...

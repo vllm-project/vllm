@@ -23,36 +23,16 @@ from vllm.model_executor.model_loader import get_model
 
 LONG_LORA_INFOS = [
     {
-        "lora_id":
-        1,
-        "context_length":
-        "16k",
-        "local_path":
-        "/mnt/local_storage/long_context_checkpoint_16k",
-        "lora":
-        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_1/lora/",
-        "merged":
-        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_1/merged/"
+        "lora_id": 1,
+        "context_length": "16k",
     },
     {
         "lora_id": 2,
         "context_length": "16k",
-        "local_path": "/mnt/local_storage/long_context_checkpoint_16k_2/",
-        "lora":
-        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_2/lora/",
-        "merged": None  # This model has not been merged
     },
     {
-        "lora_id":
-        3,
-        "context_length":
-        "32k",
-        "local_path":
-        "/mnt/local_storage/long_context_checkpoint_32k",
-        "lora":
-        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/lora/",
-        "merged":
-        "s3://endpoints-finetune-mirrors/dev-test/long-context-test/model_3/merged/"
+        "lora_id": 3,
+        "context_length": "32k",
     }
 ]
 
@@ -189,24 +169,39 @@ def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_1():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_16k_2():
+    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_2")
+
+
+@pytest.fixture(scope="session")
+def long_context_lora_files_32k():
+    return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
+
+
 # SANG-TODO Download long lora files.
 @pytest.fixture(scope="session")
-def long_context_infos():
-    import subprocess
+def long_context_infos(long_context_lora_files_16k_1, long_context_lora_files_16k_2, long_context_lora_files_32k):
+    cleanup()
     infos = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
-        local_lora_path = lora_checkpoint_info['local_path'] + "/lora"
-        print(
-            f"Downloading {lora_checkpoint_info['lora']} to {local_lora_path} "
-        )
-        subprocess.run([
-            "aws", "s3", "sync", "--quiet", lora_checkpoint_info["lora"],
-            local_lora_path
-        ])
+        if lora_id == 1:
+            lora = long_context_lora_files_16k_1
+        elif lora_id == 2:
+            lora = long_context_lora_files_16k_2
+        elif lora_id == 3:
+            lora = long_context_lora_files_32k
+        else:
+            raise AssertionError("Unknown lora id")
         infos[lora_id] = {
             "context_length": lora_checkpoint_info["context_length"],
-            "lora": local_lora_path,
+            "lora": lora,
         }
     return infos
 

@@ -61,6 +61,7 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.is_neox_style = is_neox_style
+        self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
         cache = cache.to(dtype)

@@ -160,8 +160,6 @@ def test_batched_rope_kernel(lora_llm, long_context_infos):
     """We test the batched kernel by comparing the results of batched an
         non-batched generation.
     """
-    # lora_llm = self._get_lora_llm(long_context_infos)
-
     # Create non batched results first to compare against batched results
     non_batched_results = []
 
@@ -196,7 +194,6 @@ def test_self_consistency(lora_llm, long_context_infos):
     """We test consistency of the batched kernel by permuting batched
     inputs and comparing the results to the non-permuted batched results.
     """
-    # lora_llm = self._get_lora_llm(long_context_infos)
     num_loras = len(long_context_infos)
 
     # Create results in order of long_context_infos
@@ -247,8 +244,6 @@ def test_quality(lora_llm, long_context_infos):
     The test is expected to run for about 1 minute on a p4de.24xlarge
     instance.
     """
-    # lora_llm = self._get_lora_llm(long_context_infos)
-
     scores = []
     for lora_id, info in long_context_infos.items():
         context_len = info["context_length"]
@@ -267,8 +262,6 @@ def test_quality(lora_llm, long_context_infos):
 def test_max_len(lora_llm, long_context_infos):
     """Test that we raise an ValueError when the input of a given LoRA
         model exceeds the maximum length."""
-    # lora_llm = self._get_lora_llm(long_context_infos)
-
     # Since each LoRA model has a different maximum length, we need to
     # test each one separately
     for lora_id, info in long_context_infos.items():
