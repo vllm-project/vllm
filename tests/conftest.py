@@ -353,7 +353,7 @@ class HfRunner:
         cleanup()
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def hf_runner():
     return HfRunner
 

@@ -24,7 +24,7 @@ MODELS = [
 
 @pytest.mark.asyncio
 @pytest.fixture(scope="module", autouse=True)
-async def download_hf(hf_runner, ):
+async def download_hf(hf_runner):
     tasks = (hf_runner.async_load_model(model) for model in MODELS)
     await asyncio.gather(*tasks)
 
