@@ -92,6 +92,7 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
 WORKDIR /vllm-workspace
 COPY . .
 
+RUN python3 -m pip install pynvml # to be removed eventually
 RUN python3 -m pip install --upgrade pip numba
 
 # make sure punica kernels are built (for LoRA)
