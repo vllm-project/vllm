@@ -228,7 +228,8 @@ def test_rope_module_cache():
     ]
     rope_setting_id_map = {}
     for setting in product(*settings):
-        head_size, rotary_dim, max_position, base, is_neox_stype, rope_scaling, dtype = setting
+        head_size, rotary_dim, max_position, base, \
+            is_neox_stype, rope_scaling, dtype = setting
         if rotary_dim is None:
             rotary_dim = head_size
         rope = get_rope(head_size, rotary_dim, max_position, base,
@@ -240,7 +241,8 @@ def test_rope_module_cache():
         rope_setting_id_map[str(setting)] = id(rope)
 
     for setting in product(*settings):
-        head_size, rotary_dim, max_position, base, is_neox_stype, rope_scaling, dtype = setting
+        head_size, rotary_dim, max_position, base, \
+            is_neox_stype, rope_scaling, dtype = setting
         if rotary_dim is None:
             rotary_dim = head_size
         rope = get_rope(head_size, rotary_dim, max_position, base,
