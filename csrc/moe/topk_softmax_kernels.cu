@@ -19,7 +19,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include "csrc/cuda_compat.h"
+#include "../cuda_compat.h"
 
 #ifndef USE_ROCM
     #include <cub/util_type.cuh>
