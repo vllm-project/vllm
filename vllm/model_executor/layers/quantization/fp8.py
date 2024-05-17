@@ -8,7 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -58,9 +58,13 @@ class Fp8Config(QuantizationConfig):
                    activation_scheme=activation_scheme)
 
     def get_quant_method(
-            self, layer: torch.nn.Module) -> Optional["Fp8LinearMethod"]:
+            self, layer: torch.nn.Module) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
+
         if isinstance(layer, LinearBase):
             return Fp8LinearMethod(self)
+        if isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
         return None
 
     def get_scaled_act_names(self) -> List[str]:
@@ -249,6 +253,44 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         return torch.narrow(output, 0, 0, x.shape[0])
+
+
+class Fp8KVCacheMethod(QuantizeMethodBase):
+    """FIXME"""
+
+    def __init__(self, quant_config: Fp8Config):
+        self.quant_config = quant_config
+
+    def create_weights(self, layer: torch.nn.Module):
+        """Create "weight" (aka kv_scale) for an attention layer. 
+        
+        Args:
+            layer: The layer that is using the QuantizeMethodBase factory.
+        """
+        # Initialize the KV cache scale to 1.0 as the default value.
+        # If the kv_scale appears in the checkpoint, it will be
+        # overwritten when loading weights.
+        # The scaling factor convention we are assuming is
+        # quantized_value * scaling_factor ~= true_value
+        # which is consistent with the practice of setting
+        # scaling_factor = tensor_amax / FPtype_max
+        layer.kv_scale = Parameter(torch.ones(1, dtype=torch.float32),
+                                   requires_grad=False)
+
+    def apply(self, layer: torch.nn.Module) -> torch.Tensor:
+        raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        kv_scales = layer.kv_scale.to("cpu").tolist()
+        if len(kv_scales) > 1:
+            raise ValueError("Only support per-tensor scaling factor "
+                             "for fp8 KV cache")
+        layer._kv_scale = kv_scales[0]
+        if layer._kv_scale == 1.0:
+            logger.warning(
+                "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
+                "cause accuracy issues. Please make sure kv-cache scaling "
+                "factor is available in the fp8 checkpoint.")
 
 
 def all_close_1d(x: torch.Tensor) -> bool:
