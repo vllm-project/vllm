@@ -201,13 +201,13 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                                          attn_metadata.attn_bias):
                     end = start + seq_len
                     sub_out = scaled_dot_product_attention(
-                        query[:, start:end, :],
-                        key[:, start:end, :],
-                        value[:, start:end, :],
+                        query[None, :, start:end, :],
+                        key[None, :, start:end, :],
+                        value[None, :, start:end, :],
                         attn_mask=mask,
                         dropout_p=0.0,
                         is_causal=not self.need_mask,
-                        scale=self.scale).movedim(query.dim() - 2, 0)
+                        scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
                     output[start:end, :, :] = sub_out
                     start = end
             else:
@@ -252,7 +252,7 @@ def _make_alibi_bias(
 
         num_heads = alibi_slopes.shape[0]
         bias = bias[None, :].repeat((num_heads, 1, 1))
-        bias.mul_(alibi_slopes[:, None, None])
+        bias.mul_(alibi_slopes[:, None, None]).unsqueeze_(0)
         inf_mask = torch.empty(
             (1, seq_len, seq_len),
             dtype=bias.dtype).fill_(-torch.inf).triu_(diagonal=1)
