@@ -95,6 +95,7 @@ class DeepSpeedFPLinearMethod(LinearMethodBase):
                        input_size: int,
                        output_size: int,
                        params_dtype: torch.dtype,
+                       layer_name: Optional[str] = None,
                        weight_loader=None,
                        **extra_weight_attrs):
         del output_size

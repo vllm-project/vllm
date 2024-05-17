@@ -4,9 +4,8 @@ import torch
 from torch.nn import Parameter
 
 # TODO (varun) : Unify ops and custom ops
-from vllm._C import ops
 from vllm import _custom_ops as custom_ops
-
+from vllm._C import ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
@@ -137,4 +136,5 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         else:
             w_q = weight  # already quantized
 
-        return custom_ops.cutlass_scaled_mm_dq(x_q, w_q.t(), act_scale, weight_scale, x.dtype)
+        return custom_ops.cutlass_scaled_mm_dq(x_q, w_q.t(), act_scale,
+                                               weight_scale, x.dtype)
