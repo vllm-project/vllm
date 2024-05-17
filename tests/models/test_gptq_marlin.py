@@ -8,7 +8,6 @@ up to 3 times to see if we pass.
 
 Run `pytest tests/models/test_gptq_marlin.py`.
 """
-import asyncio
 import os
 
 import pytest
@@ -50,11 +49,9 @@ MODELS = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.fixture(scope="module", autouse=True)
-async def download_hf(hf_runner):
-    tasks = (hf_runner.async_load_model(model) for model in MODELS)
-    await asyncio.gather(*tasks)
+def download_hf(hf_runner):
+    hf_runner.load_models(MODELS)
 
 
 @pytest.mark.flaky(reruns=3)

@@ -4,8 +4,6 @@ This tests bigger models and use half precision.
 
 Run `pytest tests/models/test_big_models.py`.
 """
-import asyncio
-
 import pytest
 
 MODELS = [
@@ -19,11 +17,9 @@ MODELS = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.fixture(scope="module", autouse=True)
-async def download_hf(hf_runner):
-    tasks = (hf_runner.async_load_model(model) for model in MODELS)
-    await asyncio.gather(*tasks)
+def download_hf(hf_runner):
+    hf_runner.load_models(MODELS)
 
 
 @pytest.mark.parametrize("model", MODELS)
