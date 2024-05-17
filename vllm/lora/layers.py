@@ -1239,16 +1239,15 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
         scaling_factors = sorted(
             list(set([base_scaling_factor] + scaling_factors)))
-        with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
-            self.base_layer = LinearScalingRotaryEmbedding(
-                self.base_layer.head_size,
-                self.base_layer.rotary_dim,
-                self.base_layer.max_position_embeddings,
-                self.base_layer.base,
-                self.base_layer.is_neox_style,
-                scaling_factors,
-                self.base_layer.dtype,
-            )
+        self.base_layer = LinearScalingRotaryEmbedding(
+            self.base_layer.head_size,
+            self.base_layer.rotary_dim,
+            self.base_layer.max_position_embeddings,
+            self.base_layer.base,
+            self.base_layer.is_neox_style,
+            scaling_factors,
+            self.base_layer.dtype,
+        )
 
     def reset_lora(self, index: int):
         ...

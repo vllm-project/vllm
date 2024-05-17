@@ -125,7 +125,15 @@ steps:
 - label: LoRA Long Context (Distributed)
   num_gpus: 4
   # This test runs llama 13B, so it is required to run on 4 GPUs.
-  command: pytest -v -s lora/test_long_context.py
+  command:
+    # Temporarily run this way because we cannot clean up GPU mem usage
+    # for multi GPU tests.
+    # TODO(sang): Fix it.
+    - pytest -v -s lora/test_long_context.py::test_rotary_emb_replaced
+    - pytest -v -s lora/test_long_context.py::test_batched_rope_kernel
+    - pytest -v -s lora/test_long_context.py::test_self_consistency
+    - pytest -v -s lora/test_long_context.py::test_quality
+    - pytest -v -s lora/test_long_context.py::test_max_len
 
 - label: Tensorizer Test
   #mirror_hardwares: [amd]
