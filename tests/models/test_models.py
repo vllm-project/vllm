@@ -5,6 +5,8 @@ test_big_models.py because it could use a larger instance to run tests.
 
 Run `pytest tests/models/test_models.py`.
 """
+import asyncio
+
 import pytest
 
 MODELS = [
@@ -18,6 +20,13 @@ MODELS = [
     # "allenai/OLMo-1B",  # Broken
     "bigcode/starcoder2-3b",
 ]
+
+
+@pytest.mark.asyncio
+@pytest.fixture(scope="module", autouse=True)
+async def download_hf(hf_runner, ):
+    tasks = (hf_runner.async_load_model(model) for model in MODELS)
+    await asyncio.gather(*tasks)
 
 
 @pytest.mark.parametrize("model", MODELS)

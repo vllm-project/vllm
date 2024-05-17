@@ -15,6 +15,7 @@ from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.logger import init_logger
 from vllm.sequence import MultiModalData, SampleLogprobs
+from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
@@ -141,6 +142,21 @@ _EMBEDDING_MODELS = [
 
 class HfRunner:
 
+    @classmethod
+    def load_model(cls, model_name: str):
+        if model_name in _EMBEDDING_MODELS:
+            # Lazy init required for AMD CI
+            from sentence_transformers import SentenceTransformer
+            return SentenceTransformer(
+                model_name,
+                device="cpu",
+            )
+
+        return AutoModelForCausalLM.from_pretrained(model_name,
+                                                    trust_remote_code=True)
+
+    async_load_model = make_async(load_model)
+
     def __init__(
         self,
         model_name: str,
@@ -150,20 +166,7 @@ class HfRunner:
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
         self.model_name = model_name
-
-        if model_name in _EMBEDDING_MODELS:
-            # Lazy init required for AMD CI
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype).cuda()
-        else:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+        self.model = self.load_model(model_name).to(dtype=torch_dtype).cuda()
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
