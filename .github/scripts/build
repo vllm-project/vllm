@@ -6,7 +6,6 @@ usage() {
     echo
     echo "usage: ${0} <options>"
     echo
-    echo "  -a    - pypi server address"
     echo "  -p    - python version"
     echo "  -v    - name for virtualenv"
     echo "  -h    - this list of options"
@@ -17,14 +16,11 @@ PYPI_IP=
 PYTHON=
 VENV=
 
-while getopts "ha:p:v:" OPT; do
+while getopts "hp:v:" OPT; do
     case "${OPT}" in
         h)
             usage
             exit 1
-            ;;
-        a)
-            PYPI_IP="${OPTARG}"
             ;;
         p)
             PYTHON="${OPTARG}"
@@ -36,12 +32,6 @@ while getopts "ha:p:v:" OPT; do
 done
 
 # check if variables are valid
-if [ -z "${PYPI_IP}" ]; then
-    echo "please provide 'pypi' server address"
-    usage
-    exit 1
-fi
-
 if [ -z "${PYTHON}" ]; then
     echo "please provide python version, e.g. 3.10.12"
     usage
@@ -55,6 +45,5 @@ if [ -z "${VENV}" ]; then
 fi
 
 source $(pyenv root)/versions/${PYTHON}/envs/${VENV}/bin/activate
-pip3 install --index-url http://${PYPI_IP}:8080/ --trusted-host ${PYPI_IP} nm-magic-wand-nightly
 pip3 install -r requirements-cuda.txt -r requirements-build.txt
 pip3 install -e .

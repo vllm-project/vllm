@@ -116,6 +116,7 @@ jobs:
     BUILD:
         uses: ./.github/workflows/build.yml
         with:
+            wf_category: ${{ inputs.wf_category }}
             build_label: ${{ inputs.build_label }}
             timeout: ${{ inputs.build_timeout }}
             gitref: ${{ github.ref }}

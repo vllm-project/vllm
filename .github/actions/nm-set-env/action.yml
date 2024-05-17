@@ -1,6 +1,9 @@
 name: set neuralmagic env
 description: 'sets environment variables for neuralmagic'
 inputs:
+  wf_category:
+    description: "categories: REMOTE, NIGHTLY, RELEASE"
+    required: true
   hf_token:
     description: 'Hugging Face home'
     required: true
@@ -14,19 +17,27 @@ runs:
   using: composite
   steps:
   - run: |
+      # setup.py defaults to making 'nightly' package with 'nightly' version
+      if [[ "${{inputs.wf_category}}" == "RELEASE" ]]; then
+        echo "NM_RELEASE_TYPE=${{inputs.wf_category}}" >> $GITHUB_ENV
+      fi
+      # CUDA
       echo "TORCH_CUDA_ARCH_LIST=7.0 7.5 8.0 8.6 8.9 9.0+PTX" >> $GITHUB_ENV
+      echo "PATH=/usr/local/apps/pyenv/plugins/pyenv-virtualenv/shims:/usr/local/apps/pyenv/shims:/usr/local/apps/pyenv/bin:/usr/local/apps/nvm/versions/node/v19.9.0/bin:/usr/local/apps/nvm/versions/node/v16.20.2/bin:/usr/local/cuda-12.1/bin:/usr/local/cuda-12.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/${WHOAMI}/.local/bin:" >> $GITHUB_ENV
+      echo "LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64::/usr/local/cuda-12.1/lib64:" >> $GITHUB_ENV
+      # HF Cache
       echo "HF_TOKEN=${HF_TOKEN_SECRET}" >> $GITHUB_ENV
       echo "HF_HOME=/EFS/hf_home" >> $GITHUB_ENV
+      # build
       NUM_THREADS=$(./.github/scripts/determine-threading -G ${{ inputs.Gi_per_thread }})
       echo "MAX_JOBS=${NUM_THREADS}" >> $GITHUB_ENV
       echo "NVCC_THREADS=${{ inputs.nvcc_threads }}" >> $GITHUB_ENV
       echo "VLLM_INSTALL_PUNICA_KERNELS=1" >> $GITHUB_ENV
       echo "NCCL_IGNORE_DISABLED_P2P=1" >> $GITHUB_ENV
+      # pyenv
       echo "PYENV_ROOT=/usr/local/apps/pyenv" >> $GITHUB_ENV
+      # testmo
       echo "XDG_CONFIG_HOME=/usr/local/apps" >> $GITHUB_ENV
-      WHOAMI=$(whoami)
-      echo "PATH=/usr/local/apps/pyenv/plugins/pyenv-virtualenv/shims:/usr/local/apps/pyenv/shims:/usr/local/apps/pyenv/bin:/usr/local/apps/nvm/versions/node/v19.9.0/bin:/usr/local/apps/nvm/versions/node/v16.20.2/bin:/usr/local/cuda-12.1/bin:/usr/local/cuda-12.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/${WHOAMI}/.local/bin:" >> $GITHUB_ENV
-      echo "LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64::/usr/local/cuda-12.1/lib64:" >> $GITHUB_ENV
       echo "PROJECT_ID=12" >> $GITHUB_ENV
     env:
         HF_TOKEN_SECRET: ${{ inputs.hf_token }}

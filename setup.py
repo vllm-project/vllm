@@ -2,6 +2,7 @@
 # UPSTREAM SYNC: noqa is required for passing ruff.
 # This file has been modified by Neural Magic
 
+import datetime
 import importlib.util
 import io
 import logging
@@ -306,8 +307,27 @@ def find_version(filepath: str) -> str:
         raise RuntimeError("Unable to find version string.")
 
 
+# Neuralmagic packaging ENV's
+NM_RELEASE_TYPE = 'NM_RELEASE_TYPE'
+
+
+def get_nm_vllm_package_name() -> str:
+    nm_release_type = os.getenv(NM_RELEASE_TYPE)
+    package_name = None
+    if nm_release_type == 'RELEASE':
+        package_name = 'nm-vllm'
+    else:
+        package_name = 'nm-vllm-nightly'
+    return package_name
+
+
 def get_vllm_version() -> str:
     version = find_version(get_path("vllm", "__init__.py"))
+
+    nm_release_type = os.getenv(NM_RELEASE_TYPE)
+    if nm_release_type != 'RELEASE':
+        date = datetime.date.today().strftime("%Y%m%d")
+        version += f'.{date}'
 
     if _is_cuda():
         cuda_version = str(get_nvcc_cuda_version())
@@ -393,6 +413,9 @@ if not _is_neuron():
 
 # UPSTREAM SYNC: needed for sparsity
 _sparsity_deps = ["nm-magic-wand-nightly"]
+nm_release_type = os.getenv(NM_RELEASE_TYPE)
+if nm_release_type == 'RELEASE':
+    _sparsity_deps = ["nm-magic-wand"]
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
@@ -402,7 +425,7 @@ if envs.VLLM_USE_PRECOMPILED:
     package_data["vllm"].append("*.so")
 
 setup(
-    name="nm-vllm",
+    name=get_nm_vllm_package_name(),
     version=get_vllm_version(),
     author="vLLM Team, Neural Magic",
     author_email="support@neuralmagic.com",

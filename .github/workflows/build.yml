@@ -3,6 +3,10 @@ on:
   # makes workflow reusable
   workflow_call:
     inputs:
+      wf_category:
+        description: "categories: REMOTE, NIGHTLY, RELEASE"
+        type: string
+        default: "REMOTE"
       build_label:
         description: "requested runner label (specifies instance)"
         type: string
@@ -31,6 +35,10 @@ on:
   # makes workflow manually callable
   workflow_dispatch:
     inputs:
+      wf_category:
+        description: "categories: REMOTE, NIGHTLY, RELEASE"
+        type: string
+        default: "REMOTE"
       build_label:
         description: "requested runner label (specifies instance)"
         type: string
@@ -83,6 +91,7 @@ jobs:
               id: setenv
               uses: ./.github/actions/nm-set-env/
               with:
+                wf_category: ${{ inputs.wf_category }}
                 hf_token: ${{ secrets.NM_HF_TOKEN }}
                 Gi_per_thread: ${{ inputs.Gi_per_thread }}
                 nvcc_threads: ${{ inputs.nvcc_threads }}

@@ -52,6 +52,9 @@ runs:
         pip3 install ${WHL}[sparse]
         # report magic_wand version
         MAGIC_WAND=$(pip3 show nm-magic-wand-nightly | grep "Version" | cut -d' ' -f2)
+        if [ -z "${MAGIC_WAND}" ]; then
+          MAGIC_WAND=$(pip3 show nm-magic-wand | grep "Version" | cut -d' ' -f2)
+        fi
         echo "magic_wand=${MAGIC_WAND}" >> "$GITHUB_OUTPUT"
         # test and collect code coverage
         SUCCESS=0

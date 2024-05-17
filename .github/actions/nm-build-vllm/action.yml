@@ -32,7 +32,6 @@ runs:
       VENV="${{ inputs.venv }}-${COMMIT:0:7}"
       source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
       # TODO: adjust when we need a proper release. use nightly now.
-      pip3 install nm-magic-wand-nightly
       pip3 install -r requirements-cuda.txt -r requirements-build.txt
       # build
       SUCCESS=0
