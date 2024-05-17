@@ -1,5 +1,6 @@
 from abc import abstractmethod
 from typing import List, Optional, Set
+import traceback
 
 import torch
 import torch.nn.functional as F
@@ -165,6 +166,7 @@ class ReplicatedLinear(LinearBase):
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
+        print("CW 1:", self.output_size, "|", self.output_size)
         self.quant_method.create_weights(self, self.input_size,
                                          [self.output_size], self.input_size,
                                          self.output_size, self.params_dtype)
@@ -235,6 +237,7 @@ class ColumnParallelLinear(LinearBase):
             output_sizes = [output_size]
         # All the linear layer supports quant method.
         assert self.quant_method is not None
+        print("CW 2:", [x // tp_size for x in output_sizes], sum([x // tp_size for x in output_sizes]), tp_size, "|", self.output_size)
         self.quant_method.create_weights(self,
                                          self.input_size,
                                          [x // tp_size for x in output_sizes],
@@ -661,6 +664,8 @@ class RowParallelLinear(LinearBase):
         self.input_size_per_partition = divide(input_size, self.tp_size)
         # All the linear layer supports quant method.
         assert self.quant_method is not None
+        print("CW 3:", self.output_size, "|", self.output_size)
+        traceback.print_stack()
         self.quant_method.create_weights(self,
                                          self.input_size_per_partition,
                                          [self.output_size],

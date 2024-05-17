@@ -67,6 +67,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("aqlm_dequant", &aqlm_dequant, "Decompression method for AQLM");
   ops.def("awq_gemm", &awq_gemm, "Quantized GEMM for AWQ");
   ops.def("marlin_gemm", &marlin_gemm, "Marlin (Dense) Optimized Quantized GEMM for GPTQ");
+  // ops.def("marlin_gemm_moe", &marlin_gemm_moe, "Marlin gemm moe kernel.");
   ops.def("gptq_marlin_24_gemm", &gptq_marlin_24_gemm, "Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ");
   ops.def("gptq_marlin_gemm", &gptq_marlin_gemm, "gptq_marlin Optimized Quantized GEMM for GPTQ");
   ops.def("gptq_marlin_repack", &gptq_marlin_repack, "gptq_marlin repack from GPTQ");
