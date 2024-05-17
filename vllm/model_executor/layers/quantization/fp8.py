@@ -10,6 +10,7 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -287,7 +288,7 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
                              "for fp8 KV cache")
         layer._kv_scale = kv_scales[0]
         if layer._kv_scale == 1.0:
-            logger.warning(
+            print_warning_once(
                 "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
                 "cause accuracy issues. Please make sure kv-cache scaling "
                 "factor is available in the fp8 checkpoint.")
