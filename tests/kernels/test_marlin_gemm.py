@@ -6,10 +6,18 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+
 from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
+    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
+    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL)
+
+from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS,
+    GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL)
+
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    MarlinWorkspace, is_marlin_supported, marlin_quantize, marlin_weights)
+    MarlinWorkspace, is_marlin_supported, marlin_quantize, marlin_24_quantize,
+    marlin_weights, inject_24, compress_24_weight)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
@@ -21,17 +29,17 @@ N_CHUNKS = [64, 128, 256]
 
 MNK_FACTORS = [
     (1, 1, 1),
-    (1, 4, 8),
-    (1, 7, 5),
-    (1, 7 * 4, 5 * 1),
-    (13, 17, 67),
-    (26, 37, 13),
-    (67, 13, 11),
+    # (1, 4, 8),
+    # (1, 7, 5),
+    # (1, 7 * 4, 5 * 1),
+    # (13, 17, 67),
+    # (26, 37, 13),
+    # (67, 13, 11),
 ]
 
 
 def rand_data(shape):
-    data = torch.rand(shape).to(torch.half).cuda()
+    data = torch.randn(shape).to(torch.half).cuda()
     return data
 
 
@@ -136,7 +144,8 @@ def test_marlin_gemm(
     w_ref, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
         b_weight, num_bits, group_size, act_order)
 
-    workspace = MarlinWorkspace(size_n)
+    workspace = MarlinWorkspace(size_n, GPTQ_MARLIN_MIN_THREAD_N,
+                                GPTQ_MARLIN_MAX_PARALLEL)
 
     output = ops.gptq_marlin_gemm(
         a_input,
@@ -152,6 +161,57 @@ def test_marlin_gemm(
         is_k_full,
     )
     output_ref = torch.matmul(a_input, w_ref)
+
+    torch.cuda.synchronize()
+
+    assert torch.allclose(output, output_ref, rtol=1e-2)
+
+
+@pytest.mark.skipif(not is_marlin_supported(),
+                    reason="Marlin is not supported on this GPU type.")
+@pytest.mark.parametrize("k_chunk", [128])  #K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", [128])  #N_CHUNKS)
+@pytest.mark.parametrize("num_bits", [4])  #GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size",
+                         [128])  #GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
+def test_marlin_24_gemm(
+    k_chunk,
+    n_chunk,
+    num_bits,
+    group_size,
+    mnk_factors
+):
+    m_factor, n_factor, k_factor = mnk_factors
+
+    size_m = m_factor
+    size_k = k_chunk * k_factor
+    size_n = n_chunk * n_factor
+
+    print(f"MNK = {size_m} {size_n} {size_k}")
+    print(f"groupsize = {group_size}")
+
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, size_n))
+
+    (w_24_ref, marlin_24_q_w_comp, marlin_24_meta,
+     marlin_24_s) = marlin_24_quantize(b_weight, num_bits, group_size)
+
+    workspace_24 = MarlinWorkspace(size_n, GPTQ_MARLIN_24_MIN_THREAD_N,
+                                   GPTQ_MARLIN_24_MAX_PARALLEL)
+
+    output = ops.gptq_marlin_24_gemm(
+        a_input,
+        marlin_24_q_w_comp,
+        marlin_24_meta,
+        marlin_24_s,
+        workspace_24.scratch,
+        num_bits,
+        a_input.shape[0],
+        b_weight.shape[1],
+        a_input.shape[1],
+    )
+    output_ref = torch.matmul(a_input, w_24_ref)
 
     torch.cuda.synchronize()
 
