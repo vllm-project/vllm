@@ -257,7 +257,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
-    """FIXME"""
+    """Supports loading kv-cache scaling factors from FP8 checkpoints.
+    """
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
