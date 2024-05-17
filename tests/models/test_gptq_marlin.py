@@ -8,6 +8,7 @@ up to 3 times to see if we pass.
 
 Run `pytest tests/models/test_gptq_marlin.py`.
 """
+import asyncio
 import os
 
 import pytest
@@ -49,6 +50,13 @@ MODELS = [
 ]
 
 
+@pytest.mark.asyncio
+@pytest.fixture(scope="module", autouse=True)
+async def download_hf(hf_runner):
+    tasks = (hf_runner.async_load_model(model) for model in MODELS)
+    await asyncio.gather(*tasks)
+
+
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
@@ -72,7 +80,8 @@ def test_models(
                                     dtype=dtype,
                                     quantization="marlin",
                                     max_model_len=MAX_MODEL_LEN,
-                                    tensor_parallel_size=1)
+                                    tensor_parallel_size=1,
+                                    enforce_eager=True)
 
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
         example_prompts[:-1], max_tokens, num_logprobs)
@@ -88,7 +97,8 @@ def test_models(
                              dtype="half",
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
-                             tensor_parallel_size=1)
+                             tensor_parallel_size=1,
+                             enforce_eager=True)
     gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts[:-1],
                                                        max_tokens,
                                                        num_logprobs)
