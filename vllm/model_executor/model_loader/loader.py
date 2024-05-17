@@ -443,7 +443,8 @@ class ShardedStateLoader(BaseModelLoader):
 
         from vllm.distributed import get_tensor_model_parallel_rank
 
-        self._prepare_weights(model_config.model, model_config.revision)
+        local_model_path = self._prepare_weights(model_config.model,
+                                                 model_config.revision)
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
@@ -452,8 +453,7 @@ class ShardedStateLoader(BaseModelLoader):
                                           cache_config)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
-                model_config.model,
-                self.pattern.format(rank=rank, part="*"),
+                local_model_path, self.pattern.format(rank=rank, part="*"),
             )
             filepaths = glob.glob(pattern)
             if not filepaths:
