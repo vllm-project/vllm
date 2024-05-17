@@ -134,39 +134,6 @@ class RotaryEmbedding(nn.Module):
         query = query.flatten(-2)
         key = key.flatten(-2)
         return query, key
-
-    def _forward_single(self, positions, x, offsets=None):
-        """
-        Same thing as above, except only for either q or k.
-        PyTorch-native implementation equivalent to forward()."""
-        x = x.view(*x.shape[:-1], -1, self.head_size)
-
-        x_rot = x[..., :self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            x_pass = x[..., self.rotary_dim:]
-
-        self.cos_sin_cache = self.cos_sin_cache.to(positions.device)
-        cos_sin = self.cos_sin_cache[torch.add(positions, offsets)
-                                     if offsets is not None else positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
-
-        rotate_fn = _rotate_neox if self.is_neox_style else _rotate_gptj
-        x_rot = x_rot * cos + rotate_fn(x_rot) * sin
-
-        if self.rotary_dim < self.head_size:
-            x = torch.cat((x_rot, x_pass), dim=-1)
-        else:
-            x = x_rot
-        x = x.flatten(-2).squeeze(0)  # very sus!
-        return x
     
     def forward(
         self,
