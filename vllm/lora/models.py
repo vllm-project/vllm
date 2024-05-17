@@ -105,6 +105,7 @@ def convert_mapping(
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
+        # SANG-TODO
         # index_mapping_indices[i] = i
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
@@ -484,6 +485,10 @@ class LoRAModelManager:
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager CPU cache."""
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
         if lora.id not in self._registered_loras:
             if len(self._registered_loras) >= self.capacity:
                 raise RuntimeError("No free LoRA slots.")
@@ -541,7 +546,8 @@ class LoRAModelManager:
         self._active_loras.clear()
 
     def _create_lora_modules(self):
-        for module_name, module in self.model.named_modules():
+        for module_name, module in self.model.named_modules(
+                remove_duplicate=False):
             if not self._match_target_modules(module_name):
                 continue
             parts = module_name.split(".")[-1]
@@ -719,6 +725,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def add_lora(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
+        logger.debug(
+            "Adding lora. Model id: %d, "
+            "int id: %d, "
+            "scaling factor: %s", lora.id, lora.id, lora.scaling_factor)
         if lora.id not in self._registered_loras:
             self._add_lora(lora)
             was_added = True

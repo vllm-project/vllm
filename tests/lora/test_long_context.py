@@ -116,9 +116,12 @@ class TestLongContext:
             max_loras=2,
             long_lora_scaling_factors=tuple(scaling_factors),
             max_num_batched_tokens=4096 * 8,
-            tensor_parallel_size=1,
+            tensor_parallel_size=4,
         )
         return lora_llm
+
+    def test_rotary_emb_replaced(self, long_context_infos):
+        """Verify rotary emb in all the layers are replaced"""
 
     def test_batched_rope_kernel(self, long_context_infos):
         """We test the batched kernel by comparing the results of batched an

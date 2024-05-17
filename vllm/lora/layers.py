@@ -1237,8 +1237,8 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
         ) if lora_config.long_lora_scaling_factors else []
         base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
             self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
-        scaling_factors = list(set([base_scaling_factor] + scaling_factors))
-        # Replace the base layer.
+        scaling_factors = sorted(
+            list(set([base_scaling_factor] + scaling_factors)))
         with set_default_torch_dtype(self.base_layer.cos_sin_cache.dtype):
             self.base_layer = LinearScalingRotaryEmbedding(
                 self.base_layer.head_size,
