@@ -182,12 +182,14 @@ class OpenAIServing:
                        EmbeddingRequest],
         prompt: str,
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        add_special_tokens: bool,
     ) -> Tuple[List[int], str]:
         if truncate_prompt_tokens is None:
-            encoded = tokenizer(prompt)
+            encoded = tokenizer(prompt, add_special_tokens=add_special_tokens)
         else:
             encoded = tokenizer(prompt,
+                                add_special_tokens=add_special_tokens,
                                 truncation=True,
                                 max_length=truncate_prompt_tokens)
 
@@ -203,7 +205,7 @@ class OpenAIServing:
                        EmbeddingRequest],
         prompt_ids: List[int],
         tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
     ) -> Tuple[List[int], str]:
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
@@ -259,6 +261,7 @@ class OpenAIServing:
                        EmbeddingRequest],
         prompt_input: Union[str, List[int]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
     ) -> Tuple[List[int], str]:
         """A simpler implementation of
         :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
@@ -268,6 +271,7 @@ class OpenAIServing:
                 request,
                 [prompt_input],
                 truncate_prompt_tokens=truncate_prompt_tokens,
+                add_special_tokens=add_special_tokens,
             ))
 
     def _tokenize_prompt_inputs(
@@ -276,6 +280,7 @@ class OpenAIServing:
                        EmbeddingRequest],
         prompt_inputs: Iterable[Union[str, List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
     ) -> Iterator[Tuple[List[int], str]]:
         """A simpler implementation of
         :meth:`~vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs`
@@ -289,6 +294,7 @@ class OpenAIServing:
                     prompt=text,
                     tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=add_special_tokens,
                 )
             else:
                 yield self._normalize_prompt_tokens_to_input(
@@ -336,9 +342,10 @@ class OpenAIServing:
                        EmbeddingRequest],
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
     ) -> Iterator[Tuple[List[int], str]]:
         """Tokenize/detokenize depending on the input format.
-        
+
         According to `OpenAI API <https://platform.openai.com/docs/api-reference/embeddings/create>`_
         , each input can be a string or array of tokens. Note that each request
         can pass one or more inputs.
@@ -357,6 +364,7 @@ class OpenAIServing:
                     prompt=prompt_input["text"],
                     tokenizer=tokenizer,
                     truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=add_special_tokens,
                 )
             else:
                 yield self._normalize_prompt_tokens_to_input(
