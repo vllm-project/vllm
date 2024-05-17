@@ -148,19 +148,28 @@ def make_metadata_tensors(attn_backend:AttentionBackend, is_prompt:bool, is_cros
     context_lens_tensor=None if context_lens is None else torch.tensor(context_lens, 
                                                                        dtype=torch.int,
                                                                        device=device)
-    max_query_len=None if prompt_lens is None else max(prompt_lens)
     max_context_len=None if context_lens is None else max(context_lens)
-    max_prompt_len=max_query_len
+    max_prompt_len=None if prompt_lens is None else max(prompt_lens)
 
     seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
                                 dtype=torch.int32,
                                 device=device)
 
-    # torch.cumsum(prompt_lens_tensor,
-    #              dim=0,
-    #              dtype=seq_start_loc.dtype,
-    #              out=seq_start_loc[1:])
-    query_start_loc = copy.deepcopy(seq_start_loc)
+    torch.cumsum(prompt_lens_tensor,
+                 dim=0,
+                 dtype=seq_start_loc.dtype,
+                 out=seq_start_loc[1:])
+
+    if is_prompt:
+        # Prefill: query_start_loc matches seq_start_loc
+        query_start_loc = copy.deepcopy(seq_start_loc)
+        max_query_len=max_prompt_len
+    else:
+        # Decode: one new query input token per batch
+        # element, thus query_start_loc is the cumsum
+        # of [1,1,1,...]
+        query_start_loc = list(range(len(seq_start_loc)))
+        max_query_len = 1
 
     return prompt_lens_tensor, \
            context_lens_tensor, \
@@ -323,7 +332,7 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
 
         num_prefills = 0
         num_prefill_tokens = 0
-        num_decode_tokens = sum(context_lens)
+        num_decode_tokens = len(prompt_lens)
 
         prompt_lens_tensor, \
         context_lens_tensor, \
@@ -352,8 +361,8 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
             seq_lens=prompt_lens,
             seq_lens_tensor=prompt_lens_tensor,
             max_query_len=max_query_len,
-            max_prefill_seq_len=max(prompt_lens),
-            max_decode_seq_len=0,
+            max_prefill_seq_len=0,
+            max_decode_seq_len=max(prompt_lens),
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
@@ -437,7 +446,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     #                                     scale)
 
     is_prompt = False
-    context_lens = [1 for _ in range(batch_size)]
+    context_lens = copy.deepcopy(prefill_kv_prompt_lens)
     decode_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype)
     
     decode_packed_query,decode_packed_key,decode_packed_value,decode_q_start_loc_list,decode_kv_start_loc_list = pack_qkv(decode_query,decode_key,decode_value,decode_q_prompt_lens,decode_kv_prompt_lens)
