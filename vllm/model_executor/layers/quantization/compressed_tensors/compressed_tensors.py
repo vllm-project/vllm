@@ -12,9 +12,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 
 class CompressedTensorsConfig(QuantizationConfig):
 
-    def __init__(self, layer_quant_details: Dict[str, Any], ignore: List[str],
-                 fake_quant: bool):
-        self.fake_quant = fake_quant
+    def __init__(self, layer_quant_details: Dict[str, Any], ignore: List[str]):
         self.ignore = ignore
         self.layer_quant_details = layer_quant_details
 
@@ -25,7 +23,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return []
 
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.float32, torch.float16, torch.int8]
+        return [torch.float16, torch.int8]
 
     # Need to figure it out
     def get_min_capability(self) -> int:
@@ -45,7 +43,6 @@ class CompressedTensorsConfig(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
         layer_quant_details: Dict[str, Any] = dict()
         ignore: List[str] = config.get("ignore", None)
-        fake_quant: bool = config.get("format") == "fakequant"
 
         for key, quant_config in config["config_groups"].items():
             targets = quant_config.get("targets")
@@ -56,9 +53,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer_quant_details[target]["input"] = quant_config.get(
                     "input_activations")
 
-        return cls(layer_quant_details=layer_quant_details,
-                   ignore=ignore,
-                   fake_quant=fake_quant)
+        return cls(layer_quant_details=layer_quant_details, ignore=ignore)
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
@@ -84,8 +79,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 torch.cuda.is_available():
             # CompressedTensorsW8A8StaticTensor only supports CUDA path for
             # now.
-            return CompressedTensorsW8A8StaticTensor(
-                fake_quant=self.fake_quant)
+            return CompressedTensorsW8A8StaticTensor()
         raise NotImplementedError(
             "Scheme not supported. Only 8-bit static symmtetric "
             "per tensor quantization is currently supported")
