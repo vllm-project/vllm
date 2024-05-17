@@ -25,7 +25,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         return []
 
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.float32, torch.int8]
+        return [torch.float32, torch.float16, torch.int8]
 
     # Need to figure it out
     def get_min_capability(self) -> int:

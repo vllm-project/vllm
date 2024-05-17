@@ -3,7 +3,10 @@ from typing import Callable, List, Tuple, Union
 import torch
 from torch.nn import Parameter
 
+# TODO (varun) : Unify ops and custom ops
 from vllm._C import ops
+from vllm import _custom_ops as custom_ops
+
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
@@ -113,12 +116,6 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-
-        # Lazy import so we don't fail on cutlass imports on non-CUDA
-        # machines.
-        from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
-            cutlass_gemm_dq)
-
         weight = layer.weight
         weight_scale = layer.weight_scale
         act_scale = layer.input_scale
@@ -140,21 +137,4 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         else:
             w_q = weight  # already quantized
 
-        # Gemm and dq
-        # TODO (varun) : cutlass epilogues are interpreted differently when
-        # there is only a single prompt.
-        # Consider the case, M, N {*, 2560} and weight_scale is a vector of
-        # 2560 elements.
-        # differently when,
-        #  - When M > 1 - The result is correctly multiplied column wise.
-        #  - When M == 1, the result is not a columnwise multiplication.
-        #
-        # The following if-statement is a temporary hack and will no
-        # longer be needed when https://github.com/vllm-project/vllm/pull/4749
-        # (CPP cutlass kernels) land.
-        num_prompts = x_q.shape[0]
-        if num_prompts == 1:
-            return cutlass_gemm_dq(x_q, w_q, x.dtype,
-                                   None) * weight_scale * act_scale
-        else:
-            return cutlass_gemm_dq(x_q, w_q, x.dtype, weight_scale, act_scale)
+        return custom_ops.cutlass_scaled_mm_dq(x_q, w_q.t(), act_scale, weight_scale, x.dtype)
