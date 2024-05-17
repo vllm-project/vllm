@@ -21,20 +21,16 @@ from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader import get_model
 
-LONG_LORA_INFOS = [
-    {
-        "lora_id": 1,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 2,
-        "context_length": "16k",
-    },
-    {
-        "lora_id": 3,
-        "context_length": "32k",
-    }
-]
+LONG_LORA_INFOS = [{
+    "lora_id": 1,
+    "context_length": "16k",
+}, {
+    "lora_id": 2,
+    "context_length": "16k",
+}, {
+    "lora_id": 3,
+    "context_length": "32k",
+}]
 
 
 def cleanup():
@@ -186,7 +182,9 @@ def long_context_lora_files_32k():
 
 # SANG-TODO Download long lora files.
 @pytest.fixture(scope="session")
-def long_context_infos(long_context_lora_files_16k_1, long_context_lora_files_16k_2, long_context_lora_files_32k):
+def long_context_infos(long_context_lora_files_16k_1,
+                       long_context_lora_files_16k_2,
+                       long_context_lora_files_32k):
     cleanup()
     infos = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
