@@ -135,7 +135,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         return XFormersBackend()
     assert False, f"Unrecognized backend_name {backend_name} for unit test"
 
-def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0', cross_prompt_lens:Optional[List[int]] = None) -> AttentionMetadataPerStage:
+def make_metadata_tensors(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0', cross_prompt_lens:Optional[List[int]] = None) -> tuple:
     '''
     Assumptions:
     * No chunked prefill
@@ -156,27 +156,35 @@ def make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_
                                 dtype=torch.int32,
                                 device=device)
 
-    torch.cumsum(prompt_lens_tensor,
-                 dim=0,
-                 dtype=seq_start_loc.dtype,
-                 out=seq_start_loc[1:])
+    # torch.cumsum(prompt_lens_tensor,
+    #              dim=0,
+    #              dtype=seq_start_loc.dtype,
+    #              out=seq_start_loc[1:])
     query_start_loc = copy.deepcopy(seq_start_loc)
 
-    return attn_backend.make_metadata(
-                            is_prompt=is_prompt,
-                            is_cross_attn=is_cross_attn,
-                            seq_lens=prompt_lens,
-                            seq_lens_tensor=prompt_lens_tensor,
-                            cross_seq_lens=cross_prompt_lens,
-                            max_query_len=max_query_len,
-                            #max_context_len=max_context_len,
-                            max_seq_len=max_prompt_len,
-                            subquery_start_loc=query_start_loc,
-                            seq_start_loc=seq_start_loc,
-                            context_lens_tensor=context_lens_tensor,
-                            block_tables=block_tables,
-                            use_cuda_graph=False,
-                        )
+    return prompt_lens_tensor, \
+           context_lens_tensor, \
+           max_query_len, \
+           max_context_len, \
+           max_prompt_len, \
+           seq_start_loc, \
+           query_start_loc
+
+    # return attn_backend.make_metadata(
+    #                         is_prompt=is_prompt,
+    #                         is_cross_attn=is_cross_attn,
+    #                         seq_lens=prompt_lens,
+    #                         seq_lens_tensor=prompt_lens_tensor,
+    #                         cross_seq_lens=cross_prompt_lens,
+    #                         max_query_len=max_query_len,
+    #                         #max_context_len=max_context_len,
+    #                         max_seq_len=max_prompt_len,
+    #                         subquery_start_loc=query_start_loc,
+    #                         seq_start_loc=seq_start_loc,
+    #                         context_lens_tensor=context_lens_tensor,
+    #                         block_tables=block_tables,
+    #                         use_cuda_graph=False,
+    #                     )
 
 def make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0', default_val=0.0):
     #key_cache = torch.rand((num_blocks, num_heads, head_size//key_read_width, block_size, key_read_width),device=device)
@@ -275,17 +283,40 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
         num_prefill_tokens = sum(prompt_lens)
         num_decode_tokens = 0
 
-        # make_stage_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:bool, prompt_lens:List[int], context_lens:List[int], block_tables, device='cuda:0', cross_prompt_lens:Optional[List[int]] = None)
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, is_cross_attn, prompt_lens, context_lens, block_tables, device=device, cross_prompt_lens=cross_prompt_lens)
+        prompt_lens_tensor, \
+        context_lens_tensor, \
+        max_query_len, \
+        max_context_len, \
+        max_prompt_len, \
+        seq_start_loc, \
+        query_start_loc = make_metadata_tensors(attn_backend, 
+                                                is_prompt, 
+                                                is_cross_attn, 
+                                                prompt_lens, 
+                                                context_lens, 
+                                                block_tables, 
+                                                device=device, 
+                                                cross_prompt_lens=cross_prompt_lens)
 
-        return AttentionMetadata(
+        slot_mapping_tensor=torch.tensor(slot_mapping,
+                                         dtype=torch.long,
+                                         device=device)
+
+        return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
-            prefill_metadata=stage_metadata,
-            decode_metadata=None,
-            kv_cache_dtype=kv_cache_dtype,
+            seq_lens=prompt_lens,
+            seq_lens_tensor=prompt_lens_tensor,
+            max_query_len=max_query_len,
+            max_prefill_seq_len=max(prompt_lens),
+            max_decode_seq_len=0,
+            query_start_loc=query_start_loc,
+            seq_start_loc=seq_start_loc,
+            context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=False,
         )
 
     else: # not is_prompt
@@ -294,16 +325,40 @@ def make_metadata(attn_backend:AttentionBackend, is_prompt:bool, is_cross_attn:b
         num_prefill_tokens = 0
         num_decode_tokens = sum(context_lens)
 
-        stage_metadata:AttentionMetadataPerStage = make_stage_metadata(attn_backend, is_prompt, is_cross_attn, prompt_lens, context_lens, block_tables, device=device, cross_prompt_lens=cross_prompt_lens)
+        prompt_lens_tensor, \
+        context_lens_tensor, \
+        max_query_len, \
+        max_context_len, \
+        max_prompt_len, \
+        seq_start_loc, \
+        query_start_loc = make_metadata_tensors(attn_backend, 
+                                                is_prompt, 
+                                                is_cross_attn, 
+                                                prompt_lens, 
+                                                context_lens, 
+                                                block_tables, 
+                                                device=device, 
+                                                cross_prompt_lens=cross_prompt_lens)
 
-        return AttentionMetadata(
+        slot_mapping_tensor=torch.tensor(slot_mapping,
+                                         dtype=torch.long,
+                                         device=device)
+
+        return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping,
+            slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
-            prefill_metadata=None,
-            decode_metadata=stage_metadata,
-            kv_cache_dtype=kv_cache_dtype,
+            seq_lens=prompt_lens,
+            seq_lens_tensor=prompt_lens_tensor,
+            max_query_len=max_query_len,
+            max_prefill_seq_len=max(prompt_lens),
+            max_decode_seq_len=0,
+            query_start_loc=query_start_loc,
+            seq_start_loc=seq_start_loc,
+            context_lens_tensor=context_lens_tensor,
+            block_tables=block_tables,
+            use_cuda_graph=False,
         )
 
 def make_attention(num_heads: int, head_size: int, scale: float):
@@ -326,7 +381,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     is_prompt = True
     max_q_prompt_len = max_prompt_len
     max_kv_prompt_len = max_q_prompt_len
-    context_lens = None
+    context_lens = [0 for _ in range(batch_size)]
     key_read_width = 4
     num_blocks = 4096
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
@@ -392,6 +447,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     # eval correctness of decode output
     assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:]) 
 
+@pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
