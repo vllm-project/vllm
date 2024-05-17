@@ -80,12 +80,12 @@ steps:
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Kernels Test %N
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Models Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models --ignore=models/test_llava.py
@@ -102,7 +102,7 @@ steps:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s samplers
 
 - label: LogitsProcessor Test
@@ -114,16 +114,16 @@ steps:
   command: pytest -v -s worker
 
 - label: Speculative decoding tests
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
 - label: Tensorizer Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
 
 - label: Metrics Test
@@ -131,7 +131,7 @@ steps:
   command: pytest -v -s metrics
 
 - label: Quantization Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s quantization
 
 - label: Benchmarks
