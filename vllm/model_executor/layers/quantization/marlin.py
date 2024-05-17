@@ -4,10 +4,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.utils import set_weight_attrs
+
+logger = init_logger(__name__)
 
 
 class MarlinConfig(QuantizationConfig):
@@ -71,6 +74,25 @@ class MarlinConfig(QuantizationConfig):
     def from_config(cls, config: Dict[str, Any]) -> "MarlinConfig":
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(group_size)
+
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        # compat: autogptq >=0.8.0 use checkpoint_format: str
+        # compat: autogptq <=0.7.1 is_marlin_format: bool
+        is_marlin_format = (hf_quant_cfg.get("checkpoint_format") == "marlin"
+                            or hf_quant_cfg.get("is_marlin_format", False))
+
+        is_valid_user_quant = (user_quant is None or user_quant == "gptq"
+                               or user_quant == "marlin")
+
+        if is_marlin_format and is_valid_user_quant:
+            msg = ("The model is serialized in {} format. Using {} kernel.".
+                   format(cls.get_name(), cls.get_name()))
+            logger.info(msg)
+            return cls.get_name()
+
+        return None
 
     def get_quant_method(
             self, layer: torch.nn.Module) -> Optional["MarlinLinearMethod"]:
