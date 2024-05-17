@@ -64,40 +64,79 @@ def ref_masked_attention(
     #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
     return out
 
-def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True, force_max_len=True):
-    if force_max_len:
-        q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
-        kv_prompt_lens = None
-        if not is_cross_attn:
-            # K,V prompt lens match Q for self-attention
-            kv_prompt_lens = q_prompt_lens
-        else:
-            # K,V prompt lens come from K,V operands
-            kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True):
+    q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+    kv_prompt_lens = None
+    if not is_cross_attn:
+        # K,V prompt lens match Q for self-attention
+        kv_prompt_lens = q_prompt_lens
     else:
-        q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
-        kv_prompt_lens = None
-        if not is_cross_attn:
-            # K,V prompt lens match Q for self-attention
-            kv_prompt_lens = q_prompt_lens
-        else:
-            # K,V prompt lens come from K,V operands
-            kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
-    
+        # K,V prompt lens come from K,V operands
+        kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+
+    actual_max_q_prompt_len = max(q_prompt_lens)
+    actual_max_kv_prompt_len = max(kv_prompt_lens)
+
     query=torch.rand((batch_size,max_q_prompt_len,head_size))
     key=torch.rand((batch_size,max_kv_prompt_len,head_size))
     value=torch.rand((batch_size,max_kv_prompt_len,head_size))
 
+    prefill_query=torch.zeros((batch_size,max_q_prompt_len-1,head_size))
+    prefill_key=torch.zeros((batch_size,max_kv_prompt_len-1,head_size))
+    prefill_value=torch.zeros((batch_size,max_kv_prompt_len-1,head_size))
+
+    decode_query=torch.zeros((batch_size,1,head_size))
+    decode_key=torch.zeros((batch_size,1,head_size))
+    decode_value=torch.zeros((batch_size,1,head_size))
+
     for bdx,(q_prompt_len,kv_prompt_len) in enumerate(zip(q_prompt_lens,kv_prompt_lens)):
-        query[bdx,q_prompt_len:] = 0
-        key[bdx,kv_prompt_len:] = 0
-        value[bdx,kv_prompt_len:] = 0
+        query[bdx,q_prompt_len:,:] = 0
+        key[bdx,kv_prompt_len:,:] = 0
+        value[bdx,kv_prompt_len:,:] = 0
+
+        prefill_query[bdx,0:(q_prompt_len-1),:] = query[bdx,0:(q_prompt_len-1),:]
+        prefill_key[bdx,0:(kv_prompt_len-1),:] = key[bdx,0:(kv_prompt_len-1),:]
+        prefill_value[bdx,0:(kv_prompt_len-1),:] = value[bdx,0:(kv_prompt_len-1),:]
+
+        decode_query[bdx,:,:] = query[bdx,(q_prompt_len-1):q_prompt_len,:]
+        decode_key[bdx,:,:] = key[bdx,(kv_prompt_len-1):kv_prompt_len,:]
+        decode_value[bdx,:,:] = value[bdx,(kv_prompt_len-1):kv_prompt_len,:]
+
+    prefill_q_prompt_lens = [plen - 1 for plen in q_prompt_lens]
+    prefill_kv_prompt_lens = [plen - 1 for plen in kv_prompt_lens]
+
+    decode_q_prompt_lens = [1 for _ in q_prompt_lens]
+    decode_kv_prompt_lens = [1 for _ in kv_prompt_lens]
 
     query=query.unsqueeze(-2)
     key=key.unsqueeze(-2)
     value=value.unsqueeze(-2)
 
-    return query,key,value,q_prompt_lens,kv_prompt_lens
+    prefill_query=prefill_query.unsqueeze(-2)
+    prefill_key=prefill_key.unsqueeze(-2)
+    prefill_value=prefill_value.unsqueeze(-2)
+
+    decode_query=decode_query.unsqueeze(-2)
+    decode_key=decode_key.unsqueeze(-2)
+    decode_value=decode_value.unsqueeze(-2)
+
+    return query, \
+           key, \
+           value, \
+           prefill_query, \
+           prefill_key, \
+           prefill_value, \
+           decode_query, \
+           decode_key, \
+           decode_value, \
+           q_prompt_lens, \
+           kv_prompt_lens, \
+           actual_max_q_prompt_len, \
+           actual_max_kv_prompt_len, \
+           prefill_q_prompt_lens, \
+           prefill_kv_prompt_lens, \
+           decode_q_prompt_lens, \
+           decode_kv_prompt_lens
 
 def pack_tensor(unpacked_tensor,prompt_lens, device='cuda:0'):
     num_tok = sum(prompt_lens)
@@ -400,13 +439,26 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     key_read_width = 4
     num_blocks = 4096
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
-    key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, num_heads, head_size)
-    #(key_cache, value_cache) = kv_cache
     scale = float(1.0 / (head_size**0.5))
     attn = make_attention(num_heads, head_size, scale)
     attn_backend = make_backend(backend_name)
-    query,key,value,q_prompt_lens,kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
+    query, \
+    key, \
+    value, \
+    prefill_query, \
+    prefill_key, \
+    prefill_value, \
+    decode_query, \
+    decode_key, \
+    decode_value, \
+    q_prompt_lens, \
+    kv_prompt_lens, \
+    actual_max_q_prompt_len, \
+    actual_max_kv_prompt_len, \
+    prefill_q_prompt_lens, \
+    prefill_kv_prompt_lens, \
+    decode_q_prompt_lens, \
+    decode_kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
     #block_tables, slot_mapping = make_block_tables_slot_mapping(block_size,q_prompt_lens)
     #prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn,q_prompt_lens, context_lens, block_tables, slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=None)
     causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len)
@@ -418,19 +470,13 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
         attn_mask=causal_mask
     )
 
-    prefill_query = query[:,:-1]
-    prefill_key = key[:,:-1]
-    prefill_value = value[:,:-1]
-    decode_query = query[:,-1:]
-    decode_key = key[:,-1:]
-    decode_value = value[:,-1:]
-    prefill_q_prompt_lens = [plen-1 for plen in q_prompt_lens]
-    prefill_kv_prompt_lens = [plen-1 for plen in kv_prompt_lens]
-    decode_q_prompt_lens = [1 for _ in q_prompt_lens]
-    decode_kv_prompt_lens = [1 for _ in kv_prompt_lens]
-    prefill_ideal_output = ideal_output[:,:-1]
+    prefill_ideal_output = torch.zeros_like(ideal_output)
+    decode_ideal_output = torch.zeros_like(ideal_output[:,0:1])
+    for bdx,prefill_q_prompt_len in enumerate(prefill_q_prompt_lens):
+        prefill_ideal_output[bdx,:prefill_q_prompt_len] = ideal_output[bdx,:prefill_q_prompt_len]
+        decode_ideal_output[bdx,:] = ideal_output[bdx,prefill_q_prompt_len:(prefill_q_prompt_len+1)]
+
     prefill_packed_ideal_output,_ = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
-    decode_ideal_output = ideal_output[:,-1:]
     decode_packed_ideal_output,_ = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
 
     decode_block_tables, decode_slot_mapping, prefill_slot_mapping, prefill_block_tables = make_block_tables_slot_mapping(block_size,q_prompt_lens)
