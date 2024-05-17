@@ -6,8 +6,8 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsW8A8StaticTensor,
-    CompressedTensorsUnquantized)
+    CompressedTensorsLinearMethod, CompressedTensorsUnquantized,
+    CompressedTensorsW8A8StaticTensor)
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
