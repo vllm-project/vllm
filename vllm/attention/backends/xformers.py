@@ -154,6 +154,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
+            is_cross_attn=self.is_cross_attn,
+            cross_seq_lens=self.cross_seq_lens
         )
         return self._cached_prefill_metadata
 
@@ -182,6 +184,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             context_lens_tensor=None,
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
+            is_cross_attn=self.is_cross_attn,
+            cross_seq_lens=self.cross_seq_lens
         )
         return self._cached_decode_metadata
 
@@ -280,7 +284,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        is_cross_attn = (attn_metadata.prefill_metadata is not None and attn_metadata.prefill_metadata.is_cross_attn) or (attn_metadata.decode_metadata is not None and attn_metadata.decode_metadata.is_cross_attn)
+        is_cross_attn = attn_metadata.is_cross_attn
         assert is_cross_attn or (key.shape[0] == num_prefill_tokens + num_decode_tokens)
         assert is_cross_attn or (value.shape[0] == num_prefill_tokens + num_decode_tokens)
 
