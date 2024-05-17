@@ -690,6 +690,10 @@ class LLMEngine:
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
+        if not request_outputs:
+            # Stop the execute model loop in parallel workers for now
+            self.model_executor.stop_remote_worker_execution_loop()
+
         return request_outputs
 
     def do_log_stats(

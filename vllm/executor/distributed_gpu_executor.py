@@ -1,17 +1,28 @@
+import asyncio
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import SamplerOutput
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 logger = init_logger(__name__)
 
 
 class DistributedGPUExecutor(GPUExecutor):
     """Abstract superclass of multi-GPU executor implementations."""
+
+    def __init__(self, *args, **kwargs):
+        # This is non-None when the execute model loop is running
+        # in the parallel workers
+        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
+        # Updated by implementations that require additional args to be passed
+        # to the _run_workers execute_model call
+        self.extra_execute_model_run_workers_kwargs = {}
+
+        super().__init__(*args, **kwargs)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks.
@@ -52,13 +63,17 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks)
 
-    def execute_model(self, *args, **kwargs) -> List[SamplerOutput]:
-        all_outputs = self._run_workers("execute_model",
-                                        driver_args=args,
-                                        driver_kwargs=kwargs)
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        if self.parallel_worker_tasks is None:
+            self.parallel_worker_tasks = self._run_workers(
+                "start_worker_execution_loop",
+                remote_workers_only_async=True,
+                **self.extra_execute_model_run_workers_kwargs)
 
         # Only the driver worker returns the sampling results.
-        return all_outputs[0]
+        return self._driver_execute_model(execute_model_req)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -89,12 +104,18 @@ class DistributedGPUExecutor(GPUExecutor):
                           max_size=max_size)
 
     @abstractmethod
+    def _driver_execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        """Run execute_model in the driver worker."""
+        raise NotImplementedError
+
+    @abstractmethod
     def _run_workers(
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
+        remote_workers_only_async: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
@@ -104,23 +125,35 @@ class DistributedGPUExecutor(GPUExecutor):
 
 class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
 
-    @abstractmethod
-    async def _run_workers_async(
-        self,
-        method: str,
-        *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-        raise NotImplementedError
-
-    async def execute_model_async(self, *args,
-                                  **kwargs) -> List[SamplerOutput]:
-        all_outputs = await self._run_workers_async("execute_model",
-                                                    driver_args=args,
-                                                    driver_kwargs=kwargs)
+    async def execute_model_async(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        if self.parallel_worker_tasks is None:
+            # Start model execution loop running in the parallel workers
+            self.parallel_worker_tasks = asyncio.create_task(
+                self._start_worker_execution_loop())
 
         # Only the driver worker returns the sampling results.
-        return all_outputs[0]
+        return await self._driver_execute_model_async(execute_model_req)
+
+    async def stop_remote_worker_execution_loop_async(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        await self._driver_execute_model_async()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        await parallel_worker_tasks
+
+    @abstractmethod
+    async def _driver_execute_model_async(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def _start_worker_execution_loop(self):
+        raise NotImplementedError

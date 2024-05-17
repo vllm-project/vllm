@@ -226,48 +226,36 @@ class Worker(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
+        assert self.is_driver_worker
 
         if execute_model_req is None:
-            seq_group_metadata_list = None
-        else:
-            seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+            # No data to run, notify other workers to stop the execution loop.
+            broadcast_tensor_dict({}, src=0)
+            return []
 
-        blocks_to_swap_in: torch.Tensor
-        blocks_to_swap_out: torch.Tensor
-        blocks_to_copy: torch.Tensor
-        if self.is_driver_worker:
-            assert seq_group_metadata_list is not None
-            assert execute_model_req is not None
-            num_seq_groups = len(seq_group_metadata_list)
-            # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
-            # they contain parameters to launch cudamemcpyasync.
-            blocks_to_swap_in = torch.tensor(
-                execute_model_req.blocks_to_swap_in,
-                device="cpu",
-                dtype=torch.int64).view(-1, 2)
-            blocks_to_swap_out = torch.tensor(
-                execute_model_req.blocks_to_swap_out,
-                device="cpu",
-                dtype=torch.int64).view(-1, 2)
-            # `blocks_to_copy` is a gpu tensor. The src and tgt of
-            # blocks to copy are in the same device, and `blocks_to_copy`
-            # can be used directly within cuda kernels.
-            blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
-                                          device=self.device,
+        seq_group_metadata_list = execute_model_req.seq_group_metadata_list
+        num_seq_groups = len(seq_group_metadata_list)
+        # `blocks_to_swap_in` and `blocks_to_swap_out` are cpu tensors.
+        # they contain parameters to launch cudamemcpyasync.
+        blocks_to_swap_in = torch.tensor(execute_model_req.blocks_to_swap_in,
+                                         device="cpu",
+                                         dtype=torch.int64).view(-1, 2)
+        blocks_to_swap_out = torch.tensor(execute_model_req.blocks_to_swap_out,
+                                          device="cpu",
                                           dtype=torch.int64).view(-1, 2)
-            data: Dict[str, Any] = {
-                "num_seq_groups": num_seq_groups,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-            }
-            broadcast_tensor_dict(data, src=0)
-        else:
-            data = broadcast_tensor_dict(src=0)
-            num_seq_groups = data["num_seq_groups"]
-            blocks_to_swap_in = data["blocks_to_swap_in"]
-            blocks_to_swap_out = data["blocks_to_swap_out"]
-            blocks_to_copy = data["blocks_to_copy"]
+        # `blocks_to_copy` is a gpu tensor. The src and tgt of
+        # blocks to copy are in the same device, and `blocks_to_copy`
+        # can be used directly within cuda kernels.
+        blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+                                      device=self.device,
+                                      dtype=torch.int64).view(-1, 2)
+        data: Dict[str, Any] = {
+            "num_seq_groups": num_seq_groups,
+            "blocks_to_swap_in": blocks_to_swap_in,
+            "blocks_to_swap_out": blocks_to_swap_out,
+            "blocks_to_copy": blocks_to_copy,
+        }
+        broadcast_tensor_dict(data, src=0)
 
         self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
@@ -281,6 +269,26 @@ class Worker(WorkerBase):
         # Worker only supports single-step execution. Wrap the output in a list
         # to conform to interface.
         return [output]
+
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop in parallel worker."""
+        assert not self.is_driver_worker
+        # No data => stop execution loop
+        while data := broadcast_tensor_dict(src=0):
+            num_seq_groups = data.get("num_seq_groups", 0)
+            blocks_to_swap_in = data.get("blocks_to_swap_in")
+            blocks_to_swap_out = data.get("blocks_to_swap_out")
+            blocks_to_copy = data.get("blocks_to_copy")
+
+            self.cache_swap(blocks_to_swap_in, blocks_to_swap_out,
+                            blocks_to_copy)
+
+            # If there is no input, we don't need to execute the model.
+            if num_seq_groups == 0:
+                return
+
+            self.model_runner.execute_model(None, self.gpu_cache)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
