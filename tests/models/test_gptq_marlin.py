@@ -62,6 +62,7 @@ def download_hf(hf_runner):
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
+    hf_runner,  # Load the models (see download_hf)
     vllm_runner,
     example_prompts,
     model,
