@@ -224,18 +224,18 @@ class JambaMambaMixer(nn.Module):
             # Mamba doesn't support chunked prefill,
             # We pad the hidden_states before the forward pass and
             # unpad it again afterwards.
-            max_seq_len = max(attn_metadata.prefill_metadata.prompt_lens)
-            batch_size = len(attn_metadata.prefill_metadata.prompt_lens)
+            max_seq_len = max(attn_metadata.prefill_metadata.seq_lens)
+            batch_size = len(attn_metadata.prefill_metadata.seq_lens)
             padded_hidden_states = torch.zeros(
                 (batch_size, max_seq_len, hidden_states.shape[-1]),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device)
             offset = 0
-            for i, prompt_len in enumerate(
-                    attn_metadata.prefill_metadata.prompt_lens):
-                padded_hidden_states[i, :prompt_len].copy_(
-                    hidden_states[offset:offset + prompt_len])
-                offset += prompt_len
+            for i, seq_len in enumerate(
+                    attn_metadata.prefill_metadata.seq_lens):
+                padded_hidden_states[i, :seq_len].copy_(
+                    hidden_states[offset:offset + seq_len])
+                offset += seq_len
             cache = MambaCacheParams(
                 True,
                 conv_state=conv_state,
@@ -244,11 +244,11 @@ class JambaMambaMixer(nn.Module):
             padded_hidden_states = self.mamba_forward(padded_hidden_states,
                                                       cache_params=cache)
             offset = 0
-            for i, prompt_len in enumerate(
-                    attn_metadata.prefill_metadata.prompt_lens):
-                hidden_states[offset:offset + prompt_len].copy_(
-                    padded_hidden_states[i, :prompt_len])
-                offset += prompt_len
+            for i, seq_len in enumerate(
+                    attn_metadata.prefill_metadata.seq_lens):
+                hidden_states[offset:offset + seq_len].copy_(
+                    padded_hidden_states[i, :seq_len])
+                offset += seq_len
         else:
             cache = MambaCacheParams(False,
                                      conv_state=conv_state,
