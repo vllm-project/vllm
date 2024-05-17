@@ -38,7 +38,7 @@ def test_models(
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
     del hf_model
 
-    vllm_model = vllm_runner(model, dtype=dtype)
+    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=True)
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
 
@@ -58,7 +58,7 @@ def test_model_print(
     model: str,
     dtype: str,
 ) -> None:
-    vllm_model = vllm_runner(model, dtype=dtype)
+    vllm_model = vllm_runner(model, dtype=dtype, enforce_eager=True)
     # This test is for verifying whether the model's extra_repr
     # can be printed correctly.
     print(vllm_model.model.llm_engine.model_executor.driver_worker.
