@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.fp8_rocm import Fp8RocmConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
+from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
+    GPTQMarlin24Config)
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.squeezellm import SqueezeLLMConfig
 from vllm.utils import is_hip
@@ -18,12 +20,9 @@ from vllm.utils import is_hip
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
-    "fp8": Fp8RocmConfig if is_hip() else Fp8Config,
+    "fp8": Fp8Config,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
-    "gptq_marlin": GPTQMarlinConfig,
-    "marlin": MarlinConfig,
-    "deepspeedfp": DeepSpeedFPConfig
 }
 
 

@@ -1,4 +1,4 @@
-# This script build the ROCm docker image and runs test inside it.
+# This script runs test inside the corresponding ROCm docker container.
 set -ex
 
 # Print ROCm version
@@ -19,15 +19,16 @@ done
 
 echo "--- Building container"
 sha=$(git rev-parse --short HEAD)
-container_name=rocm_${sha}
+image_name=rocm_${sha}
+container_name=rocm_${sha}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)
 docker build \
-        -t ${container_name} \
+        -t ${image_name} \
         -f Dockerfile.rocm \
         --progress plain \
         .
 
 remove_docker_container() {
-   docker rm -f ${container_name} || docker image rm -f ${container_name} || true
+   docker rm -f ${container_name} || docker image rm -f ${image_name} || true
 }
 trap remove_docker_container EXIT
 
@@ -39,6 +40,6 @@ docker run \
         --rm \
         -e HF_TOKEN \
         --name ${container_name} \
-        ${container_name} \
+        ${image_name} \
         /bin/bash -c "${@}"
 

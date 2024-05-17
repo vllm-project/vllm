@@ -3,9 +3,8 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-
   - label: ":docker: build image"
-    commands:
+    commands: 
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     env:
