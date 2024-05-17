@@ -13,7 +13,7 @@ import types
 from .utils import extract_node_type, compose, build_extension, mangle_name, argument_type_str, node_function_target
 
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
-from vllm.logger import init_logger, _default_handler
+from vllm.logger import init_logger #, _default_handler
 
 logger = init_logger(__name__)
 
@@ -240,8 +240,8 @@ class FusedOpGenerator:
         self.fused_op.append('  pybind11::gil_scoped_acquire gil_lock;')
 
         # TODO: this debug logging/print is a hack, remove it later.
-        if _default_handler.level == logging.DEBUG:
-            self.fused_op.append(f'  std::cout << "Executing: {op}" << std::endl;')
+        #if _default_handler.level == logging.DEBUG:
+        #self.fused_op.append(f'  std::cout << "Executing: {op}" << std::endl;')
 
         for n, fn in zip(nodes, fn_names):
             comment_str = f"  // ({', '.join([argument_type_str(inp) for inp in n.args])}) -> {str(extract_node_type(n))}"

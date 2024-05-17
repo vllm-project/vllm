@@ -195,7 +195,7 @@ def pointwise_fusion(
 
         pred = is_fusable_pair if not fuse_with_compute else is_compute_fusable_pair
 
-        fusable = [pred(s, n) for s in fg.predecessors(n)]
+        fusable = [pred(s, n) for s in fg.predecessors(n) if s.op != 'placeholder']
         if not all(fusable):
             if not n in node_map:
                 logger.debug(f"  REJECT {n} no fusable preds and not in map: {fusable}, {fg.predecessors(n)}")
@@ -213,7 +213,8 @@ def pointwise_fusion(
             node_map[n] = partition
 
         for s in fg.predecessors(n):
-            node_map[s] = node_map[n]
+            if s.op != 'placeholder':
+                node_map[s] = node_map[n]
 
     logger.debug(f"node_map = {node_map}")
 
@@ -265,6 +266,9 @@ def pointwise_fusion(
 
     for p, nodes in subgraphs.items():
         sub = SubGraph(mod, subgraphs[p])
+        if len([n for n in sub.nodes if n.op == 'call_function']) <= 1:
+            logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
+            continue
         logger.debug(f"Fusing sub-module:\n{sub.tabular()}")
         fuse_graph_nodes(cc, fgen, sub)
         logger.debug(f"Post fusion sub-module:\n{sub.tabular()}")

@@ -87,8 +87,6 @@ class LlamaMLP(nn.Module):
 
     @torch.compile(backend=make_backend(backend=None))
     def forward(self, x):
-        # TODO: fix fusion bug when this is present
-        # x = x + 1
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
@@ -173,6 +171,7 @@ class LlamaAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
 
+    #@torch.compile(backend=make_backend(backend=None))
     def forward(
         self,
         positions: torch.Tensor,
