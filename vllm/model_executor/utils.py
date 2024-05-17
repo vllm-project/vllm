@@ -1,5 +1,4 @@
 """Utils for model executor."""
-import contextlib
 import random
 from typing import Any, Dict, Optional
 
