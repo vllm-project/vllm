@@ -163,7 +163,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
         else:
-            # if not using triton, navi3x not use flash-attn either
+            # if not using triton, navi3x/navi21/navi10 do not use flash-attn
+            # either
             if torch.cuda.get_device_capability()[0] != 9:
                 self.use_naive_attn = True
             else:
