@@ -398,10 +398,17 @@ class EngineArgs:
             choices=['auto', 'float16', 'bfloat16', 'float32'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
-        parser.add_argument('--long-lora-scaling-factors',
-                            type=nullable_str,
-                            default=EngineArgs.long_lora_scaling_factors,
-                            help='Scaling factors of long LoRAs')
+        parser.add_argument(
+            '--long-lora-scaling-factors',
+            type=nullable_str,
+            default=EngineArgs.long_lora_scaling_factors,
+            help=('Specify multiple scaling factors (which can '
+                  'be different from base model scaling factor '
+                  '- see eg. Long LoRA) to allow for multiple '
+                  'LoRA adapters trained with those scaling '
+                  'factors to be used at the same time. If not '
+                  'specified, only adapters trained with the '
+                  'base model scaling factor are allowed.'))
         parser.add_argument(
             '--max-cpu-loras',
             type=int,

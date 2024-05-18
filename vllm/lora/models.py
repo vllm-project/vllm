@@ -268,8 +268,9 @@ class LoRAModel:
     def from_local_checkpoint(
         cls,
         lora_dir: str,
-        max_position_embeddings: int,
         expected_lora_modules: List[str],
+        *,
+        max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
@@ -277,7 +278,23 @@ class LoRAModel:
         embedding_modules: Optional[Dict[str, str]] = None,
         embedding_padding_modules: Optional[List[str]] = None,
     ) -> "LoRAModel":
-        """Create a LoRAModel from a local checkpoint."""
+        """Create a LoRAModel from a local checkpoint.
+        
+        Args:
+            lora_dir: The local path that has lora data.
+            expected_lora_modules: Name of modules that are expected to be
+                replaced by lora.
+            max_position_embeddings: Max position embedding length. Used to
+                scaling the largest context length. If None, the lora model's
+                context length is not scaled.
+            lora_model_id: Lora model id. If not given, automatically set by
+                a global counter.
+            device: Device where the lora model is loaded.
+            dtype: dtype of the lora model weights.
+
+        Returns:
+            Loaded LoRA Model.
+        """
         lora_config_path = os.path.join(lora_dir, "adapter_config.json")
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
@@ -318,9 +335,13 @@ class LoRAModel:
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
         context_length = config.get("context_length", None)
-        scaling_factor = float(
-            math.ceil(context_length /
-                      max_position_embeddings)) if context_length else None
+        scaling_factor = None
+        if context_length:
+            if max_position_embeddings is None:
+                max_position_embeddings = context_length
+            scaling_factor = float(
+                math.ceil(context_length / max_position_embeddings))
+
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id()
             if lora_model_id is None else lora_model_id,

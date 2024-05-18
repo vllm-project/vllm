@@ -34,20 +34,25 @@ class TokenizerGroup(BaseTokenizerGroup):
         """Get the maximum input length for the LoRA request."""
         return self.max_input_length
 
+    def _raise_if_input_too_long(self,
+                                 encoded_tokens: List[str],
+                                 lora_request: Optional[LoRARequest] = None):
+        input_length = len(encoded_tokens)
+        if lora_request:
+            max_input_length = (lora_request.long_lora_max_len
+                                or self.max_input_length)
+        else:
+            max_input_length = self.max_input_length
+        if max_input_length is not None and input_length > max_input_length:
+            raise ValueError("Input too long.", input_length, max_input_length)
+
     def encode(self,
                prompt: str,
                request_id: Optional[str] = None,
                lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = self.get_lora_tokenizer(lora_request)
         ret = tokenizer.encode(prompt)
-        input_length = len(ret)
-        if lora_request:
-            max_input_length = (lora_request.long_lora_max_len
-                                or self.max_input_length)
-        else:
-            max_input_length = self.max_input_length
-        if (max_input_length is not None and input_length > max_input_length):
-            raise ValueError("Input too long.", input_length, max_input_length)
+        self._raise_if_input_too_long(ret, lora_request)
         return ret
 
     async def encode_async(
@@ -57,14 +62,7 @@ class TokenizerGroup(BaseTokenizerGroup):
             lora_request: Optional[LoRARequest] = None) -> List[int]:
         tokenizer = await self.get_lora_tokenizer_async(lora_request)
         ret = tokenizer.encode(prompt)
-        input_length = len(ret)
-        if lora_request:
-            max_input_length = (lora_request.long_lora_max_len
-                                or self.max_input_length)
-        else:
-            max_input_length = self.max_input_length
-        if (max_input_length is not None and input_length > max_input_length):
-            raise ValueError("Input too long.", input_length, max_input_length)
+        self._raise_if_input_too_long(ret, lora_request)
         return ret
 
     def get_lora_tokenizer(

@@ -1206,7 +1206,7 @@ class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
     """Implements RoPE-scaled embeddings with linear scaling for
     multiple LoRA adapters with a specialized kernel.
 
-    Replace LinearScalingRotaryEmbedding to MultiLinearScalingRotaryEmbedding
+    Replace LinearScalingRotaryEmbedding with MultiLinearScalingRotaryEmbedding
     which can handle multi lora adapters in a specialied kernel.
     """
 
