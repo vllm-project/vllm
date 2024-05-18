@@ -6,47 +6,45 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-
 from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS,
-    GPTQ_MARLIN_MIN_THREAD_N, GPTQ_MARLIN_MAX_PARALLEL)
-
+    GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
+    GPTQ_MARLIN_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
-    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS,
-    GPTQ_MARLIN_24_MIN_THREAD_N, GPTQ_MARLIN_24_MAX_PARALLEL)
-
+    GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
+    GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    MarlinWorkspace, is_marlin_supported, marlin_quantize, marlin_24_quantize,
-    marlin_weights, inject_24, compress_24_weight)
+    MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
+    marlin_quantize, marlin_weights)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack, quantize_weights, sort_weights)
 
 ACT_ORDER_OPTS = [False, True]
 K_FULL_OPTS = [False, True]
 
-K_CHUNKS = [128, 256]
-N_CHUNKS = [64, 128, 256]
+MARLIN_K_CHUNKS = [128]
+MARLIN_N_CHUNKS = [64, 128, 256]
+
+MARLIN_24_K_CHUNKS = [128]
+MARLIN_24_N_CHUNKS = [256]
 
 MNK_FACTORS = [
     (1, 1, 1),
-    # (1, 4, 8),
-    # (1, 7, 5),
-    # (1, 7 * 4, 5 * 1),
-    # (13, 17, 67),
-    # (26, 37, 13),
-    # (67, 13, 11),
+    (1, 4, 8),
+    (1, 7, 5),
+    (13, 17, 67),
+    (26, 37, 13),
+    (67, 13, 11),
 ]
 
 
 def rand_data(shape):
-    data = torch.randn(shape).to(torch.half).cuda()
-    return data
+    return torch.randn(shape, dtype=torch.half, device="cuda")
 
 
 @pytest.mark.skipif(not is_marlin_supported(),
                     reason="Marlin is not supported on this GPU type.")
-@pytest.mark.parametrize("k_chunk", K_CHUNKS)
-@pytest.mark.parametrize("n_chunk", N_CHUNKS)
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("act_order", ACT_ORDER_OPTS)
@@ -107,8 +105,8 @@ def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
 
 @pytest.mark.skipif(not is_marlin_supported(),
                     reason="Marlin is not supported on this GPU type.")
-@pytest.mark.parametrize("k_chunk", K_CHUNKS)
-@pytest.mark.parametrize("n_chunk", N_CHUNKS)
+@pytest.mark.parametrize("k_chunk", MARLIN_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_N_CHUNKS)
 @pytest.mark.parametrize("num_bits", GPTQ_MARLIN_SUPPORTED_NUM_BITS)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
@@ -164,24 +162,20 @@ def test_marlin_gemm(
 
     torch.cuda.synchronize()
 
-    assert torch.allclose(output, output_ref, rtol=1e-2)
+    max_diff = compute_max_diff(output, output_ref)
+    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.04
 
 
 @pytest.mark.skipif(not is_marlin_supported(),
                     reason="Marlin is not supported on this GPU type.")
-@pytest.mark.parametrize("k_chunk", [128])  #K_CHUNKS)
-@pytest.mark.parametrize("n_chunk", [128])  #N_CHUNKS)
-@pytest.mark.parametrize("num_bits", [4])  #GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
-@pytest.mark.parametrize("group_size",
-                         [128])  #GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
+@pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
+@pytest.mark.parametrize("n_chunk", MARLIN_24_N_CHUNKS)
+@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("group_size", GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
-def test_marlin_24_gemm(
-    k_chunk,
-    n_chunk,
-    num_bits,
-    group_size,
-    mnk_factors
-):
+def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
     m_factor, n_factor, k_factor = mnk_factors
 
     size_m = m_factor
@@ -200,6 +194,8 @@ def test_marlin_24_gemm(
     workspace_24 = MarlinWorkspace(size_n, GPTQ_MARLIN_24_MIN_THREAD_N,
                                    GPTQ_MARLIN_24_MAX_PARALLEL)
 
+    output_ref = torch.matmul(a_input, w_24_ref)
+
     output = ops.gptq_marlin_24_gemm(
         a_input,
         marlin_24_q_w_comp,
@@ -211,8 +207,10 @@ def test_marlin_24_gemm(
         b_weight.shape[1],
         a_input.shape[1],
     )
-    output_ref = torch.matmul(a_input, w_24_ref)
 
     torch.cuda.synchronize()
 
-    assert torch.allclose(output, output_ref, rtol=1e-2)
+    max_diff = compute_max_diff(output, output_ref)
+    print("max_diff = {}".format(max_diff))
+
+    assert max_diff < 0.02

@@ -21,6 +21,7 @@ GPTQ_MARLIN_24_SUPPORTED_NUM_BITS = [4, 8]
 GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES = [-1, 128]
 GPTQ_MARLIN_24_SUPPORTED_SYM = [True]
 
+
 class GPTQMarlin24Config(QuantizationConfig):
     """Config class for Marlin24.
     """
@@ -44,7 +45,7 @@ class GPTQMarlin24Config(QuantizationConfig):
                 f"Marlin_24 does not support group_size = {self.group_size}. "
                 f"Only group_sizes = {GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES} "
                 "are supported.")
-        
+
         # 4 Bits packed into 32 bit datatype.
         self.pack_factor = 32 // self.weight_bits
 

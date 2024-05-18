@@ -52,7 +52,7 @@ def _calculate_meta_reordering_scatter_offsets(m, meta_ncols, meta_dtype,
 def sparse_semi_structured_from_dense_cutlass(dense):
     if dense.dim() != 2:
         raise RuntimeError(
-            f"Expected 2-dimensional dense tensor, got {dense.dim()}-dimensional tensor"
+            f"Expected 2-dimensional dense tensor, got {dense.dim()}-dimensional tensor"  # noqa: E501
         )
 
     m, k = dense.shape
@@ -80,7 +80,7 @@ def sparse_semi_structured_from_dense_cutlass(dense):
                 f"Number of rows of dense matrix {m} must be divisible by 32")
     if k % (4 * quadbits_per_meta_elem) != 0:
         raise RuntimeError(
-            f"Number of columns of dense matrix {k} must be divisible by {4 * quadbits_per_meta_elem}"
+            f"Number of columns of dense matrix {k} must be divisible by {4 * quadbits_per_meta_elem}"  # noqa: E501
         )
 
     if dense.dtype != torch.float:
@@ -184,7 +184,7 @@ def sparse_semi_structured_from_dense_cutlass(dense):
 def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
     if sparse.dim() != 2:
         raise RuntimeError(
-            f"Expected 2-dimensional sparse tensor, got {sparse.dim()}-dimensional tensor"
+            f"Expected 2-dimensional sparse tensor, got {sparse.dim()}-dimensional tensor"  # noqa: E501
         )
 
     m, k = sparse.shape
@@ -192,11 +192,11 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
 
     if meta_reordered.dim() != 2:
         raise RuntimeError(
-            f"Expected 2-dimensional meta tensor, got {meta_reordered.dim()}-dimensional tensor"
+            f"Expected 2-dimensional meta tensor, got {meta_reordered.dim()}-dimensional tensor"  # noqa: E501
         )
     if meta_reordered.device != device:
         raise RuntimeError(
-            f"Expected meta matrix to be on {device} device, got matrix on {meta_reordered.device} device"
+            f"Expected meta matrix to be on {device} device, got matrix on {meta_reordered.device} device"  # noqa: E501
         )
 
     meta_dtype = meta_reordered.dtype
@@ -204,19 +204,16 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
         raise RuntimeError(f"Invalid datatype {meta_dtype} of meta matrix")
     quadbits_per_meta_elem = meta_dtype.itemsize * 8 // 4
 
-    if sparse.dtype != torch.float:
-        ksparse = 4
-    else:
-        ksparse = 2
+    ksparse = 4 if sparse.dtype != torch.float else 2
 
     meta_nrows, meta_ncols = meta_reordered.shape
     if meta_nrows != m:
         raise RuntimeError(
-            f"Number of rows of meta matrix {meta_nrows} must be equal to number of columns of spase matrix {m}"
+            f"Number of rows of meta matrix {meta_nrows} must be equal to number of columns of spase matrix {m}"  # noqa: E501
         )
     if meta_ncols * ksparse * quadbits_per_meta_elem != 2 * k:
         raise RuntimeError(
-            f"Number of columns of sparse matrix {k} different from the {meta_ncols * ksparse * quadbits_per_meta_elem // 2}, "
+            f"Number of columns of sparse matrix {k} different from the {meta_ncols * ksparse * quadbits_per_meta_elem // 2}, "  # noqa: E501
             "expected according to the number of columns of meta matrix")
 
     # Undo meta tensor elements reordering.
@@ -282,8 +279,9 @@ def sparse_semi_structured_to_dense_cutlass(sparse, meta_reordered):
 def mask_creator(tensor):
     """
     Class for creating N:M sparsity masks.
-    Masks will be created using the N:M ratio, where for every block of M weights,
-    N will be pruned based on ranked weight value. Each mask will correspond to the given tensor.
+    Masks will be created using the N:M ratio, where for every block of 
+    M weights, N will be pruned based on ranked weight value. Each mask 
+    will correspond to the given tensor.
 
     :param N: The number of weights in a group to keep
     :param M: The size of a weight group

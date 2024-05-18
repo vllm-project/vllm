@@ -392,8 +392,7 @@ __global__ void Marlin_24(
       for (int i = 0; i < b_sh_wr_iters; i++) {
 #pragma unroll
         for (int j = 0; j < b_thread_vecs; j++) {
-          cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j],
-                           B_ptr[i] + j);
+          cp_async4(&sh_b_stage[b_sh_wr_delta * i + b_sh_wr + j], B_ptr[i] + j);
         }
         B_ptr[i] += b_gl_rd_delta_o;
       }
@@ -401,8 +400,7 @@ __global__ void Marlin_24(
 #pragma unroll
       for (int i = 0; i < m_sh_iters; i++) {
         if (m_sh_wr_pred)
-          cp_async4(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr],
-                           meta_ptr[i]);
+          cp_async4(&sh_meta_stage[m_sh_wr_delta * i + m_sh_wr], meta_ptr[i]);
         meta_ptr[i] += m_gl_rd_delta_o;
       }
       // Only fetch scales if this tile starts a new group
@@ -562,9 +560,9 @@ __global__ void Marlin_24(
   };
 
   // Since multiple threadblocks may process parts of the same column slice, we
-  // finally have to globally reduce over the results. As the striped partitioning
-  // minimizes the number of such reductions and our outputs are usually rather
-  // small, we perform this reduction serially in L2 cache.
+  // finally have to globally reduce over the results. As the striped
+  // partitioning minimizes the number of such reductions and our outputs are
+  // usually rather small, we perform this reduction serially in L2 cache.
   auto global_reduce = [&](bool first = false, bool last = false) {
     // We are very careful here to reduce directly in the output buffer to
     // maximize L2 cache utilization in this step. To do this, we write out
@@ -833,6 +831,7 @@ __global__ void Marlin_24(
         global_reduce(slice_idx == 0, last);
         barrier_release(&locks[slice_col], last);
       }
+
       if (last) // only the last block in a slice actually writes the result
         write_result();
 
@@ -904,8 +903,8 @@ void marlin_cuda_2_4(const void *A, const void *B, const void *meta, void *C,
 
   if (thread_k == -1 || thread_m == -1) {
     if (prob_n <= 16) {
-      // For small batchizes, better partitioningif is slightly more important than
-      // better compute utilization
+      // For small batchizes, better partitioningif is slightly more important
+      // than better compute utilization
       thread_k = 128;
       thread_m = 128;
     } else {
@@ -956,9 +955,9 @@ void marlin_cuda_2_4(const void *A, const void *B, const void *meta, void *C,
     // For compilation speed, we only define the kernel configurations that have
     // seemed useful (in terms of performance) in our testing, however many more
     // are, in principle, possible.
-    
+
     // the false is start of the CALL_IF macros
-    if (false) { 
+    if (false) {
     } //         BMxBNxBK,   group
     // 4-bit
     CALL_IF_2_4(4, 8, 1, 4, -1)  // e.g., 16x128x128

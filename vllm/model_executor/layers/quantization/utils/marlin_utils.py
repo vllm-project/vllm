@@ -1,17 +1,15 @@
 """This file is used for /tests and /benchmarks"""
-import numpy
-import torch
 import random
 
-from vllm.model_executor.layers.quantization.utils.marlin_perms import (
-    marlin_perm, marlin_scale_perm, marlin_scale_perm_single)
-
-from vllm.model_executor.layers.quantization.utils.marlin_24_perms import (
-    marlin_24_perm, marlin_24_scale_perm, marlin_24_scale_perm_single)
+import numpy
+import torch
 
 from vllm.model_executor.layers.quantization.utils.format_24 import (
-    sparse_semi_structured_from_dense_cutlass, mask_creator)
-
+    mask_creator, sparse_semi_structured_from_dense_cutlass)
+from vllm.model_executor.layers.quantization.utils.marlin_24_perms import (
+    marlin_24_perm, marlin_24_scale_perm, marlin_24_scale_perm_single)
+from vllm.model_executor.layers.quantization.utils.marlin_perms import (
+    marlin_perm, marlin_scale_perm, marlin_scale_perm_single)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_pack_factor, quantize_weights, sort_weights)
 
@@ -51,7 +49,6 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
 
     q_packed = numpy.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
                            dtype=numpy.uint32)
-
     for i in range(pack_factor):
         q_packed |= q_w[:, i::pack_factor] << num_bits * i
 
@@ -114,7 +111,7 @@ def inject_24(w, size_k, size_n):
 
     mask = mask_creator(w.t()).t().cuda().bool()
 
-    return mask * w, mask
+    return (mask * w).contiguous(), mask.contiguous()
 
 
 def check_24(w, num_rows_to_sample=50, _verbose=False):
@@ -144,19 +141,27 @@ def check_24(w, num_rows_to_sample=50, _verbose=False):
     print(f"{non_24_segments} / {total_segments} do not have 2:4 structure.")
 
 
-def compress_24_weight(w, size_k, size_n):
-    assert w.shape == (size_k, size_n)
+def compress_quantized_24_weight(q_24, size_k, size_n, num_bits):
+    assert q_24.shape == (size_k, size_n)
 
-    w = w.t().contiguous()
-    w_comp, meta = sparse_semi_structured_from_dense_cutlass(w)
+    # Remove zp to normalize over 0
+    max_q_val = (1 << num_bits) - 1
+    zp = (max_q_val + 1) // 2
+    q_24_no_zp = q_24 - zp
+
+    # Compress
+    q_24_no_zp = q_24_no_zp.t().contiguous()
+    q_24_no_zp_comp, meta = sparse_semi_structured_from_dense_cutlass(
+        q_24_no_zp)
+    q_24_no_zp_comp = q_24_no_zp_comp.t().contiguous()
+
+    # Restore zp
+    q_24_comp = q_24_no_zp_comp + zp
 
     # Resize meta to its actual shape (without moving any data)
     meta = meta.resize_(meta.shape[1] // 2, meta.shape[0] * 2)
 
-    # Restore w_comp to its original form
-    w_comp = w_comp.t().contiguous()
-
-    return w_comp, meta
+    return q_24_comp, meta
 
 
 def marlin_24_quantize(
@@ -172,10 +177,7 @@ def marlin_24_quantize(
     assert group_size <= size_k
 
     # Inject 2:4 sparsity
-    print("w.shape = {} data = {}".format(w.shape, w))
     w_24, mask_24 = inject_24(w, size_k, size_n)
-    print("w_24.shape = {} data = {}".format(w_24.shape, w_24))
-    check_24(w_24)
 
     # Quantize
     w_24_ref, q_w_24, s, g_idx, rand_perm = quantize_weights(w_24,
@@ -183,18 +185,11 @@ def marlin_24_quantize(
                                                              group_size,
                                                              act_order=False)
 
-    print("w_24_ref.shape = {} data = {}".format(w_24_ref.shape, w_24_ref))
-    check_24(w_24_ref)
-
-    print("q_w_24.shape = {} data = {}".format(q_w_24.shape, q_w_24))
-    # check_24(q_w_24)
-
     # Compress quantized weight
-    q_w_24_comp, meta = compress_24_weight(q_w_24 * mask_24, size_k, size_n)
+    q_w_24_comp, meta = compress_quantized_24_weight(q_w_24, size_k, size_n,
+                                                     num_bits)
     size_k_comp = size_k // 2
 
-    print("q_w_24_comp.shape = {} data = {}".format(q_w_24_comp.shape,
-                                                    q_w_24_comp))
     # Reformat to marlin
     marlin_24_q_w_comp = marlin_weights(q_w_24_comp, size_k_comp, size_n,
                                         num_bits, marlin_24_perm[num_bits])
@@ -202,14 +197,17 @@ def marlin_24_quantize(
                                         marlin_24_scale_perm[num_bits],
                                         marlin_24_scale_perm_single[num_bits])
 
-    print("marlin_24_s, shape = {} data = {}".format(marlin_24_s.shape,
-                                                     marlin_24_s))
     # Create result
     res_list = [w_24_ref, marlin_24_q_w_comp, meta, marlin_24_s]
     for i in range(len(res_list)):
         res_list[i] = res_list[i].to(w.device)
 
     return res_list
+
+
+def compute_max_diff(output, output_ref):
+    return torch.mean(torch.abs(output - output_ref)) / torch.mean(
+        torch.abs(output_ref))
 
 
 class MarlinWorkspace:
