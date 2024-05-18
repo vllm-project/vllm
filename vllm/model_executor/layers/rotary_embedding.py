@@ -61,6 +61,7 @@ class RotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         self.is_neox_style = is_neox_style
+        self.dtype = dtype
 
         cache = self._compute_cos_sin_cache()
         cache = cache.to(dtype)
@@ -168,6 +169,29 @@ class RotaryEmbedding(nn.Module):
 class LinearScalingRotaryEmbedding(RotaryEmbedding):
     """RotaryEmbedding extended with linear scaling.
 
+    It supports multiple scaling factors. Since multiple LoRA adapters may have
+    different scaling factors, we need multiple cos/sin caches. In this way,
+    instead of running rotary embedding kernel per lora, we can run multiple
+    lora in a batched way.
+
+    In addition to that, we also keep the cos/sin cache for the scaling factor
+    of 1 (default) at all times.
+
+    Exemplary for two scaling factors x=1, y and z with embeddings
+    [[x11, x12, ... x1m], ..., [xn1, xn2, ..., xnm]] and
+    [[y11, y12, ... y1o], ..., [yn1, yn2, ..., yno]], and
+    [[z11, z12, ... z1p], ..., [zn1, zn2, ..., znp]],
+
+    we construct the cos/sin cache as follows:
+    [[x11, x12, ... x1m, y11, y12, ... y1o, z11, z12, ... z1p],
+        ...
+     [xn1, xn2, ... xnm, yn1, yn2, ... yno, zn1, zn2, ... znp]]
+
+    We then use offsets to index into the cos/sin cache for
+    the respective scaling factors.
+
+    The offset to cache can be accessed via `scaling_factor_to_offset` API.
+
     Credits to the Reddit user /u/kaiokendev
     """
 
@@ -183,13 +207,18 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
     ) -> None:
         if isinstance(scaling_factors, float):
             scaling_factors = [scaling_factors]
-        self.scaling_factors = scaling_factors
+        self.scaling_factors: List[float] = scaling_factors  # noqa
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
+        # Lazy initialized.
+        self._scaling_factor_to_offset: Dict[float, int]
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.base)
-        cache_list = []
+        cache_list: List[torch.Tensor] = []
+        # offsets to the next cache in a tensor.
+        # Each offset corresponds to the same index in scaling_factors.
+        offsets: List[int] = []
         for scaling_factor in self.scaling_factors:
             # NOTE(woosuk): self.max_position_embeddings is the original
             # maximum length before applying the rope scaling.
@@ -203,8 +232,24 @@ class LinearScalingRotaryEmbedding(RotaryEmbedding):
             cos = freqs.cos()
             sin = freqs.sin()
             cache = torch.cat((cos, sin), dim=-1)
+            if not cache_list:
+                offset = 0
+            else:
+                last_offset = offsets[-1]
+                next_max_len = cache_list[-1].shape[0]
+                offset = last_offset + next_max_len
+            offsets.append(offset)
             cache_list.append(cache)
+        self._scaling_factor_to_offset = {
+            float(scaling_factor): offsets[i]
+            for i, scaling_factor in enumerate(self.scaling_factors)
+        }
+        assert len(self.scaling_factors) == len(offsets)
         return torch.cat(cache_list, dim=0)
+
+    @property
+    def scaling_factor_to_offset(self) -> Dict[float, int]:
+        return self._scaling_factor_to_offset
 
 
 class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
