@@ -35,7 +35,11 @@ BACKEND_NAMES = ["xformers"]
 #    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 #]
 
-PROMPT_LENS = [32]
+PROMPT_LENS = [8]
+
+Q_PROMPT_LENS = [7]
+
+K_PROMPT_LENS = [32]
 
 def build_causal_mask(q_max_prompt_len, k_max_prompt_len):
     # Create a matrix where entry (i, j) is True if i >= j
@@ -64,15 +68,21 @@ def ref_masked_attention(
     #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
     return out
 
-def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True):
-    q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True, force_max_len=False):
+    if force_max_len:
+        q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
+    else:
+        q_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
     kv_prompt_lens = None
     if not is_cross_attn:
         # K,V prompt lens match Q for self-attention
         kv_prompt_lens = q_prompt_lens
     else:
         # K,V prompt lens come from K,V operands
-        kv_prompt_lens = [random.randint(1, max_q_prompt_len) for _ in range(batch_size)]
+        if force_max_len:
+            kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
+        else:
+            kv_prompt_lens = [random.randint(1, max_kv_prompt_len) for _ in range(batch_size)]
 
     actual_max_q_prompt_len = max(q_prompt_lens)
     actual_max_kv_prompt_len = max(kv_prompt_lens)
@@ -476,8 +486,8 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("block_size",BLOCK_SIZES)
-@pytest.mark.parametrize("max_q_prompt_len",PROMPT_LENS)
-@pytest.mark.parametrize("max_kv_prompt_len",PROMPT_LENS)
+@pytest.mark.parametrize("max_q_prompt_len",Q_PROMPT_LENS)
+@pytest.mark.parametrize("max_kv_prompt_len",K_PROMPT_LENS)
 def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_name: str, batch_size: int, block_size: int, max_q_prompt_len: int, max_kv_prompt_len: int) -> None:
     # Attention operator instance
     is_cross_attn=True

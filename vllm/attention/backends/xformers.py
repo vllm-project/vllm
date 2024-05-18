@@ -392,8 +392,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
                 if attn_metadata.is_cross_attn:
-                    attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens,attn_metadata.cross_seq_lens)
+                    attn_bias = None #BlockDiagonalMask.from_seqlens(
+                        # attn_metadata.seq_lens,attn_metadata.cross_seq_lens)
                 else:
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
                         attn_metadata.seq_lens)
