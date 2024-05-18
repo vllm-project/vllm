@@ -8,6 +8,8 @@ import torch
 from pydantic import Field
 from typing_extensions import Annotated
 
+from .sequence_controller import SequenceController
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -169,6 +171,7 @@ class SamplingParams:
         self.spaces_between_special_tokens = spaces_between_special_tokens
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
+        self.controller: Optional[SequenceController] = None
         self.truncate_prompt_tokens = truncate_prompt_tokens
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
@@ -277,6 +280,9 @@ class SamplingParams:
     def update_from_generation_config(
             self, generation_config: Dict[str, Any]) -> None:
         """Update if there are non-default values from generation_config"""
+        # If present, we want the controller to control stopping.
+        if self.controller:
+            return
         # Update eos_token_id for generation
         if (not self.ignore_eos) and (eos_ids :=
                                       generation_config.get("eos_token_id")):
@@ -305,10 +311,15 @@ class SamplingParams:
         See https://github.com/vllm-project/vllm/issues/3087
         """
 
-        logit_processor_refs = None if self.logits_processors is None else {
-            id(lp): lp
-            for lp in self.logits_processors
-        }
+        logit_processor_refs: Optional[
+            dict] = None if self.logits_processors is None else {
+                id(lp): lp
+                for lp in self.logits_processors
+            }
+        if self.controller:
+            if logit_processor_refs is None:
+                logit_processor_refs = {}
+            logit_processor_refs[id(self.controller)] = self.controller
         return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:

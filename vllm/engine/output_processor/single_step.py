@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Set, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -85,6 +85,8 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         # List of (child, parent)
         child_seqs: List[Tuple[Sequence, Sequence]] = []
 
+        to_stop: Set[int] = set()
+
         # Process the child samples for each parent sequence
         for parent in parent_seqs:
             child_samples: List[SequenceOutput] = parent_child_dict[
@@ -108,9 +110,20 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # We reuse the parent sequence here to reduce redundant memory
             # copies, especially when using non-beam search sampling methods.
             last_child_sample = child_samples[-1]
+            child_seqs.append((parent, parent))
+            ctrl = seq_group.sampling_params.controller
+            if ctrl:
+                sid = parent.seq_id
+                sampled_token = last_child_sample.output_token
+                backtrack, ff_tokens, should_stop = ctrl.sampled(
+                    parent, sampled_token, last_child_sample.logprobs)
+                if should_stop:
+                    to_stop.add(sid)
+                if backtrack != 0 or ff_tokens != [sampled_token]:
+                    parent.splice_tokens(backtrack, ff_tokens)
+                    continue  # don't call append_token_id()
             parent.append_token_id(last_child_sample.output_token,
                                    last_child_sample.logprobs)
-            child_seqs.append((parent, parent))
 
         for seq, _ in child_seqs:
             if seq_group.sampling_params.detokenize and self.detokenizer:
@@ -120,6 +133,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 new_char_count = 0
             self.stop_checker.maybe_stop_sequence(seq, new_char_count,
                                                   seq_group.sampling_params)
+            if seq.seq_id in to_stop:
+                seq.status = SequenceStatus.FINISHED_STOPPED
+                seq.stop_reason = "<SequenceController>"
 
         # Non-beam search case
         if not seq_group.sampling_params.use_beam_search:

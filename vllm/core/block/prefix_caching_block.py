@@ -456,6 +456,9 @@ class PrefixCachingBlock(Block):
             _cow_target=self,
         )
 
+    def trim(self, num_tokens: int):
+        return self._block.trim(num_tokens)
+
     @property
     def computed(self) -> bool:
         return self._computed

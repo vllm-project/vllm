@@ -9,6 +9,7 @@ from vllm.block import LogicalTokenBlock
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.sequence_controller import SequenceController
 
 if TYPE_CHECKING:
     import torch
@@ -235,6 +236,8 @@ class Sequence:
         self.data: SequenceData = SequenceData(prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
+        self.backtrack = 0
+        self.controller: Optional[SequenceController] = None
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
@@ -307,6 +310,58 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id].logprob)
+
+    def splice_tokens(self, backtrack: int, token_ids: List[int]):
+        assert self.backtrack == 0
+
+        data = self.data
+
+        if not token_ids:
+            # we need at least one token in forward step,
+            # so we pretend we're backtracking one token more
+            # and repeat the token that was there
+            # otherwise, the _num_comptued_tokens gets out of sync
+            backtrack += 1
+            if backtrack <= len(data.output_token_ids):
+                token_ids = [data.output_token_ids[-backtrack]]
+            else:
+                off = backtrack - len(data.output_token_ids)
+                if off <= len(data.prompt_token_ids):
+                    token_ids = [data.prompt_token_ids[-off]]
+                else:
+                    token_ids = [1]
+
+        backtrack = min(backtrack, data.get_len())
+        self.backtrack = backtrack
+
+        if backtrack > 0:
+            prompt_backtrack = 0
+            output_len = len(data.output_token_ids)
+            if backtrack > output_len:
+                prompt_backtrack = backtrack - output_len
+                backtrack = output_len
+            del data.output_token_ids[-backtrack:]
+            del self.output_logprobs[-backtrack:]
+            data._num_computed_tokens = min(data._num_computed_tokens,
+                                            len(data.output_token_ids))
+            if prompt_backtrack > 0:
+                assert not data.output_token_ids
+                del data.prompt_token_ids[-prompt_backtrack:]
+            needed_blocks = \
+                (self.get_len() + self.block_size - 1) // self.block_size
+            if len(self.logical_token_blocks) > needed_blocks:
+                del self.logical_token_blocks[needed_blocks:]
+            if needed_blocks > 0:
+                last_block = self.logical_token_blocks[-1]
+                last_num_tokens = self.get_len() % self.block_size
+                if last_num_tokens == 0:
+                    last_num_tokens = self.block_size
+                last_block.num_tokens = last_num_tokens
+
+        for t in token_ids:
+            self.append_token_id(t, {t: Logprob(logprob=0.0)})
+        if data.get_num_uncomputed_tokens() > 1:
+            data._stage = SequenceStage.PREFILL
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -466,8 +521,10 @@ class SequenceGroup:
 
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
-        # If still in prefill phase, raise Error.
-        if self.is_prefill():
+        # If still in prefill phase, raise Error (unless using controllers,
+        # where the request may go from decode to prefill).
+        if self.is_prefill() and not (self.sampling_params
+                                      and self.sampling_params.controller):
             raise ValueError(
                 "seq_group.get_last_latency() should not be called "
                 "if the seq_group is in prefill phase.")

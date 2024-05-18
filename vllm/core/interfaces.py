@@ -60,6 +60,7 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
+        backtrack: int = 0,
     ) -> List[Tuple[int, int]]:
         pass
 

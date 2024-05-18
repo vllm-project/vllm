@@ -479,8 +479,10 @@ class LLMEngine:
                              f"{max_logprobs} logprobs.")
 
         # Defensive copy of SamplingParams, which are used by the sampler,
-        # this doesn't deep-copy LogitsProcessor objects
+        # this doesn't deep-copy LogitsProcessor or SequenceController objects
         sampling_params = sampling_params.clone()
+        # Link controller to sequence.
+        seq.controller = sampling_params.controller
         # Add the eos token id into the sampling_params to support min_tokens
         # processing
         if seq.eos_token_id is not None:

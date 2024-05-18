@@ -43,6 +43,10 @@ class Block(ABC):
     def prev_block(self) -> Optional["Block"]:
         pass
 
+    @abstractmethod
+    def trim(self, num_tokens: int):
+        pass
+
     @property
     @abstractmethod
     def computed(self) -> bool:
