@@ -4,11 +4,10 @@ import inspect
 import re
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Optional, Set
-
+from typing import Optional, Set, Annotated
 import fastapi
 import uvicorn
-from fastapi import Request
+from fastapi import Request, Form, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -23,10 +22,14 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
-                                              EmbeddingRequest, ErrorResponse)
+                                              EmbeddingRequest, 
+                                              ErrorResponse,
+                                              CreateBatchRequest,
+                                              CreateBatchResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
+from vllm.entrypoints.openai.serving_batch import OpenAIServingBatch, OpenAIServingFiles
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -35,6 +38,9 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
+openai_serving_files: OpenAIServingFiles
+openai_serving_batch: OpenAIServingBatch
+
 
 logger = init_logger(__name__)
 
@@ -137,6 +143,45 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     else:
         return JSONResponse(content=generator.model_dump())
 
+@app.post("/v1/files")
+async def upload_file(file: Annotated[UploadFile, Form()], 
+                            purpose: Annotated[str, Form()], raw_request: Request):
+    response = await openai_serving_files.create_file(file, purpose)
+    if not response:
+        return Response(status_code=400)
+
+    return JSONResponse(content=response)
+
+@app.get("/v1/files")
+async def get_files(purpose: str = None):
+    response = await openai_serving_files.list_files(purpose)
+    return JSONResponse(content=response)
+
+@app.get("/v1/files/{file_id}")
+async def retrieve_file(file_id):
+    response = await openai_serving_files.retrieve_file(file_id)
+    if not response:
+        return Response(status_code=404)
+
+    return JSONResponse(content=response)
+
+@app.delete("/v1/files/{file_id}")
+async def delete_file(file_id):
+    response = await openai_serving_files.delete_file(file_id)
+    return JSONResponse(content=response)
+
+@app.get("/v1/files/{file_id}/content")
+async def retrieve_file_content(file_id):
+    response = await openai_serving_files.retrieve_file_content(file_id)
+    if not response:
+        return Response(status_code=404)
+    return Response(content=response)
+
+@app.post("/v1/batches")
+async def create_exec_batch(request: CreateBatchRequest, raw_request: Request):
+    response = await openai_serving_batch.create_batch_chat_completion(request, raw_request) 
+    return response 
+
 
 if __name__ == "__main__":
     args = parse_args()
@@ -203,6 +248,12 @@ if __name__ == "__main__":
                                             args.response_role,
                                             args.lora_modules,
                                             args.chat_template)
+    openai_serving_batch = OpenAIServingBatch(engine, model_config,
+                                              served_model_names,
+                                              args.response_role,
+                                              args.lora_modules,
+                                              args.chat_template)
+    openai_serving_files = OpenAIServingFiles()
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
     openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,

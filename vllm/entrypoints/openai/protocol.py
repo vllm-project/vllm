@@ -364,6 +364,19 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
+class BatchRequestInputObject(OpenAIBaseModel):
+    custom_id: str
+    method: str
+    url: str
+    body: ChatCompletionRequest
+
+
+class CreateBatchRequest(OpenAIBaseModel):
+    input_file_id: str
+    endpoint: str
+    completion_window: str
+
+
 class EmbeddingRequest(BaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
@@ -470,6 +483,26 @@ class ChatCompletionResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+
+
+class BatchRequestOutputObject(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"batch_req_{random_uuid()}") 
+    custom_id: str
+    response: ChatCompletionResponse
+
+
+class BatchObject(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"batch_{random_uuid()}")
+    object: str = "batch"
+    created_at: int
+    completed_at: int
+    endpoint: str
+    input_file_id: str
+    completion_window: str
+    status: str
+    output_file_id: str
+    error_file_id: str
+    request_counts: dict
 
 
 class DeltaMessage(OpenAIBaseModel):
