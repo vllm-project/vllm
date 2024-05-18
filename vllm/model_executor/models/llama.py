@@ -207,24 +207,19 @@ class LlamaAttention(nn.Module):
                 num_past_tokens = context_lens[i] - 1
                 within_context_len = num_past_tokens < llama_context_len
                 
-                past_keys = {} # logic bnum => block of keys
                 block_table = block_tables_tensor[i]
+                end_logic_bnum = num_past_tokens // block_size
                 if within_context_len:
                     start_logic_bnum = 0
-                else:
-                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
-                end_logic_bnum = num_past_tokens // block_size
-
-                '''rewrite while loop with index_select and index_put_'''
-                # can cache phys_bnums, same for all layers
-                if within_context_len:
                     phys_bnums = [
                         block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
                     ]
                 else:
+                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
                     phys_bnums = [block_table[0]] + [
                         block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
                     ]
+                # can cache phys_bnums, same for all layers
                 phys_bnums = torch.tensor(phys_bnums, device=device)
                 
                 rem = num_past_tokens % block_size
@@ -235,10 +230,14 @@ class LlamaAttention(nn.Module):
                 rem_past_keys = key_cache[rem_phys_bnum, :, :, :rem, :]
                 original_keys.append((full_past_keys.clone(), rem_past_keys.clone()))
                 
-                pos_start = 0
-                pos_end = num_past_tokens if within_context_len else llama_context_len - block_size + rem
+                pos_start = 0 if within_context_len else 2 * block_size - 1 - rem
+                pos_end = min(num_past_tokens, llama_context_len - 1)
                 # can cache pos, same for all layers
                 pos = torch.arange(pos_start, pos_end, device=device)
+                # if not within context length: pos = [0, 16] + [31 - rem, 4095)
+                if not within_context_len:
+                    pos_sink = torch.arange(0, block_size, device=device)
+                    pos = torch.cat((pos_sink, pos))
                 
                 full_past_keys = full_past_keys.permute((0, 3, 1, 2, 4)).flatten(0, 1)
                 rem_past_keys = rem_past_keys.permute((2, 0, 1, 3))
@@ -258,33 +257,6 @@ class LlamaAttention(nn.Module):
                 full_past_keys = full_past_keys.permute((0, 2, 3, 1, 4))
                 key_cache.index_put_((phys_bnums,), full_past_keys)
                 key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys.permute((1, 2, 0, 3))
-
-                # abs_pos = start
-                # while abs_pos < end:
-                #     logic_bnum = abs_pos // block_size
-                #     phys_bnum = block_table[logic_bnum]
-                #     offset_start = abs_pos % block_size
-                #     offset_end = min(end - abs_pos, block_size)
-                #     num_tokens = offset_end - offset_start
-
-                #     # past_key shape: [num_heads, head_size/x, num_tokens, x]
-                #     past_key = key_cache[phys_bnum, :, :, offset_start : offset_end, :]
-                #     past_keys[logic_bnum] = past_key.clone()
-
-                #     # rotate k based on new relative pos
-                #     p = abs_pos if within_context_len else abs_pos - start + block_size
-                #     pos = torch.arange(p, p + num_tokens, device=device)
-
-                #     # sus reshapes
-                #     past_key = past_key.permute((2, 0, 1, 3)).reshape(num_tokens, -1)
-                #     dummy_q = torch.zeros_like(past_key)
-                #     _, past_key = self.rotary_emb(pos, dummy_q, past_key)
-                #     past_key = past_key.reshape(num_tokens, key_cache.shape[1], key_cache.shape[2], key_cache.shape[4])
-                #     key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_key.permute((1, 2, 0, 3))
-                    
-                #     abs_pos += num_tokens
-
-                # original_keys.append(past_keys)
                 
                 if not within_context_len:
                     blocks_to_ignore = (num_past_tokens - llama_context_len) // block_size + 1
@@ -293,10 +265,10 @@ class LlamaAttention(nn.Module):
                     block_tables.append(capped_block_table)
 
                     # edited context len is in range [4081, 4096]
-                    attn_metadata.decode_metadata.context_lens[i] = pos_end + 1
+                    attn_metadata.decode_metadata.context_lens[i] = llama_context_len  # pos_end + 1
                     
                     # edited position is in range [4080, 4095]
-                    positions[i] = pos_end
+                    positions[i] = llama_context_len - 1  # pos_end
 
             if block_tables:
                 attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
@@ -318,17 +290,14 @@ class LlamaAttention(nn.Module):
                 within_context_len = num_past_tokens < llama_context_len
 
                 block_table = original_block_tables[i]
+                end_logic_bnum = num_past_tokens // block_size
                 if within_context_len:
                     start_logic_bnum = 0
-                else:
-                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
-                end_logic_bnum = num_past_tokens // block_size
-                
-                if within_context_len:
                     phys_bnums = [
                         block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
                     ]
                 else:
+                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
                     phys_bnums = [block_table[0]] + [
                         block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
                     ]
@@ -340,17 +309,6 @@ class LlamaAttention(nn.Module):
                 full_past_keys, rem_past_keys = original_keys[i]
                 key_cache.index_put_((phys_bnums,), full_past_keys)
                 key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys
-
-                # abs_pos = start
-                # while abs_pos < end:
-                #     logic_bnum = abs_pos // block_size
-                #     phys_bnum = block_table[logic_bnum]
-                #     offset_start = abs_pos % block_size
-                #     offset_end = block_size if end - abs_pos > block_size else end - abs_pos
-                #     num_tokens = offset_end - offset_start
-                    
-                #     key_cache[phys_bnum, :, :, offset_start : offset_end, :] = past_keys[logic_bnum]
-                #     abs_pos += num_tokens
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields

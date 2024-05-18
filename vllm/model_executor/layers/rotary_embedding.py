@@ -134,7 +134,7 @@ class RotaryEmbedding(nn.Module):
         query = query.flatten(-2)
         key = key.flatten(-2)
         return query, key
-    
+
     def forward(
         self,
         positions: torch.Tensor,
