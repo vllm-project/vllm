@@ -1,4 +1,4 @@
-"""Make sure ignore_eos works with llama2 model.
+"""Make sure ignore_eos works.
 
 Run `pytest tests/samplers/test_ignore_eos.py`.
 """
