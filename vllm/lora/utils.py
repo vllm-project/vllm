@@ -13,6 +13,7 @@ from vllm.lora.fully_sharded_layers import (
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
+                              LinearScalingRotaryEmbeddingWithLora,
                               LogitsProcessorWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
@@ -26,12 +27,18 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 logger = init_logger(__name__)
 
 _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
-    VocabParallelEmbeddingWithLoRA, ColumnParallelLinearWithLoRA,
-    MergedColumnParallelLinearWithLoRA, QKVParallelLinearWithLora,
-    MergedQKVParallelLinearWithLora, RowParallelLinearWithLoRA,
-    LogitsProcessorWithLoRA, ColumnParallelLinearWithShardedLoRA,
+    VocabParallelEmbeddingWithLoRA,
+    ColumnParallelLinearWithLoRA,
+    MergedColumnParallelLinearWithLoRA,
+    QKVParallelLinearWithLora,
+    MergedQKVParallelLinearWithLora,
+    RowParallelLinearWithLoRA,
+    LogitsProcessorWithLoRA,
+    ColumnParallelLinearWithShardedLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
-    MergedQKVParallelLinearWithShardedLora, RowParallelLinearWithShardedLoRA
+    MergedQKVParallelLinearWithShardedLora,
+    RowParallelLinearWithShardedLoRA,
+    LinearScalingRotaryEmbeddingWithLora,
 }
 
 

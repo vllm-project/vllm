@@ -264,13 +264,6 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        if self.scheduler_config.chunked_prefill_enabled:
-            self.prompt_limit = self.scheduler_config.max_model_len
-        else:
-            self.prompt_limit = min(
-                self.scheduler_config.max_model_len,
-                self.scheduler_config.max_num_batched_tokens)
-
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
             version = "v2"
@@ -596,6 +589,21 @@ class Scheduler:
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
+    def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
+        if self.scheduler_config.chunked_prefill_enabled:
+            prompt_limit = self.scheduler_config.max_model_len
+        else:
+            prompt_limit = min(self.scheduler_config.max_model_len,
+                               self.scheduler_config.max_num_batched_tokens)
+
+        # Model is fine tuned with long context. Return the fine tuned max_len.
+        if (seq_group.lora_request
+                and seq_group.lora_request.long_lora_max_len):
+            assert prompt_limit <= seq_group.lora_request.long_lora_max_len
+            return seq_group.lora_request.long_lora_max_len
+        else:
+            return prompt_limit
+
     def _schedule_prefills(
         self,
         waiting_queue: deque,
@@ -650,11 +658,11 @@ class Scheduler:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
 
-            if num_new_tokens > self.prompt_limit:
+            prompt_limit = self._get_prompt_limit(seq_group)
+            if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
-                    " and exceeds limit of %d", num_new_tokens,
-                    self.prompt_limit)
+                    " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)

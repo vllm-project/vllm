@@ -1,7 +1,7 @@
 # pylint: disable=unused-argument
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.rotary_embedding import (
+    LinearScalingRotaryEmbedding, RotaryEmbedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 
@@ -185,6 +187,7 @@ class BaseLayerWithLoRA(nn.Module):
         sampler_indices: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
         indices_len: List[int],
     ):
         """Sets the mapping indices."""
@@ -306,6 +309,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         sampler_indices: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
         indices_len: List[int],
     ):
         self.indices = base_indices
@@ -431,6 +435,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         sampler_indices: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
         indices_len: List[int],
     ):
         self.indices = base_indices
@@ -951,6 +956,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         sampler_indices: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
         indices_len: List[int],
     ):
         self.indices = base_indices
@@ -1127,6 +1133,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         sampler_indices: torch.Tensor,
         sampler_indices_padded: torch.Tensor,
         embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
         indices_len: List[int],
     ):
         self.indices = sampler_indices
@@ -1193,3 +1200,101 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                           model_config: Optional[PretrainedConfig]) -> bool:
         # Special handling for the LogitsProcessor.
         return False
+
+
+class LinearScalingRotaryEmbeddingWithLora(BaseLayerWithLoRA):
+    """Implements RoPE-scaled embeddings with linear scaling for
+    multiple LoRA adapters with a specialized kernel.
+
+    Replace LinearScalingRotaryEmbedding with MultiLinearScalingRotaryEmbedding
+    which can handle multi lora adapters in a specialied kernel.
+    """
+
+    def __init__(self, base_layer: RotaryEmbedding) -> None:
+        super().__init__()
+        self.base_layer = base_layer
+        # Lazily initialized
+        self.long_lora_indices: torch.Tensor
+        self.indices_len: List[int]
+
+    @property
+    def scaling_factors(self):
+        return self.base_layer.scaling_factors
+
+    @property
+    def rotary_dim(self):
+        return self.base_layer.rotary_dim
+
+    def create_lora_weights(
+        self,
+        max_loras: int,
+        lora_config: LoRAConfig,
+        model_config: Optional[PretrainedConfig] = None,
+    ) -> None:
+        scaling_factors = list(
+            lora_config.long_lora_scaling_factors
+        ) if lora_config.long_lora_scaling_factors else []
+        base_scaling_factor = (self.base_layer.scaling_factor if isinstance(
+            self.base_layer, LinearScalingRotaryEmbedding) else 1.0)
+        scaling_factors = sorted(
+            list(set([base_scaling_factor] + scaling_factors)))
+        self.base_layer = LinearScalingRotaryEmbedding(
+            self.base_layer.head_size,
+            self.base_layer.rotary_dim,
+            self.base_layer.max_position_embeddings,
+            self.base_layer.base,
+            self.base_layer.is_neox_style,
+            scaling_factors,
+            self.base_layer.dtype,
+        )
+
+    def reset_lora(self, index: int):
+        ...
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        embeddings_tensor: Optional[torch.Tensor],
+    ):
+        ...
+
+    def set_mapping(
+        self,
+        base_indices: torch.Tensor,
+        sampler_indices: torch.Tensor,
+        sampler_indices_padded: torch.Tensor,
+        embeddings_indices: torch.Tensor,
+        long_lora_indices: torch.Tensor,
+        indices_len: List[int],
+    ):
+        self.long_lora_indices = long_lora_indices
+        self.indices_len = indices_len
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.base_layer(
+            positions,
+            query,
+            key,
+            offsets=self.long_lora_indices[:self.indices_len[4]])
+
+    @property
+    def scaling_factor_to_offset(self) -> Dict[float, int]:
+        return self.base_layer.scaling_factor_to_offset
+
+    @classmethod
+    def can_replace_layer(cls, source_layer: nn.Module,
+                          lora_config: LoRAConfig, packed_modules_list: List,
+                          model_config: Optional[PretrainedConfig]) -> bool:
+        """Returns True if the layer can be replaced by this LoRA layer."""
+        return type(source_layer) is LinearScalingRotaryEmbedding or type(
+            source_layer) is RotaryEmbedding
+
+    def extra_repr(self) -> str:
+        return self.base_layer.extra_repr()
