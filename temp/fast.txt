@@ -1,19 +1,15 @@
-INFO 05-18 07:06:31 pynccl.py:58] Loading nccl from library /root/.config/vllm/nccl/cu12/libnccl.so.2.18.1
-The token has not been saved to the git credentials helper. Pass `add_to_git_credential=True` in this function directly or `--add-to-git-credential` if using via `huggingface-cli` if you want to set the git credential as well.
-Token is valid (permission: read).
-Your token has been saved to /root/.cache/huggingface/token
-Login successful
-INFO 05-18 07:06:31 llm_engine.py:81] Initializing an LLM engine (v0.4.0.post1) with config: model='lmsys/vicuna-7b-v1.5', speculative_config=None, tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, seed=0)
-INFO 05-18 07:06:32 selector.py:77] Cannot use FlashAttention backend because the flash_attn package is not found. Please install it for better performance.
-INFO 05-18 07:06:32 selector.py:33] Using XFormers backend.
-INFO 05-18 07:06:34 weight_utils.py:194] Using model weights format ['*.bin']
-INFO 05-18 07:06:44 model_runner.py:164] Loading model weights took 12.5523 GB
+INFO 05-18 19:17:14 pynccl.py:58] Loading nccl from library /root/.config/vllm/nccl/cu12/libnccl.so.2.18.1
+INFO 05-18 19:17:15 llm_engine.py:81] Initializing an LLM engine (v0.4.0.post1) with config: model='lmsys/vicuna-7b-v1.5', speculative_config=None, tokenizer='lmsys/vicuna-7b-v1.5', tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=4096, download_dir=None, load_format=auto, tensor_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, seed=0)
+INFO 05-18 19:17:15 selector.py:77] Cannot use FlashAttention backend because the flash_attn package is not found. Please install it for better performance.
+INFO 05-18 19:17:15 selector.py:33] Using XFormers backend.
+INFO 05-18 19:17:17 weight_utils.py:194] Using model weights format ['*.bin']
+INFO 05-18 19:17:26 model_runner.py:164] Loading model weights took 12.5523 GB
 	execute_model: token id: tensor([0, 0, 0,  ..., 0, 0, 0], device='cuda:0'), positions: tensor([ 0,  1,  2,  ..., 13, 14, 15], device='cuda:0')
-INFO 05-18 07:06:45 gpu_executor.py:81] # GPU blocks: 3394, # CPU blocks: 512
+INFO 05-18 19:17:27 gpu_executor.py:81] # GPU blocks: 3394, # CPU blocks: 512
 max model len 4096
 	execute_model: token id: tensor([    1,  2266,   338,  ...,   363,   592, 29973], device='cuda:0'), positions: tensor([   0,    1,    2,  ..., 4060, 4061, 4062], device='cuda:0')
 		FREE BLOCKS 3140
-INFO 05-18 07:06:47 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
+INFO 05-18 19:17:29 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([13], device='cuda:0'), positions: tensor([4063], device='cuda:0')
 		FREE BLOCKS 3140
 	execute_model: token id: tensor([13], device='cuda:0'), positions: tensor([4064], device='cuda:0')
@@ -54,7 +50,6 @@ INFO 05-18 07:06:47 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3138
 	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4082], device='cuda:0')
 		FREE BLOCKS 3138
-INFO 05-18 07:06:52 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.5%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([450], device='cuda:0'), positions: tensor([4083], device='cuda:0')
 		FREE BLOCKS 3138
 	execute_model: token id: tensor([5687], device='cuda:0'), positions: tensor([4084], device='cuda:0')
@@ -95,7 +90,6 @@ INFO 05-18 07:06:52 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3137
 	execute_model: token id: tensor([9259], device='cuda:0'), positions: tensor([4102], device='cuda:0')
 		FREE BLOCKS 3137
-INFO 05-18 07:06:57 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([491], device='cuda:0'), positions: tensor([4103], device='cuda:0')
 		FREE BLOCKS 3137
 	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4104], device='cuda:0')
@@ -136,11 +130,11 @@ INFO 05-18 07:06:57 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3136
 	execute_model: token id: tensor([2323], device='cuda:0'), positions: tensor([4122], device='cuda:0')
 		FREE BLOCKS 3136
-INFO 05-18 07:07:02 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4123], device='cuda:0')
 		FREE BLOCKS 3136
 	execute_model: token id: tensor([338], device='cuda:0'), positions: tensor([4124], device='cuda:0')
 		FREE BLOCKS 3136
+INFO 05-18 19:17:34 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 12.3 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4125], device='cuda:0')
 		FREE BLOCKS 3136
 	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4126], device='cuda:0')
@@ -177,7 +171,6 @@ INFO 05-18 07:07:02 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3135
 	execute_model: token id: tensor([15332], device='cuda:0'), positions: tensor([4142], device='cuda:0')
 		FREE BLOCKS 3135
-INFO 05-18 07:07:08 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.6%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([322], device='cuda:0'), positions: tensor([4143], device='cuda:0')
 		FREE BLOCKS 3135
 	execute_model: token id: tensor([301], device='cuda:0'), positions: tensor([4144], device='cuda:0')
@@ -218,7 +211,6 @@ INFO 05-18 07:07:08 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3133
 	execute_model: token id: tensor([671], device='cuda:0'), positions: tensor([4162], device='cuda:0')
 		FREE BLOCKS 3133
-INFO 05-18 07:07:13 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([310], device='cuda:0'), positions: tensor([4163], device='cuda:0')
 		FREE BLOCKS 3133
 	execute_model: token id: tensor([19012], device='cuda:0'), positions: tensor([4164], device='cuda:0')
@@ -259,13 +251,13 @@ INFO 05-18 07:07:13 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3132
 	execute_model: token id: tensor([263], device='cuda:0'), positions: tensor([4182], device='cuda:0')
 		FREE BLOCKS 3132
-INFO 05-18 07:07:18 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([995], device='cuda:0'), positions: tensor([4183], device='cuda:0')
 		FREE BLOCKS 3132
 	execute_model: token id: tensor([756], device='cuda:0'), positions: tensor([4184], device='cuda:0')
 		FREE BLOCKS 3132
 	execute_model: token id: tensor([1063], device='cuda:0'), positions: tensor([4185], device='cuda:0')
 		FREE BLOCKS 3132
+INFO 05-18 19:17:39 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 12.0 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([10434], device='cuda:0'), positions: tensor([4186], device='cuda:0')
 		FREE BLOCKS 3132
 	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4187], device='cuda:0')
@@ -300,7 +292,6 @@ INFO 05-18 07:07:18 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg gen
 		FREE BLOCKS 3131
 	execute_model: token id: tensor([8841], device='cuda:0'), positions: tensor([4202], device='cuda:0')
 		FREE BLOCKS 3131
-INFO 05-18 07:07:23 metrics.py:224] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 7.7%, CPU KV cache usage: 0.0%
 	execute_model: token id: tensor([14009], device='cuda:0'), positions: tensor([4203], device='cuda:0')
 		FREE BLOCKS 3131
 	execute_model: token id: tensor([29889], device='cuda:0'), positions: tensor([4204], device='cuda:0')

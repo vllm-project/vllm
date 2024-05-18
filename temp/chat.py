@@ -5,7 +5,7 @@ from transformers import AutoTokenizer
 from huggingface_hub import login
 
 
-login(token='see Notes')
+# login(token='see Notes')
 MAX_GEN_TOKENS = 200
 
 
@@ -58,8 +58,8 @@ def process_requests(engine: LLMEngine,
 
 def main():
     # context length 4096
-    # model = "lmsys/vicuna-7b-v1.5"
-    model = "meta-llama/Llama-2-13b-chat-hf"
+    model = "lmsys/vicuna-7b-v1.5"
+    # model = "meta-llama/Llama-2-13b-chat-hf"
     args = EngineArgs(
         model=model,
         enforce_eager=True,

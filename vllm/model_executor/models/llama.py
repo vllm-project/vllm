@@ -198,6 +198,12 @@ class LlamaAttention(nn.Module):
             block_tables_tensor = attn_metadata.decode_metadata.block_tables
             block_tables: List[List[int]] = []
             context_lens = attn_metadata.decode_metadata.context_lens.tolist()
+
+            # cache phys_bnums because they take up 2/3 of compute time every decode
+            if hasattr(attn_metadata, 'phys_bnums_list'):
+                phys_bnums_list = attn_metadata.phys_bnums_list
+            else:
+                phys_bnums_list = []
             
             # batch size = num sequences
             batch_size = block_tables_tensor.shape[0]
@@ -206,21 +212,25 @@ class LlamaAttention(nn.Module):
                 # see paged_attn.py line 19 for context_lens definition
                 num_past_tokens = context_lens[i] - 1
                 within_context_len = num_past_tokens < llama_context_len
-                
                 block_table = block_tables_tensor[i]
+
                 end_logic_bnum = num_past_tokens // block_size
-                if within_context_len:
-                    start_logic_bnum = 0
-                    phys_bnums = [
-                        block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                    ]
+                
+                if hasattr(attn_metadata, 'phys_bnums_list'):
+                    phys_bnums = phys_bnums_list[i]
                 else:
-                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
-                    phys_bnums = [block_table[0]] + [
-                        block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                    ]
-                # can cache phys_bnums, same for all layers
-                phys_bnums = torch.tensor(phys_bnums, device=device)
+                    if within_context_len:
+                        start_logic_bnum = 0
+                        phys_bnums = [
+                            block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
+                        ]
+                    else:
+                        start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
+                        phys_bnums = [block_table[0]] + [
+                            block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
+                        ]
+                    phys_bnums = torch.tensor(phys_bnums, device=device)
+                    phys_bnums_list.append(phys_bnums)
                 
                 rem = num_past_tokens % block_size
                 rem_phys_bnum = block_table[end_logic_bnum]
@@ -279,6 +289,9 @@ class LlamaAttention(nn.Module):
                     device=device
                 )
 
+            if not hasattr(attn_metadata, 'phys_bnums_list'):
+                attn_metadata.phys_bnums_list = phys_bnums_list
+
             # compute attention in kernel
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
@@ -288,20 +301,8 @@ class LlamaAttention(nn.Module):
             for i in range(batch_size):
                 num_past_tokens = context_lens[i] - 1
                 within_context_len = num_past_tokens < llama_context_len
-
                 block_table = original_block_tables[i]
-                end_logic_bnum = num_past_tokens // block_size
-                if within_context_len:
-                    start_logic_bnum = 0
-                    phys_bnums = [
-                        block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                    ]
-                else:
-                    start_logic_bnum = (num_past_tokens - llama_context_len) // block_size + 2
-                    phys_bnums = [block_table[0]] + [
-                        block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                    ]
-                phys_bnums = torch.tensor(phys_bnums, device=device)
+                phys_bnums = phys_bnums_list[i]
 
                 rem = num_past_tokens % block_size
                 rem_phys_bnum = block_table[end_logic_bnum]
