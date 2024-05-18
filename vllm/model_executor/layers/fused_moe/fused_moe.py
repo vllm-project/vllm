@@ -490,6 +490,8 @@ def fused_moe(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -521,7 +523,7 @@ def fused_moe(
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
 
     topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
+                                        renormalize, num_expert_group, topk_group)
     return fused_experts(hidden_states,
                          w1,
                          w2,
