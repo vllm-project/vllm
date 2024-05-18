@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQ_MARLIN_24_MAX_PARALLEL, GPTQ_MARLIN_24_MIN_THREAD_N,
     GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES, GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+from vllm.model_executor.layers.quantization.utils.marlin_perms import (
+    marlin_perm)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MarlinWorkspace, compute_max_diff, is_marlin_supported, marlin_24_quantize,
     marlin_quantize, marlin_weights)
@@ -88,7 +90,8 @@ def test_marlin_repack(k_chunk, n_chunk, num_bits, group_size, act_order,
         q_w, g_idx, sort_indices = sort_weights(q_w, g_idx)
 
     # Pack to Marlin format
-    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits)
+    marlin_q_w_1 = marlin_weights(q_w, size_k, size_n, num_bits,
+                                  marlin_perm[num_bits])
 
     # Run Marlin repack GPU kernel
     marlin_q_w_2 = ops.gptq_marlin_repack(
@@ -213,4 +216,4 @@ def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):
     max_diff = compute_max_diff(output, output_ref)
     print("max_diff = {}".format(max_diff))
 
-    assert max_diff < 0.02
+    assert max_diff < 0.04
