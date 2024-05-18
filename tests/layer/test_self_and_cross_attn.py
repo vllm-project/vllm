@@ -37,9 +37,9 @@ BACKEND_NAMES = ["xformers"]
 
 PROMPT_LENS = [8]
 
-Q_PROMPT_LENS = [7]
+Q_PROMPT_LENS = [128]
 
-K_PROMPT_LENS = [32]
+K_PROMPT_LENS = [128]
 
 def build_causal_mask(q_max_prompt_len, k_max_prompt_len):
     # Create a matrix where entry (i, j) is True if i >= j
@@ -68,7 +68,9 @@ def ref_masked_attention(
     #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
     return out
 
-def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True, force_max_len=False):
+def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_attn=True, force_max_len=True):
+    assert max_kv_prompt_len >= max_q_prompt_len
+
     if force_max_len:
         q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
     else:
@@ -82,7 +84,8 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_a
         if force_max_len:
             kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
         else:
-            kv_prompt_lens = [random.randint(1, max_kv_prompt_len) for _ in range(batch_size)]
+            kv_prompt_lens = [16*((q_prompt_len + random.randint(0, max_kv_prompt_len-q_prompt_len))//16) 
+                              for q_prompt_len,_ in zip(q_prompt_lens,range(batch_size))]
 
     actual_max_q_prompt_len = max(q_prompt_lens)
     actual_max_kv_prompt_len = max(kv_prompt_lens)
@@ -547,7 +550,7 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
 
     prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,key,value,prefill_q_prompt_lens,kv_prompt_lens)
 
-    prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
+    prefill_packed_actual_output=attn.forward(prefill_packed_query.contiguous(),prefill_packed_key.contiguous(),prefill_packed_value.contiguous(),kv_cache,prefill_attn_metadata,scale)
 
     # eval correctness of prefill output
     assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
