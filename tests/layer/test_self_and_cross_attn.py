@@ -27,7 +27,7 @@ HEAD_SIZES = [64]
 
 NUM_HEADS = [1]
 
-BATCH_SIZES = [16]
+BATCH_SIZES = [1]
 BLOCK_SIZES = [16]
 #KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 BACKEND_NAMES = ["xformers"]
@@ -77,17 +77,17 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_a
     actual_max_q_prompt_len = max(q_prompt_lens)
     actual_max_kv_prompt_len = max(kv_prompt_lens)
 
-    query=torch.rand((batch_size,max_q_prompt_len,head_size))
-    key=torch.rand((batch_size,max_kv_prompt_len,head_size))
-    value=torch.rand((batch_size,max_kv_prompt_len,head_size))
+    query=torch.rand((batch_size,max_q_prompt_len,head_size)).cuda()
+    key=torch.rand((batch_size,max_kv_prompt_len,head_size)).cuda()
+    value=torch.rand((batch_size,max_kv_prompt_len,head_size)).cuda()
 
-    prefill_query=torch.zeros((batch_size,max_q_prompt_len-1,head_size))
-    prefill_key=torch.zeros((batch_size,max_kv_prompt_len-1,head_size))
-    prefill_value=torch.zeros((batch_size,max_kv_prompt_len-1,head_size))
+    prefill_query=torch.zeros((batch_size,max_q_prompt_len-1,head_size)).cuda()
+    prefill_key=torch.zeros((batch_size,max_kv_prompt_len-1,head_size)).cuda()
+    prefill_value=torch.zeros((batch_size,max_kv_prompt_len-1,head_size)).cuda()
 
-    decode_query=torch.zeros((batch_size,1,head_size))
-    decode_key=torch.zeros((batch_size,1,head_size))
-    decode_value=torch.zeros((batch_size,1,head_size))
+    decode_query=torch.zeros((batch_size,1,head_size)).cuda()
+    decode_key=torch.zeros((batch_size,1,head_size)).cuda()
+    decode_value=torch.zeros((batch_size,1,head_size)).cuda()
 
     for bdx,(q_prompt_len,kv_prompt_len) in enumerate(zip(q_prompt_lens,kv_prompt_lens)):
         query[bdx,q_prompt_len:,:] = 0
@@ -432,7 +432,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     decode_q_prompt_lens, \
     decode_kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
 
-    causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len)
+    causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len).cuda()
     ideal_output = ref_masked_attention(
         query,
         key,
