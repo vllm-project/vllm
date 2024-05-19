@@ -226,7 +226,9 @@ class Worker(WorkerBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[Union[SamplerOutput, PoolerOutput]]:
-        assert self.is_driver_worker
+        if not self.is_driver_worker:
+            self._execute_model_non_driver()
+            return []
 
         if execute_model_req is None:
             # No data to run, notify other workers with an empty dict
@@ -278,22 +280,31 @@ class Worker(WorkerBase):
         You can stop the loop by executing a driver worker with an empty output.
         See `stop_remote_worker_execution_loop` for more details.
         """
+        while self._execute_model_non_driver():
+            pass
+
+    def _execute_model_non_driver(self) -> bool:
+        """Execute model in parallel worker.
+
+        Returns True iff there are remaining sequences to process.
+        """
         assert not self.is_driver_worker
-        # No data => stop execution loop
-        while data := broadcast_tensor_dict(src=0):
-            num_seq_groups = data.get("num_seq_groups", 0)
-            blocks_to_swap_in = data.get("blocks_to_swap_in")
-            blocks_to_swap_out = data.get("blocks_to_swap_out")
-            blocks_to_copy = data.get("blocks_to_copy")
+        data = broadcast_tensor_dict(src=0)
+        if not data:
+            return False
 
-            self.cache_swap(blocks_to_swap_in, blocks_to_swap_out,
-                            blocks_to_copy)
+        num_seq_groups = data.get("num_seq_groups", 0)
+        blocks_to_swap_in = data.get("blocks_to_swap_in")
+        blocks_to_swap_out = data.get("blocks_to_swap_out")
+        blocks_to_copy = data.get("blocks_to_copy")
+        self.cache_swap(blocks_to_swap_in, blocks_to_swap_out, blocks_to_copy)
 
-            # If there is no input, we don't need to execute the model.
-            if num_seq_groups == 0:
-                return
+        # If there is no input, we don't need to execute the model.
+        if num_seq_groups == 0:
+            return False
 
-            self.model_runner.execute_model(None, self.gpu_cache)
+        self.model_runner.execute_model(None, self.gpu_cache)
+        return True
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
