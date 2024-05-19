@@ -26,7 +26,7 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0,
-                                          max_tokens=32,
+                                          max_tokens=64,
                                           stop="### End")
     outputs = llm.generate(
         prompts,
