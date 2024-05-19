@@ -154,6 +154,11 @@ def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
+@pytest.fixture(scope="session")
+def phi2_lora_files():
+    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+
+
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings() -> nn.Module:
     cleanup()
