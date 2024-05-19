@@ -150,7 +150,7 @@ class CustomAllreduce:
         physical_device_ids = [t.item() for t in gather_list]
 
         # 3 nodes will be like [0,1,2,3,0,1,0,1]
-        if physical_device_ids[-1] + 1 != world_size:
+        if sorted(physical_device_ids)[-1] + 1 != world_size:
             logger.warning(
                 "Custom allreduce is disabled because this feature is "
                 "not intended for multi node use case.")
