@@ -327,6 +327,8 @@ class FlashAttentionImpl(AttentionImpl):
                 output[:num_prefill_tokens] = out
             else:
                 # prefix-enabled attention
+                assert prefill_meta.seq_lens is not None
+                max_seq_len = max(prefill_meta.seq_lens)
                 output[:num_prefill_tokens] = flash_attn_varlen_func(
                     q=query,
                     k=key_cache,
@@ -334,7 +336,7 @@ class FlashAttentionImpl(AttentionImpl):
                     cu_seqlens_q=prefill_meta.query_start_loc,
                     max_seqlen_q=prefill_meta.max_query_len,
                     cu_seqlens_k=prefill_meta.seq_start_loc,
-                    max_seqlen_k=max(prefill_meta.seq_lens),
+                    max_seqlen_k=max_seq_len,
                     softmax_scale=self.scale,
                     causal=True,
                     alibi_slopes=self.alibi_slopes,
