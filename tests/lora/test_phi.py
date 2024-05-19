@@ -25,7 +25,9 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
             "CREATE TABLE arctic_weather (id INT, date DATE, temperature FLOAT, species VARCHAR(50));"  # noqa: E501
         ),
     ]
-    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32, stop="### End")
+    sampling_params = vllm.SamplingParams(temperature=0,
+                                          max_tokens=32,
+                                          stop="### End")
     outputs = llm.generate(
         prompts,
         sampling_params,
