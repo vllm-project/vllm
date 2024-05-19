@@ -176,6 +176,11 @@ class LlamaAttention(nn.Module):
             output, _ = self.o_proj(attn_output)
             return output
 
+        # key cache shape: [num_blocks, num_heads, head_size/x, block_size, x]
+        if kv_cache is not None:
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_dim)
+        
         # what if metadata has both prefill and decode?
         if attn_metadata.prefill_metadata is not None:
             # for prefill, storing original keys happens in xformers.py
@@ -183,15 +188,26 @@ class LlamaAttention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                     self.kv_scale, k_original)
+            
+            if kv_cache is not None:
+                k_original = k_original.view(-1, self.num_kv_heads, self.head_dim)
+                v = v.view(-1, self.num_kv_heads, self.head_dim)
+                PagedAttention.write_to_paged_cache(
+                    k_original,
+                    v,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    attn_metadata.kv_cache_dtype,
+                    self.kv_scale
+                )
+
             output, _ = self.o_proj(attn_output)
             return output
 
         elif attn_metadata.decode_metadata is not None:
             k_original = k.clone()
             device = positions.device
-            
-            # key cache reshape: [num_blocks, num_heads, head_size/x, block_size, x]
-            key_cache, _ = PagedAttention.split_kv_cache(kv_cache, self.num_kv_heads, self.head_dim)
             block_size = key_cache.shape[-2]
 
             original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
@@ -310,6 +326,18 @@ class LlamaAttention(nn.Module):
                 full_past_keys, rem_past_keys = original_keys[i]
                 key_cache.index_put_((phys_bnums,), full_past_keys)
                 key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys
+            
+            k_original = k_original.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            PagedAttention.write_to_paged_cache(
+                k_original,
+                v,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata.kv_cache_dtype,
+                self.kv_scale
+            )
             
             # revert block_tables and context_lens inside metadata
             # so that next attn layer starts with same fields

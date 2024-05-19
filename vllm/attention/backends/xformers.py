@@ -173,7 +173,6 @@ class XFormersImpl(AttentionImpl):
         kv_cache: Optional[torch.Tensor],
         attn_metadata: AttentionMetadata[XFormersMetadata],
         kv_scale: float,
-        key_original: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -190,9 +189,6 @@ class XFormersImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        
-        use_attn_sinks = True
-        value_copy = value.clone() if use_attn_sinks else None
 
         if kv_cache is not None:
             key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -233,19 +229,6 @@ class XFormersImpl(AttentionImpl):
                     query, key, value, prefill_meta)
                 assert out.shape == output[:num_prefill_tokens].shape
                 output[:num_prefill_tokens] = out
-
-                # in prefill, rewrite all keys with original
-                if use_attn_sinks and kv_cache is not None and key_original is not None:
-                    key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
-                    PagedAttention.write_to_paged_cache(
-                        key_original,
-                        value,
-                        key_cache,
-                        value_cache,
-                        attn_metadata.slot_mapping,
-                        attn_metadata.kv_cache_dtype,
-                        kv_scale
-                    )
             else:
                 # prefix-enabled attention
                 # TODO(Hai) this triton kernel has regression issue (broke) to
@@ -281,19 +264,6 @@ class XFormersImpl(AttentionImpl):
                 self.alibi_slopes,
                 kv_scale,
             )
-
-            # attention sinks: revert cur key in cache to pre-rotated state
-            if use_attn_sinks and kv_cache is not None:
-                key_original = key_original.view(-1, self.num_kv_heads, self.head_size)
-                PagedAttention.write_to_paged_cache(
-                    key_original,
-                    value_copy,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    attn_metadata.kv_cache_dtype,
-                    kv_scale
-                )
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
