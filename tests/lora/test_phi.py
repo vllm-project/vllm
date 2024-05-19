@@ -51,9 +51,9 @@ def test_phi2_lora(phi2_lora_files):
                    max_loras=4)
 
     expected_lora_output = [
-        " SELECT catalog_publisher, COUNT(*) as count FROM catalogs GROUP BY catalog_publisher ORDER BY count DESC;"  # noqa: E501
-        " SELECT t.id FROM trip t JOIN station s ON t.start_station_id = s.id WHERE s.dock_count = (SELECT MAX(dock_count) FROM station);"  # noqa: E501
-        " SELECT species, MAX(temperature) AS max_temperature FROM arctic_weather WHERE YEAR(date) = 2020 GROUP BY species;",  # noqa: E501
+        " SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;"  # noqa: E501
+        " SELECT trip.id FROM trip JOIN station ON trip.start_station_id = station.id WHERE station.dock_count = (SELECT MAX(dock_count) FROM station);"  # noqa: E501
+        " SELECT species, MAX(temperature) as max_temperature, EXTRACT(MONTH FROM date) as month FROM arctic_weather WHERE EXTRACT(YEAR FROM date) = 2020 GROUP BY species, month;",  # noqa: E501
     ]
 
     output1 = do_sample(llm, phi2_lora_files, lora_id=1)
