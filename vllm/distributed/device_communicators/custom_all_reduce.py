@@ -138,10 +138,27 @@ class CustomAllreduce:
         else:
             device_ids = list(range(torch.cuda.device_count()))
 
+        if len(device_ids) < world_size:
+            logger.warning(
+                "Custom allreduce is disabled because this feature is "
+                "not intended for multi node use case.")
+            return
+
+        physical_device_id = device_ids[device.index]
+        tensor = torch.tensor([physical_device_id],
+                              dtype=torch.int,
+                              device="cpu")
+        gather_list = [
+            torch.tensor([0], dtype=torch.int, device="cpu")
+            for _ in range(world_size)
+        ]
+        dist.all_gather(gather_list, tensor, group=self.group)
+        physical_device_ids = [t.item() for t in gather_list]
+
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = _is_full_nvlink(device_ids)
+        full_nvlink = _is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
