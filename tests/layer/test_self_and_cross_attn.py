@@ -25,7 +25,7 @@ HEAD_SIZES = [64]
 
 NUM_HEADS = [1]
 
-BATCH_SIZES = [2]
+BATCH_SIZES = [16]
 BLOCK_SIZES = [16]
 #KV_CACHE_DTYPE = ["auto", "fp8_e5m2"]
 BACKEND_NAMES = ["xformers"]
@@ -89,7 +89,7 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_a
     if force_max_len:
         q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
     else:
-        q_prompt_lens = [random.randint(3, max_q_prompt_len) for _ in range(batch_size)]
+        q_prompt_lens = [random.randint(2, max_q_prompt_len) for _ in range(batch_size)]
     kv_prompt_lens = None
     if not is_cross_attn:
         # K,V prompt lens match Q for self-attention
@@ -99,8 +99,7 @@ def make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size, is_cross_a
         if force_max_len:
             kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
         else:
-            kv_prompt_lens = [min(q_prompt_len-1,max_kv_prompt_len) 
-                              for q_prompt_len in q_prompt_lens]
+            kv_prompt_lens = [random.randint(2, max_kv_prompt_len) for _ in range(batch_size)]
 
     actual_max_q_prompt_len = max(q_prompt_lens)
     actual_max_kv_prompt_len = max(kv_prompt_lens)
@@ -420,7 +419,6 @@ def make_attention(num_heads: int, head_size: int, scale: float):
                      head_size,
                      scale=scale,)
 
-#@pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
@@ -486,18 +484,6 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     prefill_packed_query,prefill_packed_key,prefill_packed_value,_,_ = pack_qkv(prefill_query,prefill_key,prefill_value,prefill_q_prompt_lens,prefill_kv_prompt_lens)
 
     prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
-
-    # attn_bias = BlockDiagonalCausalMask.from_seqlens(prefill_q_prompt_lens)
-    # xops_out = xops.memory_efficient_attention_forward(
-    #     prefill_packed_query.unsqueeze(0),
-    #     prefill_packed_key.unsqueeze(0),
-    #     prefill_packed_value.unsqueeze(0),
-    #     attn_bias=attn_bias,
-    #     p=0.0,
-    #     scale=scale)
-    # xops_out=xops_out.view_as(prefill_packed_query)
-
-    # assert torch.allclose(xops_out,prefill_packed_ideal_output[:,0,:])
 
     # eval correctness of prefill output
     assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
