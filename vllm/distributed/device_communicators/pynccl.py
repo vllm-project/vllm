@@ -96,8 +96,10 @@ class PyNcclCommunicator:
             self.stream = torch.cuda.Stream()
 
             # A small all_reduce for warmup.
-            self.all_reduce(torch.zeros(1, device=device))
+            data = torch.zeros(1, device=device)
+            self.all_reduce(data)
             self.stream.synchronize()
+            del data
 
         # by default it is disabled, e.g. in profiling models and prefill phase.
         # to use it, use under `with obj.change_state(enable=True)`, usually

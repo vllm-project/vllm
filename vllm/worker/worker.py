@@ -8,12 +8,11 @@ import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
-                              init_distributed_environment)
-from vllm.distributed.device_communicators.custom_all_reduce import (
-    init_custom_ar)
+                              init_distributed_environment,
+                              set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
@@ -44,6 +43,7 @@ class Worker(WorkerBase):
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        speculative_config: Optional[SpeculativeConfig] = None,
         is_driver_worker: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -119,6 +119,18 @@ class Worker(WorkerBase):
 
     def load_model(self):
         self.model_runner.load_model()
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        self.model_runner.save_sharded_state(
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
 
     @torch.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -302,15 +314,13 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
-
-    # Initialize a custom fast all-reduce implementation.
-    if not parallel_config.disable_custom_all_reduce:
-        init_custom_ar()
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

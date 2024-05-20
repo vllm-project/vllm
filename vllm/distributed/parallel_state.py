@@ -13,10 +13,13 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_ENABLE_CUSTOM_ALL_REDUCE = True
+
 # Tensor model parallel group that the current rank belongs to.
 _TP_DEVICE_GROUP: Optional[ProcessGroup] = None
 _TP_CPU_GROUP: Optional[ProcessGroup] = None
 _TP_PYNCCL_COMMUNICATOR = None
+_TP_CA_COMMUNICATOR = None
 # Pipeline model parallel group that the current rank belongs to.
 _PP_DEVICE_GROUP: Optional[ProcessGroup] = None
 
@@ -47,9 +50,19 @@ _PP_GLOBAL_RANKS: Optional[List[int]] = None
 _LOCAL_RANK = -1
 
 
+def set_custom_all_reduce(enable: bool):
+    global _ENABLE_CUSTOM_ALL_REDUCE
+    _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
 def get_tp_pynccl_communicator():
     global _TP_PYNCCL_COMMUNICATOR
     return _TP_PYNCCL_COMMUNICATOR
+
+
+def get_tp_ca_communicator():
+    global _TP_CA_COMMUNICATOR
+    return _TP_CA_COMMUNICATOR
 
 
 def get_local_rank():
@@ -100,6 +113,9 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             data = data.to(device=f"cuda:{local_rank}")
         torch.distributed.all_reduce(data)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        del data
 
 
 def initialize_model_parallel(
@@ -149,7 +165,8 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_DEVICE_GROUP, _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR
+    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
+    global _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
     assert _TP_DEVICE_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
@@ -167,6 +184,15 @@ def initialize_model_parallel(
         group=_TP_CPU_GROUP,
         device=_LOCAL_RANK,
     )
+
+    # Initialize a custom fast all-reduce implementation.
+    if _ENABLE_CUSTOM_ALL_REDUCE:
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
+        _TP_CA_COMMUNICATOR = CustomAllreduce(
+            group=_TP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
     # Build the pipeline model-parallel groups.
     global _PP_DEVICE_GROUP
