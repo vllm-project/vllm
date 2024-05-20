@@ -3,7 +3,6 @@ from typing import Optional, List, Iterable, Tuple
 import torch.nn as nn
 import torch
 import math
-from fms_extras.models.hf.modeling_mlp_speculator import MLPSpeculatorConfig
 from vllm.attention import AttentionMetadata
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import Sampler
@@ -50,7 +49,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
 class MLPSpeculator(nn.Module):
     def __init__(
         self,
-        config: MLPSpeculatorConfig,
+        config,
     ) -> None:
         super().__init__()
         self.n_predict = config.n_predict
