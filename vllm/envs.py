@@ -98,8 +98,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
     # used in distributed environment to manually set the communication port
+    # '0' is used to make mypy happy
     'VLLM_PORT':
-    lambda: int(os.getenv('VLLM_PORT')) if 'VLLM_PORT' in os.environ else None,
+    lambda: int(os.getenv('VLLM_PORT', '0'))
+    if 'VLLM_PORT' in os.environ else None,
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
