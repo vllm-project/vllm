@@ -99,6 +99,7 @@ vLLM is a community project. Our compute resources for development and testing a
 - Anyscale
 - AWS
 - Crusoe Cloud
+- Databricks
 - DeepInfra
 - Lambda Lab
 - NVIDIA
