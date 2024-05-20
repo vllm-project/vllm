@@ -401,9 +401,10 @@ class VllmRunner:
         if multi_modal_data_list is not None:
             assert len(prompts) == len(multi_modal_data_list)
 
-        req_outputs = self.model.generate(prompts,
-                                          sampling_params=sampling_params,
-                                          multi_modal_data_list=multi_modal_data_list)
+        req_outputs = self.model.generate(
+            prompts,
+            sampling_params=sampling_params,
+            multi_modal_data_list=multi_modal_data_list)
 
         outputs = []
         for req_output in req_outputs:

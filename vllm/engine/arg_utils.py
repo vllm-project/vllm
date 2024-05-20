@@ -142,7 +142,7 @@ class EngineArgs:
             action='store_true',
             help='Disables the use of image processor, even if one is defined '
             'for the model on huggingface.')
-        
+
         return parser
 
     @staticmethod
@@ -658,10 +658,11 @@ class EngineArgs:
                 self.image_processor = self.model
             if self.disable_image_processor:
                 if self.image_processor != self.model:
-                    warnings.warn("You've specified an image processor "
-                                  f"({self.image_processor}) but also disabled "
-                                  "it via `--disable-image-processor`.",
-                                  stacklevel=2)
+                    warnings.warn(
+                        "You've specified an image processor "
+                        f"({self.image_processor}) but also disabled "
+                        "it via `--disable-image-processor`.",
+                        stacklevel=2)
 
                 self.image_processor = None
 

@@ -103,10 +103,9 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
         hf_outputs = [None] * len(hf_image_prompts)
     else:
         _, _, h, w = vision_language_config.image_input_shape
-        hf_outputs = hf_model.generate_greedy(
-            hf_image_prompts,
-            max_tokens,
-            images=hf_images)
+        hf_outputs = hf_model.generate_greedy(hf_image_prompts,
+                                              max_tokens,
+                                              images=hf_images)
     del hf_model
 
     vllm_model = vllm_runner(model_id,
@@ -114,9 +113,8 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                              worker_use_ray=worker_use_ray,
                              enforce_eager=True,
                              **as_dict(vision_language_config))
-    vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
-                                              max_tokens,
-                                              multi_modal_data_list=vllm_images)
+    vllm_outputs = vllm_model.generate_greedy(
+        vllm_image_prompts, max_tokens, multi_modal_data_list=vllm_images)
     del vllm_model
 
     gc.collect()
