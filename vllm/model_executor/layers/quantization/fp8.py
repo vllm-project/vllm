@@ -272,18 +272,18 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
         # Initialize the KV cache scale to 1.0 as the default value.
         # If the kv_scale appears in the checkpoint, it will be
         # overwritten when loading weights.
-        layer.kv_scale = Parameter(torch.ones(1, dtype=torch.float32),
-                                   requires_grad=False)
+        layer.kv_scale = Parameter(torch.tensor(1.0), requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        kv_scales = layer.kv_scale.to("cpu").tolist()
-        if len(kv_scales) > 1:
+        kv_scale = layer.kv_scale.to("cpu").tolist()
+        del layer.kv_scale
+        if not isinstance(kv_scale, float):
             raise ValueError("Only support per-tensor scaling factor "
                              "for fp8 KV cache")
-        layer._kv_scale = kv_scales[0]
+        layer._kv_scale = 1.0  # kv_scale
         if layer._kv_scale == 1.0:
             print_warning_once(
                 "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
