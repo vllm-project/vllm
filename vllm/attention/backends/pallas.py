@@ -134,6 +134,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         else:
             # Decoding run.
             assert kv_cache is not None
+            # FIXME(woosuk): megacore must be None for TPUv5e.
+            if self.num_kv_heads % 2 == 0:
+                megacore_mode = "kv_head"
+            elif batch_size % 2 == 0:
+                megacore_mode = "batch"
+            else:
+                megacore_mode = None
             output = torch.ops.xla.paged_attention(
                 query.squeeze(dim=1),
                 key_cache,
@@ -141,8 +148,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 attn_metadata.context_lens,
                 attn_metadata.block_tables,
                 16,  # pages_per_compute_block. TODO(woosuk): Tune this value.
-                megacore_mode=
-                "kv_head",  # FIXME(woosuk): Must be None for TPUv5e.
+                megacore_mode=megacore_mode,
             )
 
         # Reshape the output tensor.
