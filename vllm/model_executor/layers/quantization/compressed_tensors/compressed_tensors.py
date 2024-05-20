@@ -42,7 +42,6 @@ class CompressedTensorsConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
         layer_quant_details: Dict[str, Any] = dict()
-        config = config["compression_config"]["quantization_config"]
         ignore: List[str] = config.get("ignore", None)
 
         for key, quant_config in config["config_groups"].items():
@@ -58,7 +57,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return ["config.json"]
+        return []
 
     def _get_schema(self, weight_quant: Dict, input_quant: Dict):
         # TODO: Refactor as additional cases are supported

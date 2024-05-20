@@ -120,6 +120,13 @@ def get_quant_config(model_config: ModelConfig,
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
+    if hf_quant_config is None:
+        compression_config = getattr(model_config.hf_config,
+                                     "compression_config", None)
+        if compression_config is not None:
+            hf_quant_config = compression_config.get("quantization_config",
+                                                     None)
+
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
     model_name_or_path = model_config.model
@@ -148,7 +155,7 @@ def get_quant_config(model_config: ModelConfig,
 
     quant_config_files = [
         f for f in config_files if any(
-            f.split("/")[-1] == x for x in possible_config_filenames)
+            f.endswith(x) for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
         raise ValueError(
