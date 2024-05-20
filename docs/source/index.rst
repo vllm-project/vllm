@@ -107,15 +107,16 @@ Documentation
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Developer Documentation
 
    dev/engine/engine_index
    dev/kernel/paged_attention
+   dev/multimodal/multimodal_index
    dev/dockerfile/dockerfile
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Community
 
    community/meetups

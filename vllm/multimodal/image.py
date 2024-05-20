@@ -33,7 +33,7 @@ def _get_values(vlm_config: VisionLanguageConfig):
 def get_dummy_image_data(seq_len: int, model_config: ModelConfig,
                          vlm_config: VisionLanguageConfig):
     """Standard dummy data factory for image data (to be used in
-    :meth:`vlm.multimodal.registry.MultiModalRegistry.register_dummy_data)."""
+    :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
     seq_data = _get_seq_data(seq_len, vlm_config)
     values = _get_values(vlm_config)
 
