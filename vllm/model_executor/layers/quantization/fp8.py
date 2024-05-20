@@ -272,10 +272,6 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
         # Initialize the KV cache scale to 1.0 as the default value.
         # If the kv_scale appears in the checkpoint, it will be
         # overwritten when loading weights.
-        # The scaling factor convention we are assuming is
-        # quantized_value * scaling_factor ~= true_value
-        # which is consistent with the practice of setting
-        # scaling_factor = tensor_amax / FPtype_max
         layer.kv_scale = Parameter(torch.ones(1, dtype=torch.float32),
                                    requires_grad=False)
 
