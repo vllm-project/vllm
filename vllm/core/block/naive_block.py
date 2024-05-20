@@ -1,4 +1,4 @@
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -133,9 +133,11 @@ class NaiveBlockAllocator(BlockAllocator):
 
         return forked_blocks
 
-    def get_num_free_blocks(self, device: Optional[Device] = None) -> int:
-        assert device is None
+    def get_num_free_blocks(self) -> int:
         return len(self._free_block_indices)
+
+    def get_num_total_blocks(self) -> int:
+        return len(self._all_block_indices)
 
     def _allocate_new_block_id(self) -> BlockId:
         if not self._free_block_indices:
@@ -173,12 +175,12 @@ class NaiveBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
+    def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockId, List[BlockId]]: A dictionary mapping source
-                block indices to lists of destination block indices.
+            List[Tuple[BlockId, BlockId]]: A list mapping source
+                block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()
 

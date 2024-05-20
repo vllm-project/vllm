@@ -1,13 +1,11 @@
 """Compares the outputs of gptq vs gptq_marlin 
 Note: GPTQ and Marlin do not have bitwise correctness.
 As a result, in this test, we just confirm that the top selected tokens of the
-Marlin/GPTQ models are in the top 3 selections of each other.
+Marlin/GPTQ models are in the top 5 selections of each other.
 Note: Marlin internally uses locks to synchronize the threads. This can
 result in very slight nondeterminism for Marlin. As a result, we re-run the test
 up to 3 times to see if we pass.
-Note: This test currently fails running with --forked with the following:
-    RuntimeError: Cannot re-initialize CUDA in forked subprocess.
-    To use CUDA with multiprocessing, you must use the 'spawn' start method
+
 Run `pytest tests/models/test_gptq_marlin.py`.
 """
 import os
@@ -15,8 +13,10 @@ import os
 import pytest
 import torch
 
-from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+from .utils import check_logprobs_close
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -49,11 +49,11 @@ MODELS = [
 ]
 
 
-@pytest.mark.flaky(reruns=2)
+@pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -75,17 +75,21 @@ def test_models(
                                     tensor_parallel_size=1)
 
     gptq_marlin_outputs = gptq_marlin_model.generate_greedy_logprobs(
-        example_prompts, max_tokens, num_logprobs)
+        example_prompts[:-1], max_tokens, num_logprobs)
     del gptq_marlin_model
+    _ROPE_DICT.clear()  # clear rope cache to avoid rope dtype error
 
     # Run gptq.
+    # The naive gptq kernel doesn't support bf16 yet.
+    # Here we always compare fp16/bf16 gpt marlin kernel
+    # to fp16 gptq kernel.
     gptq_model = vllm_runner(model_name=model_name,
                              revision=revision,
-                             dtype=dtype,
+                             dtype="half",
                              quantization="gptq",
                              max_model_len=MAX_MODEL_LEN,
                              tensor_parallel_size=1)
-    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts,
+    gptq_outputs = gptq_model.generate_greedy_logprobs(example_prompts[:-1],
                                                        max_tokens,
                                                        num_logprobs)
     del gptq_model

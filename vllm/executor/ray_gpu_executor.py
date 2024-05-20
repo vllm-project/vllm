@@ -10,7 +10,7 @@ from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.ray_utils import RayWorkerWrapper, ray
 from vllm.logger import init_logger
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         get_vllm_instance_id, make_async)
 
@@ -28,10 +28,7 @@ USE_RAY_COMPILED_DAG = envs.VLLM_USE_RAY_COMPILED_DAG
 class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_executor(self) -> None:
-        assert (not self.speculative_config
-                ), "Speculative decoding not yet supported for RayGPU backend."
-
-        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.distributed_executor_backend == "ray"
         placement_group = self.parallel_config.placement_group
 
         # Disable Ray usage stats collection.
@@ -90,14 +87,22 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 placement_group_capture_child_tasks=True,
                 placement_group_bundle_index=bundle_id,
             )
+
+            if self.speculative_config is not None:
+                worker_module_name = "vllm.spec_decode.spec_decode_worker"
+                worker_class_name = "create_spec_worker"
+            else:
+                worker_module_name = "vllm.worker.worker"
+                worker_class_name = "Worker"
+
             worker = ray.remote(
                 num_cpus=0,
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
             )(RayWorkerWrapper).remote(
-                worker_module_name="vllm.worker.worker",
-                worker_class_name="Worker",
+                worker_module_name=worker_module_name,
+                worker_class_name=worker_class_name,
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
@@ -107,8 +112,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 # as the resource holder for the driver process.
                 self.driver_dummy_worker = worker
                 self.driver_worker = RayWorkerWrapper(
-                    worker_module_name="vllm.worker.worker",
-                    worker_class_name="Worker",
+                    worker_module_name=worker_module_name,
+                    worker_class_name=worker_class_name,
                     trust_remote_code=self.model_config.trust_remote_code,
                 )
             else:
@@ -166,21 +171,12 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_concurrent_workers=self.parallel_config.
                           max_parallel_loading_workers)
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]],
-                      num_lookahead_slots: int = 0) -> List[SamplerOutput]:
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
         all_outputs = self._run_workers(
             "execute_model",
-            driver_kwargs={
-                "seq_group_metadata_list": seq_group_metadata_list,
-                "blocks_to_swap_in": blocks_to_swap_in,
-                "blocks_to_swap_out": blocks_to_swap_out,
-                "blocks_to_copy": blocks_to_copy,
-                "num_lookahead_slots": num_lookahead_slots,
-            },
+            driver_kwargs={"execute_model_req": execute_model_req},
             use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
 
         # Only the driver worker returns the sampling results.
@@ -273,7 +269,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                              f"required, but found {current_version}")
 
         from ray.dag import InputNode, MultiOutputNode
-        assert self.parallel_config.worker_use_ray
+        assert self.parallel_config.distributed_executor_backend == "ray"
 
         # Right now, compiled DAG requires at least 1 arg. We send
         # a dummy value for now. It will be fixed soon.

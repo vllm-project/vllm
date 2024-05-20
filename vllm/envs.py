@@ -27,8 +27,71 @@ if TYPE_CHECKING:
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: str = "spawn"
+    VLLM_TARGET_DEVICE: str = "cuda"
+    MAX_JOBS: Optional[str] = None
+    NVCC_THREADS: Optional[str] = None
+    VLLM_BUILD_WITH_NEURON: bool = False
+    VLLM_USE_PRECOMPILED: bool = False
+    VLLM_INSTALL_PUNICA_KERNELS: bool = False
+    CMAKE_BUILD_TYPE: Optional[str] = None
+    VERBOSE: bool = False
+
+# The begin-* and end* here are used by the documentation generator
+# to extract the used env vars.
+
+# begin-env-vars-definition
 
 environment_variables: Dict[str, Callable[[], Any]] = {
+
+    # ================== Installation Time Env Vars ==================
+
+    # Target device of vLLM, supporting [cuda (by default), rocm, neuron, cpu]
+    "VLLM_TARGET_DEVICE":
+    lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda"),
+
+    # Maximum number of compilation jobs to run in parallel.
+    # By default this is the number of CPUs
+    "MAX_JOBS":
+    lambda: os.getenv("MAX_JOBS", None),
+
+    # Number of threads to use for nvcc
+    # By default this is 1.
+    # If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
+    "NVCC_THREADS":
+    lambda: os.getenv("NVCC_THREADS", None),
+
+    # If set, vllm will build with Neuron support
+    "VLLM_BUILD_WITH_NEURON":
+    lambda: bool(os.environ.get("VLLM_BUILD_WITH_NEURON", False)),
+
+    # If set, vllm will use precompiled binaries (*.so)
+    "VLLM_USE_PRECOMPILED":
+    lambda: bool(os.environ.get("VLLM_USE_PRECOMPILED")),
+
+    # If set, vllm will install Punica kernels
+    "VLLM_INSTALL_PUNICA_KERNELS":
+    lambda: bool(int(os.getenv("VLLM_INSTALL_PUNICA_KERNELS", "0"))),
+
+    # CMake build type
+    # If not set, defaults to "Debug" or "RelWithDebInfo"
+    # Available options: "Debug", "Release", "RelWithDebInfo"
+    "CMAKE_BUILD_TYPE":
+    lambda: os.getenv("CMAKE_BUILD_TYPE"),
+
+    # If set, vllm will print verbose logs during installation
+    "VERBOSE":
+    lambda: bool(int(os.getenv('VERBOSE', '0'))),
+
+    # Root directory for VLLM configuration files
+    # Note that this not only affects how vllm finds its configuration files
+    # during runtime, but also affects how vllm installs its configuration
+    # files during **installation**.
+    "VLLM_CONFIG_ROOT":
+    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
+        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
+
+    # ================== Runtime Env Vars ==================
+
     # used in distributed environment to determine the master address
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
@@ -82,19 +145,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
-    lambda: os.environ.get("S3_ACCESS_KEY", None),
+    lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY":
     lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
     "S3_ENDPOINT_URL":
     lambda: os.environ.get("S3_ENDPOINT_URL", None),
-
-    # Root directory for VLLM configuration files
-    # Note that this not only affects how vllm finds its configuration files
-    # during runtime, but also affects how vllm installs its configuration
-    # files during **installation**.
-    "VLLM_CONFIG_ROOT":
-    lambda: os.environ.get("VLLM_CONFIG_ROOT", None) or os.getenv(
-        "XDG_CONFIG_HOME", None) or os.path.expanduser("~/.config"),
 
     # Usage stats collection
     "VLLM_USAGE_STATS_SERVER":
@@ -147,6 +202,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_WORKER_MULTIPROC_METHOD":
     lambda: os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn"),
 }
+
+# end-env-vars-definition
 
 
 def __getattr__(name):
