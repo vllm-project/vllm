@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
-    VLLM_PORT: str = ""
+    VLLM_PORT: Optional[int] = None
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
@@ -99,7 +99,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # used in distributed environment to manually set the communication port
     'VLLM_PORT':
-    lambda: os.getenv('VLLM_PORT', ""),
+    lambda: int(os.getenv('VLLM_PORT')) if 'VLLM_PORT' in os.environ else None,
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
