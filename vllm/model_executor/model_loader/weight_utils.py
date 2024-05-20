@@ -148,7 +148,7 @@ def get_quant_config(model_config: ModelConfig,
 
     quant_config_files = [
         f for f in config_files if any(
-            f.endswith(x) for x in possible_config_filenames)
+            f.split("/")[-1] == x for x in possible_config_filenames)
     ]
     if len(quant_config_files) == 0:
         raise ValueError(
