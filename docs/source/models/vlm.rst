@@ -5,40 +5,16 @@ Using VLMs
 
 This document shows you how to run and serve Vision Language Models (VLMs) using vLLM.
 
-Additional Engine Arguments
----------------------------
+Engine Arguments
+----------------
 
-Apart from the :ref:`basic engine arguments <engine_args>`, VLMs additionally require the following engine arguments for vLLM.
+The following :ref:`engine arguments <engine_args>` are specific to VLMs:
 
-.. option:: --image-input-type {pixel_values,image_features}
-
-    The image input type passed into vLLM. Should be one of "pixel_values" or "image_features".
-
-.. option:: --image-token-id <id>
-
-    Input ID for image token.
-
-.. option:: --image-input-shape <tuple>
-
-    The biggest image input shape (worst for memory footprint) given an input type. Only used for vLLM's profile_run.
-
-    For example, if the image tensor has shape :code:`(1, 3, 336, 336)`, then you should pass :code:`--image-input-shape 1,3,336,336`.
-
-.. option:: --image-feature-size <size>
-
-    The image feature size along the context dimension.
-
-.. option:: --image-processor <size>
-
-    Name or path of the huggingface image processor to use.
-
-.. option:: --image-processor-revision <revision>
-
-    The specific image processor version to use. It can be a branch name, a tag name, or a commit id. If unspecified, will use the default version.
-
-.. option:: --no-image-processor
-
-    Disables the use of image processor, even if one is defined for the model on huggingface.
+.. argparse::
+    :module: vllm.engine.arg_utils
+    :func: _vlm_engine_args_parser
+    :prog: -m vllm.entrypoints.openai.api_server
+    :nodefaultconst:
 
 Offline Batched Inference
 -------------------------
