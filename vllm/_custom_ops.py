@@ -244,7 +244,7 @@ def scaled_fp8_quant(
     else:
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        scale = torch.empty((1, 1), device=input.device, dtype=torch.float32)
         vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         vllm_ops.static_scaled_fp8_quant(output, input, scale)
