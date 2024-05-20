@@ -420,8 +420,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 value,
                 attn_bias=attn_metadata.attn_bias[0],
                 p=0.0,
-                scale=self.scale,
-                op=xops.MemoryEfficientAttentionOp())
+                scale=self.scale)
             return out.view_as(original_query)
 
         # Attention with alibi slopes.
