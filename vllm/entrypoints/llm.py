@@ -29,8 +29,10 @@ class LLM:
     mechanism and efficient memory management.
 
     NOTE: This class is intended to be used for offline inference. For online
-    serving, use the `AsyncLLMEngine` class instead.
-    NOTE: For the comprehensive list of arguments, see `EngineArgs`.
+    serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
+
+    NOTE: For the comprehensive list of arguments, see
+    :class:`~vllm.EngineArgs`.
 
     Args:
         model: The name or path of a HuggingFace Transformers model.

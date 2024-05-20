@@ -291,15 +291,15 @@ class _AsyncLLMEngine(LLMEngine):
 
 
 class AsyncLLMEngine:
-    """An asynchronous wrapper for LLMEngine.
+    """An asynchronous wrapper for :class:`LLMEngine`.
 
-    This class is used to wrap the LLMEngine class to make it asynchronous. It
-    uses asyncio to create a background loop that keeps processing incoming
-    requests. The LLMEngine is kicked by the generate method when there
-    are requests in the waiting queue. The generate method yields the outputs
-    from the LLMEngine to the caller.
+    This class is used to wrap the :class:`LLMEngine` class to make it
+    asynchronous. It uses asyncio to create a background loop that keeps
+    processing incoming requests. The :class:`LLMEngine` is kicked by the
+    generate method when there are requests in the waiting queue. The generate
+    method yields the outputs from the :class:`LLMEngine` to the caller.
 
-    NOTE: For the comprehensive list of arguments, see `LLMEngine`.
+    NOTE: For the comprehensive list of arguments, see :class:`LLMEngine`.
 
     Args:
         worker_use_ray: Whether to use Ray for model workers. Required for
@@ -313,8 +313,8 @@ class AsyncLLMEngine:
             being printed in log.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
-        *args: Arguments for LLMEngine.
-        *kwargs: Arguments for LLMEngine.
+        *args: Arguments for :class:`LLMEngine`.
+        **kwargs: Arguments for :class:`LLMEngine`.
     """
 
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine

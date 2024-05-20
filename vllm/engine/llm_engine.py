@@ -63,11 +63,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The `LLM` class wraps this class for offline batched inference and the
-    `AsyncLLMEngine` class wraps this class for online serving.
+    The :class:`~vllm.LLM` class wraps this class for offline batched inference
+    and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
-    NOTE: The config arguments are derived from the `EngineArgs` class. For the
-    comprehensive list of arguments, see `EngineArgs`.
+    NOTE: The config arguments are derived from the :class:`~vllm.EngineArgs`
+    class. For the comprehensive list of arguments, see :ref:`engine_args`.
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -84,7 +84,7 @@ class LLMEngine:
         executor_class: The model executor class for managing distributed
             execution.
         log_stats: Whether to log statistics.
-        usage_context: Specified entry point, used for usage info collection
+        usage_context: Specified entry point, used for usage info collection.
     """
     tokenizer: Optional[BaseTokenizerGroup]
 
