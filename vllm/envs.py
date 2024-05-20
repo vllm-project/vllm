@@ -99,7 +99,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # used in distributed environment to manually set the communication port
     'VLLM_PORT':
-    lambda: os.getenv('VLLM_PORT', "") or os.getenv("VLLM_PORT", ""),
+    lambda: os.getenv('VLLM_PORT', ""),
 
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers

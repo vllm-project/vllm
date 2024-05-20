@@ -284,7 +284,7 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_port() -> int:
     port = envs.VLLM_PORT
     if port:
-        return port
+        return int(port)
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
