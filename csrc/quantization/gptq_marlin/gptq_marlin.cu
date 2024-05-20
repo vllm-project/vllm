@@ -1519,10 +1519,6 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
       }
     }
 
-    printf("WARNING: Marlin kernel is reducing max_m_blocks due to small SM "
-           "GPU cache. This may "
-           "hurt performance. Consider upgrading your GPU.\n");
-
     max_m_blocks--; // Process less M blocks per invocation to reduce cache
                     // usage
   }
