@@ -135,24 +135,22 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         expected_input_type = self.vision_language_config.image_input_type
         ImageInputType = VisionLanguageConfig.ImageInputType
 
-        if expected_input_type == ImageInputType.PIXEL_VALUES:
-            if data is None:
-                return None
+        if data is None:
+            return None
 
+        if expected_input_type == ImageInputType.PIXEL_VALUES:
             if not isinstance(data, torch.Tensor):
-                raise ValueError("Incorrect type of pixel values")
+                raise TypeError("Image pixel vector should be a tensor, "
+                                f"but received type: {type(data)}")
 
             return LlavaImagePixelInputs(
                 type="pixel_values",
                 data=self._validate_image_data(data),
             )
-
-        if expected_input_type == ImageInputType.IMAGE_FEATURES:
-            if data is None:
-                return None
-
+        elif expected_input_type == ImageInputType.IMAGE_FEATURES:
             if not isinstance(data, torch.Tensor):
-                raise ValueError("Incorrect type of image features")
+                raise TypeError("Image feature vector should be a tensor, "
+                                f"but received type: {type(data)}")
 
             return LlavaImageFeatureInputs(
                 type="image_features",
