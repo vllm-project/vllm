@@ -260,7 +260,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         **kwargs: object,
-    ) -> SamplerOutput:  # noqa: E501
+    ) -> SamplerOutput:
         """Run forward pass for Llava 1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -311,6 +311,7 @@ class LlavaForConditionalGeneration(VisionLanguageModelBase):
             input_ids = None
         else:
             inputs_embeds = None
+
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             kv_caches,
