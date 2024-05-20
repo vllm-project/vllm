@@ -778,9 +778,9 @@ class ModelRunner:
 
             if vlm_config is None:
                 seq_data = SequenceData([0] * seq_len)
-                multi_modal_data = None
+                dummy_multi_modal_data = None
             else:
-                seq_data, multi_modal_data = MM_REGISTRY \
+                seq_data, dummy_multi_modal_data = MM_REGISTRY \
                     .dummy_data_for_profiling(seq_len, model_config, vlm_config)
 
             seq = SequenceGroupMetadata(
@@ -791,7 +791,7 @@ class ModelRunner:
                 block_tables=None,
                 lora_request=dummy_lora_requests_per_seq[group_id]
                 if dummy_lora_requests_per_seq else None,
-                multi_modal_data=multi_modal_data,
+                multi_modal_data=dummy_multi_modal_data,
             )
             seqs.append(seq)
 
