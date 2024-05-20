@@ -9,7 +9,7 @@ import torch
 from vllm.utils import is_hip
 
 if (not is_hip()):
-    from pynvml import (nvmlDeviceGetHandleByIndex,nvmlDeviceGetMemoryInfo, 
+    from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, 
                         nvmlInit)
 
 from vllm import LLM
