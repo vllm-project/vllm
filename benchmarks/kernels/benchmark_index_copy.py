@@ -72,25 +72,27 @@ def benchmark(num_blocks: int):
     slot_mapping = slot_mapping + head_indicies.view(1, -1)
     slot_mapping = slot_mapping.flatten()
 
-    f = torch.compile(write_to_kv_cache, backend="openxla")
-    f(key, value, k_cache, v_cache, slot_mapping)
+
+    @torch.compile(backend="openxla")
+    def f():
+        for _ in range(100):
+            write_to_kv_cache(key, value, k_cache, v_cache, slot_mapping)
+
+    f()
     xm.wait_device_ops()
 
-    for _ in range(10):
-        f(key, value, k_cache, v_cache, slot_mapping)
+    f()
     xm.wait_device_ops()
 
     start = time.time()
-    for _ in range(100):
-        f(key, value, k_cache, v_cache, slot_mapping)
+    f()
     xm.wait_device_ops()
     end = time.time()
     op_time = (end - start) / 100
     print(f"# Blocks: {num_blocks} Time: {op_time * 1000 * 1000:.1f} us")
 
 
-for num_blocks in [1, 1024, 2048, 4096, 8192, 16384]:
-    benchmark(num_blocks)
+benchmark(8192)
 
 # TPUv4 results:
 # Blocks: 1 Time: 161.4 us
