@@ -266,20 +266,27 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
+        if key is not None:
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+        if value is not None:
+            value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if (kv_cache is not None):
+            # Even if there are no new key/value pairs to cache,
+            # we still need to break out key_cache and value_cache
+            # i.e. for later use by paged attention
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
-            # Reshape the input keys and values and store them in the cache.
-            # If kv_cache is not provided, the new key and value tensors are
-            # not cached. This happens during the initial memory profiling run.
-            PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                value_cache,
-                                                attn_metadata.slot_mapping,
-                                                self.kv_cache_dtype, kv_scale)
+            if (key is not None) and (value is not None):
+
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory profiling run.
+                PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                    value_cache,
+                                                    attn_metadata.slot_mapping,
+                                                    self.kv_cache_dtype, kv_scale)
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -294,7 +301,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
 
-        if not is_cross_attn:
+        if not is_cross_attn and key is not None and value is not None:
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
@@ -339,8 +346,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                decode_meta.max_decode_seq_len,
+                decode_meta.seq_lens_tensor if not is_cross_attn else torch.tensor(decode_meta.cross_seq_lens,dtype=decode_meta.seq_lens_tensor.dtype,device=decode_meta.seq_lens_tensor.device),
+                decode_meta.max_decode_seq_len if not is_cross_attn else max(decode_meta.cross_seq_lens),
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,

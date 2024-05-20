@@ -499,8 +499,6 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     # eval correctness of decode output
     assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:])
 
-
-#@pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
@@ -568,7 +566,7 @@ def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_
 
     prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,key,value,prefill_q_prompt_lens,kv_prompt_lens)
 
-    prefill_packed_actual_output=attn.forward(prefill_packed_query.contiguous(),prefill_packed_key.contiguous(),prefill_packed_value.contiguous(),kv_cache,prefill_attn_metadata,scale)
+    prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
 
     # eval correctness of prefill output
     assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
