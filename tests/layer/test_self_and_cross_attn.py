@@ -10,20 +10,11 @@ from vllm.attention import Attention, AttentionMetadata #, AttentionMetadataPerS
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.attention.backends.abstract import AttentionBackend
 
-from vllm.attention.ops.paged_attn import PagedAttention
-
 from vllm.utils import make_tensor_with_pad
 
 from vllm.attention.layer import Attention
 
 import random
-
-from xformers import ops as xops
-
-from xformers.ops.fmha.attn_bias import (AttentionBias,
-                                         BlockDiagonalMask,
-                                         BlockDiagonalCausalMask,
-                                         LowerTriangularMaskWithTensorBias)
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
@@ -60,7 +51,9 @@ def ref_masked_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     scale: float,
-    attn_mask: Optional[torch.Tensor] = None,
+    custom_mask: Optional[torch.Tensor] = None,
+    q_prompt_lens: Optional[List] = None,
+    kv_prompt_lens: Optional[List] = None
 ) -> torch.Tensor:
     #query=query.unsqueeze(-2)
     #key=key.unsqueeze(-2)
@@ -68,8 +61,23 @@ def ref_masked_attention(
     #assert False,f"{query.shape} ; {key.shape}"
     attn_weights = scale * torch.einsum("bqhd,bkhd->bhqk", query, key).float()
     #assert False,f"{query.shape} ; {key.shape} ; {attn_weights.shape}"
-    if attn_mask is not None:
+
+    # Lowest-level attention mask, derived from prompt lens
+    if (q_prompt_lens is not None) or (kv_prompt_lens is not None):
+        attn_mask = torch.zeros_like(attn_weights)
+        if q_prompt_lens is not None:
+            for bdx,plen in enumerate(q_prompt_lens):
+                attn_mask[bdx,:,plen:,:] = -torch.inf
+        if kv_prompt_lens is not None:
+            for bdx,plen in enumerate(kv_prompt_lens):
+                attn_mask[bdx,:,:,plen:] = -torch.inf
+
         attn_weights = attn_weights + attn_mask.float()
+
+    # Custom attention mask
+    if custom_mask is not None:
+        attn_weights = attn_weights + custom_mask.float()
+
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("bhqk,bkhd->bqhd", attn_weights, value)
     #assert False, f"{attn_weights.shape} ; {value.shape} ; {out.shape}"
@@ -412,114 +420,6 @@ def make_attention(num_heads: int, head_size: int, scale: float):
                      head_size,
                      scale=scale,)
 
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
-@pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("block_size",BLOCK_SIZES)
-@pytest.mark.parametrize("max_q_prompt_len",Q_PROMPT_LENS)
-@pytest.mark.parametrize("max_kv_prompt_len",K_PROMPT_LENS)
-def test_xops_memory_efficient_attention_forward_cross_attention(num_heads: int, head_size: int, backend_name: str, batch_size: int, block_size: int, max_q_prompt_len: int, max_kv_prompt_len: int):
-    # Attention operator instance
-    is_cross_attn=True
-    device='cuda:0'
-    kv_cache_dtype='auto'
-    is_prompt = True
-    context_lens = [0 for _ in range(batch_size)]
-    key_read_width = 4
-    num_blocks = 4096
-    kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
-    scale = float(1.0 / (head_size**0.5))
-    attn = make_attention(num_heads, head_size, scale)
-    attn_backend = make_backend(backend_name)
-
-    query, \
-    key, \
-    value, \
-    prefill_query, \
-    _, \
-    _, \
-    decode_query, \
-    _, \
-    _, \
-    q_prompt_lens, \
-    kv_prompt_lens, \
-    actual_max_q_prompt_len, \
-    actual_max_kv_prompt_len, \
-    prefill_q_prompt_lens, \
-    _, \
-    decode_q_prompt_lens, \
-    _ = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=is_cross_attn)
-
-    #causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len)
-    ideal_output = ref_masked_attention(
-        query,
-        key,
-        value,
-        scale=scale,
-        #attn_mask=causal_mask
-    )
-
-    original_query = query
-    #query = query.unsqueeze(0)
-    #key = key.unsqueeze(0)
-    #value = value.unsqueeze(0)
-    xops_out = xops.memory_efficient_attention_forward(
-        query,
-        key,
-        value,
-        attn_bias=None,
-        p=0.0,
-        scale=scale)
-
-    assert torch.allclose(ideal_output,xops_out)
-
-    prefill_ideal_output = torch.zeros_like(ideal_output)
-    decode_ideal_output = torch.zeros_like(ideal_output[:,0:1])
-    for bdx,prefill_q_prompt_len in enumerate(prefill_q_prompt_lens):
-        prefill_ideal_output[bdx,:prefill_q_prompt_len] = ideal_output[bdx,:prefill_q_prompt_len]
-        decode_ideal_output[bdx,:] = ideal_output[bdx,prefill_q_prompt_len:(prefill_q_prompt_len+1)]
-
-    prefill_packed_ideal_output,_ = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
-    decode_packed_ideal_output,_ = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
-
-    # Unlike self-attention:
-    # - Prefill slot-mapping includes all key slots
-    # - Decode slot-mapping is empty
-    decode_block_tables, _, _, prefill_block_tables, prefill_slot_mapping, decode_slot_mapping = make_block_tables_slot_mapping(block_size,kv_prompt_lens)
-
-    prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn,prefill_q_prompt_lens, context_lens, prefill_block_tables, prefill_slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
-
-    prefill_packed_query,prefill_packed_key,prefill_packed_value,prefill_q_start_loc_list,prefill_kv_start_loc_list = pack_qkv(prefill_query,key,value,prefill_q_prompt_lens,kv_prompt_lens)
-
-    prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
-
-    xops_out = xops.memory_efficient_attention_forward(
-        prefill_packed_query.unsqueeze(0),
-        prefill_packed_key.unsqueeze(0),
-        prefill_packed_value.unsqueeze(0),
-        attn_bias=None,
-        p=0.0,
-        scale=scale)
-    xops_out=xops_out.view_as(prefill_packed_query)
-
-    # eval correctness of prefill output
-    assert torch.allclose(prefill_packed_actual_output,xops_out)
-
-    # eval correctness of prefill output
-    assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
-
-    is_prompt = False
-    context_lens = copy.deepcopy(kv_prompt_lens)
-    decode_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, decode_block_tables, decode_slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=kv_prompt_lens)
-    
-    decode_packed_query,decode_packed_key,decode_packed_value,decode_q_start_loc_list,decode_kv_start_loc_list = pack_qkv(decode_query,key,value,decode_q_prompt_lens,kv_prompt_lens)
-
-    decode_packed_actual_output=attn.forward(decode_packed_query,None,None,kv_cache,decode_attn_metadata,scale)
-
-    # eval correctness of decode output
-    assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:])
-
 #@pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -552,7 +452,7 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     decode_key, \
     decode_value, \
     q_prompt_lens, \
-    _, \
+    kv_prompt_lens, \
     _, \
     _, \
     prefill_q_prompt_lens, \
@@ -566,7 +466,9 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
         key,
         value,
         scale=scale,
-        attn_mask=causal_mask
+        custom_mask=causal_mask,
+        q_prompt_lens=q_prompt_lens,
+        kv_prompt_lens=kv_prompt_lens
     )
 
     prefill_ideal_output = torch.zeros_like(ideal_output)
@@ -609,9 +511,10 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
     decode_packed_actual_output=attn.forward(decode_packed_query,decode_packed_key,decode_packed_value,kv_cache,decode_attn_metadata,scale)
 
     # eval correctness of decode output
-    assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:]) 
+    assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:])
 
 
+#@pytest.mark.skip
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
@@ -620,111 +523,6 @@ def test_prefill_decode_self_attention(num_heads: int, head_size: int, backend_n
 @pytest.mark.parametrize("max_q_prompt_len",Q_PROMPT_LENS)
 @pytest.mark.parametrize("max_kv_prompt_len",K_PROMPT_LENS)
 def test_prefill_decode_cross_attention(num_heads: int, head_size: int, backend_name: str, batch_size: int, block_size: int, max_q_prompt_len: int, max_kv_prompt_len: int) -> None:
-    # Attention operator instance
-    is_cross_attn=False
-    device='cuda:0'
-    kv_cache_dtype='auto'
-    is_prompt = True
-    #max_q_prompt_len = max_prompt_len
-    max_kv_prompt_len = max_q_prompt_len
-    context_lens = [0 for _ in range(batch_size)]
-    key_read_width = 4
-    num_blocks = 4096
-    kv_cache = make_kv_cache(num_blocks, num_heads, head_size,  block_size, key_read_width, device='cuda:0')
-    scale = float(1.0 / (head_size**0.5))
-    attn = make_attention(num_heads, head_size, scale)
-    attn_backend = make_backend(backend_name)
-    query, \
-    key, \
-    value, \
-    prefill_query, \
-    prefill_key, \
-    prefill_value, \
-    decode_query, \
-    decode_key, \
-    decode_value, \
-    q_prompt_lens, \
-    _, \
-    _, \
-    _, \
-    prefill_q_prompt_lens, \
-    prefill_kv_prompt_lens, \
-    decode_q_prompt_lens, \
-    decode_kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,head_size,is_cross_attn=False)
-
-    causal_mask = build_causal_mask(max_q_prompt_len, max_kv_prompt_len).cuda()
-    ideal_output = ref_masked_attention(
-        query,
-        key,
-        value,
-        scale=scale,
-        attn_mask=causal_mask
-    )
-
-    prefill_ideal_output = torch.zeros_like(ideal_output)
-    decode_ideal_output = torch.zeros_like(ideal_output[:,0:1])
-    for bdx,prefill_q_prompt_len in enumerate(prefill_q_prompt_lens):
-        prefill_ideal_output[bdx,:prefill_q_prompt_len] = ideal_output[bdx,:prefill_q_prompt_len]
-        decode_ideal_output[bdx,:] = ideal_output[bdx,prefill_q_prompt_len:(prefill_q_prompt_len+1)]
-
-    prefill_packed_ideal_output,_ = pack_tensor(prefill_ideal_output,prefill_q_prompt_lens)
-    decode_packed_ideal_output,_ = pack_tensor(decode_ideal_output,[1 for _ in range(batch_size)])
-
-    decode_block_tables, decode_slot_mapping, prefill_slot_mapping, prefill_block_tables, _, _ = make_block_tables_slot_mapping(block_size,q_prompt_lens)
-    prefill_attn_metadata:AttentionMetadata = make_metadata(attn_backend, is_prompt, is_cross_attn,prefill_q_prompt_lens, context_lens, prefill_block_tables, prefill_slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype, cross_prompt_lens=None)
-
-    prefill_packed_query,prefill_packed_key,prefill_packed_value,_,_ = pack_qkv(prefill_query,prefill_key,prefill_value,prefill_q_prompt_lens,prefill_kv_prompt_lens)
-
-    prefill_packed_actual_output=attn.forward(prefill_packed_query,prefill_packed_key,prefill_packed_value,kv_cache,prefill_attn_metadata,scale)
-
-
-
-    shorten_amt = 17
-    new_ideal_output = ref_masked_attention(
-        query[:,:(prefill_q_prompt_lens[0]-shorten_amt),:,:],
-        key[:,:prefill_kv_prompt_lens[0],:,:],
-        value[:,:prefill_kv_prompt_lens[0],:,:],
-        scale=scale,
-        attn_mask=None #causal_mask[:(prefill_q_prompt_lens[0]-shorten_amt),:prefill_kv_prompt_lens[0]]
-    )
-
-    attn_bias = None #BlockDiagonalCausalMask.from_seqlens([(prefill_q_prompt_lens[0]-shorten_amt)],[prefill_kv_prompt_lens[0]])
-
-    xops_out = xops.memory_efficient_attention_forward(
-        prefill_packed_query.view(-1, num_heads, head_size)[:-shorten_amt,:,:].unsqueeze(0),
-        prefill_packed_key.view(-1, num_heads, head_size).unsqueeze(0),
-        prefill_packed_value.view(-1, num_heads, head_size).unsqueeze(0),
-        attn_bias=attn_bias,
-        p=0.0,
-        scale=scale)
-    #xops_out=xops_out.view_as(prefill_packed_query)
-
-    assert torch.allclose(xops_out,new_ideal_output.view_as(xops_out))
-
-    # eval correctness of prefill output
-    assert torch.allclose(prefill_packed_actual_output,prefill_packed_ideal_output[:,0,:])
-
-    is_prompt = False
-    context_lens = copy.deepcopy(prefill_kv_prompt_lens)
-    decode_attn_metadata = make_metadata(attn_backend, is_prompt, is_cross_attn, q_prompt_lens, context_lens, decode_block_tables, decode_slot_mapping, device=device, kv_cache_dtype=kv_cache_dtype)
-    
-    decode_packed_query,decode_packed_key,decode_packed_value,_,_ = pack_qkv(decode_query,decode_key,decode_value,decode_q_prompt_lens,decode_kv_prompt_lens)
-
-    decode_packed_actual_output=attn.forward(decode_packed_query,decode_packed_key,decode_packed_value,kv_cache,decode_attn_metadata,scale)
-
-    # eval correctness of decode output
-    assert torch.allclose(decode_packed_actual_output,decode_packed_ideal_output[:,0,:]) 
-
-
-@pytest.mark.skip
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
-@pytest.mark.parametrize("batch_size", BATCH_SIZES)
-@pytest.mark.parametrize("block_size",BLOCK_SIZES)
-@pytest.mark.parametrize("max_q_prompt_len",Q_PROMPT_LENS)
-@pytest.mark.parametrize("max_kv_prompt_len",K_PROMPT_LENS)
-def test_prefill_decode_cross_attention_old(num_heads: int, head_size: int, backend_name: str, batch_size: int, block_size: int, max_q_prompt_len: int, max_kv_prompt_len: int) -> None:
     # Attention operator instance
     is_cross_attn=True
     device='cuda:0'
@@ -762,7 +560,8 @@ def test_prefill_decode_cross_attention_old(num_heads: int, head_size: int, back
         key,
         value,
         scale=scale,
-        #attn_mask=causal_mask
+        q_prompt_lens=q_prompt_lens,
+        kv_prompt_lens=kv_prompt_lens
     )
 
     prefill_ideal_output = torch.zeros_like(ideal_output)
