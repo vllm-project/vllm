@@ -63,7 +63,7 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             logger.error("Failed to process image (%s)", image)
             raise
 
-        return {k: v.to(model_config.dtype) for k, v in out_dict.data.items()}
+        return out_dict.to(model_config.dtype).data
 
 
 class ImageFeatureData(MultiModalData):
