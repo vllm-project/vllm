@@ -9,8 +9,8 @@ import torch
 from vllm.utils import is_hip
 
 if (not is_hip()):
-    from pynvml import (nvmlDeviceGetHandleByIndex,
-                    nvmlDeviceGetMemoryInfo, nvmlInit)
+    from pynvml import (nvmlDeviceGetHandleByIndex,nvmlDeviceGetMemoryInfo, 
+                        nvmlInit)
 
 from vllm import LLM
 from vllm.engine.arg_utils import AsyncEngineArgs
