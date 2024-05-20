@@ -20,9 +20,9 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
         ),
         PROMPT_TEMPLATE.format(
             sql_prompt=
-            "What is the maximum temperature recorded in the 'arctic_weather' table for each month in the year 2020, broken down by species ('species' column in the 'arctic_weather' table)?",  # noqa: E501
+            "How many marine species are found in the Southern Ocean?",  # noqa: E501
             context=
-            "CREATE TABLE arctic_weather (id INT, date DATE, temperature FLOAT, species VARCHAR(50));"  # noqa: E501
+            "CREATE TABLE marine_species (name VARCHAR(50), common_name VARCHAR(50), location VARCHAR(50));"  # noqa: E501
         ),
     ]
     sampling_params = vllm.SamplingParams(temperature=0,
@@ -54,7 +54,7 @@ def test_phi2_lora(phi2_lora_files):
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
         "SELECT trip.id FROM trip JOIN station ON trip.start_station_id = station.id WHERE station.dock_count = (SELECT MAX(dock_count) FROM station);",  # noqa: E501
-        "SELECT species, MAX(temperature) FROM arctic_weather WHERE YEAR(date) = 2020 GROUP BY species;",  # noqa: E501
+        "SELECT COUNT(*) FROM marine_species WHERE location = 'Southern Ocean';",  # noqa: E501
     ]
 
     output1 = do_sample(llm, phi2_lora_files, lora_id=1)
