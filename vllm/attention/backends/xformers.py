@@ -4,8 +4,7 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
-from xformers.ops.fmha.attn_bias import (AttentionBias,
-                                         BlockDiagonalMask,
+from xformers.ops.fmha.attn_bias import (AttentionBias, BlockDiagonalMask,
                                          BlockDiagonalCausalMask,
                                          LowerTriangularMaskWithTensorBias)
 
@@ -155,8 +154,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_tables=self.block_tables[:self.num_prefills],
             use_cuda_graph=False,
             is_cross_attn=self.is_cross_attn,
-            cross_seq_lens=self.cross_seq_lens
-        )
+            cross_seq_lens=self.cross_seq_lens)
         return self._cached_prefill_metadata
 
     @property
@@ -185,8 +183,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
             is_cross_attn=self.is_cross_attn,
-            cross_seq_lens=self.cross_seq_lens
-        )
+            cross_seq_lens=self.cross_seq_lens)
         return self._cached_decode_metadata
 
 
@@ -286,14 +283,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
                                                     attn_metadata.slot_mapping,
-                                                    self.kv_cache_dtype, kv_scale)
+                                                    self.kv_cache_dtype,
+                                                    kv_scale)
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         is_cross_attn = attn_metadata.is_cross_attn
-        assert is_cross_attn or (key.shape[0] == num_prefill_tokens + num_decode_tokens)
-        assert is_cross_attn or (value.shape[0] == num_prefill_tokens + num_decode_tokens)
+        assert is_cross_attn or (key.shape[0]
+                                 == num_prefill_tokens + num_decode_tokens)
+        assert is_cross_attn or (value.shape[0]
+                                 == num_prefill_tokens + num_decode_tokens)
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
@@ -346,8 +346,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 key_cache,
                 value_cache,
                 decode_meta.block_tables,
-                decode_meta.seq_lens_tensor if not is_cross_attn else torch.tensor(decode_meta.cross_seq_lens,dtype=decode_meta.seq_lens_tensor.dtype,device=decode_meta.seq_lens_tensor.device),
-                decode_meta.max_decode_seq_len if not is_cross_attn else max(decode_meta.cross_seq_lens),
+                decode_meta.seq_lens_tensor if not is_cross_attn else
+                torch.tensor(decode_meta.cross_seq_lens,
+                             dtype=decode_meta.seq_lens_tensor.dtype,
+                             device=decode_meta.seq_lens_tensor.device),
+                decode_meta.max_decode_seq_len
+                if not is_cross_attn else max(decode_meta.cross_seq_lens),
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
@@ -400,7 +404,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             if self.alibi_slopes is None:
                 if attn_metadata.is_cross_attn:
                     attn_bias = BlockDiagonalMask.from_seqlens(
-                        attn_metadata.seq_lens,attn_metadata.cross_seq_lens)
+                        attn_metadata.seq_lens, attn_metadata.cross_seq_lens)
                 else:
                     attn_bias = BlockDiagonalCausalMask.from_seqlens(
                         attn_metadata.seq_lens)
