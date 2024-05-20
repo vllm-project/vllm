@@ -92,19 +92,23 @@ RUN if [ "$BUILD_TRITON" = "1" ]; then \
 WORKDIR /vllm-workspace
 COPY . .
 
+#RUN python3 -m pip install pynvml # to be removed eventually
 RUN python3 -m pip install --upgrade pip numba
 
 # make sure punica kernels are built (for LoRA)
 ENV VLLM_INSTALL_PUNICA_KERNELS=1
+# Workaround for ray >= 2.10.0
+ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+
+ENV VLLM_NCCL_SO_PATH=/opt/rocm/lib/librccl.so
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -U -r requirements-rocm.txt \
     && patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h ./rocm_patch/rocm_bf16.patch \
     && python3 setup.py install \
     && cp build/lib.linux-x86_64-cpython-39/vllm/_C.cpython-39-x86_64-linux-gnu.so vllm/ \
+    && cp build/lib.linux-x86_64-cpython-39/vllm/_punica_C.cpython-39-x86_64-linux-gnu.so vllm/ \
     && cd ..
 
-RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install --no-cache-dir ray[all]==2.9.3
 
 CMD ["/bin/bash"]

@@ -60,7 +60,8 @@ steps:
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
+
   commands:
   # these tests have to be separated, because each one will allocate all posible GPU memory
   - pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py
