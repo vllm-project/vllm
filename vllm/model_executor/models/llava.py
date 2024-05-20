@@ -22,6 +22,8 @@ from vllm.multimodal import MM_REGISTRY
 from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SamplerOutput, SequenceData
 
+from .vlm_base import VisionLanguageModelBase
+
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
@@ -92,7 +94,13 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
                              image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
-    inputs_embeds[mask] = vision_embeddings.view(-1,
+
+    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
+    if mask.sum() != image_feature_size:
+        raise ValueError(f"image_feature_size should be {image_feature_size}, "
+                         f"but found: {mask.sum()}")
+
+    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
                                                  vision_embeddings.shape[-1])
     return inputs_embeds
 
@@ -115,22 +123,16 @@ LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
 @MM_REGISTRY.register_image_feature_input()
 @MM_REGISTRY.register_image_pixel_input()
 @MM_REGISTRY.register_dummy_data(_get_dummy_data)
-class LlavaForConditionalGeneration(nn.Module):
+class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,
-                 config: "LlavaConfig",
+                 config: LlavaConfig,
                  vision_language_config: VisionLanguageConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional["QuantizationConfig"] = None) -> None:
-        super().__init__()
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(vision_language_config)
+
         self.config = config
-
-        self.vision_language_config = vision_language_config
-
-        assert self.vision_language_config, (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
