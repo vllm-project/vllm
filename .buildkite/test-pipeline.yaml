@@ -63,8 +63,7 @@ steps:
   #mirror_hardwares: [amd]
   commands:
   - pytest -v -s test_inputs.py
-  - pytest -v -s entrypoints -m llm_generate
-  - pytest -v -s entrypoints -m llm_encode
+  - pytest -v -s entrypoints -m llm
   - pytest -v -s entrypoints -m openai
 
 - label: Examples Test

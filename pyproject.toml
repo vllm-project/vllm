@@ -69,7 +69,6 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "llm_encode: run tests for vLLM embedding API only",
-    "llm_generate: run tests for vLLM generate API only",
+    "llm: run tests for vLLM API only",
     "openai: run tests for OpenAI API only",
 ]

@@ -1,8 +1,11 @@
+import weakref
 from typing import List
 
 import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
+
+from ..conftest import cleanup
 
 MODEL_NAME = "facebook/opt-125m"
 
@@ -20,17 +23,23 @@ TOKEN_IDS = [
     [0, 3, 1, 2],
 ]
 
-pytestmark = pytest.mark.llm_generate
+pytestmark = pytest.mark.llm
 
 
 @pytest.fixture(scope="module")
 def llm():
-    # pytest caches the fixture so we cannot GC it
-    yield LLM(model=MODEL_NAME,
+    # pytest caches the fixture so we use weakref for garbage collection to work
+    llm = LLM(model=MODEL_NAME,
               max_num_batched_tokens=4096,
               tensor_parallel_size=1,
               gpu_memory_utilization=0.10,
               enforce_eager=True)
+
+    yield weakref.proxy(llm)
+
+    del llm
+
+    cleanup()
 
 
 def assert_outputs_equal(o1: List[RequestOutput], o2: List[RequestOutput]):
