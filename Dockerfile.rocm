@@ -1,15 +1,15 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 FROM $BASE_IMAGE
 
-ARG BASE_IMAGE="rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 RUN echo "Base image is $BASE_IMAGE"
 
 # BASE_IMAGE for ROCm_5.7: "rocm/pytorch:rocm5.7_ubuntu22.04_py3.10_pytorch_2.0.1"
 # BASE_IMAGE for ROCm_6.0: "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1"
-
+# BASE_IMAGE=fpr ROCm_6.1: "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
 RUN echo "FA_GFX_ARCHS is $FA_GFX_ARCHS"
