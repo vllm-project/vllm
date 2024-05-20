@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import pytest
 import ray
 import torch
+
 from vllm.utils import is_hip
 
 if (not is_hip()):
