@@ -113,5 +113,3 @@ class MultiModalRegistry:
 
 MM_REGISTRY = MultiModalRegistry()
 """The global registry for multi-modal data."""
-
-__all__ = ["MM_REGISTRY"]

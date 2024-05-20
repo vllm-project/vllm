@@ -57,13 +57,11 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
             return {"pixel_values": pixel_values}
 
         try:
-            out_dict = image_processor.preprocess(image) \
-                .convert_to_tensors("pt")
+            return image_processor.preprocess(image) \
+                .convert_to_tensors("pt").data
         except Exception:
             logger.error("Failed to process image (%s)", image)
             raise
-
-        return out_dict.to(model_config.dtype).data
 
 
 class ImageFeatureData(MultiModalData):
