@@ -106,8 +106,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
         hf_outputs = hf_model.generate_greedy(
             hf_image_prompts,
             max_tokens,
-            # To be compatible with the patch for LLaVA-NeXT
-            images=[im.resize((w, h)) for im in hf_images])
+            images=hf_images)
     del hf_model
 
     vllm_model = vllm_runner(model_id,

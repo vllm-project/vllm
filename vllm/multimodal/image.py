@@ -41,10 +41,7 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
     def _default_input_processor(
             self, data: ImagePixelData, model_config: ModelConfig,
             vlm_config: VisionLanguageConfig) -> Dict[str, torch.Tensor]:
-        # Temporary patch to make LLaVA-NeXT usable
-        _, _, h, w = vlm_config.image_input_shape
-        image = data.image.resize((w, h))
-
+        image = data.image
         image_processor = self._get_hf_image_processor(model_config,
                                                        vlm_config)
         if image_processor is None:

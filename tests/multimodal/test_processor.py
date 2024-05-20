@@ -35,8 +35,7 @@ def test_clip_image_processor(hf_images, dtype):
 
     for image in hf_images:
         hf_result = hf_processor.preprocess(
-            # To be compatible with the patch for LLaVA-NeXT
-            image.resize((IMAGE_WIDTH, IMAGE_HEIGHT)),
+            image,
             return_tensors="np",
         )
         vllm_result = MM_REGISTRY.process_input(
