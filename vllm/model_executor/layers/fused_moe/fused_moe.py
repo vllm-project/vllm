@@ -8,11 +8,9 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm._moe_C as moe_kernels
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.utils import is_hip
-import vllm._moe_C as moe_kernels
-
 
 logger = init_logger(__name__)
 
@@ -322,13 +320,13 @@ def fused_topk(
     M, _ = hidden_states.shape
 
     topk_weights = torch.empty(M,
-                                topk,
-                                dtype=torch.float32,
-                                device=hidden_states.device)
+                               topk,
+                               dtype=torch.float32,
+                               device=hidden_states.device)
     topk_ids = torch.empty(M,
-                            topk,
-                            dtype=torch.int32,
-                            device=hidden_states.device)
+                           topk,
+                           dtype=torch.int32,
+                           device=hidden_states.device)
     token_expert_indicies = torch.empty(M,
                                         topk,
                                         dtype=torch.int32,
