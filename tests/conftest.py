@@ -396,14 +396,14 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        multi_modal_datas: Optional[List[Optional[MultiModalData]]] = None,
+        multi_modal_data_list: Optional[List[Optional[MultiModalData]]] = None,
     ) -> List[Tuple[List[int], str]]:
-        if multi_modal_datas is not None:
-            assert len(prompts) == len(multi_modal_datas)
+        if multi_modal_data_list is not None:
+            assert len(prompts) == len(multi_modal_data_list)
 
         req_outputs = self.model.generate(prompts,
                                           sampling_params=sampling_params,
-                                          multi_modal_datas=multi_modal_datas)
+                                          multi_modal_data_list=multi_modal_data_list)
 
         outputs = []
         for req_output in req_outputs:
@@ -441,12 +441,12 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        multi_modal_datas: Optional[List[Optional[MultiModalData]]] = None,
+        multi_modal_data_list: Optional[List[Optional[MultiModalData]]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts,
                                 greedy_params,
-                                multi_modal_datas=multi_modal_datas)
+                                multi_modal_data_list=multi_modal_data_list)
         return [(output_ids[0], output_str[0])
                 for output_ids, output_str in outputs]
 

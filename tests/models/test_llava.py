@@ -117,7 +117,7 @@ def test_models(hf_runner, vllm_runner, hf_image_prompts, hf_images,
                              **as_dict(vision_language_config))
     vllm_outputs = vllm_model.generate_greedy(vllm_image_prompts,
                                               max_tokens,
-                                              multi_modal_datas=vllm_images)
+                                              multi_modal_data_list=vllm_images)
     del vllm_model
 
     gc.collect()

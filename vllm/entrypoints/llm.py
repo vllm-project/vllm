@@ -145,7 +145,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_datas: Optional[Union[
+        multi_modal_data_list: Optional[Union[
             Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
@@ -165,7 +165,7 @@ class LLM:
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            multi_modal_datas: A list of multi modal data, one per prompt.
+            multi_modal_data_list: A list of multi modal data, one per prompt.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -180,7 +180,7 @@ class LLM:
             sampling_params,
             prompt_token_ids,
             lora_request,
-            multi_modal_datas,
+            multi_modal_data_list,
         )
 
         # Add requests to the engine and run the engine
@@ -197,7 +197,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_datas: Optional[Union[
+        multi_modal_data_list: Optional[Union[
             Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
@@ -214,7 +214,7 @@ class LLM:
                 use the tokenizer to convert the prompts to token IDs.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
-            multi_modal_datas: A list of multi modal data, one per prompt.
+            multi_modal_data_list: A list of multi modal data, one per prompt.
 
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
@@ -229,7 +229,7 @@ class LLM:
             pooling_params,
             prompt_token_ids,
             lora_request,
-            multi_modal_datas,
+            multi_modal_data_list,
         )
 
         # Add requests to the engine and run the engine
@@ -246,7 +246,7 @@ class LLM:
                                  PoolingParams]]],  # Unified parameter
         prompt_token_ids: Optional[List[List[int]]] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_datas: Optional[Union[
+        multi_modal_data_list: Optional[Union[
             Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
     ) -> List[dict]:
         """Validates and prepares request data for adding to the engine.
@@ -280,14 +280,14 @@ class LLM:
         if isinstance(params, list) and len(params) != num_requests:
             raise ValueError("The lengths of prompts and params "
                              "must be the same.")
-        if isinstance(multi_modal_datas, MultiModalData):
+        if isinstance(multi_modal_data_list, MultiModalData):
             # Convert a single multi_modal_data to a list.
-            multi_modal_datas = [multi_modal_datas]
-        if (multi_modal_datas is not None
-                and len(multi_modal_datas) != num_requests):
+            multi_modal_data_list = [multi_modal_data_list]
+        if (multi_modal_data_list is not None
+                and len(multi_modal_data_list) != num_requests):
             raise ValueError(f"The lengths of prompts/prompt_token_ids "
-                             f"({num_requests}) and multi_modal_datas "
-                             f"({len(multi_modal_datas)}) must be the same.")
+                             f"({num_requests}) and multi_modal_data_list "
+                             f"({len(multi_modal_data_list)}) must be equal.")
 
         # Add requests to the engine.
         requests_data = []
@@ -302,8 +302,8 @@ class LLM:
                 "lora_request":
                 lora_request,
                 "multi_modal_data":
-                multi_modal_datas[i]
-                if multi_modal_datas is not None else None,
+                multi_modal_data_list[i]
+                if multi_modal_data_list is not None else None,
             })
 
         return requests_data

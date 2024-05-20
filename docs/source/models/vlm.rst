@@ -34,7 +34,7 @@ To initialize a VLM, the aforementioned arguments must be passed to the ``LLM`` 
 For now, we only support a single image per text prompt when calling ``llm.generate``. To pass an image to the model, note the following parameters:
 
 * ``prompt``: The prompt should have a number of ``<image>`` tokens equal to ``image_feature_size``.
-* ``multi_modal_datas``: This should be an instance of ``ImagePixelData``.
+* ``multi_modal_data_list``: This should be an instance of ``ImagePixelData``.
 
 .. code-block:: python
 
@@ -44,7 +44,8 @@ For now, we only support a single image per text prompt when calling ``llm.gener
     # Load the image using PIL.Image
     image = ...
 
-    outputs = llm.generate(prompt, multi_modal_datas=ImagePixelData(image))
+    outputs = llm.generate(prompt,
+                           multi_modal_data_list=ImagePixelData(image))
 
     for o in outputs:
         generated_text = o.outputs[0].text
