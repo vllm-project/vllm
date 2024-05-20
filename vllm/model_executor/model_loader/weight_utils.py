@@ -370,6 +370,7 @@ def initialize_dummy_weights(
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
             if torch.finfo(param.data.dtype).bits < 16:
+                # torch.uniform_ doesn't support < 16-bit datatypes (FP8)
                 dtype = param.data.dtype
                 param.data.to(torch.float16).uniform_(low, high).to(dtype)
             else:
