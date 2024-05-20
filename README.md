@@ -91,6 +91,9 @@ Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
 
 vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
 
+<!-- Note: Please sort them in alphabetical order. -->
+<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+
 - a16z
 - AMD
 - Anyscale
