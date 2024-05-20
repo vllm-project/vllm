@@ -25,12 +25,12 @@ EXPECTED_STRS_MAP = {
         "auto": [
             'LLaMA is a high-throughput and memory-efficient inference and serving engine for Large Language Models (',
             'Here are the major milestones in the development of artificial intelligence (AI) from 1950 to ',
-            'Artificial intelligence (AI) and human intelligence (HI) differ significantly in how they process information.',
-            'A neural network is a complex system modeled after the human brain, consisting of interconnected nodes or "ne',
-            'Zeta-5, a highly advanced robot designed for menial labor, whirred to a',
+            'Artificial intelligence (AI) and human intelligence (HI) process information in distinct ways, with both',
+            'A neural network is a complex system modeled after the human brain, composed of interconnected nodes or "ne',
+            'Zeta-5, a highly advanced robot designed for menial labor, whirred and beep',
             'The COVID-19 pandemic has had a profound impact on global economic structures and future business models. The',
             'The Mona Lisa, painted by Leonardo da Vinci in the early 16th century, is one of',
-            'Here are the translations:\n\n**Japanese:** (Haya aki no tori, guri o',
+            'Here are the translations:\n\n**Japanese:** (Haya aki no tori, nemuri no'
         ],
         "fp8": [
             'LLM (Large Language Model) is a type of artificial intelligence (AI) model that is trained',
@@ -75,7 +75,7 @@ fp8_not_supported = (capability <
 
 @pytest.mark.skipif(fp8_not_supported,
                     reason="fp8 is not supported on this GPU type.")
-@pytest.mark.parametrize("model_name", ["meta-llama/Meta-Llama-3-8B-Instruct"])
+@pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_models(example_prompts, model_name, kv_cache_dtype) -> None:
     model = LLM(model=model_name,
@@ -105,7 +105,7 @@ def test_models(example_prompts, model_name, kv_cache_dtype) -> None:
         generations.append(outputs[0].outputs[0].text)
     del model
 
-    print(generations)
+    print(model_name, kv_cache_dtype, generations)
     expected_strs = EXPECTED_STRS_MAP[model_name][kv_cache_dtype]
     for i in range(len(example_prompts)):
         generated_str = generations[i]

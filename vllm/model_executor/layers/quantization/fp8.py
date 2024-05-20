@@ -278,17 +278,20 @@ class Fp8KVCacheMethod(QuantizeMethodBase):
         raise RuntimeError("Fp8KVCacheMethod.apply should not be called.")
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        kv_scale = layer.kv_scale.to("cpu").tolist()
+        # If the kv-cache dtype is auto, we enforce the kv-scale to be 1.0
+        # regardless whether the kv-scale is available in the checkpoint.
+        if layer.kv_cache_dtype != "auto":
+            kv_scale = layer.kv_scale.to("cpu").tolist()
+            if not isinstance(kv_scale, float):
+                raise ValueError("Only support per-tensor scaling factor "
+                                 "for fp8 KV cache")
+            layer._kv_scale = kv_scale
+            if layer._kv_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
+                print_warning_once(
+                    "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
+                    "cause accuracy issues. Please make sure kv-cache scaling "
+                    "factor is available in the fp8 checkpoint.")
         del layer.kv_scale
-        if not isinstance(kv_scale, float):
-            raise ValueError("Only support per-tensor scaling factor "
-                             "for fp8 KV cache")
-        layer._kv_scale = 1.0  # kv_scale
-        if layer._kv_scale == 1.0:
-            print_warning_once(
-                "Using KV cache scaling factor 1.0 for fp8_e4m3. This may "
-                "cause accuracy issues. Please make sure kv-cache scaling "
-                "factor is available in the fp8 checkpoint.")
 
 
 def all_close_1d(x: torch.Tensor) -> bool:
