@@ -869,13 +869,13 @@ class ModelRunner:
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
-        # Only perform sampling in the driver worker.
-        if not self.is_driver_worker:
-            return None
-
         if self.contains_seqlen_agnostic_layers:
             for i, offset in enumerate(indices):
                 self._copy_seqlen_agnostic_cache(offset, i, current_seqlen_agnostic_cache)
+
+        # Only perform sampling in the driver worker.
+        if not self.is_driver_worker:
+            return None
 
         # Sample the next token.
         output = self.model.sample(
