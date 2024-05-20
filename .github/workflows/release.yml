@@ -26,12 +26,12 @@ jobs:
 
       test_label_solo: aws-avx2-32G-a10g-24G
       test_label_multi: aws-avx2-192G-4-a10g-96G
-      test_timeout: 480
+      test_timeout: 720
       test_skip_list: neuralmagic/tests/skip-for-release.txt
 
       benchmark_label: aws-avx2-32G-a10g-24G
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
-      benchmark_timeout: 180
+      benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
     secrets: inherit
 
@@ -44,12 +44,12 @@ jobs:
 
       test_label_solo: aws-avx2-32G-a10g-24G
       test_label_multi: aws-avx2-192G-4-a10g-96G
-      test_timeout: 480
+      test_timeout: 720
       test_skip_list: neuralmagic/tests/skip-for-release.txt
 
       benchmark_label: aws-avx2-32G-a10g-24G
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
-      benchmark_timeout: 180
+      benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
     secrets: inherit
 
@@ -62,12 +62,12 @@ jobs:
 
       test_label_solo: aws-avx2-32G-a10g-24G
       test_label_multi: aws-avx2-192G-4-a10g-96G
-      test_timeout: 480
+      test_timeout: 720
       test_skip_list: neuralmagic/tests/skip-for-release.txt
 
       benchmark_label: aws-avx2-32G-a10g-24G
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
-      benchmark_timeout: 180
+      benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
     secrets: inherit
 
@@ -80,11 +80,11 @@ jobs:
 
       test_label_solo: aws-avx2-32G-a10g-24G
       test_label_multi: aws-avx2-192G-4-a10g-96G
-      test_timeout: 480
+      test_timeout: 720
       test_skip_list: neuralmagic/tests/skip-for-release.txt
 
       benchmark_label: aws-avx2-32G-a10g-24G
       benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
-      benchmark_timeout: 180
+      benchmark_timeout: 720
       push_benchmark_results_to_gh_pages: ${{ inputs.push_benchmark_results_to_gh_pages }}
     secrets: inherit
