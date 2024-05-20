@@ -453,7 +453,8 @@ class ShardedStateLoader(BaseModelLoader):
                                           cache_config)
             rank = get_tensor_model_parallel_rank()
             pattern = os.path.join(
-                local_model_path, self.pattern.format(rank=rank, part="*"),
+                local_model_path,
+                self.pattern.format(rank=rank, part="*"),
             )
             filepaths = glob.glob(pattern)
             if not filepaths:
