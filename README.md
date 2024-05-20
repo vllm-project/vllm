@@ -87,6 +87,27 @@ Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
 We welcome and value any contributions and collaborations.
 Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
 
+## Sponsors
+
+vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
+
+- a16z
+- AMD
+- Anyscale
+- AWS
+- Crusoe Cloud
+- DeepInfra
+- Lambda Lab
+- NVIDIA
+- Replicate
+- Roblox
+- RunPod
+- Trainy
+- UC Berkeley
+- UC San Diego
+
+We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
+
 ## Citation
 
 If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
