@@ -1,19 +1,16 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
-
-GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -155,37 +152,15 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
 
-            # Check which LinearMethod the GPTQ model should use.
-            if quant_method == "gptq":
-                # If serialized in Marlin format, use MarlinLinearMethod.
-                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
-                if is_format_marlin:
-                    logger.info("The model is serialized in Marlin format. "
-                                "Using Marlin kernel.")
-                    quant_method = "marlin"
-                    if self.quantization == "gptq":
-                        self.quantization = quant_method
-
-                # If convertible to Marlin format, use GPTQMarlinLinearMethod
-                # unless the user explicitly specified GPTQLinearMethod.
-                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
-                    if self.quantization == "gptq":
-                        logger.warning(
-                            "The model is convertible to Marlin format, but "
-                            "you specified quantization=gptq. Use "
-                            "quantization=marlin for faster inference.")
-                    else:
-                        logger.info(
-                            "The model is convertible to Marlin format. "
-                            "Using Marlin kernel.")
-                        quant_method = "gptq_marlin"
-                        if self.quantization == "marlin":
-                            self.quantization = quant_method
+            # Detect which checkpoint is it
+            for name, method in QUANTIZATION_METHODS.items():
+                quantization_override = method.override_quantization_method(
+                    quant_cfg, self.quantization)
+                if quantization_override:
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
+                    break
 
             # Verify quantization configurations.
             if self.quantization is None:
@@ -207,7 +182,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization not in ["marlin", "gptq_marlin"]):
+            if (self.quantization
+                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -992,6 +968,7 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
@@ -1084,7 +1061,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
 
 def _get_and_verify_dtype(
@@ -1115,14 +1092,6 @@ def _get_and_verify_dtype(
         torch_dtype = dtype
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
-
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.
     if torch_dtype != config_dtype:
