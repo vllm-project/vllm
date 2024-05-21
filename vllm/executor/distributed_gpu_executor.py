@@ -1,6 +1,6 @@
 import asyncio
 from abc import abstractmethod
-from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
+from typing import Any, Awaitable, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
@@ -16,11 +16,11 @@ class DistributedGPUExecutor(GPUExecutor):
 
     def __init__(self, *args, **kwargs):
         # This is non-None when the execute model loop is running
-        # in the parallel workers
+        # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
         self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
         # Updated by implementations that require additional args to be passed
         # to the _run_workers execute_model call
-        self.extra_execute_model_run_workers_kwargs = {}
+        self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
 
         super().__init__(*args, **kwargs)
 
@@ -75,6 +75,17 @@ class DistributedGPUExecutor(GPUExecutor):
         # Only the driver worker returns the sampling results.
         return self._driver_execute_model(execute_model_req)
 
+    def stop_remote_worker_execution_loop(self) -> None:
+        if self.parallel_worker_tasks is None:
+            return
+
+        self._driver_execute_model()
+        parallel_worker_tasks = self.parallel_worker_tasks
+        self.parallel_worker_tasks = None
+        # Ensure that workers exit model loop cleanly
+        # (this will raise otherwise)
+        self._wait_for_tasks_completion(parallel_worker_tasks)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
         return self._run_workers(
@@ -105,9 +116,14 @@ class DistributedGPUExecutor(GPUExecutor):
 
     @abstractmethod
     def _driver_execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        """Run execute_model in the driver worker."""
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        """Run execute_model in the driver worker.
+
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -115,11 +131,24 @@ class DistributedGPUExecutor(GPUExecutor):
         self,
         method: str,
         *args,
-        remote_workers_only_async: bool = False,
+        async_run_remote_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers."""
+        """Runs the given method on all workers.
+
+        Args:
+            async_run_remote_workers_only: If True the method will be run only
+                in the remote workers, not the driver worker. It will also be
+                run asynchronously and return a list of futures rather than
+                blocking on the results.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
         raise NotImplementedError
 
 
@@ -152,8 +181,17 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
+        """Execute the model asynchronously in the driver worker.
+
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
         raise NotImplementedError
 
     @abstractmethod
     async def _start_worker_execution_loop(self):
+        """Run execution loop on all workers. It guarantees all workers run
+        the loop or None of them is running the loop. Loop can be stopped by
+        `stop_remote_worker_execution_loop`.
+        The API is idempotent (guarantee only 1 loop run at any moment)."""
         raise NotImplementedError

@@ -174,8 +174,14 @@ class RayGPUExecutor(DistributedGPUExecutor):
                           max_parallel_loading_workers)
 
     def _driver_execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        """Run execute_model in the driver worker.
+
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
         return self.driver_worker.execute_method("execute_model",
                                                  execute_model_req)
 
@@ -183,7 +189,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        remote_workers_only_async: bool = False,
+        async_run_remote_workers_only: bool = False,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
@@ -194,6 +200,10 @@ class RayGPUExecutor(DistributedGPUExecutor):
         """Runs the given method on all workers. Can be used in the following
         ways:
 
+        - async_run_remote_workers_only: If True the method will be run only
+          in the remote workers, not the driver worker. It will also be
+          run asynchronously and return a list of futures rather than blocking
+          on the results.
         - args/kwargs: All workers share the same args/kwargs
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
@@ -224,7 +234,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
                      ) in zip(self.workers, all_worker_args, all_worker_kwargs)
             ]
 
-        if remote_workers_only_async:
+        if async_run_remote_workers_only:
             # Just return futures
             return ray_worker_outputs
 
@@ -256,6 +266,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
                 ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
+
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        ray.get(parallel_worker_tasks)
 
     def _compiled_ray_dag(self):
         import pkg_resources

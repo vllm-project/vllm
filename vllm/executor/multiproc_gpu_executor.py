@@ -73,8 +73,14 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             worker_monitor.close()
 
     def _driver_execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        """Run execute_model in the driver worker.
+
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
         return self.driver_worker.execute_model(
             execute_model_req=execute_model_req)
 
@@ -82,11 +88,18 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        remote_workers_only_async: bool = False,
+        async_run_remote_workers_only: bool = False,
         max_concurrent_workers: Optional[int] = None,
         **kwargs,
     ) -> Any:
-        """Runs the given method on all workers."""
+        """Runs the given method on all workers.
+
+        Args:
+            async_run_remote_workers_only: If True the method will be run only
+                in the remote workers, not the driver worker. It will also be
+                run asynchronously and return a list of futures rather than
+                blocking on the results.
+        """
 
         if max_concurrent_workers:
             raise NotImplementedError(
@@ -98,11 +111,10 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             for worker in self.workers
         ]
 
-        if remote_workers_only_async:
+        if async_run_remote_workers_only:
             # Just return futures
             return worker_outputs
 
-        # Start the driver worker after all the ray workers.
         driver_worker_method = getattr(self.driver_worker, method)
         driver_worker_output = driver_worker_method(*args, **kwargs)
 
@@ -114,6 +126,12 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         """Raises an error if engine is unhealthy."""
         if not self.worker_monitor.is_alive():
             raise RuntimeError("Worker processes are not running")
+
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        for result in parallel_worker_tasks:
+            result.get()
 
 
 class MultiprocessingGPUExecutorAsync(MultiprocessingGPUExecutor,

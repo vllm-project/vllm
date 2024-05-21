@@ -229,7 +229,8 @@ class Worker(WorkerBase):
         assert self.is_driver_worker
 
         if execute_model_req is None:
-            # No data to run, notify other workers to stop the execution loop.
+            # No data to run, notify other workers with an empty dict
+            # to stop the execution loop.
             broadcast_tensor_dict({}, src=0)
             return []
 
@@ -272,7 +273,11 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker."""
+        """Execute model loop in parallel worker.
+
+        You can stop the loop by executing a driver worker with an empty output.
+        See `stop_remote_worker_execution_loop` for more details.
+        """
         assert not self.is_driver_worker
         # No data => stop execution loop
         while data := broadcast_tensor_dict(src=0):
