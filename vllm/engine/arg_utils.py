@@ -498,11 +498,10 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
-        parser.add_argument(
-            '--draft-tensor-parallel-size',
-            type=int,
-            default=EngineArgs.draft_tensor_parallel_size,
-            help='Tensor parallel size for the draft model.')
+        parser.add_argument('--draft-tensor-parallel-size',
+                            type=int,
+                            default=EngineArgs.draft_tensor_parallel_size,
+                            help='Tensor parallel size for the draft model.')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
