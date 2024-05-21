@@ -60,7 +60,8 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         # 2. CUDA Graphs:
         #   CUDA Graphs don't support `.item()` calls on a GPU tensor.
         #
-        # TODO: zero-points are not supported yet. But we expect a similar pattern.
+        # TODO: zero-points are not supported yet. But we expect a similar
+        # pattern.
 
         is_tensor_partitioned = len(output_partition_sizes) != 1
         weight_scale_dim = sum(
