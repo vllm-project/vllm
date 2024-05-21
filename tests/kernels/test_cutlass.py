@@ -192,11 +192,11 @@ def test_cutlass_subset():
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
 
-# Test to make sure eager mode works
+# Test to make sure cuda graphs work
 class CutlassLayer(torch.nn.Module):
 
     def __init__(self, b, scale_a, scale_b, out_dtype):
-        super(CutlassLayer, self).__init__()
+        super().__init__()
         self.b = b
         self.scale_a = scale_a
         self.scale_b = scale_b
@@ -207,7 +207,7 @@ class CutlassLayer(torch.nn.Module):
                                         self.out_dtype)
 
 
-def test_cutlass_eager_mode():
+def test_cutlass_cuda_graph():
     m, n, k = 512, 512, 512
 
     a = to_int8(torch.randn((m, k), device="cuda"))
@@ -216,7 +216,7 @@ def test_cutlass_eager_mode():
     scale_a = (torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10)
     scale_b = (torch.randn((1, n), device="cuda", dtype=torch.float32) / 10)
 
-    #Construct a trivial model with a single layer that calls a CUTLASS kernel
+    # Construct a trivial model with a single layer that calls a CUTLASS kernel
     model = CutlassLayer(b, scale_a, scale_b, torch.bfloat16)
 
     # Run the model with a cuda graph
