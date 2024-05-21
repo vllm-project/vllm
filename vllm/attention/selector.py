@@ -36,18 +36,7 @@ def get_attn_backend(
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
-
-        # We check it here not in _which_attn_to_use because we cannot know
-        # the head size until we import FlashAttentionBackend.
-        supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
-        if head_size in supported_head_sizes:
-            logger.info("Using FlashAttention-2 backend.")
-            return FlashAttentionBackend
-        logger.info(
-            "Cannot use FlashAttention-2 backend for head size %d. "
-            "Using XFormers backend instead.", head_size)
-        backend = _Backend.XFORMERS
-
+        return FlashAttentionBackend
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -145,6 +134,17 @@ def _which_attn_to_use(
     if selected_backend == _Backend.FLASH_ATTN:
         try:
             import vllm_flash_attn  # noqa: F401
+
+            from vllm.attention.backends.flash_attn import (  # noqa: F401
+                FlashAttentionBackend)
+
+            supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes(
+            )
+            if head_size not in supported_head_sizes:
+                logger.info(
+                    "Cannot use FlashAttention-2 backend for head size %d.",
+                    head_size)
+                selected_backend = _Backend.XFORMERS
         except ImportError:
             logger.info(
                 "Cannot use FlashAttention-2 backend because the "
