@@ -51,7 +51,7 @@ def test_rope_scaling():
         dtype="float16",
         seed=0,
     )
-    assert llama_model_config.rope_scaling is None
+    assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
@@ -63,7 +63,8 @@ def test_rope_scaling():
         seed=0,
         rope_scaling=TEST_ROPE_SCALING,
     )
-    assert llama_model_config.rope_scaling == TEST_ROPE_SCALING
+    assert getattr(llama_model_config.hf_config, "rope_scaling",
+                   None) == TEST_ROPE_SCALING
     assert llama_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
@@ -74,7 +75,8 @@ def test_rope_scaling():
         dtype="float16",
         seed=0,
     )
-    assert longchat_model_config.rope_scaling == LONGCHAT_ROPE_SCALING
+    assert getattr(longchat_model_config.hf_config, "rope_scaling",
+                   None) == LONGCHAT_ROPE_SCALING
     assert longchat_model_config.max_model_len == 131072
 
     longchat_model_config = ModelConfig(
@@ -86,5 +88,6 @@ def test_rope_scaling():
         seed=0,
         rope_scaling=TEST_ROPE_SCALING,
     )
-    assert longchat_model_config.rope_scaling == TEST_ROPE_SCALING
+    assert getattr(longchat_model_config.hf_config, "rope_scaling",
+                   None) == TEST_ROPE_SCALING
     assert longchat_model_config.max_model_len == 32768
