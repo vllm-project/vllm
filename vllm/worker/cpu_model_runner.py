@@ -61,6 +61,7 @@ class CPUModelRunner:
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            for_cpu=True,
         )
 
         # Lazy initialization.

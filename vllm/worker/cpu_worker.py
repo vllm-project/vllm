@@ -61,6 +61,7 @@ class CPUCacheEngine:
             self.model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            for_cpu=True,
         )
 
         # Initialize the cache.
