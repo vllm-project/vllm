@@ -48,12 +48,12 @@ namespace marlin_24 {
 // than 1 warp per schedule allows some more latency hiding. At the same time,
 // we want relatively few warps to have many registers per warp and small tiles.
 static constexpr int THREADS = 256;
-static constexpr int STAGES = 4;  // 4 pipeline stages fit into shared memory
+static constexpr int STAGES = 4;
 
 static constexpr int min_thread_n = 128;
 
 static constexpr int tile_size = 16;
-static constexpr int max_par = 32;
+static constexpr int max_par = 64;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -1087,7 +1087,7 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
   int thread_k = -1;
   int thread_m = -1;
   int sms = -1;
-  int max_par = 16;
+  int max_par = marlin_24::max_par;
 
   int groupsize = -1;
   if (b_scales.size(0) > 1) {
