@@ -182,22 +182,6 @@ class BenchmarkWorker:
         best_config = None
         best_time = float("inf")
         for config in search_space:
-            # A simple heuristic to prune the search space.
-            # TODO(woosuk): Remove this once we have a performance model.
-            split_k = config["SPLIT_K"]
-            if split_k > 1:
-                block_size_m = config["BLOCK_SIZE_M"]
-                block_size_n = config["BLOCK_SIZE_N"]
-                num_m_blocks = triton.cdiv(M * topk + E * (block_size_m - 1),
-                                           block_size_m)
-                num_n_blocks = triton.cdiv(N, block_size_n)
-                num_total_blocks = num_m_blocks * num_n_blocks * split_k
-
-                num_sms = self.device_properties.multi_processor_count
-                if num_total_blocks > 2 * num_sms:
-                    # Sufficient number of blocks. Split-K is not beneficial.
-                    continue
-
             try:
                 kernel_time = benchmark_config(config,
                                                M,
@@ -261,10 +245,11 @@ def main(args: argparse.Namespace):
 
     hidden_size = config.hidden_size
     shard_intermediate_size = intermediate_size // args.tp_size
+    dtype = config.torch_dtype
     if args.dtype == "auto":
-        dtype = config.torch_dtype
+        w_dtype = dtype
     elif args.dtype == "fp8":
-        dtype = torch.float8_e4m3fn
+        w_dtype = torch.float16
     else:
         raise ValueError(f"Invalid dtype: {args.dtype}")
 
