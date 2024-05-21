@@ -212,7 +212,7 @@ __device__ void paged_attention_kernel(
       bs_block_offset = 0;
     else
       // sliding on kv heads
-      bs_block_offset = (tp_rank * num_kv_heads + kv_head_idx) * blocksparse_head_sliding_step + 1;
+      bs_block_offset = (tp_rank * num_kv_heads + kv_head_idx) * (-blocksparse_head_sliding_step) + 1;
   }
 
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx; block_idx += NUM_WARPS) {
