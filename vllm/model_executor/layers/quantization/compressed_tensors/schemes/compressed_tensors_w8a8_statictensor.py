@@ -15,9 +15,6 @@ __all__ = ["CompressedTensorsW8A8StaticTensor"]
 
 class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
 
-    def __init__(self):
-        pass
-
     def _quantize(self,
                   x: torch.Tensor,
                   scales: torch.Tensor,

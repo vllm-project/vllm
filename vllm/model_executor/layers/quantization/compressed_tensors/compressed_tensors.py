@@ -111,11 +111,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer_name}.")
-        try:
-            return self._get_schema(weight_quant=layer_quant_details["weight"],
-                                    input_quant=layer_quant_details["input"])
-        except NotImplementedError as e:
-            raise e
+
+        return self._get_schema(weight_quant=layer_quant_details["weight"],
+                                input_quant=layer_quant_details["input"])
 
 
 class CompressedTensorsLinearMethod(LinearMethodBase):
