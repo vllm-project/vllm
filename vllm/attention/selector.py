@@ -106,6 +106,11 @@ def _which_attn_to_use(
         logger.info(
             "Cannot use FlashAttention-2 backend due to sliding window.")
         return _Backend.XFORMERS
+    
+    if head_size % 32 !=0 or head_size > 256:
+        logger.info(
+            f"Head size {head_size} is not supported by FlashAttention.")
+        return _Backend.XFORMERS
 
     try:
         import vllm_flash_attn  # noqa: F401
