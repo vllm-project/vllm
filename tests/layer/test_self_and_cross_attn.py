@@ -24,26 +24,26 @@ BLOCK_SIZES = [16]
 BACKEND_NAMES = ["xformers"]
 CUDA_DEVICE = "cuda:0"
 
-MAX_Q_PROMPT_LENS = [128]
-MAX_K_PROMPT_LENS = [128]
+MAX_Q_SEQ_LENS = [128]
+MAX_K_SEQ_LENS = [128]
 
 
-def build_causal_mask(q_max_prompt_len, kv_max_prompt_len):
+def build_causal_mask(q_max_seq_len, kv_max_seq_len):
     '''
-    Create a q_max_prompt_len x kv_max_prompt_len causal mask
+    Create a q_max_seq_len x kv_max_seq_len causal mask
 
     Arguments:
     
-    * q_max_prompt_len: query max prompt len
-    * kv_max_prompt_len: key/value max prompt len
+    * q_max_seq_len: query max seq len
+    * kv_max_seq_len: key/value max seq len
 
     Returns:
 
-    * 2D tensor, q_max_prompt_len x kv_max_prompt_len
+    * 2D tensor, q_max_seq_len x kv_max_seq_len
     '''
 
     # Create a matrix where entry (i, j) is True if i >= j
-    mask = torch.triu(torch.ones(q_max_prompt_len, kv_max_prompt_len),
+    mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len),
                       diagonal=1)
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1,
@@ -57,12 +57,12 @@ def ref_masked_attention(
         value: torch.Tensor,
         scale: float,
         custom_mask: Optional[torch.Tensor] = None,
-        q_prompt_lens: Optional[List] = None,
-        kv_prompt_lens: Optional[List] = None) -> torch.Tensor:
+        q_seq_lens: Optional[List] = None,
+        kv_seq_lens: Optional[List] = None) -> torch.Tensor:
     '''
     "Golden" masked attention reference. Supports two types of masking:
 
-    * Basic attention mask, utilizing {q,kv}_prompt_lens args to mask out
+    * Basic attention mask, utilizing {q,kv}_seq_lens args to mask out
       padding elements
     * Custom attention mask, which can force an arbitrary mask tensor, i.e.
       causal
@@ -75,8 +75,8 @@ def ref_masked_attention(
     * scale: Attention scale factor
     * Custom mask: custom attention mask; good place to inject a causal
       attention mask
-    * q_prompt_lens: list of unpadded query seq_lens for each batch index
-    * kv_prompt_lens: list of unpadded key/value seq_lens for each batch index
+    * q_seq_lens: list of unpadded query seq_lens for each batch index
+    * kv_seq_lens: list of unpadded key/value seq_lens for each batch index
 
     Returns:
 
@@ -84,19 +84,19 @@ def ref_masked_attention(
     '''
 
     batch_size = query.shape[0]
-    assert (len(q_prompt_lens) == batch_size)
-    assert (len(kv_prompt_lens) == batch_size)
+    assert (len(q_seq_lens) == batch_size)
+    assert (len(kv_seq_lens) == batch_size)
 
     attn_weights = scale * torch.einsum("bqhd,bkhd->bhqk", query, key).float()
 
-    # Basic attention mask, derived from prompt lens
-    if (q_prompt_lens is not None) or (kv_prompt_lens is not None):
+    # Basic attention mask, derived from seq lens
+    if (q_seq_lens is not None) or (kv_seq_lens is not None):
         attn_mask = torch.zeros_like(attn_weights)
-        if q_prompt_lens is not None:
-            for bdx, plen in enumerate(q_prompt_lens):
+        if q_seq_lens is not None:
+            for bdx, plen in enumerate(q_seq_lens):
                 attn_mask[bdx, :, plen:, :] = -torch.inf
-        if kv_prompt_lens is not None:
-            for bdx, plen in enumerate(kv_prompt_lens):
+        if kv_seq_lens is not None:
+            for bdx, plen in enumerate(kv_seq_lens):
                 attn_mask[bdx, :, :, plen:] = -torch.inf
 
         attn_weights = attn_weights + attn_mask.float()
@@ -111,8 +111,8 @@ def ref_masked_attention(
 
 
 def make_qkv(batch_size,
-             max_q_prompt_len,
-             max_kv_prompt_len,
+             max_q_seq_len,
+             max_kv_seq_len,
              num_heads,
              head_size,
              is_cross_attn=True,
@@ -135,79 +135,79 @@ def make_qkv(batch_size,
     Arguments:
 
     * batch_size
-    * max_q_prompt_len: max query prompt len
-    * max_kv_prompt_len: max key/value prompt len
+    * max_q_seq_len: max query seq len
+    * max_kv_seq_len: max key/value seq len
     * num_heads
     * head_size
     * is_cross_attn: if True, query seqlen may differ from key/value seqlen (as
       is often the case for cross-attention); o/w, query/key/value seqlens match
-      at each batch index (max_kv_prompt_len is unused)
-    * force_max_len: if True, all query seqlens are max_q_prompt_len; o/w query
-      seqlens are random in [2,max_q_prompt_lens]. Same for key/value seqlens
-      and max_kv_prompt_len, unless forced by is_cross_attn=False
+      at each batch index (max_kv_seq_len is unused)
+    * force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
+      seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
+      and max_kv_seq_len, unless forced by is_cross_attn=False
     * device: CPU or CUDA device
 
     Returns:
 
-    * query: "baseline" query; batch_size x max_q_prompt_len x num_heads x
+    * query: "baseline" query; batch_size x max_q_seq_len x num_heads x
       head_size
-    * key: "baseline" key; batch_size x max_kv_prompt_len x num_heads x
+    * key: "baseline" key; batch_size x max_kv_seq_len x num_heads x
       head_size
-    * value: "baseline" value; batch_size x max_kv_prompt_len x num_heads x
+    * value: "baseline" value; batch_size x max_kv_seq_len x num_heads x
       head_size
-    * prefill_query: batch_size x (max_q_prompt_len-1) x num_heads x head_size
-    * prefill_key: batch_size x (max_kv_prompt_len-1) x num_heads x head_size
-    * prefill_value: batch_size x (max_kv_prompt_len-1) x num_heads x head_size
+    * prefill_query: batch_size x (max_q_seq_len-1) x num_heads x head_size
+    * prefill_key: batch_size x (max_kv_seq_len-1) x num_heads x head_size
+    * prefill_value: batch_size x (max_kv_seq_len-1) x num_heads x head_size
     * decode_query: batch_size x 1 x num_heads x head_size
     * decode_key: batch_size x 1 x num_heads x head_size
     * decode_value: batch_size x 1 x num_heads x head_size
-    * q_prompt_lens: "baseline" query seqlen list
-    * kv_prompt_lens: "baseline" key/value seqlen list
-    * actual_max_q_prompt_len: actual "baseline" query max prompt len (may be <=
-      max_q_prompt_len due to randomness)
-    * actual_max_kv_prompt_len: actual "baseline" key/value max prompt len (may
-      be <= max_kv_prompt_len due to randomness)
-    * prefill_q_prompt_lens: "prefill" query seqlen list
-    * prefill_kv_prompt_lens: "prefill" key/value seqlen list
-    * decode_q_prompt_lens: "decode" query seqlen list (all ones)
-    * decode_kv_prompt_lens: "decode" key/value seqlen list
+    * q_seq_lens: "baseline" query seqlen list
+    * kv_seq_lens: "baseline" key/value seqlen list
+    * actual_max_q_seq_len: actual "baseline" query max seq len (may be <=
+      max_q_seq_len due to randomness)
+    * actual_max_kv_seq_len: actual "baseline" key/value max seq len (may
+      be <= max_kv_seq_len due to randomness)
+    * prefill_q_seq_lens: "prefill" query seqlen list
+    * prefill_kv_seq_lens: "prefill" key/value seqlen list
+    * decode_q_seq_lens: "decode" query seqlen list (all ones)
+    * decode_kv_seq_lens: "decode" key/value seqlen list
     '''
 
     if force_max_len:
-        q_prompt_lens = [max_q_prompt_len for _ in range(batch_size)]
+        q_seq_lens = [max_q_seq_len for _ in range(batch_size)]
     else:
-        q_prompt_lens = [
-            random.randint(2, max_q_prompt_len) for _ in range(batch_size)
+        q_seq_lens = [
+            random.randint(2, max_q_seq_len) for _ in range(batch_size)
         ]
-    kv_prompt_lens = None
+    kv_seq_lens = None
     if not is_cross_attn:
-        # K,V prompt lens match Q for self-attention
-        kv_prompt_lens = q_prompt_lens
+        # K,V seq lens match Q for self-attention
+        kv_seq_lens = q_seq_lens
     else:
-        # K,V prompt lens are distinct from Q prompt lens & random
+        # K,V seq lens are distinct from Q seq lens & random
         if force_max_len:
-            kv_prompt_lens = [max_kv_prompt_len for _ in range(batch_size)]
+            kv_seq_lens = [max_kv_seq_len for _ in range(batch_size)]
         else:
-            kv_prompt_lens = [
-                random.randint(2, max_kv_prompt_len) for _ in range(batch_size)
+            kv_seq_lens = [
+                random.randint(2, max_kv_seq_len) for _ in range(batch_size)
             ]
 
-    actual_max_q_prompt_len = max(q_prompt_lens)
-    actual_max_kv_prompt_len = max(kv_prompt_lens)
+    actual_max_q_seq_len = max(q_seq_lens)
+    actual_max_kv_seq_len = max(kv_seq_lens)
 
     query = torch.rand(
-        (batch_size, max_q_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
     key = torch.rand(
-        (batch_size, max_kv_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
     value = torch.rand(
-        (batch_size, max_kv_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
 
     prefill_query = torch.zeros(
-        (batch_size, max_q_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_q_seq_len, num_heads * head_size)).to(device)
     prefill_key = torch.zeros(
-        (batch_size, max_kv_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
     prefill_value = torch.zeros(
-        (batch_size, max_kv_prompt_len, num_heads * head_size)).to(device)
+        (batch_size, max_kv_seq_len, num_heads * head_size)).to(device)
 
     decode_query = torch.zeros(
         (batch_size, 1, num_heads * head_size)).to(device)
@@ -215,32 +215,32 @@ def make_qkv(batch_size,
     decode_value = torch.zeros(
         (batch_size, 1, num_heads * head_size)).to(device)
 
-    for bdx, (q_prompt_len,
-              kv_prompt_len) in enumerate(zip(q_prompt_lens, kv_prompt_lens)):
-        query[bdx, q_prompt_len:, :] = 0
-        key[bdx, kv_prompt_len:, :] = 0
-        value[bdx, kv_prompt_len:, :] = 0
+    for bdx, (q_seq_len,
+              kv_seq_len) in enumerate(zip(q_seq_lens, kv_seq_lens)):
+        query[bdx, q_seq_len:, :] = 0
+        key[bdx, kv_seq_len:, :] = 0
+        value[bdx, kv_seq_len:, :] = 0
 
         prefill_query[bdx,
-                      0:(q_prompt_len - 1), :] = query[bdx,
-                                                       0:(q_prompt_len - 1), :]
+                      0:(q_seq_len - 1), :] = query[bdx,
+                                                       0:(q_seq_len - 1), :]
         prefill_key[bdx,
-                    0:(kv_prompt_len - 1), :] = key[bdx,
-                                                    0:(kv_prompt_len - 1), :]
-        prefill_value[bdx, 0:(kv_prompt_len -
-                              1), :] = value[bdx, 0:(kv_prompt_len - 1), :]
+                    0:(kv_seq_len - 1), :] = key[bdx,
+                                                    0:(kv_seq_len - 1), :]
+        prefill_value[bdx, 0:(kv_seq_len -
+                              1), :] = value[bdx, 0:(kv_seq_len - 1), :]
 
         decode_query[bdx, :, :] = query[bdx,
-                                        (q_prompt_len - 1):q_prompt_len, :]
-        decode_key[bdx, :, :] = key[bdx, (kv_prompt_len - 1):kv_prompt_len, :]
+                                        (q_seq_len - 1):q_seq_len, :]
+        decode_key[bdx, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :]
         decode_value[bdx, :, :] = value[bdx,
-                                        (kv_prompt_len - 1):kv_prompt_len, :]
+                                        (kv_seq_len - 1):kv_seq_len, :]
 
-    prefill_q_prompt_lens = [plen - 1 for plen in q_prompt_lens]
-    prefill_kv_prompt_lens = [plen - 1 for plen in kv_prompt_lens]
+    prefill_q_seq_lens = [plen - 1 for plen in q_seq_lens]
+    prefill_kv_seq_lens = [plen - 1 for plen in kv_seq_lens]
 
-    decode_q_prompt_lens = [1 for _ in q_prompt_lens]
-    decode_kv_prompt_lens = [1 for _ in kv_prompt_lens]
+    decode_q_seq_lens = [1 for _ in q_seq_lens]
+    decode_kv_seq_lens = [1 for _ in kv_seq_lens]
 
     query = query.view(batch_size, query.shape[1], num_heads, head_size)
     key = key.view(batch_size, key.shape[1], num_heads, head_size)
@@ -269,68 +269,68 @@ def make_qkv(batch_size,
            decode_query, \
            decode_key, \
            decode_value, \
-           q_prompt_lens, \
-           kv_prompt_lens, \
-           actual_max_q_prompt_len, \
-           actual_max_kv_prompt_len, \
-           prefill_q_prompt_lens, \
-           prefill_kv_prompt_lens, \
-           decode_q_prompt_lens, \
-           decode_kv_prompt_lens
+           q_seq_lens, \
+           kv_seq_lens, \
+           actual_max_q_seq_len, \
+           actual_max_kv_seq_len, \
+           prefill_q_seq_lens, \
+           prefill_kv_seq_lens, \
+           decode_q_seq_lens, \
+           decode_kv_seq_lens
 
 
-def pack_tensor(unpacked_tensor, prompt_lens, device=CUDA_DEVICE):
+def pack_tensor(unpacked_tensor, seq_lens, device=CUDA_DEVICE):
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
-    number_of_tokens = sum(prompt_lens)
+    number_of_tokens = sum(seq_lens)
 
     Arguments:
 
     * unpacked_tensor: batch_size x padded_seq_len x num_heads x head_size
-    * prompt_lens: list of token counts for each prompt
+    * seq_lens: list of token counts for each seq
     * device: CPU or CUDA device
 
     Returns
 
     * packed_tensor: number_of_tokens x num_heads x head_size
     * start_loc_list: start idx of each batch elt in packed_tensor; [0] +
-      list(itertools.accumulate(prompt_lens))
+      list(itertools.accumulate(seq_lens))
     '''
 
-    num_tok = sum(prompt_lens)
+    num_tok = sum(seq_lens)
     num_heads = unpacked_tensor.shape[-2]
     head_size = unpacked_tensor.shape[-1]
-    start_loc_list = [0] + list(itertools.accumulate(prompt_lens))
+    start_loc_list = [0] + list(itertools.accumulate(seq_lens))
     packed_tensor = torch.zeros((num_tok, num_heads, head_size), device=device)
 
-    for bdx, (prompt_len,
-              start_loc) in enumerate(zip(prompt_lens, start_loc_list)):
+    for bdx, (seq_len,
+              start_loc) in enumerate(zip(seq_lens, start_loc_list)):
 
         packed_tensor[start_loc:(
             start_loc +
-            prompt_len), :, :] = unpacked_tensor[bdx, :prompt_len, :, :]
+            seq_len), :, :] = unpacked_tensor[bdx, :seq_len, :, :]
 
     return packed_tensor, start_loc_list
 
 
-def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
+def pack_qkv(query, key, value, q_seq_lens, kv_seq_lens):
     '''
     Individually pack each of Q, K and V, each with dimensions batch_size x
     padded_seq_len x num_heads x head_size, into respective number_of_tokens x
     num_heads x head_size tensors.
     
-    For Q, number_of_tokens = sum(q_prompt_lens).
+    For Q, number_of_tokens = sum(q_seq_lens).
 
-    For K and V, number_of_tokens = sum(kv_prompt_lens)
+    For K and V, number_of_tokens = sum(kv_seq_lens)
 
     Arguments:
 
     * query: batch_size x padded_seq_len x num_heads x head_size
     * key: batch_size x padded_seq_len x num_heads x head_size
     * value: batch_size x padded_seq_len x num_heads x head_size
-    * q_prompt_lens: list of token counts for each query
-    * kv_prompt_lens: list of token counts for each key/value
+    * q_seq_lens: list of token counts for each query
+    * kv_seq_lens: list of token counts for each key/value
 
     Returns
 
@@ -345,9 +345,9 @@ def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
         packed_query = None
         q_start_loc_list = None
     else:
-        packed_query, q_start_loc_list = pack_tensor(query, q_prompt_lens)
-    packed_key, kv_start_loc_list = pack_tensor(key, kv_prompt_lens)
-    packed_value, _ = pack_tensor(value, kv_prompt_lens)
+        packed_query, q_start_loc_list = pack_tensor(query, q_seq_lens)
+    packed_key, kv_start_loc_list = pack_tensor(key, kv_seq_lens)
+    packed_value, _ = pack_tensor(value, kv_seq_lens)
     if packed_query is not None:
         packed_query = packed_query.view(
             -1, packed_query.shape[-1] * packed_query.shape[-2])
@@ -382,7 +382,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 
 def make_metadata_tensors(is_prompt: bool,
-                          prompt_lens: List[int],
+                          seq_lens: List[int],
                           context_lens: List[int],
                           device=CUDA_DEVICE) -> tuple:
     '''
@@ -391,33 +391,33 @@ def make_metadata_tensors(is_prompt: bool,
     Arguments:
 
     * is_prompt: True -> Prefill, False -> Decode
-    * prompt_lens: list of token-counts for each prompt
-    * context_lens: list of context length values for each prompt
+    * seq_lens: list of token-counts for each seq
+    * context_lens: list of context length values for each seq
     * device: CPU or CUDA device
 
     Returns:
 
-    * prompt_lens_tensor: prompt_lens list, as tensor
+    * seq_lens_tensor: seq_lens list, as tensor
     * context_lens_tensor: context_lens list, as tensor
-    * max_query_len: max(prompt_lens) if is_prompt, o/w 1
+    * max_query_len: max(seq_lens) if is_seq, o/w 1
     * max_context_len: max(context_lens)
-    * max_prompt_len: max(prompt_lens)
+    * max_seq_len: max(seq_lens)
     * seq_start_loc: start idx of each sequence
     * query_start_loc: start idx of each query
     '''
-    prompt_lens_tensor = torch.tensor(prompt_lens,
+    seq_lens_tensor = torch.tensor(seq_lens,
                                       dtype=torch.int,
                                       device=device)
     context_lens_tensor = None if context_lens is None else torch.tensor(
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
-    max_prompt_len = None if prompt_lens is None else max(prompt_lens)
+    max_seq_len = None if seq_lens is None else max(seq_lens)
 
-    seq_start_loc = torch.zeros(prompt_lens_tensor.shape[0] + 1,
+    seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                 dtype=torch.int32,
                                 device=device)
 
-    torch.cumsum(prompt_lens_tensor,
+    torch.cumsum(seq_lens_tensor,
                  dim=0,
                  dtype=seq_start_loc.dtype,
                  out=seq_start_loc[1:])
@@ -425,18 +425,18 @@ def make_metadata_tensors(is_prompt: bool,
     if is_prompt:
         # Prefill: query_start_loc matches seq_start_loc
         query_start_loc = copy.deepcopy(seq_start_loc)
-        max_query_len = max_prompt_len
+        max_query_len = max_seq_len
     else:
         # Decode: one new query input token per batch element, thus
         # query_start_loc is the cumsum of [1,1,1,...]
         query_start_loc = list(range(len(seq_start_loc)))
         max_query_len = 1
 
-    return prompt_lens_tensor, \
+    return seq_lens_tensor, \
            context_lens_tensor, \
            max_query_len, \
            max_context_len, \
-           max_prompt_len, \
+           max_seq_len, \
            seq_start_loc, \
            query_start_loc
 
@@ -480,7 +480,7 @@ def num_tokens_to_min_blocks(num_tokens, block_size):
 
 
 def make_block_tables_slot_mapping(block_size,
-                                   prompt_lens,
+                                   seq_lens,
                                    block_base_addr=0,
                                    device=CUDA_DEVICE):
     '''
@@ -495,7 +495,7 @@ def make_block_tables_slot_mapping(block_size,
     Arguments:
 
     * block_size: number of offsets per block
-    * prompt_lens: list of token-counts for each sequence
+    * seq_lens: list of token-counts for each sequence
     * block_base_addr: the block table base address
     * device: CPU or CUDA device
 
@@ -518,7 +518,7 @@ def make_block_tables_slot_mapping(block_size,
     # Over-provision block table blocks by 1
     num_blocks_list = [
         num_tokens_to_min_blocks(num_tokens, block_size) + 1
-        for num_tokens in prompt_lens
+        for num_tokens in seq_lens
     ]
     max_block_table_len = max(num_blocks_list)
     block_table_pad_tokens = 10
@@ -530,7 +530,7 @@ def make_block_tables_slot_mapping(block_size,
     block_base_idx = block_base_addr + sum(
         num_blocks_list) * 2 - 1  # Support more blocks than needed
     max_block_idx = block_base_idx
-    for sdx, num_tokens in enumerate(prompt_lens):
+    for sdx, num_tokens in enumerate(seq_lens):
         num_blocks = num_blocks_list[sdx]
         block_table = list(
             range(block_base_idx, block_base_idx - num_blocks, -1))
@@ -582,7 +582,7 @@ def make_block_tables_slot_mapping(block_size,
 def make_metadata_self_cross(
     attn_backend: AttentionBackend,
     is_prompt: bool,
-    prompt_lens: List[int],
+    seq_lens: List[int],
     context_lens: List[int],
     block_tables,
     slot_mapping,
@@ -603,7 +603,7 @@ def make_metadata_self_cross(
 
     * attn_backend: Backend for sourcing attention kernels
     * is_prompt: prefill if True, o/w decode
-    * prompt_lens: list of token counts for each sequence
+    * seq_lens: list of token counts for each sequence
     * context_lens: list of context lengths for each sequence
     * block_tables: self-attention block tables
     * slot_mapping: self-attention slot_mapping
@@ -619,18 +619,18 @@ def make_metadata_self_cross(
     '''
 
     if is_prompt:
-        num_prefills = len(prompt_lens)
-        num_prefill_tokens = sum(prompt_lens)
+        num_prefills = len(seq_lens)
+        num_prefill_tokens = sum(seq_lens)
         num_decode_tokens = 0
 
-        prompt_lens_tensor, \
+        seq_lens_tensor, \
         context_lens_tensor, \
         max_query_len, \
         _, \
         _, \
         seq_start_loc, \
         query_start_loc = make_metadata_tensors(is_prompt,
-                                                prompt_lens,
+                                                seq_lens,
                                                 context_lens,
                                                 device=device)
 
@@ -643,10 +643,10 @@ def make_metadata_self_cross(
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
-            seq_lens=prompt_lens,
-            seq_lens_tensor=prompt_lens_tensor,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
-            max_prefill_seq_len=max(prompt_lens),
+            max_prefill_seq_len=max(seq_lens),
             max_decode_seq_len=0,
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
@@ -662,16 +662,16 @@ def make_metadata_self_cross(
 
         num_prefills = 0
         num_prefill_tokens = 0
-        num_decode_tokens = len(prompt_lens)
+        num_decode_tokens = len(seq_lens)
 
-        prompt_lens_tensor, \
+        seq_lens_tensor, \
         context_lens_tensor, \
         max_query_len, \
         _, \
         _, \
         seq_start_loc, \
         query_start_loc = make_metadata_tensors(is_prompt,
-                                                prompt_lens,
+                                                seq_lens,
                                                 context_lens,
                                                 device=device)
 
@@ -684,11 +684,11 @@ def make_metadata_self_cross(
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
-            seq_lens=prompt_lens,
-            seq_lens_tensor=prompt_lens_tensor,
+            seq_lens=seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_prefill_seq_len=0,
-            max_decode_seq_len=max(prompt_lens),
+            max_decode_seq_len=max(seq_lens),
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
@@ -747,7 +747,7 @@ def self_attn_setup(batch_size,
                     head_size,
                     block_size,
                     scale,
-                    max_q_prompt_len,
+                    max_q_seq_len,
                     block_base_addr=0):
     '''
     Set up test vectors & data structures for self-attention test.
@@ -784,7 +784,7 @@ def self_attn_setup(batch_size,
     * head_size: Head dimension
     * block_size: Number of offsets per KV cache block
     * scale: attention scale parameter
-    * max_q_prompt_len: upper limit on query length for synthetic test vectors
+    * max_q_seq_len: upper limit on query length for synthetic test vectors
     * block_base_addr: self-attention block table base address
 
     Returns:
@@ -799,10 +799,10 @@ def self_attn_setup(batch_size,
       num_heads x head_size
     * prefill_packed_ideal_output: self-attn "prefill" ideal output;
       number_of_tokens x num_heads x head_size
-    * prefill_q_prompt_lens: list of token counts for each *prefill query* (one
+    * prefill_q_seq_lens: list of token counts for each *prefill query* (one
       less than baseline query)
-    * prefill_kv_prompt_lens: list of token counts for each self-attn *prefill
-      key/value* (should match prefill_q_prompt_lens)
+    * prefill_kv_seq_lens: list of token counts for each self-attn *prefill
+      key/value* (should match prefill_q_seq_lens)
     * decode_packed_query: "decode" query; number_of_tokens x num_heads x
       head_size
     * decode_packed_key: self-attn "decode" key; number_of_tokens x num_heads x
@@ -811,13 +811,13 @@ def self_attn_setup(batch_size,
       x head_size
     * decode_packed_ideal_output: self-attn "decode" ideal output;
       number_of_tokens x num_heads x head_size
-    * decode_q_prompt_lens: list of token counts for each *decode query* (should
+    * decode_q_seq_lens: list of token counts for each *decode query* (should
       be 1)
-    * decode_kv_prompt_lens: list of token counts for each self-attn *decode
-      key/value* (should match decode_q_prompt_lens)
-    * q_prompt_lens: "baseline" query seq lens; number_of_tokens x num_heads x
+    * decode_kv_seq_lens: list of token counts for each self-attn *decode
+      key/value* (should match decode_q_seq_lens)
+    * q_seq_lens: "baseline" query seq lens; number_of_tokens x num_heads x
       head_size
-    * kv_prompt_lens: self-attn "baseline" key/value seq lens; number_of_tokens
+    * kv_seq_lens: self-attn "baseline" key/value seq lens; number_of_tokens
       x num_heads x head_size
     * decode_block_tables: fake self-attn decode-phase block table
     * decode_slot_mapping: fake self-attn decode-phase slot mapping
@@ -826,7 +826,7 @@ def self_attn_setup(batch_size,
     * max_block_idx: highest block address in the self-attention block-table
     '''
 
-    max_kv_prompt_len = max_q_prompt_len
+    max_kv_seq_len = max_q_seq_len
 
     query, \
     key, \
@@ -837,41 +837,41 @@ def self_attn_setup(batch_size,
     decode_query, \
     decode_key, \
     decode_value, \
-    q_prompt_lens, \
-    kv_prompt_lens, \
+    q_seq_lens, \
+    kv_seq_lens, \
     _, \
     _, \
-    prefill_q_prompt_lens, \
-    prefill_kv_prompt_lens, \
-    decode_q_prompt_lens, \
-    decode_kv_prompt_lens = make_qkv(batch_size,
-                                     max_q_prompt_len,
-                                     max_kv_prompt_len,
-                                     num_heads,
-                                     head_size,
-                                     is_cross_attn=False)
+    prefill_q_seq_lens, \
+    prefill_kv_seq_lens, \
+    decode_q_seq_lens, \
+    decode_kv_seq_lens = make_qkv(batch_size,
+                                  max_q_seq_len,
+                                  max_kv_seq_len,
+                                  num_heads,
+                                  head_size,
+                                  is_cross_attn=False)
 
-    causal_mask = build_causal_mask(max_q_prompt_len,
-                                    max_kv_prompt_len).to(CUDA_DEVICE)
+    causal_mask = build_causal_mask(max_q_seq_len,
+                                    max_kv_seq_len).to(CUDA_DEVICE)
 
     ideal_output = ref_masked_attention(query,
                                         key,
                                         value,
                                         scale=scale,
                                         custom_mask=causal_mask,
-                                        q_prompt_lens=q_prompt_lens,
-                                        kv_prompt_lens=kv_prompt_lens)
+                                        q_seq_lens=q_seq_lens,
+                                        kv_seq_lens=kv_seq_lens)
 
     prefill_ideal_output = torch.zeros_like(ideal_output)
     decode_ideal_output = torch.zeros_like(ideal_output[:, 0:1])
-    for bdx, prefill_q_prompt_len in enumerate(prefill_q_prompt_lens):
-        prefill_ideal_output[bdx, :prefill_q_prompt_len] = ideal_output[
-            bdx, :prefill_q_prompt_len]
-        decode_ideal_output[bdx, :] = ideal_output[bdx, prefill_q_prompt_len:(
-            prefill_q_prompt_len + 1)]
+    for bdx, prefill_q_seq_len in enumerate(prefill_q_seq_lens):
+        prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
+            bdx, :prefill_q_seq_len]
+        decode_ideal_output[bdx, :] = ideal_output[bdx, prefill_q_seq_len:(
+            prefill_q_seq_len + 1)]
 
     prefill_packed_ideal_output, _ = pack_tensor(prefill_ideal_output,
-                                                 prefill_q_prompt_lens)
+                                                 prefill_q_seq_lens)
     decode_packed_ideal_output, _ = pack_tensor(decode_ideal_output,
                                                 [1 for _ in range(batch_size)])
 
@@ -882,37 +882,37 @@ def self_attn_setup(batch_size,
     _, \
     _, \
     max_block_idx = make_block_tables_slot_mapping(
-        block_size, q_prompt_lens, block_base_addr=block_base_addr)
+        block_size, q_seq_lens, block_base_addr=block_base_addr)
 
     prefill_packed_query, \
     prefill_packed_key, \
     prefill_packed_value, _, _ = pack_qkv(
-        prefill_query, prefill_key, prefill_value, prefill_q_prompt_lens,
-        prefill_kv_prompt_lens)
+        prefill_query, prefill_key, prefill_value, prefill_q_seq_lens,
+        prefill_kv_seq_lens)
 
     decode_packed_query, \
     decode_packed_key, \
     decode_packed_value, \
     _, \
     _ = pack_qkv(
-        decode_query, decode_key, decode_value, decode_q_prompt_lens,
-        decode_kv_prompt_lens)
+        decode_query, decode_key, decode_value, decode_q_seq_lens,
+        decode_kv_seq_lens)
 
     return query, \
     prefill_packed_query, \
     prefill_packed_key, \
     prefill_packed_value, \
     prefill_packed_ideal_output, \
-    prefill_q_prompt_lens, \
-    prefill_kv_prompt_lens, \
+    prefill_q_seq_lens, \
+    prefill_kv_seq_lens, \
     decode_packed_query, \
     decode_packed_key, \
     decode_packed_value, \
     decode_packed_ideal_output, \
-    decode_q_prompt_lens, \
-    decode_kv_prompt_lens, \
-    q_prompt_lens, \
-    kv_prompt_lens, \
+    decode_q_seq_lens, \
+    decode_kv_seq_lens, \
+    q_seq_lens, \
+    kv_seq_lens, \
     decode_block_tables, \
     decode_slot_mapping, \
     prefill_slot_mapping, \
@@ -921,15 +921,15 @@ def self_attn_setup(batch_size,
 
 
 def cross_attn_setup_reuses_query(query,
-                                  q_prompt_lens,
-                                  prefill_q_prompt_lens,
+                                  q_seq_lens,
+                                  prefill_q_seq_lens,
                                   batch_size,
                                   num_heads,
                                   head_size,
                                   block_size,
                                   scale,
-                                  max_q_prompt_len,
-                                  max_kv_prompt_len,
+                                  max_q_seq_len,
+                                  max_kv_seq_len,
                                   block_base_addr=0):
     '''
     Set up test vectors & data structures for cross-attention test.
@@ -962,16 +962,16 @@ def cross_attn_setup_reuses_query(query,
 
     * query: pre-existing "baseline" query; batch_size x padded_seq_len x
       num_heads x head_size
-    * q_prompt_lens: list of token-counts for each "baseline" query sequence
-    * prefill_q_prompt_lens:  list of token-counts for each "prefill" query
+    * q_seq_lens: list of token-counts for each "baseline" query sequence
+    * prefill_q_seq_lens:  list of token-counts for each "prefill" query
       sequence
     * batch_size
     * num_heads: Number of attention heads
     * head_size: Head dimension
     * block_size: Number of offsets per KV cache block
     * scale: attention scale parameter
-    * max_q_prompt_len: upper limit on query length for synthetic test vectors
-    * max_kv_prompt_len: upper limit on key/value length for synthetic test
+    * max_q_seq_len: upper limit on query length for synthetic test vectors
+    * max_kv_seq_len: upper limit on key/value length for synthetic test
       vectors
     * block_base_addr: cross-attention block table base address
 
@@ -984,7 +984,7 @@ def cross_attn_setup_reuses_query(query,
       num_heads x head_size
     * decode_packed_ideal_output: "decode" ideal output; number_of_tokens x
       num_heads x head_size
-    * kv_prompt_lens: list of token-counts for each key/value
+    * kv_seq_lens: list of token-counts for each key/value
     * decode_block_tables: fake decode-phase block tables
     * decode_slot_mapping: fake decode-phase slot mapping
     * prefill_slot_mapping: fake prefill-phase slot mapping
@@ -1002,15 +1002,15 @@ def cross_attn_setup_reuses_query(query,
     _, \
     _, \
     _, \
-    kv_prompt_lens, \
+    kv_seq_lens, \
     _, \
     _, \
     _, \
     _, \
     _, \
     _ = make_qkv(batch_size,
-                 max_q_prompt_len,
-                 max_kv_prompt_len,
+                 max_q_seq_len,
+                 max_kv_seq_len,
                  num_heads,
                  head_size,
                  is_cross_attn=True)
@@ -1019,19 +1019,19 @@ def cross_attn_setup_reuses_query(query,
                                         key,
                                         value,
                                         scale=scale,
-                                        q_prompt_lens=q_prompt_lens,
-                                        kv_prompt_lens=kv_prompt_lens)
+                                        q_seq_lens=q_seq_lens,
+                                        kv_seq_lens=kv_seq_lens)
 
     prefill_ideal_output = torch.zeros_like(ideal_output)
     decode_ideal_output = torch.zeros_like(ideal_output[:, 0:1])
-    for bdx, prefill_q_prompt_len in enumerate(prefill_q_prompt_lens):
-        prefill_ideal_output[bdx, :prefill_q_prompt_len] = ideal_output[
-            bdx, :prefill_q_prompt_len]
-        decode_ideal_output[bdx, :] = ideal_output[bdx, prefill_q_prompt_len:(
-            prefill_q_prompt_len + 1)]
+    for bdx, prefill_q_seq_len in enumerate(prefill_q_seq_lens):
+        prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
+            bdx, :prefill_q_seq_len]
+        decode_ideal_output[bdx, :] = ideal_output[bdx, prefill_q_seq_len:(
+            prefill_q_seq_len + 1)]
 
     prefill_packed_ideal_output, _ = pack_tensor(prefill_ideal_output,
-                                                 prefill_q_prompt_lens)
+                                                 prefill_q_seq_lens)
     decode_packed_ideal_output, _ = pack_tensor(decode_ideal_output,
                                                 [1 for _ in range(batch_size)])
 
@@ -1045,17 +1045,17 @@ def cross_attn_setup_reuses_query(query,
     prefill_slot_mapping, \
     decode_slot_mapping, \
     max_block_idx = make_block_tables_slot_mapping(
-        block_size, kv_prompt_lens, block_base_addr=block_base_addr)
+        block_size, kv_seq_lens, block_base_addr=block_base_addr)
 
     # Packed key/value (query is already provided)
     _, packed_key, packed_value, _, _ = pack_qkv(None, key, value, None,
-                                                 kv_prompt_lens)
+                                                 kv_seq_lens)
 
     return packed_key, \
     packed_value, \
     prefill_packed_ideal_output, \
     decode_packed_ideal_output, \
-    kv_prompt_lens, \
+    kv_seq_lens, \
     decode_block_tables, \
     decode_slot_mapping, \
     prefill_slot_mapping, \
@@ -1083,12 +1083,12 @@ def run_cross_attention_test(attn, packed_query, packed_key, packed_value,
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("max_q_prompt_len", MAX_Q_PROMPT_LENS)
-@pytest.mark.parametrize("max_kv_prompt_len", MAX_K_PROMPT_LENS)
+@pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
+@pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
 def test_prefill_decode_self_and_cross_attention(
         num_heads: int, head_size: int, backend_name: str, batch_size: int,
-        block_size: int, max_q_prompt_len: int,
-        max_kv_prompt_len: int) -> None:
+        block_size: int, max_q_seq_len: int,
+        max_kv_seq_len: int) -> None:
     '''
     Test:
 
@@ -1138,15 +1138,15 @@ def test_prefill_decode_self_and_cross_attention(
     self_prefill_packed_key, \
     self_prefill_packed_value, \
     self_prefill_packed_ideal_output, \
-    prefill_q_prompt_lens, \
-    self_prefill_kv_prompt_lens, \
+    prefill_q_seq_lens, \
+    self_prefill_kv_seq_lens, \
     decode_packed_query, \
     self_decode_packed_key, \
     self_decode_packed_value, \
     self_decode_packed_ideal_output, \
     _, \
     _, \
-    q_prompt_lens, \
+    q_seq_lens, \
     _, \
     self_decode_block_tables, \
     self_decode_slot_mapping, \
@@ -1157,7 +1157,7 @@ def test_prefill_decode_self_and_cross_attention(
                                                 head_size,
                                                 block_size,
                                                 scale,
-                                                max_q_prompt_len,
+                                                max_q_seq_len,
                                                 block_base_addr=self_block_base_addr)
 
     # Cross-attention setup
@@ -1166,21 +1166,21 @@ def test_prefill_decode_self_and_cross_attention(
     cross_prefill_packed_value, \
     cross_prefill_packed_ideal_output, \
     cross_decode_packed_ideal_output, \
-    cross_kv_prompt_lens, \
+    cross_kv_seq_lens, \
     cross_decode_block_tables, \
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
     cross_prefill_block_tables, \
     _ = cross_attn_setup_reuses_query(query,
-                                      q_prompt_lens,
-                                      prefill_q_prompt_lens,
+                                      q_seq_lens,
+                                      prefill_q_seq_lens,
                                       batch_size,
                                       num_heads,
                                       head_size,
                                       block_size,
                                       scale,
-                                      max_q_prompt_len,
-                                      max_kv_prompt_len,
+                                      max_q_seq_len,
+                                      max_kv_seq_len,
                                       block_base_addr=cross_block_base_addr)
 
     # PREFILL: self- and cross-attention tests
@@ -1190,11 +1190,11 @@ def test_prefill_decode_self_and_cross_attention(
     prefill_attn_metadata: AttentionMetadata = make_metadata_self_cross(
         attn_backend,
         True,
-        prefill_q_prompt_lens,
+        prefill_q_seq_lens,
         context_lens,
         self_prefill_block_tables,
         self_prefill_slot_mapping,
-        cross_seq_lens=cross_kv_prompt_lens,
+        cross_seq_lens=cross_kv_seq_lens,
         cross_block_tables=cross_prefill_block_tables,
         cross_slot_mapping=cross_prefill_slot_mapping,
     )
@@ -1219,18 +1219,18 @@ def test_prefill_decode_self_and_cross_attention(
         cross_prefill_packed_actual_output.view_as(
             cross_prefill_packed_ideal_output))
 
-    context_lens = copy.deepcopy(self_prefill_kv_prompt_lens)
+    context_lens = copy.deepcopy(self_prefill_kv_seq_lens)
 
     # DECODE: self- and cross-attention tests
 
     decode_attn_metadata: AttentionMetadata = make_metadata_self_cross(
         attn_backend,
         False,
-        q_prompt_lens,
+        q_seq_lens,
         context_lens,
         self_decode_block_tables,
         self_decode_slot_mapping,
-        cross_seq_lens=cross_kv_prompt_lens,
+        cross_seq_lens=cross_kv_seq_lens,
         cross_block_tables=cross_decode_block_tables,
         cross_slot_mapping=cross_decode_slot_mapping,
     )
