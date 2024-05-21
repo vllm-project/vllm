@@ -1,6 +1,3 @@
-# Please update any changes made here to
-# docs/source/dev/dockerfile-ubi/dockerfile-ubi.rst
-
 ## Global Args #################################################################
 ARG BASE_UBI_IMAGE_TAG=9.4
 ARG PYTHON_VERSION=3.11
@@ -120,21 +117,6 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r requirements-cuda.txt \
         -r requirements-dev.txt
 
-## Proto Compilation ###########################################################
-FROM python-install AS gen-protos
-
-ENV PATH=/opt/vllm/bin/:$PATH
-
-RUN microdnf install -y \
-        make \
-        findutils \
-    && microdnf clean all
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=bind,source=Makefile,target=Makefile \
-    --mount=type=bind,source=proto,target=proto \
-    make gen-protos
-
 ## Builder #####################################################################
 FROM dev AS build
 
@@ -175,9 +157,6 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 # Copy the entire directory before building wheel
 COPY vllm vllm
 
-# Copy over the generated *.pb2 files
-COPY --from=gen-protos /workspace/vllm/entrypoints/grpc/pb vllm/entrypoints/grpc/pb
-
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
@@ -216,18 +195,8 @@ RUN pip install \
     chmod 0755 /opt/vllm/lib/libnccl.so.2.18.1
 
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install \
-        # additional dependencies for the TGIS gRPC server
-        grpcio-tools==1.63.0 \
-        # additional dependencies for openai api_server
-        accelerate==0.30.0 \
-        # hf_transfer for faster HF hub downloads
-        hf_transfer==0.1.6
-
 ENV HF_HUB_OFFLINE=1 \
     PORT=8000 \
-    GRPC_PORT=8033 \
     HOME=/home/vllm \
     VLLM_NCCL_SO_PATH=/opt/vllm/lib/libnccl.so.2.18.1 \
     VLLM_USAGE_SOURCE=production-docker-image \
