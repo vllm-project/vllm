@@ -12,14 +12,9 @@ from vllm.attention.backends.abstract import AttentionBackend
 
 from vllm.utils import make_tensor_with_pad
 
-from vllm.attention.layer import Attention
-
-import random
-
 # If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
 #
-# TODO:
-# FlashAttention forward only supports head dimension at most 128
+# TODO: FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
 HEAD_SIZES = [64, 256]
 
@@ -39,10 +34,12 @@ def build_causal_mask(q_max_prompt_len, kv_max_prompt_len):
     Create a q_max_prompt_len x kv_max_prompt_len causal mask
 
     Arguments:
+    
     * q_max_prompt_len: query max prompt len
     * kv_max_prompt_len: key/value max prompt len
 
     Returns:
+
     * 2D tensor, q_max_prompt_len x kv_max_prompt_len
     '''
 
@@ -65,19 +62,25 @@ def ref_masked_attention(
         kv_prompt_lens: Optional[List] = None) -> torch.Tensor:
     '''
     "Golden" masked attention reference. Supports two types of masking:
-    * Basic attention mask, utilizing {q,kv}_prompt_lens args to mask out padding elements
-    * Custom attention mask, which can force an arbitrary mask tensor, i.e. causal
+
+    * Basic attention mask, utilizing {q,kv}_prompt_lens args to mask out
+      padding elements
+    * Custom attention mask, which can force an arbitrary mask tensor, i.e.
+      causal
 
     Arguments:
+
     * query: batch_size x q_padded_seq_len x num_heads x head_size
     * key: batch_size x kv_padded_seq_len x num_heads x head_size
     * value: batch_size x kv_padded_seq_len x num_heads x head_size
     * scale: Attention scale factor
-    * Custom mask: custom attention mask; good place to inject a causal attention mask
+    * Custom mask: custom attention mask; good place to inject a causal
+      attention mask
     * q_prompt_lens: list of unpadded query seq_lens for each batch index
     * kv_prompt_lens: list of unpadded key/value seq_lens for each batch index
 
     Returns:
+
     * Attention result, batch_size x q_padded_seq_len x num_heads x head_size
     '''
 
@@ -120,26 +123,39 @@ def make_qkv(batch_size,
     Construct QKV test tensors for self- and cross-attention.
 
     Generates three query/key/value triplets:
-    * "Baseline" query/key/value (for input to reference attention function)
-    * "Prefill" query/key/value (last sequence offset zero'd out, for use as input to prefill kernel)
-    * "Decode" query/key/value (only the last sequence offset  from baseline, for use as input to decode kernel)
 
-    Each Q/K/V triplet is associated with a list of q seqlens and a list of k/v seqlens
+    * "Baseline" query/key/value (for input to reference attention function)
+    * "Prefill" query/key/value (last sequence offset zero'd out, for use as
+      input to prefill kernel)
+    * "Decode" query/key/value (only the last sequence offset  from baseline,
+      for use as input to decode kernel)
+
+    Each Q/K/V triplet is associated with a list of q seqlens and a list of k/v
+    seqlens
 
     Arguments:
+
     * batch_size
     * max_q_prompt_len: max query prompt len
     * max_kv_prompt_len: max key/value prompt len
     * num_heads
     * head_size
-    * is_cross_attn: if True, query seqlen may differ from key/value seqlen (as is often the case for cross-attention); o/w, query/key/value seqlens match at each batch index (max_kv_prompt_len is unused)
-    * force_max_len: if True, all query seqlens are max_q_prompt_len; o/w query seqlens are random in [2,max_q_prompt_lens]. Same for key/value seqlens and max_kv_prompt_len, unless forced by is_cross_attn=False
+    * is_cross_attn: if True, query seqlen may differ from key/value seqlen (as
+      is often the case for cross-attention); o/w, query/key/value seqlens match
+      at each batch index (max_kv_prompt_len is unused)
+    * force_max_len: if True, all query seqlens are max_q_prompt_len; o/w query
+      seqlens are random in [2,max_q_prompt_lens]. Same for key/value seqlens
+      and max_kv_prompt_len, unless forced by is_cross_attn=False
     * device: CPU or CUDA device
 
     Returns:
-    * query: "baseline" query; batch_size x max_q_prompt_len x num_heads x head_size
-    * key: "baseline" key; batch_size x max_kv_prompt_len x num_heads x head_size
-    * value: "baseline" value; batch_size x max_kv_prompt_len x num_heads x head_size
+
+    * query: "baseline" query; batch_size x max_q_prompt_len x num_heads x
+      head_size
+    * key: "baseline" key; batch_size x max_kv_prompt_len x num_heads x
+      head_size
+    * value: "baseline" value; batch_size x max_kv_prompt_len x num_heads x
+      head_size
     * prefill_query: batch_size x (max_q_prompt_len-1) x num_heads x head_size
     * prefill_key: batch_size x (max_kv_prompt_len-1) x num_heads x head_size
     * prefill_value: batch_size x (max_kv_prompt_len-1) x num_heads x head_size
@@ -148,8 +164,10 @@ def make_qkv(batch_size,
     * decode_value: batch_size x 1 x num_heads x head_size
     * q_prompt_lens: "baseline" query seqlen list
     * kv_prompt_lens: "baseline" key/value seqlen list
-    * actual_max_q_prompt_len: actual "baseline" query max prompt len (may be <= max_q_prompt_len due to randomness)
-    * actual_max_kv_prompt_len: actual "baseline" key/value max prompt len (may be <= max_kv_prompt_len due to randomness)
+    * actual_max_q_prompt_len: actual "baseline" query max prompt len (may be <=
+      max_q_prompt_len due to randomness)
+    * actual_max_kv_prompt_len: actual "baseline" key/value max prompt len (may
+      be <= max_kv_prompt_len due to randomness)
     * prefill_q_prompt_lens: "prefill" query seqlen list
     * prefill_kv_prompt_lens: "prefill" key/value seqlen list
     * decode_q_prompt_lens: "decode" query seqlen list (all ones)
@@ -264,19 +282,21 @@ def make_qkv(batch_size,
 
 def pack_tensor(unpacked_tensor, prompt_lens, device=CUDA_DEVICE):
     '''
-    Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an 
-    unpadded number_of_tokens x num_heads x head_size tensor, where 
+    Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
+    unpadded number_of_tokens x num_heads x head_size tensor, where
     number_of_tokens = sum(prompt_lens)
 
     Arguments:
+
     * unpacked_tensor: batch_size x padded_seq_len x num_heads x head_size
     * prompt_lens: list of token counts for each prompt
     * device: CPU or CUDA device
 
     Returns
+
     * packed_tensor: number_of_tokens x num_heads x head_size
-    * start_loc_list: start idx of each batch elt in packed_tensor;
-      [0] + list(itertools.accumulate(prompt_lens))
+    * start_loc_list: start idx of each batch elt in packed_tensor; [0] +
+      list(itertools.accumulate(prompt_lens))
     '''
 
     num_tok = sum(prompt_lens)
@@ -299,15 +319,16 @@ def pack_tensor(unpacked_tensor, prompt_lens, device=CUDA_DEVICE):
 
 def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
     '''
-    Individually pack each of Q, K and V, each with dimensions 
-    batch_size x padded_seq_len x num_heads x head_size, into 
-    respective number_of_tokens x num_heads x head_size tensors.
+    Individually pack each of Q, K and V, each with dimensions batch_size x
+    padded_seq_len x num_heads x head_size, into respective number_of_tokens x
+    num_heads x head_size tensors.
     
     For Q, number_of_tokens = sum(q_prompt_lens).
 
     For K and V, number_of_tokens = sum(kv_prompt_lens)
 
     Arguments:
+
     * query: batch_size x padded_seq_len x num_heads x head_size
     * key: batch_size x padded_seq_len x num_heads x head_size
     * value: batch_size x padded_seq_len x num_heads x head_size
@@ -315,6 +336,7 @@ def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
     * kv_prompt_lens: list of token counts for each key/value
 
     Returns
+
     * packed_query: number_of_tokens x num_heads x head_size
     * packed_key: number_of_tokens x num_heads x head_size
     * packed_value: number_of_tokens x num_heads x head_size
@@ -341,13 +363,15 @@ def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
 
 def make_backend(backend_name: str) -> AttentionBackend:
     '''
-    Construct the backend instance determined by the backend_name string argument.
+    Construct the backend instance determined by the backend_name string
+    argument.
 
     "xformers" -> construct xformers backend
 
     TODO: flash attention backend
 
     Returns:
+
     * Backend instance
     '''
     if backend_name == "xformers":
@@ -363,12 +387,14 @@ def make_metadata_tensors(is_prompt: bool,
     Build scalar & tensor values required to build attention metadata structure.
 
     Arguments:
+
     * is_prompt: True -> Prefill, False -> Decode
     * prompt_lens: list of token-counts for each prompt
     * context_lens: list of context length values for each prompt
     * device: CPU or CUDA device
 
     Returns:
+
     * prompt_lens_tensor: prompt_lens list, as tensor
     * context_lens_tensor: context_lens list, as tensor
     * max_query_len: max(prompt_lens) if is_prompt, o/w 1
@@ -399,9 +425,8 @@ def make_metadata_tensors(is_prompt: bool,
         query_start_loc = copy.deepcopy(seq_start_loc)
         max_query_len = max_prompt_len
     else:
-        # Decode: one new query input token per batch
-        # element, thus query_start_loc is the cumsum
-        # of [1,1,1,...]
+        # Decode: one new query input token per batch element, thus
+        # query_start_loc is the cumsum of [1,1,1,...]
         query_start_loc = list(range(len(seq_start_loc)))
         max_query_len = 1
 
@@ -424,6 +449,7 @@ def make_kv_cache(num_blocks,
     Create a fake KV cache.
 
     Arguments:
+
     * num_blocks: number of blocks in the KV cache
     * num_heads: number of attention heads
     * head_size: head dimension
@@ -432,6 +458,7 @@ def make_kv_cache(num_blocks,
     * default_val: initialization value for KV cache elements
 
     Returns:
+
     * kv_cache: 2 x num_blocks x (block_size * num_heads * head_size)
     '''
 
@@ -444,8 +471,8 @@ def make_kv_cache(num_blocks,
 
 def num_tokens_to_min_blocks(num_tokens, block_size):
     '''
-    Compute the minimum number of blocks required
-    to hold num_tokens tokens, given block_size
+    Compute the minimum number of blocks required to hold num_tokens tokens,
+    given block_size
     '''
     return (num_tokens + block_size) // block_size
 
@@ -461,22 +488,28 @@ def make_block_tables_slot_mapping(block_size,
 
     block_base_addr + sum(num_blocks_list) * 2 - 1
 
-    and subsequent blocks count downward toward
-    block_base_addr
+    and subsequent blocks count downward toward block_base_addr
 
     Arguments:
+
     * block_size: number of offsets per block
     * prompt_lens: list of token-counts for each sequence
     * block_base_addr: the block table base address
     * device: CPU or CUDA device
 
     Return:
-    * decode_block_tables_tensor: fake the state of the block tables during decode
-    * decode_slot_mapping_tensor: fake the state of the slot mapping during decode
-    * prefill_slot_mapping_tensor: fake the state of the slot mapping during prefill
-    * prefill_block_tables_tensor: fake the state of the block tables during prefill
+
+    * decode_block_tables_tensor: fake the state of the block tables during
+      decode
+    * decode_slot_mapping_tensor: fake the state of the slot mapping during
+      decode
+    * prefill_slot_mapping_tensor: fake the state of the slot mapping during
+      prefill
+    * prefill_block_tables_tensor: fake the state of the block tables during
+      prefill
     * slot_mapping_tensor: union of prefill and decode slot mappings
-    * empty_slot_mapping_tensor: empty slot mapping (useful for decode phase cross attention)
+    * empty_slot_mapping_tensor: empty slot mapping (useful for decode phase
+      cross attention)
     * max_block_idx: the highest block address within this block table
     '''
 
@@ -551,14 +584,15 @@ def make_metadata_self_cross(
     cross_slot_mapping: Optional[List[int]] = None,
 ) -> AttentionMetadata:
     '''
-    Construct fake attention metadata for a combined 
-    self-/cross-attention scenario i.e. an encoder/decoder 
-    model. 
+    Construct fake attention metadata for a combined self-/cross-attention
+    scenario i.e. an encoder/decoder model. 
 
     Assumptions:
+
     * No chunked prefill -> a batch is 100% prefill or 100% decode, never both
 
     Arguments:
+
     * attn_backend: Backend for sourcing attention kernels
     * is_prompt: prefill if True, o/w decode
     * prompt_lens: list of token counts for each sequence
@@ -566,11 +600,13 @@ def make_metadata_self_cross(
     * block_tables: self-attention block tables
     * slot_mapping: self-attention slot_mapping
     * device: CPU or CUDA device
-    * cross_seq_lens: list of token counts for each encoder sequence, if any exist
+    * cross_seq_lens: list of token counts for each encoder sequence, if any
+      exist
     * cross_block_tables: cross-attention block tables, if required
     * cross_slot_mapping: cross-attention slot mapping, if required
 
     Return:
+
     * AttentionMetadata structure supporting self- and cross-attention
     '''
 
@@ -658,10 +694,9 @@ def make_metadata_self_cross(
 
 def make_attention(num_heads: int, head_size: int, scale: float):
     '''
-    Construct an instance of the Attention wrapper, suited to
-    the number of attention heads and head dimension
-    (num_heads and head_size respectively) as well as the
-    attention scale factor (scale)
+    Construct an instance of the Attention wrapper, suited to the number of
+    attention heads and head dimension (num_heads and head_size respectively) as
+    well as the attention scale factor (scale)
     '''
 
     return Attention(
@@ -676,6 +711,7 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     Compute & build entities required for the self-/cross-attention test.
 
     Arguments:
+
     * num_heads: Number of attention heads
     * head_size: Head dimension
     * num_blocks: Number of KV cache blocks
@@ -683,10 +719,12 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     * backend_name: selection of backend
 
     Returns:
+
     * scale: 1/sqrt(head_size)
     * attn_backend: backend instance
     * attn: Attention wrapper instance
-    * kv_cache: fake KV cache, 2 x num_blocks x (block_size * num_heads * head_size)
+    * kv_cache: fake KV cache, 2 x num_blocks x (block_size * num_heads *
+      head_size)
     '''
 
     scale = float(1.0 / (head_size**0.5))
@@ -706,31 +744,33 @@ def self_attn_setup(batch_size,
     '''
     Set up test vectors & data structures for self-attention test.
 
-    A triplet of synthetic query/key/value tensors are constructed ("baseline" query/key/value).
-    Given this is a self-attention test, the key & value sequences will have the same length
-    as the corresponding queries.
+    A triplet of synthetic query/key/value tensors are constructed ("baseline"
+    query/key/value). Given this is a self-attention test, the key & value
+    sequences will have the same length as the corresponding queries.
 
-    "Prefill" query/key/value tensors are derived by masking out the last value in each
-    baseline query/key/value. These tensors are used to test prefill & populate KV cache
-    for a subsequent decode test.
+    "Prefill" query/key/value tensors are derived by masking out the last value
+    in each baseline query/key/value. These tensors are used to test prefill &
+    populate KV cache for a subsequent decode test.
 
-    "Decode" query/key/value tensors are derived by extracting *only* the last value from
-    each baseline query/key/value (i.e. complement of the prefill tensors.) These tensors
-    are used to test decode, conditional on the kv cache being populated during the
-    prefill test.
+    "Decode" query/key/value tensors are derived by extracting *only* the last
+    value from each baseline query/key/value (i.e. complement of the prefill
+    tensors.) These tensors are used to test decode, conditional on the kv cache
+    being populated during the prefill test.
 
-    The baseline query/key/value tensors are passed to an ideal reference self-attention implementation
-    to generate a "Baseline" ideal output tensor. This tensor is split into the "Prefill"
-    ideal output tensor (all but the last element of each output sequence) and the "Decode"
-    ideal output tensor (*only* the last element of each output sequence); the "Prefill" and
-    "Decode" ideal output tensors can be used to validate the prefill and decode test
-    results, respectively.
+    The baseline query/key/value tensors are passed to an ideal reference
+    self-attention implementation to generate a "Baseline" ideal output tensor.
+    This tensor is split into the "Prefill" ideal output tensor (all but the
+    last element of each output sequence) and the "Decode" ideal output tensor
+    (*only* the last element of each output sequence); the "Prefill" and
+    "Decode" ideal output tensors can be used to validate the prefill and decode
+    test results, respectively.
 
     This function also constructs the self-attention KV cache memory mapping
-    (slot mapping and block table), ensuring that the block table starts
-    at block_base_addr
+    (slot mapping and block table), ensuring that the block table starts at
+    block_base_addr
 
     Arguments:
+
     * batch_size
     * num_heads: Number of attention heads
     * head_size: Head dimension
@@ -740,21 +780,37 @@ def self_attn_setup(batch_size,
     * block_base_addr: self-attention block table base address
 
     Returns:
-    * query: "baseline" query; batch_size x padded_seq_len x num_heads x head_size
-    * prefill_packed_query: "prefill" query; number_of_tokens x num_heads x head_size
-    * prefill_packed_key: self-attn "prefill" key; number_of_tokens x num_heads x head_size
-    * prefill_packed_value: self-attn "prefill" value; number_of_tokens x num_heads x head_size
-    * prefill_packed_ideal_output: self-attn "prefill" ideal output; number_of_tokens x num_heads x head_size
-    * prefill_q_prompt_lens: list of token counts for each *prefill query* (one less than baseline query)
-    * prefill_kv_prompt_lens: list of token counts for each self-attn *prefill key/value* (should match prefill_q_prompt_lens)
-    * decode_packed_query: "decode" query; number_of_tokens x num_heads x head_size
-    * decode_packed_key: self-attn "decode" key; number_of_tokens x num_heads x head_size
-    * decode_packed_value: self-attn "decode" key; number_of_tokens x num_heads x head_size
-    * decode_packed_ideal_output: self-attn "decode" ideal output; number_of_tokens x num_heads x head_size
-    * decode_q_prompt_lens: list of token counts for each *decode query* (should be 1)
-    * decode_kv_prompt_lens: list of token counts for each self-attn *decode key/value* (should match decode_q_prompt_lens)
-    * q_prompt_lens: "baseline" query seq lens; number_of_tokens x num_heads x head_size
-    * kv_prompt_lens: self-attn "baseline" key/value seq lens; number_of_tokens x num_heads x head_size
+
+    * query: "baseline" query; batch_size x padded_seq_len x num_heads x
+      head_size
+    * prefill_packed_query: "prefill" query; number_of_tokens x num_heads x
+      head_size
+    * prefill_packed_key: self-attn "prefill" key; number_of_tokens x num_heads
+      x head_size
+    * prefill_packed_value: self-attn "prefill" value; number_of_tokens x
+      num_heads x head_size
+    * prefill_packed_ideal_output: self-attn "prefill" ideal output;
+      number_of_tokens x num_heads x head_size
+    * prefill_q_prompt_lens: list of token counts for each *prefill query* (one
+      less than baseline query)
+    * prefill_kv_prompt_lens: list of token counts for each self-attn *prefill
+      key/value* (should match prefill_q_prompt_lens)
+    * decode_packed_query: "decode" query; number_of_tokens x num_heads x
+      head_size
+    * decode_packed_key: self-attn "decode" key; number_of_tokens x num_heads x
+      head_size
+    * decode_packed_value: self-attn "decode" key; number_of_tokens x num_heads
+      x head_size
+    * decode_packed_ideal_output: self-attn "decode" ideal output;
+      number_of_tokens x num_heads x head_size
+    * decode_q_prompt_lens: list of token counts for each *decode query* (should
+      be 1)
+    * decode_kv_prompt_lens: list of token counts for each self-attn *decode
+      key/value* (should match decode_q_prompt_lens)
+    * q_prompt_lens: "baseline" query seq lens; number_of_tokens x num_heads x
+      head_size
+    * kv_prompt_lens: self-attn "baseline" key/value seq lens; number_of_tokens
+      x num_heads x head_size
     * decode_block_tables: fake self-attn decode-phase block table
     * decode_slot_mapping: fake self-attn decode-phase slot mapping
     * prefill_slot_mapping: fake self-attn prefill-phase slot mapping
@@ -853,45 +909,56 @@ def cross_attn_setup_reuses_query(query,
     '''
     Set up test vectors & data structures for cross-attention test.
 
-    A triplet of synthetic cross-attention key/value tensors are constructed ("baseline" key/value).
-    Given this is a cross-attention test, we assume query tensors were already synthesized for a
-    prior self-attention test and will be reused for cross-attention. The key & value sequences 
-    generated here will may have a different length than the corresponding queries (as is often
+    A triplet of synthetic cross-attention key/value tensors are constructed
+    ("baseline" key/value). Given this is a cross-attention test, we assume
+    query tensors were already synthesized for a prior self-attention test and
+    will be reused for cross-attention. The key & value sequences generated here
+    will may have a different length than the corresponding queries (as is often
     the case for cross-attention between decoder and encoder sequences.)
 
-    Cross attention key & value tensors do not grow during autoregressive inference; thus
-    this function obtains a single key/value pair suitable for both prefill and decode.
+    Cross attention key & value tensors do not grow during autoregressive
+    inference; thus this function obtains a single key/value pair suitable for
+    both prefill and decode.
 
-    The "baseline" query tensor is received as an argument. The "baseline" query/key/value tensors
-    are passed to an ideal reference cross-attention implementation
-    to generate a "baseline" ideal output tensor. This tensor is split into the "Prefill"
-    ideal output tensor (all but the last element of each output sequence) and the "Decode"
-    ideal output tensor (*only* the last element of each output sequence); the "Prefill" and
-    "Decode" ideal output tensors can be used to validate the prefill and decode test
-    results, respectively.
+    The "baseline" query tensor is received as an argument. The "baseline"
+    query/key/value tensors are passed to an ideal reference cross-attention
+    implementation to generate a "baseline" ideal output tensor. This tensor is
+    split into the "Prefill" ideal output tensor (all but the last element of
+    each output sequence) and the "Decode" ideal output tensor (*only* the last
+    element of each output sequence); the "Prefill" and "Decode" ideal output
+    tensors can be used to validate the prefill and decode test results,
+    respectively.
 
     This function also constructs the cross-attention KV cache memory mapping
-    (slot mapping and block table), ensuring that the block table starts
-    at block_base_addr. 
+    (slot mapping and block table), ensuring that the block table starts at
+    block_base_addr. 
 
     Arguments:
-    * query: pre-existing "baseline" query; batch_size x padded_seq_len x num_heads x head_size
+
+    * query: pre-existing "baseline" query; batch_size x padded_seq_len x
+      num_heads x head_size
     * q_prompt_lens: list of token-counts for each "baseline" query sequence
-    * prefill_q_prompt_lens:  list of token-counts for each "prefill" query sequence
+    * prefill_q_prompt_lens:  list of token-counts for each "prefill" query
+      sequence
     * batch_size
     * num_heads: Number of attention heads
     * head_size: Head dimension
     * block_size: Number of offsets per KV cache block
     * scale: attention scale parameter
     * max_q_prompt_len: upper limit on query length for synthetic test vectors
-    * max_kv_prompt_len: upper limit on key/value length for synthetic test vectors
+    * max_kv_prompt_len: upper limit on key/value length for synthetic test
+      vectors
     * block_base_addr: cross-attention block table base address
 
     Returns:
+
     * packed_key: cross-attention key; number_of_tokens x num_heads x head_size
-    * packed_value: cross-attention value; number_of_tokens x num_heads x head_size
-    * prefill_packed_ideal_output: "prefill" ideal output; number_of_tokens x num_heads x head_size
-    * decode_packed_ideal_output: "decode" ideal output; number_of_tokens x num_heads x head_size
+    * packed_value: cross-attention value; number_of_tokens x num_heads x
+      head_size
+    * prefill_packed_ideal_output: "prefill" ideal output; number_of_tokens x
+      num_heads x head_size
+    * decode_packed_ideal_output: "decode" ideal output; number_of_tokens x
+      num_heads x head_size
     * kv_prompt_lens: list of token-counts for each key/value
     * decode_block_tables: fake decode-phase block tables
     * decode_slot_mapping: fake decode-phase slot mapping
@@ -988,32 +1055,35 @@ def test_prefill_decode_self_and_cross_attention(
         max_kv_prompt_len: int) -> None:
     '''
     Test:
+
     * Construct fake test vectors for self- and cross-attention
-    * Construct attention metadata structure with self- and cross-attention attributes
+    * Construct attention metadata structure with self- and cross-attention
+      attributes
     * Test self- and cross-attention in the following order
+    
         * Prefill self-attention
         * Prefill cross-attention
         * Decode self-attention
         * Decode cross-attention
-        * This order would exacerbate any accidental overlap in the self-/cross-attention block tables,
-          which we attempt to avoid
-    * Validate output correctness against ideal reference attention implementation
+        * This order would exacerbate any accidental overlap in the
+          self-/cross-attention block tables, which we attempt to avoid
+    * Validate output correctness against ideal reference attention
+      implementation
 
-    Block tables are constructed such that cross-attention KV cache is in a higher, non-intersecting
-    address-space than self-attention KV cache.
+    Block tables are constructed such that cross-attention KV cache is in a
+    higher, non-intersecting address-space than self-attention KV cache.
 
-    Self- and cross-attention share the same query tensor but not the K/V tensors. Self-attention
-    K/Vs must have the same seq len as Q while cross-attention K/Vs are allowed to differ in seq
-    len, as is often the case for cross-attention.
+    Self- and cross-attention share the same query tensor but not the K/V
+    tensors. Self-attention K/Vs must have the same seq len as Q while
+    cross-attention K/Vs are allowed to differ in seq len, as is often the case
+    for cross-attention.
     '''
 
     # Num KV cache blocks
     num_blocks = 4096
 
-    # Attention scale factor,
-    # attention backend instance,
-    # attention wrapper instance,
-    # KV cache init
+    # Attention scale factor, attention backend instance, attention wrapper
+    # instance, KV cache init
     scale, \
     attn_backend, \
     attn, \
