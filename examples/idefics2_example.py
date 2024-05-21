@@ -1,4 +1,3 @@
-
 from vllm import LLM
 from vllm.sequence import MultiModalData
 import torch
@@ -11,7 +10,7 @@ if __name__ == "__main__":
         image_token_id=32000,
         image_input_shape="1,3,980,980",
         image_feature_size=576,
-        dtype = 'float16',
+        dtype='float16',
     )
 
     prompt = "<image>" * 64 + (
@@ -21,9 +20,8 @@ if __name__ == "__main__":
     images = torch.load("images/flower.pt")
     print(images.shape)
     outputs = llm.generate(prompt,
-                            multi_modal_data=MultiModalData(
-                                type=MultiModalData.Type.IMAGE, data=images))
-
+                           multi_modal_data=MultiModalData(
+                               type=MultiModalData.Type.IMAGE, data=images))
 
     for o in outputs:
         generated_text = o.outputs[0].text
