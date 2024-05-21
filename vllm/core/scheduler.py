@@ -744,8 +744,8 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
         curr_loras = set(
-            seq_group.lora_int_id
-            for seq_group in self.running) if self.lora_enabled else None
+            seq_group.lora_int_id for seq_group in self.running
+            if seq_group.lora_int_id > 0) if self.lora_enabled else None
 
         remaining_waiting, prefills = (self.waiting,
                                        SchedulerPrefillOutputs.create_empty())
