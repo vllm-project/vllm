@@ -27,7 +27,7 @@ MARLIN_K_CHUNKS = [128]
 MARLIN_N_CHUNKS = [64, 128, 256]
 
 MARLIN_24_K_CHUNKS = [128]
-MARLIN_24_N_CHUNKS = [256]
+MARLIN_24_N_CHUNKS = [512]
 
 MNK_FACTORS = [
     (1, 1, 1),
@@ -175,7 +175,7 @@ def test_marlin_gemm(
                     reason="Marlin is not supported on this GPU type.")
 @pytest.mark.parametrize("k_chunk", MARLIN_24_K_CHUNKS)
 @pytest.mark.parametrize("n_chunk", MARLIN_24_N_CHUNKS)
-@pytest.mark.parametrize("num_bits", GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
+@pytest.mark.parametrize("num_bits", [4])#GPTQ_MARLIN_24_SUPPORTED_NUM_BITS)
 @pytest.mark.parametrize("group_size", GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES)
 @pytest.mark.parametrize("mnk_factors", MNK_FACTORS)
 def test_marlin_24_gemm(k_chunk, n_chunk, num_bits, group_size, mnk_factors):

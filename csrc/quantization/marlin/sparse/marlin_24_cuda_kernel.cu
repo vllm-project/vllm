@@ -53,7 +53,7 @@ static constexpr int STAGES = 4;  // 4 pipeline stages fit into shared memory
 static constexpr int min_thread_n = 128;
 
 static constexpr int tile_size = 16;
-static constexpr int max_par = 16;
+static constexpr int max_par = 32;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
@@ -736,10 +736,10 @@ __global__ void Marlin_24(
     for (int pipe = 0; pipe < stages;) {
       fetch_to_shared((pipe + stages - 1) % stages, pipe,
                       slice_iters >= stages);
+      matmul(pipe);
       wait_for_stage();
 
       fetch_to_registers(pipe + 1, (pipe + 1) % stages);
-      matmul(pipe);
 
       pipe++;
       slice_iters--;
@@ -899,9 +899,12 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
       // than better compute utilization
       thread_k = 128;
       thread_m = 128;
-    } else {
+    } else if (prob_n <= 128) {
       thread_k = 64;
       thread_m = 256;
+    } else {
+      thread_k = 32;
+      thread_m = 512;
     }
   }
 
@@ -928,19 +931,22 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
   int4* C_ptr = (int4*)C;
   const int4* s_ptr = (const int4*)s;
 
-  int* locks = (int*)workspace;
-  for (int i = 0; i < tot_n_blocks; i += 4) {
+  constexpr int max_m_blocks = 4;
+
+  int *locks = (int *)workspace;
+  for (int i = 0; i < tot_n_blocks; i += max_m_blocks) {
     int thread_n_blocks = tot_n_blocks - i;
     prob_n = tot_n - 16 * i;
     int par = 1;
-    if (thread_n_blocks > 4) {
+    if (thread_n_blocks > max_m_blocks) {
       // Note that parallel > 1 currently only works for inputs without any
       // padding
-      par = (16 * thread_n_blocks - pad) / 64;
-      if (par > max_par) par = max_par;
-      prob_n = 64 * par;
-      i += 4 * (par - 1);
-      thread_n_blocks = 4;
+      par = (16 * thread_n_blocks - pad) / (max_m_blocks * 16);
+      if (par > max_par)
+        par = max_par;
+      prob_n = (max_m_blocks * 16) * par;
+      i += max_m_blocks * (par - 1);
+      thread_n_blocks = max_m_blocks;
     }
 
     // For compilation speed, we only define the kernel configurations that have
@@ -949,30 +955,49 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
 
     // the false is start of the CALL_IF macros
     if (false) {
-    }  //         BMxBNxBK,   group
+    } //         BMxBNxBK,   group
     // 4-bit
-    CALL_IF_2_4(4, 8, 1, 4, -1)   // e.g., 16x128x128
-    CALL_IF_2_4(4, 8, 1, 4, 4)    // e.g., 16x128x128, 64
-    CALL_IF_2_4(4, 16, 1, 2, -1)  // e.g., 16x256x64
-    CALL_IF_2_4(4, 16, 1, 2, 4)   // e.g., 16x256x64,  64
-    CALL_IF_2_4(4, 16, 2, 2, -1)  // e.g.. 32x256x64
+    CALL_IF_2_4(4, 8, 1, 4, -1) // e.g., 16x128x128
+    CALL_IF_2_4(4, 8, 1, 4, 4)  // e.g., 16x128x128, 64
+
+    CALL_IF_2_4(4, 16, 1, 2, -1) // e.g., 16x256x64
+    CALL_IF_2_4(4, 16, 1, 2, 4)  // e.g., 16x256x64,  64
+    CALL_IF_2_4(4, 16, 2, 2, -1) // e.g.. 32x256x64
     CALL_IF_2_4(4, 16, 2, 2, 4)
     CALL_IF_2_4(4, 16, 3, 2, -1)
     CALL_IF_2_4(4, 16, 3, 2, 4)
     CALL_IF_2_4(4, 16, 4, 2, -1)
     CALL_IF_2_4(4, 16, 4, 2, 4)
 
+    CALL_IF_2_4(4, 32, 1, 1, -1) // e.g., 16x256x64
+    CALL_IF_2_4(4, 32, 1, 1, 4)  // e.g., 16x256x64,  64
+    CALL_IF_2_4(4, 32, 2, 1, -1) // e.g.. 32x256x64
+    CALL_IF_2_4(4, 32, 2, 1, 4)
+    CALL_IF_2_4(4, 32, 3, 1, -1)
+    CALL_IF_2_4(4, 32, 3, 1, 4)
+    CALL_IF_2_4(4, 32, 4, 1, -1)
+    CALL_IF_2_4(4, 32, 4, 1, 4)
+
+    CALL_IF_2_4(4, 32, 5, 1, -1)
+    CALL_IF_2_4(4, 32, 5, 1, 4)
+    // CALL_IF_2_4(4, 32, 6, 1, -1)
+    // CALL_IF_2_4(4, 32, 6, 1, 4)
+    // CALL_IF_2_4(4, 32, 7, 1, -1)
+    // CALL_IF_2_4(4, 32, 7, 1, 4)
+    // CALL_IF_2_4(4, 32, 8, 1, -1)
+    // CALL_IF_2_4(4, 32, 8, 1, 4)
+
     // 8-bit
-    CALL_IF_2_4(8, 8, 1, 4, -1)   // e.g., 16x128x128
-    CALL_IF_2_4(8, 8, 1, 4, 4)    // e.g., 16x128x128, 64
-    CALL_IF_2_4(8, 16, 1, 2, -1)  // e.g., 16x256x64
-    CALL_IF_2_4(8, 16, 1, 2, 4)   // e.g., 16x256x64,  64
-    CALL_IF_2_4(8, 16, 2, 2, -1)  // e.g.. 32x256x64
-    CALL_IF_2_4(8, 16, 2, 2, 4)
-    CALL_IF_2_4(8, 16, 3, 2, -1)
-    CALL_IF_2_4(8, 16, 3, 2, 4)
-    CALL_IF_2_4(8, 16, 4, 2, -1)
-    CALL_IF_2_4(8, 16, 4, 2, 4)
+    // CALL_IF_2_4(8, 8, 1, 4, -1)  // e.g., 16x128x128
+    // CALL_IF_2_4(8, 8, 1, 4, 4)   // e.g., 16x128x128, 64
+    // CALL_IF_2_4(8, 16, 1, 2, -1) // e.g., 16x256x64
+    // CALL_IF_2_4(8, 16, 1, 2, 4)  // e.g., 16x256x64,  64
+    // CALL_IF_2_4(8, 16, 2, 2, -1) // e.g.. 32x256x64
+    // CALL_IF_2_4(8, 16, 2, 2, 4)
+    // CALL_IF_2_4(8, 16, 3, 2, -1)
+    // CALL_IF_2_4(8, 16, 3, 2, 4)
+    // CALL_IF_2_4(8, 16, 4, 2, -1)
+    // CALL_IF_2_4(8, 16, 4, 2, 4)
     else {
       throw std::runtime_error("Unsupported shapes: MKN = [" + str(prob_m) +
                                ", " + str(prob_k) + ", " + str(prob_n) + "]" +
