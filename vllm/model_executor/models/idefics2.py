@@ -1,5 +1,6 @@
 from typing import Union, Iterable, List, Optional, Tuple
 from transformers import CLIPVisionModel, LlavaConfig
+from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.config import VisionLanguageConfig
 from vllm.attention import AttentionMetadata
 from vllm.sequence import SamplerOutput
@@ -18,7 +19,9 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.layernorm import RMSNorm
-import inspect
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from .vlm_base import VisionLanguageModelBase
 
 import torch
 from torch import nn
@@ -385,18 +388,22 @@ class Idefics2Model(nn.Module):
                                             inputs_embeds=inputs_embeds)
             return hidden_states
 
-class Idefics2ForConditionalGeneration(nn.Module):
+class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self,
                  config: "Idefics2Config",                 
                  vision_language_config: VisionLanguageConfig,
-                 linear_method: Optional["LinearMethodBase"] = None) -> None:
+                 linear_method: Optional["LinearMethodBase"] = None,
+                 cache_config: Optional[CacheConfig] = None,
+                quant_config: Optional[QuantizationConfig] = None) -> None:
 
-        super().__init__()
+        super().__init__(vision_language_config)
         self.config = config
         self.vision_language_config = vision_language_config
-
+        self.cache_config = cache_config
+        self.quant_config = quant_config
+        
         assert self.vision_language_config, (
             "Provide `image_input_type` and other vision "
             "related configurations through LLM entrypoint "

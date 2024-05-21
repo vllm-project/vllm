@@ -6,8 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 import torch
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
-                          LlavaConfig, LlavaForConditionalGeneration)
+from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer, 
+                          LlavaConfig, Idefics2Config, LlavaForConditionalGeneration,
+                           Idefics2ForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
@@ -132,6 +133,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
+AutoModelForCausalLM.register(Idefics2Config, Idefics2ForConditionalGeneration)
 
 _EMBEDDING_MODELS = [
     "intfloat/e5-mistral-7b-instruct",

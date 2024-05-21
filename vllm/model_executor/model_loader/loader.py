@@ -85,7 +85,7 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
                       cache_config: CacheConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class = get_model_architecture(model_config)[0]
-    linear_method = _get_linear_method(model_config, load_config)
+    quant_config = _get_quantization_config(model_config, load_config)
 
     return model_class(config=model_config.hf_config,
                        cache_config=cache_config,
