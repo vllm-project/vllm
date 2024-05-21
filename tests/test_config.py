@@ -77,7 +77,7 @@ def test_rope_scaling():
     )
     assert getattr(longchat_model_config.hf_config, "rope_scaling",
                    None) == LONGCHAT_ROPE_SCALING
-    assert longchat_model_config.max_model_len == 131072
+    assert longchat_model_config.max_model_len == 16384
 
     longchat_model_config = ModelConfig(
         "lmsys/longchat-13b-16k",
@@ -90,4 +90,4 @@ def test_rope_scaling():
     )
     assert getattr(longchat_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
-    assert longchat_model_config.max_model_len == 32768
+    assert longchat_model_config.max_model_len == 4096
