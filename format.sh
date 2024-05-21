@@ -237,7 +237,17 @@ fi
 echo 'vLLM isort: Done'
 
 # Clang-format section
-CLANG_FORMAT_EXTENSION_TARGETS=('*.h' '*.cpp' '*.cu' '*.cuh')
+# Exclude some files for formatting because they are vendored
+# NOTE: Keep up to date with .github/workflows/clang-format.yml
+CLANG_FORMAT_EXCLUDES=(
+    'csrc/moe/topk_softmax_kernels.cu'
+    'csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu'
+    'csrc/punica/bgmv/bgmv_config.h'
+    'csrc/punica/bgmv/bgmv_impl.cuh'
+    'csrc/punica/bgmv/vec_dtypes.cuh'
+    'csrc/punica/punica_ops.cu'
+    'csrc/punica/type_convert.h'
+)
 
 # Format specified files with clang-format
 clang_format() {
@@ -254,15 +264,18 @@ clang_format_changed() {
     # exist on both branches.
     MERGEBASE="$(git merge-base origin/main HEAD)"
 
-    if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" &>/dev/null; then
-        git diff --name-only --diff-filter=ACM "$MERGEBASE" -- "${CLANG_FORMAT_EXTENSION_TARGETS[@]}" | xargs -P 5 \
-             clang-format -i
+    # Get the list of changed files, excluding the specified ones
+    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}"))
+    if [ -n "$changed_files" ]; then
+        echo "$changed_files" | xargs -P 5 clang-format -i
     fi
 }
 
 # Format all files with clang-format
 clang_format_all() {
-    clang-format -i $(find csrc/ \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print)
+    find csrc/ \( -name '*.h' -o -name '*.cpp' -o -name '*.cu' -o -name '*.cuh' \) -print \
+        | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") \
+        | xargs clang-format -i
 }
 
 # Run clang-format
