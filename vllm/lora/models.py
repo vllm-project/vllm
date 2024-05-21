@@ -26,7 +26,6 @@ from vllm.utils import LRUCache, is_pin_memory_available
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
-HF_SYSTEM = HfFileSystem(endpoint=os.getenv("HF_ENDPOINT", None))
 
 
 @dataclass
