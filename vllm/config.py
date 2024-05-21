@@ -72,6 +72,8 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model 
             names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
+        use_attention_sinks: If True, allow the model to use attention sinks
+            and exceed its context length during decoding.
     """
 
     def __init__(
@@ -94,6 +96,7 @@ class ModelConfig:
         max_logprobs: int = 5,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -123,6 +126,7 @@ class ModelConfig:
                                                      max_model_len)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
+        self.use_attention_sinks = use_attention_sinks
         if not self.skip_tokenizer_init:
             self._verify_tokenizer_mode()
         self._verify_embedding_mode()

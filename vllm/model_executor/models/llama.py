@@ -32,7 +32,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention_sink import StreamingAttentionSink
+from vllm.model_executor.layers.attention_sinks import StreamingAttentionSink
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -96,6 +96,7 @@ class LlamaAttention(nn.Module):
         bias: bool = False,
         sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -158,11 +159,15 @@ class LlamaAttention(nn.Module):
                               sliding_window=sliding_window,
                               cache_config=cache_config)
         
-        self.use_attn_sinks = True
-        llama_context_len = 4096 # where do we get this?
-        if self.use_attn_sinks:
+        self.use_attention_sinks = use_attention_sinks
+        if use_attention_sinks:
+            if cache_config is not None:
+                kv_cache_dtype = cache_config.cache_dtype
+            else:
+                kv_cache_dtype = "auto"
             self.attention_sink = StreamingAttentionSink(
-                llama_context_len,
+                max_position_embeddings, # Llama context length
+                kv_cache_dtype,
                 self.num_kv_heads,
                 self.head_dim,
                 self.kv_scale,
@@ -181,7 +186,7 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        if self.use_attn_sinks:
+        if self.use_attention_sinks:
             return self.attention_sink(
                 q,
                 k,
@@ -205,6 +210,7 @@ class LlamaDecoderLayer(nn.Module):
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -233,6 +239,7 @@ class LlamaDecoderLayer(nn.Module):
             bias=attention_bias,
             sliding_window=sliding_window,
             cache_config=cache_config,
+            use_attention_sinks=use_attention_sinks,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -283,6 +290,7 @@ class LlamaModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
@@ -297,7 +305,7 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, cache_config, quant_config)
+            LlamaDecoderLayer(config, cache_config, quant_config, use_attention_sinks)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -361,13 +369,15 @@ class LlamaForCausalLM(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.model = LlamaModel(config,
                                 cache_config,
                                 quant_config,
-                                lora_config=lora_config)
+                                lora_config=lora_config,
+                                use_attention_sinks=use_attention_sinks)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

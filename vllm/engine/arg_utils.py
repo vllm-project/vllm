@@ -71,6 +71,7 @@ class EngineArgs:
     num_gpu_blocks_override: Optional[int] = None
     num_lookahead_slots: int = 0
     model_loader_extra_config: Optional[dict] = None
+    use_attention_sinks: bool = False
 
     # Related to Vision-language models such as llava
     image_input_type: Optional[str] = None
@@ -92,6 +93,9 @@ class EngineArgs:
     def __post_init__(self):
         if self.tokenizer is None:
             self.tokenizer = self.model
+        if self.use_attention_sinks and self.speculative_model:
+            raise NotImplementedError('Attention sinks are not supported '
+                                      'with speculative decoding currently.')
 
     @staticmethod
     def add_cli_args(
@@ -429,6 +433,11 @@ class EngineArgs:
                             default=EngineArgs.device,
                             choices=["auto", "cuda", "neuron", "cpu"],
                             help='Device type for vLLM execution.')
+        parser.add_argument('--use-attention_sinks',
+                            action='store_true',
+                            help=('If True, allow the model to use '
+                            'attention sinks and exceed its context '
+                            'length during decoding.'))
         # Related to Vision-language models such as llava
         parser.add_argument(
             '--image-input-type',
@@ -552,7 +561,8 @@ class EngineArgs:
             self.quantization, self.quantization_param_path,
             self.enforce_eager, self.max_context_len_to_capture,
             self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init, self.served_model_name)
+            self.skip_tokenizer_init, self.served_model_name,
+            self.use_attention_sinks)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,

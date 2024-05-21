@@ -17,6 +17,7 @@ class StreamingAttentionSink(nn.Module):
     def __init__(
         self,
         model_context_len: int,
+        kv_cache_dtype: str,
         num_kv_heads: int,
         head_dim: int,
         kv_scale: float,
@@ -26,6 +27,7 @@ class StreamingAttentionSink(nn.Module):
     ) -> None:
         super().__init__()
         self.model_context_len = model_context_len
+        self.kv_cache_dtype = kv_cache_dtype
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.kv_scale = kv_scale
@@ -66,7 +68,7 @@ class StreamingAttentionSink(nn.Module):
                     key_cache,
                     value_cache,
                     attn_metadata.slot_mapping,
-                    attn_metadata.kv_cache_dtype,
+                    self.kv_cache_dtype,
                     self.kv_scale
                 )
 
@@ -81,7 +83,7 @@ class StreamingAttentionSink(nn.Module):
             original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
             block_tables_tensor = attn_metadata.decode_metadata.block_tables
             block_tables: List[List[int]] = []
-            context_lens = attn_metadata.decode_metadata.context_lens.tolist()
+            seq_lens = attn_metadata.seq_lens_tensor.tolist()
 
             # cache phys_bnums because they take up 2/3 of compute time every decode
             if hasattr(attn_metadata, 'phys_bnums_list'):
@@ -93,8 +95,8 @@ class StreamingAttentionSink(nn.Module):
             batch_size = block_tables_tensor.shape[0]
             original_keys: List[Tuple[torch.Tensor]] = []
             for i in range(batch_size):
-                # see paged_attn.py line 19 for context_lens definition
-                num_past_tokens = context_lens[i] - 1
+                # see XFormersMetadata class for seq_lens definition
+                num_past_tokens = seq_lens[i] - 1
                 within_context_len = num_past_tokens < model_context_len
                 block_table = block_tables_tensor[i]
 
@@ -159,7 +161,7 @@ class StreamingAttentionSink(nn.Module):
                     block_tables.append(capped_block_table)
 
                     # edited context len is in range [4081, 4096]
-                    attn_metadata.decode_metadata.context_lens[i] = model_context_len  # pos_end + 1
+                    attn_metadata.seq_lens_tensor[i] = model_context_len  # pos_end + 1
                     
                     # edited position is in range [4080, 4095]
                     positions[i] = model_context_len - 1  # pos_end
@@ -182,7 +184,7 @@ class StreamingAttentionSink(nn.Module):
                         
             # put original keys back in cache
             for i in range(batch_size):
-                num_past_tokens = context_lens[i] - 1
+                num_past_tokens = seq_lens[i] - 1
                 within_context_len = num_past_tokens < model_context_len
                 block_table = original_block_tables[i]
                 phys_bnums = phys_bnums_list[i]
@@ -202,15 +204,15 @@ class StreamingAttentionSink(nn.Module):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                attn_metadata.kv_cache_dtype,
+                self.kv_cache_dtype,
                 self.kv_scale
             )
             
-            # revert block_tables and context_lens inside metadata
+            # revert block_tables and seq_lens inside metadata
             # so that next attn layer starts with same fields
             attn_metadata.decode_metadata.block_tables = original_block_tables
-            attn_metadata.decode_metadata.context_lens = torch.tensor(
-                context_lens, dtype=torch.int, device=device)
+            attn_metadata.seq_lens_tensor = torch.tensor(
+                seq_lens, dtype=torch.int, device=device)
             
             output, _ = self.output(attn_output)
             return output

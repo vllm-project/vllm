@@ -87,9 +87,15 @@ def _initialize_model(model_config: ModelConfig, load_config: LoadConfig,
     model_class = get_model_architecture(model_config)[0]
     quant_config = _get_quantization_config(model_config, load_config)
 
+    if model_config.use_attention_sinks \
+        and model_class.__name__ != 'LlamaForCausalLM':
+        raise NotImplementedError('Attention sinks is only supported '
+                                  'for Llama models currently.')
+
     return model_class(config=model_config.hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
+                       use_attention_sinks=model_config.use_attention_sinks,
                        **_get_model_initialization_kwargs(
                            model_class, lora_config, vision_language_config))
 

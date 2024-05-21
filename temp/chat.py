@@ -64,7 +64,8 @@ def main():
         model=model,
         enforce_eager=True,
         max_model_len=4096,
-        block_size=16
+        block_size=16,
+        use_attention_sinks=True
     )
 
     engine = LLMEngine.from_engine_args(args)
