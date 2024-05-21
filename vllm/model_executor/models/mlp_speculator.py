@@ -8,7 +8,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sampling_params import LogitsProcessor
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.sequence import SamplerOutput
 
 
@@ -50,8 +50,10 @@ class MLPSpeculator(nn.Module):
     def __init__(
         self,
         config,
+        **kwargs
     ) -> None:
         super().__init__()
+        self.current_head_index = 0
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
         self.emb_dim = config.emb_dim
@@ -85,20 +87,22 @@ class MLPSpeculator(nn.Module):
     ) -> torch.Tensor:
         # prune the hidden states
         if self.current_head_index == 0:
-            accepted_tokens_len = positions.max(dim=1)[0] + 1  # add 1 for length
+            accepted_tokens_len = positions #.max(dim=0)[0] + 1  # add 1 for length
             if self.first_decode_step:
                 self.prev_context_lengths = accepted_tokens_len
                 self.first_decode_step = False
             else:
                 accepted_tokens_len -= self.prev_context_lengths
-
-            self.previous_hidden_state = self.previous_hidden_state.gather(
-                1,
-                (accepted_tokens_len - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
-            ) # b x 1 x d
+                self.prev_context_lengths += accepted_tokens_len
+            # self.previous_hidden_state = self.previous_hidden_state.contiguous().unsqueeze(0)
+            # self.previous_hidden_state = self.previous_hidden_state.gather(
+            #     1,
+            #     (accepted_tokens_len - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
+            # ) # b x 1 x d
+            self.previous_hidden_state = self.previous_hidden_state[accepted_tokens_len - 1]
 
         # Project and predict
-        z = self.emb[self.current_head_index](input_ids[:, -1])  # b k d
+        z = self.emb[self.current_head_index](input_ids[-1])  # b k d
         state = self.proj[self.current_head_index](self.previous_hidden_state)
         # Weighted add of state_weight*state and emb_weight*z
         # Let subsequent LN take care of denominator
@@ -130,7 +134,7 @@ class MLPSpeculator(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            param = params_dict[name]
+            param = params_dict[name.replace("speculator.", "")]
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)

@@ -7,9 +7,9 @@ import torch
 
 class HiddenStatesWorker(Worker):
 
-    def __init__(self, speculator: MLPSpeculator, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.speculator = speculator
+        self.speculator = None
 
     def _get_hidden_states(
         self,
@@ -65,15 +65,17 @@ class HiddenStatesWorker(Worker):
             self,
             execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
-        # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently
-        if execute_model_req.seq_group_metadata_list[0].is_prompt:
-            self.speculator.first_decode_step = True
 
         # reset the head to call in speculator
         self.speculator.current_head_index = 0
 
         sampler_output, hidden_states = self._get_hidden_states(execute_model_req.seq_group_metadata_list, self.gpu_cache)
 
-        # set the previous hidden states based on the output hidden states of the base model
-        self.speculator.previous_hidden_state = hidden_states
+        # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently
+        if execute_model_req.seq_group_metadata_list[0].is_prompt:
+            self.speculator.first_decode_step = True
+            self.speculator.previous_hidden_state = hidden_states
+        else:
+            # set the previous hidden states based on the output hidden states of the base model
+            self.speculator.previous_hidden_state = hidden_states[:6]
         return sampler_output

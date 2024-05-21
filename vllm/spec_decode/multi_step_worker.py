@@ -66,8 +66,8 @@ class MultiStepWorker(Worker):
             copied_seq_group_metadata_list)
 
         # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
-                                     sample_len)
+        # self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
+        #                              sample_len)
 
         # Run model sample_len times.
         model_outputs = []

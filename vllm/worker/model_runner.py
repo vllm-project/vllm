@@ -66,6 +66,173 @@ class ModelInput(NamedTuple):
             num_prefills=0,
         )
 
+class SingleStepSpeculativeModelRunner:
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
+        is_driver_worker: bool = False,
+        vision_language_config: Optional[VisionLanguageConfig] = None,
+    ):
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.lora_config = lora_config
+        self.load_config = load_config
+        self.is_driver_worker = is_driver_worker
+        self.vision_language_config = vision_language_config
+        self.kv_cache_dtype = kv_cache_dtype
+        self.device = self.device_config.device
+        self.pin_memory = is_pin_memory_available()
+
+    def load_model(self) -> None:
+        with CudaMemoryProfiler() as m:
+            self.model = get_model(
+                model_config=self.model_config,
+                device_config=self.device_config,
+                load_config=self.load_config,
+                lora_config=self.lora_config,
+                vision_language_config=self.vision_language_config,
+                parallel_config=self.parallel_config,
+                scheduler_config=self.scheduler_config,
+                cache_config=self.cache_config,
+            )
+
+    def save_sharded_state(
+        self,
+        path: str,
+        pattern: Optional[str] = None,
+        max_size: Optional[int] = None,
+    ) -> None:
+        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        ShardedStateLoader.save_model(
+            self.model,
+            path,
+            pattern=pattern,
+            max_size=max_size,
+        )
+
+    def prepare_input_tensors(
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ):
+        """Prepare the model input based on a given sequence group.
+
+        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
+
+        The result tensors and data structure also batches input in prefill
+        -> decode order. For example,
+
+        - input_tokens[:num_prefill_tokens] contains prefill tokens.
+        - input_tokens[num_prefill_tokens:] contains decode tokens.
+
+        If cuda graph is required, this API automatically pads inputs.
+        """
+        input_tokens: List[int] = []
+        input_positions: List[int] = []
+
+        seq_lens: List[int] = []
+        context_lens: List[int] = []
+        query_lens: List[int] = []
+
+        if len(seq_group_metadata_list) == 0:
+            return ModelInput.empty(self.device)
+
+        for seq_group_metadata in seq_group_metadata_list:
+            seq_ids = list(seq_group_metadata.seq_data.keys())
+            is_prompt = seq_group_metadata.is_prompt
+
+            for seq_id in seq_ids:
+
+                seq_data = seq_group_metadata.seq_data[seq_id]
+                if is_prompt:
+                    context_len = seq_data.get_num_computed_tokens()
+                else:
+                    # get_num_computed_tokens is incorrect for spec decoding.
+                    # So, we should have a special logic here.
+                    # TODO(sang): Fix it.
+                    context_len = seq_data.get_len() - 1
+
+                seq_len = min(
+                    seq_data.get_len(),
+                    context_len + seq_group_metadata.token_chunk_size)
+                if is_prompt:
+                    tokens = seq_data.get_token_ids()[context_len:seq_len]
+                else:
+                    # Optimization. get_token_ids requires the entire copy of
+                    # tokens.
+                    tokens = [seq_data.get_last_token_id()]
+
+                seq_lens.append(seq_len)
+                context_lens.append(context_len)
+                query_len = seq_len - context_len
+                query_lens.append(query_len)
+                input_tokens.extend(tokens)
+                input_positions.extend(list(range(context_len, seq_len)))
+
+
+        input_tokens_tensor = torch.tensor(input_tokens,
+                                           dtype=torch.long,
+                                           device=self.device)
+        input_positions_tensor = torch.tensor(input_positions,
+                                              dtype=torch.long,
+                                              device=self.device)
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.int,
+                                       device=self.device)
+        query_lens_tensor = torch.tensor(query_lens,
+                                         dtype=torch.long,
+                                         device=self.device)
+        return input_tokens_tensor, input_positions_tensor, seq_lens_tensor, query_lens_tensor
+
+    @torch.inference_mode()
+    def execute_model(
+            self,
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            kv_caches: List[torch.Tensor],
+    ) -> Optional[SamplerOutput]:
+        input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
+
+        model_executable = self.model
+        execute_model_kwargs = {
+            "input_ids": input_tokens,
+            "positions": input_positions,
+            "kv_caches": None,
+            "attn_metadata": None,
+        }
+        hidden_states = model_executable(**execute_model_kwargs)
+
+        sampling_metadata = SamplingMetadata.prepare(
+            seq_group_metadata_list, seq_lens, query_lens, self.device,
+            self.pin_memory)
+
+        # Compute the logits.
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+
+        # Only perform sampling in the driver worker.
+        if not self.is_driver_worker:
+            return None
+
+        # Sample the next token.
+        output = self.model.sample(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+        )
+
+        return output
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
+
 
 class ModelRunner:
 

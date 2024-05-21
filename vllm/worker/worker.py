@@ -18,7 +18,7 @@ from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
-from vllm.worker.model_runner import ModelRunner
+from vllm.worker.model_runner import ModelRunner, SingleStepSpeculativeModelRunner
 from vllm.worker.worker_base import WorkerBase
 
 
@@ -69,8 +69,12 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        ModelRunnerClass = (EmbeddingModelRunner if
-                            self.model_config.embedding_mode else ModelRunner)
+        if self.model_config.embedding_mode:
+            ModelRunnerClass = EmbeddingModelRunner
+        elif model_config.hf_config.model_type == "mlp_speculator":
+            ModelRunnerClass = SingleStepSpeculativeModelRunner
+        else:
+            ModelRunnerClass = ModelRunner
         self.model_runner = ModelRunnerClass(
             model_config,
             parallel_config,
