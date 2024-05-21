@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import gc
 import os
@@ -7,9 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 import torch
 import torch.nn.functional as F
-import transformers.utils.logging
 from PIL import Image
-from tqdm.asyncio import tqdm_asyncio
 from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
                           LlavaConfig, LlavaForConditionalGeneration)
 
@@ -18,7 +15,6 @@ from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.logger import init_logger
 from vllm.sequence import MultiModalData, SampleLogprobs
-from vllm.utils import make_async
 
 logger = init_logger(__name__)
 
@@ -157,26 +153,6 @@ class HfRunner:
 
         return AutoModelForCausalLM.from_pretrained(model_name,
                                                     trust_remote_code=True)
-
-    @classmethod
-    @contextlib.contextmanager
-    def _disable_hf_prog_bar(cls):
-        transformers.utils.logging.disable_progress_bar()
-
-        yield
-
-        transformers.utils.logging.enable_progress_bar()
-
-    @classmethod
-    def load_models(cls, model_names: List[str]):
-        async_load_model = make_async(cls.load_model)
-
-        async def async_load_models(models: List[str]):
-            with cls._disable_hf_prog_bar():
-                tasks = (async_load_model(model) for model in models)
-                await tqdm_asyncio.gather(*tasks, desc="Pre-loading models")
-
-        asyncio.run(async_load_models(model_names))
 
     def __init__(
         self,

@@ -49,11 +49,6 @@ MODELS = [
 ]
 
 
-@pytest.fixture(scope="module", autouse=True)
-def download_hf(hf_runner):
-    hf_runner.load_models(MODELS)
-
-
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.skipif(gptq_marlin_not_supported,
                     reason="gptq_marlin is not supported on this GPU type.")
@@ -62,7 +57,6 @@ def download_hf(hf_runner):
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
-    hf_runner,  # Load the models (see download_hf)
     vllm_runner,
     example_prompts,
     model,

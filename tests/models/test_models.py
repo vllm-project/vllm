@@ -20,11 +20,6 @@ MODELS = [
 ]
 
 
-@pytest.fixture(scope="module", autouse=True)
-def download_hf(hf_runner):
-    hf_runner.load_models(MODELS)
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
 @pytest.mark.parametrize("max_tokens", [96])
