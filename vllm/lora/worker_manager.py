@@ -171,7 +171,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
-            lora = self._lora_model_cls.from_local_checkpoint(
+            lora = self._lora_model_cls.from_checkpoint(
                 lora_request.lora_local_path,
                 expected_lora_modules,
                 max_position_embeddings=self.max_position_embeddings,

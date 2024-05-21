@@ -269,7 +269,7 @@ class LoRAModel:
         return cls(lora_model_id, rank, loras, scaling_factor=scaling_factor)
 
     @classmethod
-    def from_local_checkpoint(
+    def from_checkpoint(
         cls,
         lora_dir: str,
         expected_lora_modules: List[str],
@@ -285,7 +285,7 @@ class LoRAModel:
         """Create a LoRAModel from a local checkpoint.
         
         Args:
-            lora_dir: The local path that has lora data.
+            lora_dir: The local_path / repo_id that has lora data.
             expected_lora_modules: Name of modules that are expected to be
                 replaced by lora.
             max_position_embeddings: Max position embedding length. Used to
@@ -300,11 +300,14 @@ class LoRAModel:
             Loaded LoRA Model.
         """
         lora_path = Path(lora_dir)
+        # select file system based on the path
         if lora_path.exists():
             file_system = LocalFileSystem()
         else:
             file_system = HfFileSystem(endpoint=os.getenv("HF_ENDPOINT", None))
 
+        # Since HfFileSystem and Posix use same path separator, we can use
+        # pathlib.Path to join the path for convenience
         lora_config_path = lora_path.joinpath("adapter_config.json")
         lora_tensor_path = lora_path.joinpath("adapter_model.safetensors")
         lora_bin_file_path = lora_path.joinpath("adapter_model.bin")
