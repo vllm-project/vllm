@@ -115,7 +115,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     # Begin cross-attention fields...
 
-    # If True, prefill_metadata() and decode_metadata() will return 
+    # If True, prefill_metadata() and decode_metadata() will return
     # seqlen & memory-mapping data structures for cross-attention;
     # otherwise, self-attention data structures will be returned.
     is_cross_attn: bool = False
@@ -147,14 +147,19 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     @property
     def has_valid_cross_attn_metadata(self):
         # No cross-attention metadata is present whatsoever
-        no_md = (self.cross_seq_lens is None) and (self.cross_slot_mapping is None) and (self.cross_block_tables is None)
+        no_md = (self.cross_seq_lens is
+                 None) and (self.cross_slot_mapping is
+                            None) and (self.cross_block_tables is None)
         # If any cross-attention metadata is present, it is invalid
-        invalid_md_if_not_no_md = (self.cross_seq_lens is None) or (self.cross_slot_mapping is None) or (self.cross_block_tables is None)
+        invalid_md_if_not_no_md = (self.cross_seq_lens is None) or (
+            self.cross_slot_mapping is None) or (self.cross_block_tables is
+                                                 None)
 
         if no_md:
             return False
-        
-        assert (not invalid_md_if_not_no_md), "Invalid cross-attention metadata"
+
+        assert (
+            not invalid_md_if_not_no_md), "Invalid cross-attention metadata"
 
         return True
 
@@ -163,17 +168,20 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return self.is_cross_attn
 
     @do_cross_attn.setter
-    def do_cross_attn(self,state:bool):
+    def do_cross_attn(self, state: bool):
 
         if state:
             assert self.has_valid_cross_attn_metadata, "Must have self.cross_seq_lens not None in order to enable cross-attention"
 
             # Infer implicit cross-attention fields from user-provided fields, if needed
             if self.cross_seq_lens_tensor is None:
-                self.cross_seq_lens_tensor = torch.tensor(self.cross_seq_lens,
-                                                        dtype=self.seq_lens_tensor.dtype,
-                                                        device=self.seq_lens_tensor.device)                
+                assert self.seq_lens_tensor is not None
+                self.cross_seq_lens_tensor = torch.tensor(
+                    self.cross_seq_lens,
+                    dtype=self.seq_lens_tensor.dtype,
+                    device=self.seq_lens_tensor.device)
             if self.max_cross_seq_len is None:
+                assert self.cross_seq_lens is not None
                 self.max_cross_seq_len = max(self.cross_seq_lens)
 
             self.is_cross_attn = True
@@ -209,10 +217,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 max_decode_seq_len=0,
                 query_start_loc=self.query_start_loc[:self.num_prefills + 1],
                 seq_start_loc=None,
-                context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+                context_lens_tensor=self.context_lens_tensor[:self.
+                                                             num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_cross_attn=False, # Begin cross-attention fields below...
+                is_cross_attn=False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -244,10 +253,11 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 max_decode_seq_len=0,
                 query_start_loc=self.query_start_loc[:self.num_prefills + 1],
                 seq_start_loc=None,
-                context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+                context_lens_tensor=self.context_lens_tensor[:self.
+                                                             num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_cross_attn=True, # Begin cross-attention fields below...
+                is_cross_attn=True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -283,7 +293,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_cross_attn=False, # Begin cross-attention fields below...
+                is_cross_attn=False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -314,7 +324,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_cross_attn=True, # Begin cross-attention fields below...
+                is_cross_attn=True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
