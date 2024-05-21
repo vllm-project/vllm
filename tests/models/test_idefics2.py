@@ -2,7 +2,11 @@
 from vllm import LLM
 from vllm.sequence import MultiModalData
 import torch
-torch.cuda.empty_cache()
+import requests
+from PIL import Image
+import torch
+import os
+print(os.getcwd())
 
 llm = LLM(
     model="HuggingFaceM4/idefics2-8b",
@@ -10,7 +14,22 @@ llm = LLM(
     image_token_id=32000,
     image_input_shape="1,3,980,980",
     image_feature_size=576,
-    dtype = 'float16'
+    dtype = 'float16',
 )
 
+prompt = "<image>" * 64 + (
+    "\nUSER: What is the content of this image?\nASSISTANT:")
+
+# This should be provided by another online or offline component.
+images = torch.load("img/flower.pt")
+print(images.shape)
+outputs = llm.generate(prompt,
+                        multi_modal_data=MultiModalData(
+                            type=MultiModalData.Type.IMAGE, data=images))
+
+
+for o in outputs:
+    generated_text = o.outputs[0].text
+    print(generated_text)
+    
 print("passed")

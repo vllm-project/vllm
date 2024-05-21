@@ -45,17 +45,11 @@ class Idefics2MLP(nn.Module):
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.down_proj = nn.Linear(intermediate_size, output_size, bias=False)
-        # self.act_fn = ACT2FN[hidden_act]
         self.act_fn = get_act_fn(hidden_act)
 
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
-
-# IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
-#     "eager": Idefics2PerceiverAttention,
-#     "flash_attention_2": Idefics2PerceiverFlashAttention2,
-# }
 
 class Idefics2RMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -186,7 +180,6 @@ class Idefics2PerceiverAttention(nn.Module):
 
 IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
     "eager": Idefics2PerceiverAttention,
-    # "flash_attention_2": Idefics2PerceiverFlashAttention2,
 }
 
 class Idefics2PerceiverLayer(nn.Module):
@@ -199,7 +192,7 @@ class Idefics2PerceiverLayer(nn.Module):
 
         self.input_latents_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.input_context_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
-        self.self_attn = IDEFICS2_PERCEIVER_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx=layer_idx)
+        self.self_attn = Idefics2PerceiverAttention(config, layer_idx=layer_idx)
         self.post_attention_layernorm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.mlp = Idefics2MLP(
             hidden_size=config.text_config.hidden_size,
@@ -345,6 +338,7 @@ class Idefics2Model(nn.Module):
         self.config = config
         self.vision_language_config = vision_language_config
         self.linear_method = linear_method
+        print("LM", linear_method)
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
 
@@ -361,7 +355,29 @@ class Idefics2Model(nn.Module):
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
         # self.post_init()
 
+    def inputs_merger(
+        self,
+        input_ids: torch.LongTensor,
+        inputs_embeds: Optional[torch.Tensor],
+        image_hidden_states: Optional[torch.Tensor],
+    ):
+        """
+        This method aims at merging the token embeddings with the image hidden states into one single sequence of vectors that are fed to the transformer LM.
+        The merging happens as follows:
+        - The text token sequence is: `tok_1 tok_2 tok_3 <fake_token_around_image> <image> <image> ... <image> <fake_token_around_image> tok_4`.
+        - We get the image hidden states for the image through the vision encoder (and potentially the perceiver), and that hidden state is then projected into the text embedding space.
+        We thus have a sequence of image hidden states of size (1, image_seq_len, hidden_dim), where 1 is for batch_size of 1 image and hidden_dim is the hidden_dim of the LM transformer.
+        - The merging happens so that we obtain the following sequence: `vector_tok_1 vector_tok_2 vector_tok_3 vector_fake_tok_around_image {sequence of image_seq_len image hidden states} vector_fake_toke_around_image vector_tok_4`. That sequence is fed to the LM.
+        - To fit the format of that sequence, `input_ids`, `input_embeds`, `attention_mask` are all 3 adapted to insert the image hidden states.
+        """
+        num_images, _, vision_hidden_size = image_hidden_states.shape
+        special_image_token_mask = input_ids == self.image_token_id
+        new_inputs_embeds = inputs_embeds.clone()
+        reshaped_image_hidden_states = image_hidden_states.view(-1, vision_hidden_size)
+        new_inputs_embeds[special_image_token_mask] = reshaped_image_hidden_states
+        return new_inputs_embeds
 
+    
     ##Transform huggin
     def forward(
         self,
@@ -370,30 +386,42 @@ class Idefics2Model(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         pixel_values: Optional[torch.Tensor] = None
-    ) -> SamplerOutput:   
-        # batch_size, num_channels, height, width = pixel_values.shape
-        # pixel_attention_mask = torch.ones(
-        #     size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
-        #     dtype=torch.bool,
-        #     device=pixel_values.device,
-        # )
-        # patch_size = self.config.vision_config.patch_size
-        # patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
-        # patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
-        # patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
-        # image_hidden_states = self.vision_model(
-        #     pixel_values=pixel_values,
-        #     patch_attention_mask=patch_attention_mask,
-        # ).last_hidden_state
-        # patch_size = self.config.vision_config.patch_size
-        # patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
-        # patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
-        # patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
-        # self.vision_model(pixel_values)
-        self.vision_model(pixel_values)
-        breakpoint()
-        print("got here")
-        return None
+    ) -> SamplerOutput: 
+        if(pixel_values==None or torch.all(pixel_values == 0).item()):
+            hidden_states = self.text_model(input_ids,
+                                             positions,
+                                             kv_caches,
+                                             attn_metadata)
+            return hidden_states
+        else:
+            nb_values_per_image = pixel_values.shape[1:].numel()
+            real_images_inds = (pixel_values == 0.0).sum(dim=(-1, -2, -3)) != nb_values_per_image
+            pixel_values = pixel_values[real_images_inds].contiguous() 
+            pixel_attention_mask = torch.ones(
+                size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
+                dtype=torch.bool,
+                device=pixel_values.device,
+            )
+            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+            patch_size = self.config.vision_config.patch_size
+            patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
+            patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
+            patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+            image_hidden_states = self.vision_model(pixel_values).last_hidden_state
+            image_hidden_states = self.connector(image_hidden_states, attention_mask=patch_attention_mask.view(pixel_values.size(0), -1))
+            inputs_embeds = self.text_model.get_input_embeddings(input_ids)
+            inputs_embeds = self.inputs_merger(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                image_hidden_states=image_hidden_states,
+            )
+            input_ids = None
+            hidden_states = self.text_model(input_ids,
+                                            positions,
+                                            kv_caches,
+                                            attn_metadata,
+                                            inputs_embeds=inputs_embeds)
+            return hidden_states
     
     
 
@@ -447,7 +475,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
         attn_metadata: AttentionMetadata,
         image_input: Optional[torch.Tensor] = None
     ) -> SamplerOutput:     
-        print("need to implement forward")
         outputs = self.model(input_ids, positions, kv_caches, attn_metadata, image_input)
         return outputs
 
@@ -476,9 +503,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        # print(params_dict.keys())
-        # print(params_dict.keys())
-        # raise NotImplemented
         for name, loaded_weight in weights:
             loaded_weight = loaded_weight.to(dtype=torch.float16)
             if "rotary_emb.inv_freq" in name:
@@ -507,4 +531,3 @@ class Idefics2ForConditionalGeneration(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-        print("finished loading weights")
