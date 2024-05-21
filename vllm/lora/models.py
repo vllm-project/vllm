@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import safetensors.torch
 import torch
@@ -776,24 +776,3 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             self._registered_loras.remove_oldest()
             return True
         return False
-
-
-def create_lora_manager(
-        model: nn.Module,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-        vocab_size: int,
-        lora_config: LoRAConfig,
-        lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager,
-        **kwargs) -> LoRAModelManager:
-    """Create a LoRA adapter for a given model."""
-    if not hasattr(model, "supported_lora_modules"):
-        raise ValueError(f"Model {type(model)} is not supported for LoRA.")
-    lora_manager = lora_manager_cls(
-        model=model,
-        max_num_seqs=max_num_seqs,
-        max_num_batched_tokens=max_num_batched_tokens,
-        vocab_size=vocab_size,
-        lora_config=lora_config,
-        **kwargs)
-    return lora_manager

@@ -8,7 +8,7 @@ from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
-                              LRUCacheLoRAModelManager, create_lora_manager)
+                              LRUCacheLoRAModelManager)
 from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
@@ -85,8 +85,6 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
     Every request, the requested LoRAs will be loaded (unless they are already
     loaded), and every other LoRA will be unloaded."""
 
-    _lora_manager_cls: Type[LoRAModelManager] = LoRAModelManager
-
     def __init__(
         self,
         max_num_seqs: int,
@@ -121,14 +119,12 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self,
         model: torch.nn.Module,
     ) -> Any:
-        lora_manager = create_lora_manager(
-            model,
+        lora_manager = LoRAModelManager(
+            model=model,
             max_num_seqs=self.max_num_seqs,
             max_num_batched_tokens=self.max_num_batched_tokens,
             vocab_size=self.vocab_size,
-            lora_config=self.lora_config,
-            lora_manager_cls=self._lora_manager_cls,
-        )
+            lora_config=self.lora_config)
         self._lora_manager = lora_manager
         return lora_manager.model
 
@@ -234,21 +230,16 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     (unless they are already loaded) and least recently used LoRAs will
     be unloaded if the cache is above capacity."""
 
-    _lora_manager_cls: Type[
-        LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
-
     def create_lora_manager(
         self,
         model: torch.nn.Module,
     ) -> Any:
-        lora_manager = create_lora_manager(
-            model,
-            lora_manager_cls=self._lora_manager_cls,
+        lora_manager = LRUCacheLoRAModelManager(
+            model=model,
             max_num_seqs=self.max_num_seqs,
-            vocab_size=self.vocab_size,
-            lora_config=self.lora_config,
             max_num_batched_tokens=self.max_num_batched_tokens,
-        )
+            vocab_size=self.vocab_size,
+            lora_config=self.lora_config)
         self._lora_manager = lora_manager
         return lora_manager.model
 
