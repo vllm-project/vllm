@@ -1,15 +1,14 @@
+import copy
+import itertools
 import random
 from typing import List, Optional
-import itertools
 
 import pytest
 import torch
-import copy
+
 from vllm.attention import Attention, AttentionMetadata
-
-from vllm.attention.backends.xformers import XFormersBackend
 from vllm.attention.backends.abstract import AttentionBackend
-
+from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import make_tensor_with_pad
 
 # If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
