@@ -1,6 +1,7 @@
+import torch
+
 from vllm import LLM
 from vllm.sequence import MultiModalData
-import torch
 
 if __name__ == "__main__":
     llm = LLM(

@@ -1,25 +1,25 @@
-from typing import Iterable, List, Optional, Tuple
-from vllm.config import CacheConfig, VisionLanguageConfig
-from vllm.attention import AttentionMetadata
-from vllm.sequence import SamplerOutput
-from vllm.model_executor.layers.activation import get_act_fn
-from transformers import SiglipVisionModel
-from vllm.model_executor.models.llama import LlamaModel
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from transformers import Idefics2Config
-from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 import math
-from vllm.model_executor.layers.linear import (LinearMethodBase)
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from .vlm_base import VisionLanguageModelBase
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
+
+from transformers import Idefics2Config, SiglipVisionModel
+from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
+
+from vllm.attention import AttentionMetadata
+from vllm.config import CacheConfig, VisionLanguageConfig
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.llama import LlamaModel
+from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import SamplerOutput
+from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
