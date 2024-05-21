@@ -14,19 +14,20 @@ types-setuptools
 
 # testing
 pytest
-tensorizer==2.9.0a0
+tensorizer>=2.9.0
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
 pytest-shard
-httpx
+
+# testing utils
+awscli
 einops # required for MPT
-openai
+httpx
+peft
 requests
 ray
-peft
-awscli
-ai2-olmo # required for OLMo
+sentence-transformers # required for embedding
 
 # Benchmarking
 aiohttp

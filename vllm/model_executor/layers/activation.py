@@ -67,6 +67,9 @@ class GeluAndMul(nn.Module):
             ops.gelu_tanh_and_mul(out, x)
         return out
 
+    def extra_repr(self) -> str:
+        return f'approximate={repr(self.approximate)}'
+
 
 class NewGELU(nn.Module):
 

@@ -4,6 +4,7 @@ from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
 
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponse,
@@ -11,7 +12,8 @@ from vllm.entrypoints.openai.protocol import (CompletionRequest,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
                                               LogProbs, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import LoRA, OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
@@ -51,12 +53,12 @@ def parse_prompt_format(prompt) -> Tuple[bool, list]:
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 served_model: str,
-                 lora_modules: Optional[List[LoRA]] = None):
+    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
+                 served_model_names: List[str],
+                 lora_modules: Optional[List[LoRAModulePath]]):
         super().__init__(engine=engine,
-                         served_model=served_model,
+                         model_config=model_config,
+                         served_model_names=served_model_names,
                          lora_modules=lora_modules)
 
     async def create_completion(self, request: CompletionRequest,
@@ -79,16 +81,16 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response(
                 "suffix is not currently supported")
 
-        model_name = request.model
+        model_name = self.served_model_names[0]
         request_id = f"cmpl-{random_uuid()}"
         created_time = int(time.time())
 
         # Schedule the request and get the result generator.
-        generators = []
+        generators: List[AsyncIterator[RequestOutput]] = []
         try:
             sampling_params = request.to_sampling_params()
             lora_request = self._maybe_get_lora(request)
-            decoding_config = self.engine.engine.decoding_config
+            decoding_config = await self.engine.get_decoding_config()
             guided_decoding_backend = request.guided_decoding_backend \
                 or decoding_config.guided_decoding_backend
             guided_decode_logit_processor = (
@@ -148,7 +150,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                                     num_prompts=len(prompts))
 
         # Non-streaming response
-        final_res_batch: RequestOutput = [None] * len(prompts)
+        final_res_batch: List[Optional[RequestOutput]] = [None] * len(prompts)
         try:
             async for i, res in result_generator:
                 if await raw_request.is_disconnected():
@@ -185,6 +187,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         num_prompts: int,
     ) -> AsyncGenerator[str, None]:
+        assert request.n is not None
         previous_texts = [""] * request.n * num_prompts
         previous_num_tokens = [0] * request.n * num_prompts
         has_echoed = [False] * request.n * num_prompts
@@ -202,6 +205,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     # TODO(simon): optimize the performance by avoiding full
                     # text O(n^2) sending.
 
+                    assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
                         # only return the prompt
                         delta_text = res.prompt
@@ -279,7 +283,7 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
     ) -> CompletionResponse:
-        choices = []
+        choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
         for final_res in final_res_batch:
@@ -289,6 +293,7 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_text = final_res.prompt
 
             for output in final_res.outputs:
+                assert request.max_tokens is not None
                 if request.echo and request.max_tokens == 0:
                     token_ids = prompt_token_ids
                     top_logprobs = prompt_logprobs

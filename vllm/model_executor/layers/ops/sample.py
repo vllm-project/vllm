@@ -29,8 +29,8 @@ def _multi_split_sample(
     sampled_tokens_size: Tuple[int, int],
     sampled_logprobs_size: Tuple[int, int],
     sample_indices: torch.Tensor,
+    logprobs: torch.Tensor,
     *,
-    logprobs: Optional[torch.Tensor] = None,
     modify_greedy_probs: bool = False,
     save_logprobs: bool = False,
 ):
@@ -167,6 +167,7 @@ def sample(
         sampled_logprobs_size = (0, 0)
         logprobs = probs
 
+    assert logprobs is not None
     if _save_modified_probs:
         sampled_modified_probs_size = sampled_tokens_size
     else:
