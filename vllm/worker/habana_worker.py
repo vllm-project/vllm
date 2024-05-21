@@ -73,13 +73,14 @@ class HabanaWorker(WorkerBase):
             assert False, "To be tested: vision language model on HPU"
 
         self.model_runner = HabanaModelRunner(model_config,
-                                        parallel_config,
-                                        scheduler_config,
-                                        device_config,
-                                        load_config=load_config,
-                                        lora_config=self.lora_config,
-                                        kv_cache_dtype=self.cache_config.cache_dtype,
-                                        is_driver_worker=is_driver_worker)
+                                              parallel_config,
+                                              scheduler_config,
+                                              device_config,
+                                              load_config=load_config,
+                                              cache_config=cache_config,
+                                              lora_config=self.lora_config,
+                                              kv_cache_dtype=self.cache_config.cache_dtype,
+                                              is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
@@ -168,12 +169,10 @@ class HabanaWorker(WorkerBase):
         self.cache_engine = CacheEngine(self.cache_config, self.model_config,
                                         self.parallel_config)
         self.hpu_cache = self.cache_engine.gpu_cache
-        self.model_runner.set_block_size(self.cache_engine.block_size)
         htorch.hpu.synchronize() # we want to materialize cache tensors before we proceed with graph capture/execution
 
     def _warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model(self.hpu_cache)
+        self.model_runner.warmup_model(self.hpu_cache)
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

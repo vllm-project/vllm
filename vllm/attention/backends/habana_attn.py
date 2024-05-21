@@ -2,14 +2,13 @@
 # Copyright (C) 2024 Habana Labs, Ltd. an Intel Company
 ###############################################################################
 
-import importlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import torch
+import math
 import vllm.hpu.xops as xops
 from vllm.hpu.attn_bias import (AttentionBias,
-                                BlockDiagonalCausalMask,
                                 LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -18,7 +17,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.ops.habana_paged_attn import (HabanaPagedAttention,
                                                   HabanaPagedAttentionMetadata)
 from vllm.logger import init_logger
-from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -119,11 +117,11 @@ class HabanaAttentionMetadata(AttentionMetadataPerStage, HabanaPagedAttentionMet
 class HabanaAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|	
+    |<--------------- num_prefill_tokens ----------------->|
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:	
-    |<----------------- num_decode_tokens ------------------>|	
+    Otherwise, the layout is as follows:
+    |<----------------- num_decode_tokens ------------------>|
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -196,48 +194,37 @@ class HabanaAttentionImpl(AttentionImpl):
             HabanaPagedAttention.write_to_paged_cache(key, value, key_cache,
                                                       value_cache,
                                                       attn_metadata.slot_mapping,
-                                                      attn_metadata.kv_cache_dtype, 
+                                                      attn_metadata.kv_cache_dtype,
                                                       attn_metadata.prefill_metadata is not None)
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if kv_cache is None or prefill_meta.block_tables.numel() == 0:
-                # normal attention.
-                # block tables are empty if the prompt does not have a cached
-                # prefix.
-                if self.num_kv_heads != self.num_heads:
-                    # As of Nov 2023, xformers only supports MHA. For MQA/GQA,
-                    # project the key and value tensors to the desired number of
-                    # heads.
-                    # TODO(woosuk): Use MQA/GQA kernels for higher performance.
-                    query = query.view(query.shape[0], self.num_kv_heads,
-                                       self.num_queries_per_kv,
-                                       query.shape[-1])
-                    key = key[:, :,
-                              None, :].expand(key.shape[0], self.num_kv_heads,
-                                              self.num_queries_per_kv,
-                                              key.shape[-1])
-                    value = value[:, :,
-                                  None, :].expand(value.shape[0],
-                                                  self.num_kv_heads,
-                                                  self.num_queries_per_kv,
-                                                  value.shape[-1])
-
+                # TODO: move this outside of model
                 if prefill_meta.attn_bias is None:
                     if self.alibi_slopes is None:
-                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                            [seq_len] * batch_size)
+                        lens = torch.tensor(attn_metadata.prefill_metadata.seq_lens, device=query.device, dtype=torch.int32)
+                        len_mask = (torch.arange(0, seq_len, device=query.device, dtype=torch.int32)
+                                    .view(1, seq_len)
+                                    .ge(lens.unsqueeze(-1))
+                                    .view(batch_size, 1, 1, seq_len))
+                        causal_mask = torch.triu(
+                            torch.ones((batch_size, 1, seq_len, seq_len), device=query.device, dtype=torch.bool),
+                            diagonal=1
+                        )
+                        mask = causal_mask.logical_or(len_mask)
+                        attn_bias = (torch.zeros_like(mask, dtype=query.dtype)
+                                     .masked_fill_(mask, -math.inf))
                         if self.sliding_window is not None:
-                            attn_bias = attn_bias.make_local_attention(
-                                self.sliding_window)
+                            raise NotImplementedError("Sliding window is not supported on HPU")
                         prefill_meta.attn_bias = attn_bias
                     else:
                         prefill_meta.attn_bias = _make_alibi_bias(
                             self.alibi_slopes, self.num_kv_heads, batch_size,
                             seq_len, query.dtype)
-                query_shape = (batch_size, seq_len, self.num_kv_heads, self.num_queries_per_kv, self.head_size) if self.num_kv_heads != self.num_heads else (batch_size, seq_len, self.num_heads, self.head_size)
-                kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.num_queries_per_kv, self.head_size) if self.num_kv_heads != self.num_heads else (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
-                out = xops.memory_efficient_attention_forward(
+                query_shape = (batch_size, seq_len, self.num_heads, self.head_size)
+                kv_shape = (batch_size, seq_len_kv, self.num_kv_heads, self.head_size)
+                out = xops.prompt_attention(
                     query.view(query_shape),
                     key.view(kv_shape),
                     value.view(kv_shape),
