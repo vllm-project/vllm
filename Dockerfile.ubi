@@ -1,0 +1,244 @@
+# Please update any changes made here to
+# docs/source/dev/dockerfile-ubi/dockerfile-ubi.rst
+
+## Global Args #################################################################
+ARG BASE_UBI_IMAGE_TAG=9.4
+ARG PYTHON_VERSION=3.11
+
+ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
+
+
+## Base Layer ##################################################################
+FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
+ARG PYTHON_VERSION
+
+RUN microdnf install -y \
+    python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel \
+    && microdnf clean all
+
+WORKDIR /workspace
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# Some utils for dev purposes - tar required for kubectl cp
+RUN microdnf install -y \
+        which procps findutils tar vim git\
+    && microdnf clean all
+
+
+## Python Installer ############################################################
+FROM base as python-install
+
+ARG PYTHON_VERSION
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+RUN microdnf install -y \
+    python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-wheel && \
+    python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && pip install --no-cache -U pip wheel && microdnf clean all
+
+
+## CUDA Base ###################################################################
+FROM python-install as cuda-base
+
+# The Nvidia operator won't allow deploying on CUDA 12.0 hosts if
+# this env var is set to 12.2.0, even though it's compatible
+#ENV CUDA_VERSION=12.2.0 \
+ENV CUDA_VERSION=12.0.0 \
+    NV_CUDA_LIB_VERSION=12.2.0-1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NV_CUDA_CUDART_VERSION=12.2.53-1 \
+    NV_CUDA_COMPAT_VERSION=535.104.12
+
+RUN curl -Lo /etc/yum.repos.d/cuda-rhel9.repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+
+RUN microdnf install -y \
+        cuda-cudart-12-2-${NV_CUDA_CUDART_VERSION} \
+        cuda-compat-12-2-${NV_CUDA_COMPAT_VERSION} \
+    && microdnf clean all
+
+
+ARG CUDA_HOME="/usr/local/cuda"
+ENV CUDA_HOME=${CUDA_HOME}\
+    PATH="${CUDA_HOME}/bin:${PATH}" \
+    LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
+
+
+## CUDA Development ############################################################
+FROM cuda-base as cuda-devel
+
+ENV NV_CUDA_CUDART_DEV_VERSION=12.2.53-1 \
+    NV_NVML_DEV_VERSION=12.2.81-1 \
+    NV_LIBCUBLAS_DEV_VERSION=12.2.1.16-1 \
+    NV_LIBNPP_DEV_VERSION=12.1.1.14-1 \
+    NV_LIBNCCL_DEV_PACKAGE_VERSION=2.18.5-1+cuda12.2
+
+RUN microdnf install -y \
+        cuda-command-line-tools-12-2-${NV_CUDA_LIB_VERSION} \
+        cuda-libraries-devel-12-2-${NV_CUDA_LIB_VERSION} \
+        cuda-minimal-build-12-2-${NV_CUDA_LIB_VERSION} \
+        cuda-cudart-devel-12-2-${NV_CUDA_CUDART_DEV_VERSION} \
+        cuda-nvml-devel-12-2-${NV_NVML_DEV_VERSION} \
+        libcublas-devel-12-2-${NV_LIBCUBLAS_DEV_VERSION} \
+        libnpp-devel-12-2-${NV_LIBNPP_DEV_VERSION} \
+        libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} \
+    && microdnf clean all
+
+ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
+
+# Workaround for https://github.com/openai/triton/issues/2507 and
+# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
+# this won't be needed for future versions of this docker image
+# or future versions of triton.
+RUN ldconfig /usr/local/cuda-12.2/compat/
+
+## Python cuda base #################################################################
+FROM cuda-devel AS python-cuda-base
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# install cuda and common dependencies
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,source=requirements-cuda.txt,target=requirements-cuda.txt \
+    pip install \
+        -r requirements-cuda.txt
+
+## Development #################################################################
+FROM python-cuda-base AS dev
+
+# install build and runtime dependencies
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements-common.txt,target=requirements-common.txt \
+    --mount=type=bind,source=requirements-cuda.txt,target=requirements-cuda.txt \
+    --mount=type=bind,source=requirements-dev.txt,target=requirements-dev.txt \
+    pip3 install \
+        -r requirements-cuda.txt \
+        -r requirements-dev.txt
+
+## Proto Compilation ###########################################################
+FROM python-install AS gen-protos
+
+ENV PATH=/opt/vllm/bin/:$PATH
+
+RUN microdnf install -y \
+        make \
+        findutils \
+    && microdnf clean all
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=Makefile,target=Makefile \
+    --mount=type=bind,source=proto,target=proto \
+    make gen-protos
+
+## Builder #####################################################################
+FROM dev AS build
+
+# install build dependencies
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=requirements-build.txt,target=requirements-build.txt \
+    pip install -r requirements-build.txt
+
+# install compiler cache to speed up compilation leveraging local or remote caching
+RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y ccache && microdnf clean all
+# install build dependencies
+
+# copy input files
+COPY csrc csrc
+COPY setup.py setup.py
+COPY cmake cmake
+COPY CMakeLists.txt CMakeLists.txt
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
+COPY pyproject.toml pyproject.toml
+
+ARG TORCH_CUDA_ARCH_LIST
+ENV TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST
+
+# max jobs used by Ninja to build extensions
+ARG max_jobs=2
+ENV MAX_JOBS=${max_jobs}
+# number of threads used by nvcc
+ARG nvcc_threads=8
+ENV NVCC_THREADS=$nvcc_threads
+# make sure punica kernels are built (for LoRA)
+ENV VLLM_INSTALL_PUNICA_KERNELS=1
+
+# Make sure the cuda environment is in the PATH
+ENV PATH=/usr/local/cuda/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+
+# Copy the entire directory before building wheel
+COPY vllm vllm
+
+# Copy over the generated *.pb2 files
+COPY --from=gen-protos /workspace/vllm/entrypoints/grpc/pb vllm/entrypoints/grpc/pb
+
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    CMAKE_BUILD_TYPE=Release python3 setup.py bdist_wheel --dist-dir=dist
+
+## Release #####################################################################
+# Note from the non-UBI Dockerfile:
+# We used base cuda image because pytorch installs its own cuda libraries.
+# However pynccl depends on cuda libraries so we had to switch to the runtime image
+# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
+FROM python-install AS vllm-openai
+
+WORKDIR /workspace
+
+ENV VIRTUAL_ENV=/opt/vllm
+ENV PATH=$VIRTUAL_ENV/bin/:$PATH
+
+# Triton needs a CC compiler
+RUN microdnf install -y gcc \
+    && microdnf clean all
+
+# install vllm wheel first, so that torch etc will be installed
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install dist/*.whl --verbose
+
+# vllm requires a specific nccl version built from source distribution
+# See https://github.com/NVIDIA/nccl/issues/1234
+RUN pip install \
+        -v \
+        --force-reinstall \
+        --no-binary="all" \
+        --no-cache-dir \
+        "vllm-nccl-cu12==2.18.1.0.4.0" && \
+    mv /root/.config/vllm/nccl/cu12/libnccl.so.2.18.1 /opt/vllm/lib/ && \
+    chmod 0755 /opt/vllm/lib/libnccl.so.2.18.1
+
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        # additional dependencies for the TGIS gRPC server
+        grpcio-tools==1.63.0 \
+        # additional dependencies for openai api_server
+        accelerate==0.30.0 \
+        # hf_transfer for faster HF hub downloads
+        hf_transfer==0.1.6
+
+ENV HF_HUB_OFFLINE=1 \
+    PORT=8000 \
+    GRPC_PORT=8033 \
+    HOME=/home/vllm \
+    VLLM_NCCL_SO_PATH=/opt/vllm/lib/libnccl.so.2.18.1 \
+    VLLM_USAGE_SOURCE=production-docker-image \
+    VLLM_WORKER_MULTIPROC_METHOD=fork
+
+# setup non-root user for OpenShift
+RUN umask 002 \
+    && useradd --uid 2000 --gid 0 vllm \
+    && chmod g+rwx $HOME /usr/src /workspace
+
+COPY LICENSE /licenses/vllm.md
+
+USER 2000
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
