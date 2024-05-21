@@ -107,6 +107,8 @@ def _which_attn_to_use(
             "Cannot use FlashAttention-2 backend due to sliding window.")
         return _Backend.XFORMERS
 
+    # NOTE: this formula should sync with _SUPPORTED_HEAD_SIZES in flash_attn.py
+    # _SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
     if head_size % 32 != 0 or head_size > 256:
         logger.info("Head size %d is not supported by FlashAttention.",
                     head_size)
