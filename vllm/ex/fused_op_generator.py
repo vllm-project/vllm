@@ -93,6 +93,8 @@ class FusedOpGenerator:
             return 'torch::nn::functional::linear'
         elif s.startswith('torch.ops.vllm.'):
             return s.replace('torch.ops.vllm.', '')
+        elif s == 'torch::float16':
+            return 'torch::kFloat16'
         else:
             return s.replace("_operator.", "_operator_")
 
@@ -250,16 +252,21 @@ class FusedOpGenerator:
                 call_str = self.translate_getitem(n)
                 assert kwargs.get(n.name) is None or len(kwargs.get(n.name)) == 0
             else:
-                call_str = f"  auto {self.mangle(n.name, '_')} = {self.mangle(fn, '::')}("
+                call_str = f"  auto {self.mangle(n.name, '_')} = "
+                first_arg = 0
+                if n.op == 'call_method':
+                    call_str = call_str + f"{self.mangle(n.args[0].name, '::')}."
+                    first_arg = 1
+                call_str = call_str + f"{self.mangle(fn, '::')}("
                 sep =''
-                for inp in n.args:
+                for inp in n.args[first_arg:]:
                     # bit of a hack for optional/empty tensor arguments
                     if inp is None:
                         call_str = call_str + sep + "torch::Tensor()"
                     elif isinstance(inp, tuple):
                         call_str = call_str + sep + "{" + ','.join([str(t) for t in inp]) + "}"
                     else:
-                        call_str = call_str + sep + self.mangle(str(inp), '_')
+                        call_str = call_str + sep + self.rename(self.mangle(str(inp), '::'))
                     sep = ', '
                 n_kwargs = kwargs.get(n.name)
                 # TODO
@@ -269,7 +276,7 @@ class FusedOpGenerator:
 
             self.fused_op.append(comment_str)
             self.fused_op.append(call_str)
-            self.fused_op.append(self.delete_unused_values(user_to_last_uses, n))
+            #self.fused_op.append(self.delete_unused_values(user_to_last_uses, n))
 
         self.fused_op.append(f"  // {str(extract_node_type(outputs[0]))}")
         self.fused_op.append(f"  return {self.mangle(outputs[0].name, '_')};")

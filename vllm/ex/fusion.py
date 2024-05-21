@@ -9,9 +9,8 @@ import torch
 from .code_cache import CodeCache
 from .fused_op_generator import FusedOpGenerator, FusionFail
 from .register import FUSABLE
-from .utils import extract_node_type, ModuleInputGenerator, FlowGraph, node_function_target, graph_print_tabular, SubGraph
+from .utils import extract_node_type, ModuleInputGenerator, FlowGraph, node_function_target, graph_print_tabular, SubGraph, is_call, call_method_class
 
-from torch.fx.passes.split_module import split_module
 from torch.fx.passes.shape_prop import ShapeProp
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
 from vllm.logger import init_logger
@@ -38,7 +37,7 @@ def fuse_graph_nodes(
     nodes_to_fuse = []
     kwargs = dict()
     for n in sub.nodes:
-        if n.op != 'call_function':
+        if not is_call(n):
             continue
 
         if n.kwargs is not None and len(n.kwargs) > 0:
@@ -96,28 +95,35 @@ Determine whether or not node is a fusable operations.
 TODO: Smarter filter for 'getitem'.
 """
 def is_fusable(node: torch.fx.Node) -> bool:
-    if node.op != 'call_function':
+    if not is_call(node):
         return False
 
     op_name = node_function_target(node)
-    return op_name in FUSABLE and not FUSABLE[op_name]
-
+    if node.op == 'call_function':
+        return op_name in FUSABLE and not FUSABLE[op_name]
+    else:
+        # TODO: check class type
+        class_type = call_method_class(node)
+        return op_name in FUSABLE and not FUSABLE[op_name]
 
 """
 Determine whether or not node is a fusable compute operation, e.g. gemm.
 """
 def is_compute(node: torch.fx.Node) -> bool:
-    if node.op != 'call_function':
+    if not is_call(node):
         return False
 
     op_name = node_function_target(node)
-    return op_name in FUSABLE and FUSABLE[op_name]
+    if node.op == 'call_function':
+        return op_name in FUSABLE and FUSABLE[op_name]
+    else:
+        # TODO: check class type
+        class_type = call_method_class(node)
+        return op_name in FUSABLE and FUSABLE[op_name]
 
 
 def is_getitem(a: torch.fx.Node) -> bool:
-    if a.op != 'call_function':
-        return False
-    return node_function_target(a) == '_operator.getitem'
+    return is_call(a) and node_function_target(a) == '_operator.getitem'
 
 
 """
@@ -185,7 +191,7 @@ def pointwise_fusion(
     for n in reversed(mod.graph.nodes):
         logger.debug(f"CONSIDER {n}")
 
-        if n.op != 'call_function':
+        if not is_call(n):
             logger.debug(f"  REJECT {n} not call")
             node_map[n] = 0
             continue
@@ -231,7 +237,7 @@ def pointwise_fusion(
 
     if fuse_with_compute:
         for n in mod.graph.nodes:
-            if n.op != 'call_function':
+            if not is_call(n):
                 continue
 
             if fuse_inputs:
@@ -266,7 +272,7 @@ def pointwise_fusion(
 
     for p, nodes in subgraphs.items():
         sub = SubGraph(mod, subgraphs[p])
-        if len([n for n in sub.nodes if n.op == 'call_function']) <= 1:
+        if len([n for n in sub.nodes if is_call(n)]) <= 1:
             logger.debug(f"Reject empty/singleton subgraph:\n{sub.tabular()}")
             continue
         logger.debug(f"Fusing sub-module:\n{sub.tabular()}")

@@ -5,12 +5,14 @@ import unittest.mock
 from .code_cache import CodeCache
 from .fusion import FusedOpGenerator, pointwise_fusion
 from .register import SUPPORTED
-from .utils import ModuleInputGenerator, graph_print_tabular
+from .rewrite_quantized_gemms import rewrite_quantized_gemms
+from .utils import ModuleInputGenerator, graph_print_tabular, is_call, call_method_class
 
 from torch._dynamo import register_backend, lookup_backend
 from torch.fx.passes.operator_support import create_op_support
 from torch.fx.passes.infra.partitioner import CapabilityBasedPartitioner, Partition
 from torch.fx.passes.tools_common import get_node_target
+from torch.fx.passes.shape_prop import ShapeProp
 from torch._subclasses.fake_tensor import FakeTensorMode, FakeTensor
 
 from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set
@@ -35,15 +37,18 @@ def is_node_supported(
     submodules: Mapping[str, torch.nn.Module],
     node: torch.fx.Node,
 ) -> bool:
-    if node.op == 'call_function':
-        return get_node_target(submodules, node) in SUPPORTED
+    if is_call(node):
+        fn_name = get_node_target(submodules, node)
+        if not fn_name in SUPPORTED:
+            return False
+
+        if node.op == 'call_method':
+            class_type = call_method_class(node)
+            return any([issubclass(class_type, c) for c in SUPPORTED[fn_name]])
+        else:
+            return True
     else:
         return False
-
-
-# TODO: delete me
-def is_sym_placeholder(node: torch.fx.Node) -> bool:
-    return node.op == 'placeholder' and node.target == 's0'
 
 
 """
@@ -98,6 +103,7 @@ def optimize(
     mod: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor],
 ) -> torch.fx.GraphModule:
+    mod = rewrite_quantized_gemms(mod, example_inputs)
     mod = pointwise_fusion(cc, fgen, mod, example_inputs)
     # TODO: should we re-trace here to inline?  or will inductor handle it?
     # mod = inline_submodules(mod)
@@ -168,6 +174,8 @@ class backend_class:
         # TODO: store these in the root module state dictionary so that code for
         # all sub-modules is shared?  Or should these be globals?
         fgen = FusedOpGenerator()
+
+        ShapeProp(gm).propagate(*example_inputs)
 
         part_gm, parts = partition_graph(gm, example_inputs)
 

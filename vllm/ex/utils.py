@@ -52,11 +52,15 @@ def graph_print_tabular(
     return tabulate(node_specs, headers=headers)
 
 
+def is_call(node: torch.fx.Node) -> bool:
+    return node.op == 'call_function' or node.op == 'call_method'
+
+
 """
 Get the name of the function being called in a 'call_function' op.
 """
 def node_function_target(node: torch.fx.Node) -> str:
-    assert node.op == 'call_function'
+    assert is_call(node)
     return get_node_target(None, node)
 
 
@@ -95,6 +99,13 @@ def extract_node_type(n: torch.fx.Node):
         return n.meta['tensor_meta'].dtype
     else:
         return None
+
+
+def call_method_class(node: torch.fx.Node): # -> Type:
+    assert node.op == 'call_method'
+    ex_val = node.args[0].meta.get('example_value')
+    assert ex_val is not None
+    return type(ex_val)
 
 
 """
