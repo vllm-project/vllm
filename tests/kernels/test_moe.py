@@ -181,7 +181,7 @@ def marlin_permute_scales(s, size_k, size_n, group_size, scale_perm, scale_perm_
 
 def quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
     orig_device = w.device
-    _, size_k, size_n = w.shape
+    size_k, size_n = w.shape
 
     assert w.is_floating_point(), "w must be float"
 
@@ -239,7 +239,8 @@ def marlin_quantize(
     perm, scale_perm, scale_perm_single = get_marlin_perms()
 
     print("SHAPE:", w.shape)
-    experts, size_k, size_n = w.shape
+    #TODO experts dim
+    size_k, size_n = w.shape
 
     # Normalize group_size
     if group_size == -1:
@@ -251,10 +252,10 @@ def marlin_quantize(
 
     #TODO experts
     # Reformat to marlin
-    marlin_q_w = marlin_weights(q_w.squeeze(0), size_k, size_n, num_bits, perm)
+    marlin_q_w = marlin_weights(q_w, size_k, size_n, num_bits, perm)
     marlin_s = marlin_permute_scales(s, size_k, size_n, group_size, scale_perm, scale_perm_single)
 
-    marlin_q_w = marlin_q_w.unsqueeze(0)
+    marlin_q_w = marlin_q_w
 
     # Create result
     res_list = [w_ref, marlin_q_w, marlin_s]
@@ -269,19 +270,23 @@ import vllm._moe_C as moe_kernels
 
 def test_fused_marlin_moe():
     m = 16
-    n = 64
+    n = 128
     k = 128
     e = 1
     dtype = torch.float16
     moe_block_size = 16
 
     a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
-    w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
-    w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
+    w1 = torch.randn((2 * n, k), device='cuda', dtype=dtype) / 10
+    w2 = torch.randn((k, n), device='cuda', dtype=dtype) / 10
 
     a_2d = a.view(-1, a.shape[-1])
 
     w_ref, qweight, scales = marlin_quantize(w1, 4, -1)
+    qweight = qweight.unsqueeze(0)
+    scales = scales.unsqueeze(0)
+
+    print("scales size:", scales.size())
 
     # Allocate marlin workspace
     max_workspace_size = (n // 64) * 16

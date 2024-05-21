@@ -408,7 +408,6 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
        int4* __restrict__ C,                // fp16 output buffer of shape mxn
        int* __restrict__ sorted_ids,        // int32 sorted ids of experts
        const int4* __restrict__ scales_ptr, // fp16 quantization scales of shape (k/groupsize)xn
-       const int* __restrict__ g_idx,       // int32 group indices of shape k
        int4* __restrict__ red_tmp,          // extra tmp buffer for computing reductions of shape moe_block_sizexn
        int  num_groups,                     // number of scale groups per output channel
        int  num_tokens_post_padded,         // scales_ptrs size with padding
@@ -425,6 +424,9 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
     #else
       printf("no cuda arch found.\n");
     #endif
+
+    // TODO delete all these
+    // int* g_idx;
 
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the same size, which
   // might involve multiple column "slices" (of width 16 * `thread_n_blocks`). Stripes are defined
@@ -751,20 +753,20 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
         B_ptr[i] += b_gl_rd_delta_o;
       }
 
-      if constexpr (has_act_order) {
-        // Fetch g_idx thread-block portion
-        int full_pipe = a_off;
-        int cur_k     = slice_k_start_shared_fetch + tb_k * full_pipe;
-        if (cur_k < prob_k && cur_k < slice_k_finish) {
-          int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
+      // if constexpr (has_act_order) {
+      //   // Fetch g_idx thread-block portion
+      //   int full_pipe = a_off;
+      //   int cur_k     = slice_k_start_shared_fetch + tb_k * full_pipe;
+      //   if (cur_k < prob_k && cur_k < slice_k_finish) {
+      //     int4* sh_g_idx_stage = sh_g_idx + g_idx_stage * pipe;
 
-          int4 const* cur_g_idx_stage_ptr = reinterpret_cast<int4 const*>(&g_idx[cur_k]);
+      //     int4 const* cur_g_idx_stage_ptr = reinterpret_cast<int4 const*>(&g_idx[cur_k]);
 
-          if (threadIdx.x < g_idx_stage) {
-            cp_async4_pred(&sh_g_idx_stage[threadIdx.x], &cur_g_idx_stage_ptr[threadIdx.x]);
-          }
-        }
-      } else {
+      //     if (threadIdx.x < g_idx_stage) {
+      //       cp_async4_pred(&sh_g_idx_stage[threadIdx.x], &cur_g_idx_stage_ptr[threadIdx.x]);
+      //     }
+      //   }
+      // } else {
         if constexpr (group_blocks != -1) {
           int4* sh_s_stage = sh_s + s_sh_stage * pipe;
 
@@ -785,7 +787,7 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
             }
           }
         }
-      }
+      // }
     }
     // Insert a fence even when we are winding down the pipeline to ensure that waiting is also
     // correct at this point.
@@ -1242,7 +1244,7 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
         if (last_g_idx >= prob_k) {
           last_g_idx = prob_k - 1;
         }
-        fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
+        // fetch_scales_to_shared(true, g_idx[slice_k_start], g_idx[last_g_idx]);
       }
       fetch_to_shared(i, i, i < slice_iters);
     }
@@ -1288,18 +1290,18 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
     slice_k_start += tb_k * stages;
     slice_k_start_shared_fetch += tb_k * stages;
 
-    if constexpr (has_act_order) {
-      int first_group_id = g_idx[slice_k_start];
-      int last_g_idx     = slice_k_start + stages * tb_k * 2;
-      if (last_g_idx >= prob_k) {
-        last_g_idx = prob_k - 1;
-      }
-      int last_group_id = g_idx[last_g_idx];
-      if (last_group_id >= sh_first_group_id + sh_num_groups) {
-        fetch_scales_to_shared(false, first_group_id, last_group_id);
-        __syncthreads();
-      }
-    }
+    // if constexpr (has_act_order) {
+    //   int first_group_id = g_idx[slice_k_start];
+    //   int last_g_idx     = slice_k_start + stages * tb_k * 2;
+    //   if (last_g_idx >= prob_k) {
+    //     last_g_idx = prob_k - 1;
+    //   }
+    //   int last_group_id = g_idx[last_g_idx];
+    //   if (last_group_id >= sh_first_group_id + sh_num_groups) {
+    //     fetch_scales_to_shared(false, first_group_id, last_group_id);
+    //     __syncthreads();
+    //   }
+    // }
 
     // Process results and, if necessary, proceed to the next column slice. While this pattern may
     // not be the most readable, other ways of writing the loop seemed to noticeably worse
@@ -1407,7 +1409,6 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
        int4* __restrict__ C,                // fp16 output buffer of shape mxn
        int* __restrict__ sorted_ids,        // int32 sorted ids of experts
        const int4* __restrict__ scales_ptr, // fp16 quantization scales of shape (k/groupsize)xn
-       const int* __restrict__ g_idx,       // int32 group indices of shape k
        int4* __restrict__ red_tmp,          // extra tmp buffer for computing reductions of shape moe_block_sizexn
        int  num_groups,                     // number of scale groups per output channel
        int  num_tokens_post_padded,         // scales_ptrs size with padding
@@ -1453,7 +1454,7 @@ static constexpr int pack_factor_4bit =
                          cudaFuncAttributeMaxDynamicSharedMemorySize, SHARED_MEM);             \
     MarlinMoE<NUM_THREADS, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, STAGES,            \
            GROUP_BLOCKS><<<blocks, NUM_THREADS, SHARED_MEM, stream>>>(          \
-        A_ptr, B_ptr, C_ptr, sorted_ids_ptr, s_ptr, g_idx_ptr, red_tmp_ptr, \
+        A_ptr, B_ptr, C_ptr, sorted_ids_ptr, s_ptr, red_tmp_ptr, \
         num_groups, num_tokens_post_padded, expert_idx, \
         prob_m, prob_n, prob_k, tot_m, locks);         \
   }
@@ -1564,9 +1565,9 @@ thread_config_t determine_thread_config(int prob_m, int prob_n, int prob_k) {
 //   // __CALL_IF_MOE(3, N_BLOCKS, K_BLOCKS, 8, NUM_THREADS)                                          \
 //   // __CALL_IF_MOE(4, N_BLOCKS, K_BLOCKS, 8, NUM_THREADS)
 
-void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids, void* s, void* g_idx, void* perm,
+void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids, void* s,
                      void* a_tmp, void* red_tmp, int prob_m, int prob_n, int prob_k, void* workspace,
-                     bool has_act_order, bool is_k_full, int num_groups, int group_size,
+                     int num_groups, int group_size,
                      int num_tokens_post_padded, int num_experts, int moe_block_size,
                      int dev, cudaStream_t stream, int thread_k, int thread_n, int sms, int max_par) {
 
@@ -1575,6 +1576,9 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
 #else
   printf("no cuda arch found.\n");
 #endif
+
+// void* g_idx = (void*)nullptr;
+// void* perm = (void*)nullptr;
 
 //  MarlinMoE<<<1, 1>>>();
 
@@ -1619,25 +1623,12 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
               " is not divisible by thread_k = ", thread_k);
 
   int group_blocks = 0;
-  if (has_act_order) {
-    if (is_k_full) {
-      TORCH_CHECK(group_size != -1);
-      group_blocks = group_size / 16;
-      TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
-                  " is not divisible by group_blocks = ", group_blocks);
-    } else {
-      TORCH_CHECK(group_size == 0);
-      group_blocks = 0;
-    }
-
+  if (group_size == -1) {
+    group_blocks = -1;
   } else {
-    if (group_size == -1) {
-      group_blocks = -1;
-    } else {
-      group_blocks = group_size / 16;
-      TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
-                  " is not divisible by group_blocks = ", group_blocks);
-    }
+    group_blocks = group_size / 16;
+    TORCH_CHECK(prob_k % group_blocks == 0, "prob_k = ", prob_k,
+                " is not divisible by group_blocks = ", group_blocks);
   }
 
   // ZeroOutput<<<1, num_threads>>>((int4*)C, tot_m, prob_n);
@@ -1652,8 +1643,8 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
     int4*       C_ptr     = (int4*)C;
     int*        sorted_ids_ptr  = (int*)sorted_ids;// + moe_block_size * expert_idx;
     const int4* s_ptr     = (const int4*)s + (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) * prob_n / 8) * expert_idx;
-    const int*  g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
-    const int*  perm_ptr  = (const int*)perm;
+    // const int*  g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
+    // const int*  perm_ptr  = (const int*)perm;
     int4*       a_tmp_ptr = (int4*)a_tmp;
     int4*       red_tmp_ptr = (int4*)red_tmp;
 
@@ -1674,12 +1665,6 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
     //                                                               prob_k, block_rows);
     //   A_ptr = a_tmp_ptr;
     // }
-
-    // If we have a full K, then we can run the non-act-order version of Marlin (since the weight rows
-    // are reordered by increasing group ids, and by having a full K, we have full original groups)
-    if (is_k_full) {
-      has_act_order = false;
-    }
 
     // Main loop
     for (int i = 0; i < tot_m_blocks; i += 4) {
@@ -1706,7 +1691,7 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
       CALL_IF_MOE(4, 8, 128)
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " + str(prob_n) + ", " +
-                              str(prob_k) + "]" + ", has_act_order = " + str(has_act_order) +
+                              str(prob_k) + "]" +
                               ", num_groups = " + str(num_groups) + ", group_size = " +
                               str(group_size) + ", thread_m_blocks = " + str(thread_m_blocks) +
                               ", thread_n_blocks = " + str(thread_n_blocks) +
@@ -1731,9 +1716,6 @@ torch::Tensor marlin_gemm_moe(torch::Tensor& a, torch::Tensor& b_q_weights, torc
     cudaRuntimeGetVersion(&version);
     printf("cuda v: %d\n", version);
 
-  torch::Tensor g_idx;
-  torch::Tensor perm;
-  bool is_k_full = true;
   int64_t num_tokens_post_padded = 64;
   int64_t num_experts = 1;
   int64_t moe_block_size = 16;
@@ -1759,7 +1741,6 @@ torch::Tensor marlin_gemm_moe(torch::Tensor& a, torch::Tensor& b_q_weights, torc
   // Detect groupsize and act_order
   int  num_groups    = -1;
   int  group_size    = -1;
-  bool has_act_order = g_idx.size(0) != 0;
 
   int b_rank = b_scales.sizes().size();
   TORCH_CHECK(b_rank == 2 || b_rank == 3, "b_scales rank = ", b_rank, " is not 2");
@@ -1767,29 +1748,17 @@ torch::Tensor marlin_gemm_moe(torch::Tensor& a, torch::Tensor& b_q_weights, torc
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
 
-  if (has_act_order) {
-    if (is_k_full) {
-      TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
-      TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
-                  ", is not divisible by num_groups = ", num_groups);
-      group_size = size_k / num_groups;
-    } else {
-      group_size = 0;
-    }
-
+  if (num_groups > 1) {
+    TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
+                ", is not divisible by b_scales.size(0) = ", b_scales.size(0));
+    group_size = size_k / num_groups;
   } else {
-    if (num_groups > 1) {
-      TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
-                  ", is not divisible by b_scales.size(0) = ", b_scales.size(0));
-      group_size = size_k / num_groups;
-    } else {
-      group_size = -1;
-    }
+    group_size = -1;
   }
 
   marlin::marlin_mm_moe_f16i4(a.data_ptr(), b_q_weights.data_ptr(), c.data_ptr(), sorted_ids.data_ptr(), b_scales.data_ptr(),
-                g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(), red_tmp.data_ptr(), size_m, size_n, size_k,
-                workspace.data_ptr(), has_act_order, is_k_full, num_groups, group_size,
+                a_tmp.data_ptr(), red_tmp.data_ptr(), size_m, size_n, size_k,
+                workspace.data_ptr(), num_groups, group_size,
                 num_tokens_post_padded, num_experts, moe_block_size,
                 dev, at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par);
   return c;
