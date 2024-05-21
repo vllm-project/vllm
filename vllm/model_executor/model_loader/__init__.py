@@ -16,7 +16,6 @@ def get_model(
         scheduler_config: SchedulerConfig, lora_config: Optional[LoRAConfig],
         vision_language_config: Optional[VisionLanguageConfig]) -> nn.Module:
     loader = get_model_loader(load_config)
-    print("getting model")
     return loader.load_model(model_config=model_config,
                              device_config=device_config,
                              lora_config=lora_config,

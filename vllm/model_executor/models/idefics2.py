@@ -13,10 +13,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from transformers import Idefics2Config
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 import math
-
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.layers.layernorm import RMSNorm
 import inspect
 
-##TODO
 import torch
 from torch import nn
 
@@ -27,10 +30,16 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.model": "language_model",
 }
 
-
-'''
-Adapted from https://github.com/huggingface/transformers/blob/main/src/transformers/models/idefics2/modeling_idefics2.py
-'''
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 class Idefics2MLP(nn.Module):
@@ -50,33 +59,6 @@ class Idefics2MLP(nn.Module):
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
-
-class Idefics2RMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
-        """
-        Idefics2RMSNorm is equivalent to T5LayerNorm
-        """
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * hidden_states.to(input_dtype)
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
     
 class Idefics2PerceiverAttention(nn.Module):
     def __init__(self, config, layer_idx: Optional[int] = None) -> None:
@@ -178,10 +160,6 @@ class Idefics2PerceiverAttention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
-IDEFICS2_PERCEIVER_ATTENTION_CLASSES = {
-    "eager": Idefics2PerceiverAttention,
-}
-
 class Idefics2PerceiverLayer(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
@@ -190,10 +168,10 @@ class Idefics2PerceiverLayer(nn.Module):
         self.depth = config.perceiver_config.resampler_depth
         self.rms_norm_eps = config.text_config.rms_norm_eps
 
-        self.input_latents_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
-        self.input_context_norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.input_latents_norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.input_context_norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.self_attn = Idefics2PerceiverAttention(config, layer_idx=layer_idx)
-        self.post_attention_layernorm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
         self.mlp = Idefics2MLP(
             hidden_size=config.text_config.hidden_size,
             intermediate_size=config.text_config.hidden_size * 4,
@@ -212,20 +190,7 @@ class Idefics2PerceiverLayer(nn.Module):
         use_cache: Optional[bool] = False,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        """
-        Args:
-            latents (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            context (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, sequence_length)` where padding elements are indicated by 0.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-        """
+
         residual = latents
 
         latents = self.input_latents_norm(latents)
@@ -273,7 +238,7 @@ class Idefics2PerceiverResampler(nn.Module):
 
         # Create Transformer Blocks
         self.layers = nn.ModuleList([Idefics2PerceiverLayer(config, idx) for idx in range(self.depth)])
-        self.norm = Idefics2RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
+        self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
 
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
 
@@ -338,14 +303,12 @@ class Idefics2Model(nn.Module):
         self.config = config
         self.vision_language_config = vision_language_config
         self.linear_method = linear_method
-        print("LM", linear_method)
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
 
 
         self.config = config
         ##SIGLIP vision encodder
-        print(config.vision_config)
         self.vision_model = SiglipVisionModel(config.vision_config)
         self.connector = Idefics2Connector(config)
         ##Mistral Language Decoder
@@ -378,7 +341,6 @@ class Idefics2Model(nn.Module):
         return new_inputs_embeds
 
     
-    ##Transform huggin
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -422,18 +384,6 @@ class Idefics2Model(nn.Module):
                                             attn_metadata,
                                             inputs_embeds=inputs_embeds)
             return hidden_states
-    
-    
-
-def _merge_vision_embeddings(input_ids: torch.Tensor,
-                             inputs_embeds: torch.Tensor,
-                             vision_embeddings: torch.Tensor,
-                             image_token_id: int):
-    """In place merges in vision_embeddings with inputs_embeds."""
-    mask = (input_ids == image_token_id)
-    inputs_embeds[mask] = vision_embeddings.view(-1, vision_embeddings.shape[-1])
-
-
 
 class Idefics2ForConditionalGeneration(nn.Module):
     _tied_weights_keys = ["lm_head.weight"]
@@ -454,7 +404,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
 
         ##langauge model equivilent in llava.py
         self.model = Idefics2Model(config, vision_language_config, linear_method)
-        # self.image_token_id = self.config.image_token_id
 
         ##copied from HF
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
@@ -465,7 +414,6 @@ class Idefics2ForConditionalGeneration(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.text_config.vocab_size, logit_scale)
         self.sampler = Sampler()
-        print("finished init")
 
     def forward(
         self,

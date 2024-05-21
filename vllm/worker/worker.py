@@ -69,7 +69,6 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
-        print("before genisis")
         self.model_runner = ModelRunner(
             model_config,
             parallel_config,
@@ -115,7 +114,6 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        print("scheldued load_model")
         self.model_runner.load_model()
 
     @torch.inference_mode()

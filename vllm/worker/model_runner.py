@@ -153,7 +153,6 @@ class ModelRunner:
             self.model_config.dtype if model_config is not None else None)
 
     def load_model(self) -> None:
-        print("MMMM", self.model_config)
         with CudaMemoryProfiler() as m:
             self.model = get_model(
                 model_config=self.model_config,
