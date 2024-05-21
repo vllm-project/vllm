@@ -1,6 +1,7 @@
 {% set docker_image = "us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT" %}
 {% set default_num_gpu = 1 %}
 {% set default_working_dir = "/vllm-workspace/tests" %}
+{% set huggingface_cache_dir = "~/.cache/huggingface" %}
 
 steps:
 
@@ -67,6 +68,8 @@ steps:
               - name: dshm
                 emptyDir:
                   medium: Memory
+              - name: hf-cache
+                emptyDir: {}
             containers:
               - image: "{{ docker_image }}"
                 command: ["bash"]
@@ -88,7 +91,11 @@ steps:
                       secretKeyRef:
                         name: hf-token-secret
                         key: token
+                  - name: HF_HOME
+                    value: "{{ huggingface_cache_dir }}"
                 volumeMounts:
                   - mountPath: /dev/shm
                     name: dshm
+                  - mountPath: "{{ huggingface_cache_dir }}"
+                    name: hf-cache
   {% endfor %}
