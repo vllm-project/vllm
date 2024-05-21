@@ -154,11 +154,12 @@ class DeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         topk_weights, topk_ids = grouped_topk(
-            hidden_states, router_logits, self.top_k,
+            hidden_states,
+            router_logits,
+            self.top_k,
             renormalize=self.config.norm_topk_prob,
             num_expert_group=self.config.n_group,
-            topk_group=self.config.topk_group
-        )
+            topk_group=self.config.topk_group)
         final_hidden_states = fused_experts(
             hidden_states,
             self.w1,

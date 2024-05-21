@@ -360,22 +360,19 @@ def grouped_topk(
     topk: int,
     renormalize: bool,
     num_expert_group: int = 0,
-    topk_group: int  = 0,
+    topk_group: int = 0,
 ):
     scores = torch.softmax(gating_output, dim=-1)
     num_token = scores.shape[0]
     group_scores = scores.view(num_token, num_expert_group,
                                -1).max(dim=-1).values  # [n, n_group]
-    group_idx = torch.topk(group_scores,
-                           k=topk_group,
-                           dim=-1,
+    group_idx = torch.topk(group_scores, k=topk_group, dim=-1,
                            sorted=False)[1]  # [n, top_k_group]
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
     score_mask = group_mask.unsqueeze(-1).expand(
         num_token, num_expert_group,
-        scores.shape[-1] // num_expert_group).reshape(num_token,
-                                                      -1)  # [n, e]
+        scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
     tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
     topk_weights, topk_ids = torch.topk(tmp_scores,
                                         k=topk,
