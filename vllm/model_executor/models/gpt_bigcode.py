@@ -25,13 +25,13 @@ from torch import nn
 from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.config import LoRAConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
@@ -194,9 +194,11 @@ class GPTBigCodeModel(nn.Module):
 
         self.embed_dim = config.hidden_size
         lora_vocab = (lora_config.lora_extra_vocab_size *
-                       (lora_config.max_loras or 1)) if lora_config else 0
+                      (lora_config.max_loras or 1)) if lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
-        self.wte = VocabParallelEmbedding(self.vocab_size, self.embed_dim, org_num_embeddings=config.vocab_size)
+        self.wte = VocabParallelEmbedding(self.vocab_size,
+                                          self.embed_dim,
+                                          org_num_embeddings=config.vocab_size)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
             GPTBigCodeBlock(config, quant_config)
@@ -227,21 +229,16 @@ class GPTBigCodeForCausalLM(nn.Module):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
     supported_lora_modules = [
-         "c_fc",
-         "c_proj",
-         "wte",
-         "lm_head",
-         "c_attn",
-         "q_attn"
-     ]
+        "c_fc", "c_proj", "wte", "lm_head", "c_attn", "q_attn"
+    ]
 
     embedding_modules = {
-         "wte": "input_embeddings",
-         "lm_head": "output_embeddings",
-     }
+        "wte": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
 
     embedding_padding_modules = []
-    
+
     def __init__(
         self,
         config: GPTBigCodeConfig,
@@ -256,7 +253,8 @@ class GPTBigCodeForCausalLM(nn.Module):
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
