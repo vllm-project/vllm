@@ -253,7 +253,8 @@ class ModelConfig:
         # TODO remove hard code
         if hasattr(self.hf_text_config, "model_type"
                    ) and self.hf_text_config.model_type == 'deepseek_v2':
-            # FlashAttention suports only head_size 32, 64, 128, 256, we need to pad head_size 192 to 256
+            # FlashAttention suports only head_size 32, 64, 128, 256,
+            # we need to pad head_size 192 to 256
             return 256
         if hasattr(self.hf_text_config, "head_dim"):
             return self.hf_text_config.head_dim
