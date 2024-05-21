@@ -69,7 +69,9 @@ steps:
                 emptyDir:
                   medium: Memory
               - name: hf-cache
-                emptyDir: {}
+                hostPath:
+                  path: /tmp/volumes/hf-cache
+                  type: DirectoryOrCreate
             containers:
               - image: "{{ docker_image }}"
                 command: ["bash"]
