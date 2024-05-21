@@ -105,16 +105,36 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
-    _cached_prefill_metadata: Optional["XFormersMetadata"] = None
-    _cached_decode_metadata: Optional["XFormersMetadata"] = None
 
-    # Need to make KV cache read-only for cross-attention
+    # Self-attention prefill/decode metadata cache
+    _self_cached_prefill_metadata: Optional["XFormersMetadata"] = None
+    _self_cached_decode_metadata: Optional["XFormersMetadata"] = None
+    # Cross-attention prefill/decode metadata cache
+    _cross_cached_prefill_metadata: Optional["XFormersMetadata"] = None
+    _cross_cached_decode_metadata: Optional["XFormersMetadata"] = None
+
+    # Begin cross-attention fields...
+
+    # If True, prefill_metadata() and decode_metadata() will return 
+    # seqlen & memory-mapping data structures for cross-attention;
+    # otherwise, self-attention data structures will be returned.
     is_cross_attn: bool = False
 
     # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
     # sequence length (usually encoder sequence length) in the cross-attention
     # computation. None if this is self-attention
     cross_seq_lens: Optional[List[int]] = None
+    cross_seq_lens_tensor: Optional[torch.Tensor] = None
+
+    # The maximum cross-sequence-length, if cross_seq_lens is specified.
+    # Note that for cross-attention there is no difference in key/value
+    # sequence length between prefill and decode
+    max_cross_seq_len: Optional[int] = None
+
+    # Cross-attention memory-mapping data structures: slot mapping
+    # and block tables
+    cross_slot_mapping: Optional[torch.Tensor] = None
+    cross_block_tables: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -125,66 +145,182 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[AttentionBias]] = None
 
     @property
+    def has_valid_cross_attn_metadata(self):
+        # No cross-attention metadata is present whatsoever
+        no_md = (self.cross_seq_lens is None) and (self.cross_slot_mapping is None) and (self.cross_block_tables is None)
+        # If any cross-attention metadata is present, it is invalid
+        invalid_md_if_not_no_md = (self.cross_seq_lens is None) or (self.cross_slot_mapping is None) or (self.cross_block_tables is None)
+
+        if no_md:
+            return False
+        
+        assert (not invalid_md_if_not_no_md), "Invalid cross-attention metadata"
+
+        return True
+
+    @property
+    def do_cross_attn(self):
+        return self.is_cross_attn
+
+    @do_cross_attn.setter
+    def do_cross_attn(self,state:bool):
+
+        if state:
+            assert self.has_valid_cross_attn_metadata, "Must have self.cross_seq_lens not None in order to enable cross-attention"
+
+            # Infer implicit cross-attention fields from user-provided fields, if needed
+            if self.cross_seq_lens_tensor is None:
+                self.cross_seq_lens_tensor = torch.tensor(self.cross_seq_lens,
+                                                        dtype=self.seq_lens_tensor.dtype,
+                                                        device=self.seq_lens_tensor.device)                
+            if self.max_cross_seq_len is None:
+                self.max_cross_seq_len = max(self.cross_seq_lens)
+
+            self.is_cross_attn = True
+        else:
+            self.is_cross_attn = False
+
+    @property
     def prefill_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_prefills == 0:
             return None
 
-        if self._cached_prefill_metadata is not None:
-            return self._cached_prefill_metadata
+        if not self.do_cross_attn:
+            # Self-attention prefill
 
-        assert self.seq_lens is not None
-        assert self.seq_lens_tensor is not None
-        assert self.query_start_loc is not None
-        assert self.context_lens_tensor is not None
-        assert self.block_tables is not None
+            if self._self_cached_prefill_metadata is not None:
+                return self._self_cached_prefill_metadata
 
-        self._cached_prefill_metadata = XFormersMetadata(
-            num_prefills=self.num_prefills,
-            num_prefill_tokens=self.num_prefill_tokens,
-            num_decode_tokens=0,
-            slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
-            seq_lens=self.seq_lens[:self.num_prefills],
-            seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
-            max_query_len=self.max_query_len,
-            max_prefill_seq_len=self.max_prefill_seq_len,
-            max_decode_seq_len=0,
-            query_start_loc=self.query_start_loc[:self.num_prefills + 1],
-            seq_start_loc=None,
-            context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
-            block_tables=self.block_tables[:self.num_prefills],
-            use_cuda_graph=False,
-            is_cross_attn=self.is_cross_attn,
-            cross_seq_lens=self.cross_seq_lens)
-        return self._cached_prefill_metadata
+            assert self.seq_lens is not None
+            assert self.seq_lens_tensor is not None
+            assert self.query_start_loc is not None
+            assert self.context_lens_tensor is not None
+            assert self.block_tables is not None
+
+            self._self_cached_prefill_metadata = XFormersMetadata(
+                num_prefills=self.num_prefills,
+                num_prefill_tokens=self.num_prefill_tokens,
+                num_decode_tokens=0,
+                slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+                seq_lens=self.seq_lens[:self.num_prefills],
+                seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+                max_query_len=self.max_query_len,
+                max_prefill_seq_len=self.max_prefill_seq_len,
+                max_decode_seq_len=0,
+                query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+                seq_start_loc=None,
+                context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+                block_tables=self.block_tables[:self.num_prefills],
+                use_cuda_graph=False,
+                is_cross_attn=False, # Begin cross-attention fields below...
+                cross_seq_lens=None,
+                cross_seq_lens_tensor=None,
+                max_cross_seq_len=None,
+                cross_block_tables=None,
+                cross_slot_mapping=None)
+            return self._self_cached_prefill_metadata
+
+        else:
+            # Cross-attention prefill
+
+            if self._cross_cached_prefill_metadata is not None:
+                return self._cross_cached_prefill_metadata
+
+            assert self.seq_lens is not None
+            assert self.seq_lens_tensor is not None
+            assert self.query_start_loc is not None
+            assert self.context_lens_tensor is not None
+            assert self.block_tables is not None
+
+            self._cross_cached_prefill_metadata = XFormersMetadata(
+                num_prefills=self.num_prefills,
+                num_prefill_tokens=self.num_prefill_tokens,
+                num_decode_tokens=0,
+                slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+                seq_lens=self.seq_lens[:self.num_prefills],
+                seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
+                max_query_len=self.max_query_len,
+                max_prefill_seq_len=self.max_prefill_seq_len,
+                max_decode_seq_len=0,
+                query_start_loc=self.query_start_loc[:self.num_prefills + 1],
+                seq_start_loc=None,
+                context_lens_tensor=self.context_lens_tensor[:self.num_prefills],
+                block_tables=self.block_tables[:self.num_prefills],
+                use_cuda_graph=False,
+                is_cross_attn=True, # Begin cross-attention fields below...
+                cross_seq_lens=self.cross_seq_lens,
+                cross_seq_lens_tensor=self.cross_seq_lens_tensor,
+                max_cross_seq_len=self.max_cross_seq_len,
+                cross_slot_mapping=self.cross_slot_mapping,
+                cross_block_tables=self.cross_block_tables)
+            return self._cross_cached_prefill_metadata
 
     @property
     def decode_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_decode_tokens == 0:
             return None
 
-        if self._cached_decode_metadata is not None:
-            return self._cached_decode_metadata
-        assert self.block_tables is not None
-        assert self.seq_lens_tensor is not None
+        if not self.do_cross_attn:
+            # Self-attention decode
 
-        self._cached_decode_metadata = XFormersMetadata(
-            num_prefills=0,
-            num_prefill_tokens=0,
-            num_decode_tokens=self.num_decode_tokens,
-            slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
-            seq_lens=None,
-            seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
-            max_query_len=None,
-            max_prefill_seq_len=0,
-            max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=None,
-            seq_start_loc=None,
-            context_lens_tensor=None,
-            block_tables=self.block_tables[self.num_prefills:],
-            use_cuda_graph=self.use_cuda_graph,
-            is_cross_attn=self.is_cross_attn,
-            cross_seq_lens=self.cross_seq_lens)
-        return self._cached_decode_metadata
+            if self._self_cached_decode_metadata is not None:
+                return self._self_cached_decode_metadata
+            assert self.block_tables is not None
+            assert self.seq_lens_tensor is not None
+
+            self._self_cached_decode_metadata = XFormersMetadata(
+                num_prefills=0,
+                num_prefill_tokens=0,
+                num_decode_tokens=self.num_decode_tokens,
+                slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+                seq_lens=None,
+                seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+                max_query_len=None,
+                max_prefill_seq_len=0,
+                max_decode_seq_len=self.max_decode_seq_len,
+                query_start_loc=None,
+                seq_start_loc=None,
+                context_lens_tensor=None,
+                block_tables=self.block_tables[self.num_prefills:],
+                use_cuda_graph=self.use_cuda_graph,
+                is_cross_attn=False, # Begin cross-attention fields below...
+                cross_seq_lens=None,
+                cross_seq_lens_tensor=None,
+                max_cross_seq_len=None,
+                cross_block_tables=None,
+                cross_slot_mapping=None)
+            return self._self_cached_decode_metadata
+
+        else:
+            # Cross-attention decode
+
+            if self._cross_cached_decode_metadata is not None:
+                return self._cross_cached_decode_metadata
+            assert self.block_tables is not None
+            assert self.seq_lens_tensor is not None
+
+            self._cross_cached_decode_metadata = XFormersMetadata(
+                num_prefills=0,
+                num_prefill_tokens=0,
+                num_decode_tokens=self.num_decode_tokens,
+                slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+                seq_lens=None,
+                seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
+                max_query_len=None,
+                max_prefill_seq_len=0,
+                max_decode_seq_len=self.max_decode_seq_len,
+                query_start_loc=None,
+                seq_start_loc=None,
+                context_lens_tensor=None,
+                block_tables=self.block_tables[self.num_prefills:],
+                use_cuda_graph=self.use_cuda_graph,
+                is_cross_attn=True, # Begin cross-attention fields below...
+                cross_seq_lens=self.cross_seq_lens,
+                cross_seq_lens_tensor=self.cross_seq_lens_tensor,
+                max_cross_seq_len=self.max_cross_seq_len,
+                cross_slot_mapping=self.cross_slot_mapping,
+                cross_block_tables=self.cross_block_tables)
+            return self._cross_cached_decode_metadata
 
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
@@ -268,6 +404,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size)
 
+        # Self-attention vs. cross-attention will impact
+        # which KV cache memory-mapping & which
+        # seqlen datastructures we utilize
+        do_cross_attn = attn_metadata.do_cross_attn
+
         if (kv_cache is not None):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
@@ -277,22 +418,30 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             if (key is not None) and (value is not None):
 
+                if do_cross_attn:
+                    # Update cross-attention KV cache (prefill-only)
+                    # During cross-attention decode, key & value will be None,
+                    # preventing this IF-statement branch from running
+                    updated_slot_mapping = attn_metadata.cross_slot_mapping
+                else:
+                    # Update self-attention KV cache (prefill/decode)
+                    updated_slot_mapping = attn_metadata.slot_mapping
+
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory profiling run.
                 PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
-                                                    attn_metadata.slot_mapping,
+                                                    updated_slot_mapping,
                                                     self.kv_cache_dtype,
                                                     kv_scale)
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        is_cross_attn = attn_metadata.is_cross_attn
-        assert is_cross_attn or (key.shape[0]
+        assert do_cross_attn or (key.shape[0]
                                  == num_prefill_tokens + num_decode_tokens)
-        assert is_cross_attn or (value.shape[0]
+        assert do_cross_attn or (value.shape[0]
                                  == num_prefill_tokens + num_decode_tokens)
 
         output = torch.empty_like(query)
@@ -301,7 +450,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
 
-        if not is_cross_attn and key is not None and value is not None:
+        if not do_cross_attn and key is not None and value is not None:
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
@@ -323,6 +472,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # TODO(Hai) this triton kernel has regression issue (broke) to
                 # deal with different data types between KV and FP8 KV cache,
                 # to be addressed separately.
+                #
+                # TODO(afeldman-nm): support cross-attention
                 out = PagedAttention.forward_prefix(
                     query,
                     key,
@@ -341,17 +492,24 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
+            if do_cross_attn:
+                # Paged attention against cross-attention KV cache
+                seq_lens_arg = decode_meta.cross_seq_lens_tensor
+                max_seq_len_arg = decode_meta.max_cross_seq_len
+                block_tables_arg = decode_meta.cross_block_tables
+            else:
+                # Paged attention against self-attention KV cache
+                seq_lens_arg = decode_meta.seq_lens_tensor
+                max_seq_len_arg = decode_meta.max_decode_seq_len
+                block_tables_arg = decode_meta.block_tables
+
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
                 value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor if not is_cross_attn else
-                torch.tensor(decode_meta.cross_seq_lens,
-                             dtype=decode_meta.seq_lens_tensor.dtype,
-                             device=decode_meta.seq_lens_tensor.device),
-                decode_meta.max_decode_seq_len
-                if not is_cross_attn else max(decode_meta.cross_seq_lens),
+                block_tables_arg,
+                seq_lens_arg,
+                max_seq_len_arg,
                 self.kv_cache_dtype,
                 self.num_kv_heads,
                 self.scale,
