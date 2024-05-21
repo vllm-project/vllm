@@ -314,7 +314,7 @@ def fused_topk(
     topk: int,
     renormalize: bool,
     num_expert_group: int = 0,
-    topk_group: int  = 0,
+    topk_group: int = 0,
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")
@@ -332,13 +332,13 @@ def fused_topk(
             import vllm._moe_C as moe_kernels
 
             topk_weights = torch.empty(M,
-                                    topk,
-                                    dtype=torch.float32,
-                                    device=hidden_states.device)
+                                       topk,
+                                       dtype=torch.float32,
+                                       device=hidden_states.device)
             topk_ids = torch.empty(M,
-                                topk,
-                                dtype=torch.int32,
-                                device=hidden_states.device)
+                                   topk,
+                                   dtype=torch.int32,
+                                   device=hidden_states.device)
             token_expert_indicies = torch.empty(M,
                                                 topk,
                                                 dtype=torch.int32,
@@ -351,15 +351,25 @@ def fused_topk(
             )
             del token_expert_indicies  # Not used. Will be used in the future.
         else:
-            scores = torch.softmax(gating_output, dim = -1)
+            scores = torch.softmax(gating_output, dim=-1)
             num_token = scores.shape[0]
-            group_scores = scores.view(num_token, num_expert_group, -1).max(dim=-1).values  # [n, n_group]
-            group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=False)[1]  # [n, top_k_group]
+            group_scores = scores.view(num_token, num_expert_group,
+                                       -1).max(dim=-1).values  # [n, n_group]
+            group_idx = torch.topk(group_scores,
+                                   k=topk_group,
+                                   dim=-1,
+                                   sorted=False)[1]  # [n, top_k_group]
             group_mask = torch.zeros_like(group_scores)  # [n, n_group]
             group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
-            score_mask = group_mask.unsqueeze(-1).expand(num_token, num_expert_group, scores.shape[-1] // num_expert_group).reshape(num_token, -1)  # [n, e]
+            score_mask = group_mask.unsqueeze(-1).expand(
+                num_token, num_expert_group,
+                scores.shape[-1] // num_expert_group).reshape(num_token,
+                                                              -1)  # [n, e]
             tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
-            topk_weights, topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=False)
+            topk_weights, topk_ids = torch.topk(tmp_scores,
+                                                k=topk,
+                                                dim=-1,
+                                                sorted=False)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -523,7 +533,8 @@ def fused_moe(
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
 
     topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize, num_expert_group, topk_group)
+                                        renormalize, num_expert_group,
+                                        topk_group)
     return fused_experts(hidden_states,
                          w1,
                          w2,

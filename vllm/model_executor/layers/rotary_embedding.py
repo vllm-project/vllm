@@ -488,8 +488,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_slow = beta_slow
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
-            yarn_get_mscale(self.scaling_factor, float(mscale))
-            / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) * attn_factor)
+            yarn_get_mscale(self.scaling_factor, float(mscale)) /
+            yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
+            attn_factor)
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style)
 
@@ -505,7 +506,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
                                                 self.max_position_embeddings)
         # Get n-d rotational scaling corrected for extrapolation
         inv_freq_mask = (1 - _yarn_linear_ramp_mask(
-            low, high, self.rotary_dim // 2, dtype=torch.float)) * self.extrapolation_factor
+            low, high, self.rotary_dim // 2,
+            dtype=torch.float)) * self.extrapolation_factor
         inv_freq = inv_freq_interpolation * (
             1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
         return inv_freq
@@ -522,7 +524,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         print("Cache shape", cache.shape)
         return cache
 
-    
     def forward(
         self,
         positions: torch.Tensor,
@@ -562,7 +563,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             query = query_rot
             key = key_rot
         return query, key
- 
+
+
 _ROPE_DICT: Dict[Tuple, RotaryEmbedding] = {}
 
 
@@ -627,11 +629,9 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow", "mscale", "mscale_all_dim")
             }
-            rotary_emb = DeepseekScalingRotaryEmbedding(head_size, rotary_dim,
-                                                    original_max_position,
-                                                    base, is_neox_style,
-                                                    scaling_factor,
-                                                    **extra_kwargs)
+            rotary_emb = DeepseekScalingRotaryEmbedding(
+                head_size, rotary_dim, original_max_position, base,
+                is_neox_style, scaling_factor, **extra_kwargs)
         elif scaling_type == "su":
             short_factor = rope_scaling["short_factor"]
             long_factor = rope_scaling["long_factor"]
