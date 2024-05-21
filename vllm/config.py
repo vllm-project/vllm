@@ -28,8 +28,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
-            It is also used as the content for `model_name` tag in metrics 
-            output when `served_model_name` is not specified. 
+            It is also used as the content for `model_name` tag in metrics
+            output when `served_model_name` is not specified.
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -69,8 +69,8 @@ class ModelConfig:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
-            matches the model name exposed via the APIs. If multiple model 
-            names provided, the first name will be used. If not specified, 
+            matches the model name exposed via the APIs. If multiple model
+            names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
     """
 
@@ -707,6 +707,7 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        tensor_parallel_size: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -740,6 +741,8 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
+            tensor_parallel_size (Optional[int]): tensor parallel size of the
+                draft model, if provided.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -826,7 +829,7 @@ class SpeculativeConfig:
 
             draft_parallel_config = (
                 SpeculativeConfig.create_draft_parallel_config(
-                    target_parallel_config))
+                    target_parallel_config, tensor_parallel_size))
 
         return SpeculativeConfig(
             draft_model_config,
@@ -874,16 +877,18 @@ class SpeculativeConfig:
 
     @staticmethod
     def create_draft_parallel_config(
-            target_parallel_config: ParallelConfig) -> ParallelConfig:
+            target_parallel_config: ParallelConfig,
+            tensor_parallel_size: Optional[int]) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
-        This is mostly a copy of the target parallel config. In the future the
-        draft worker can have a different parallel strategy, e.g. TP=1.
+        This is mostly a copy of the target parallel config.
         """
+        tp_size = (tensor_parallel_size or
+                   target_parallel_config.tensor_parallel_size)
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
-            tensor_parallel_size=target_parallel_config.tensor_parallel_size,
+            tensor_parallel_size=tp_size,
             distributed_executor_backend=target_parallel_config.
             distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
@@ -1183,10 +1188,10 @@ def _get_and_verify_max_len(
 def get_served_model_name(model: str,
                           served_model_name: Optional[Union[str, List[str]]]):
     """
-    If the input is a non-empty list, the first model_name in 
-    `served_model_name` is taken. 
-    If the input is a non-empty string, it is used directly. 
-    For cases where the input is either an empty string or an 
+    If the input is a non-empty list, the first model_name in
+    `served_model_name` is taken.
+    If the input is a non-empty string, it is used directly.
+    For cases where the input is either an empty string or an
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
