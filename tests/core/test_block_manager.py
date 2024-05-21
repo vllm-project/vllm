@@ -314,7 +314,7 @@ def test_swap_encoder_decoder():
     assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
     decoder_prompt.status = SequenceStatus.SWAPPED
 
-    # Swap decoder seq group from CPU -> GPU.
+    # Swap encoder/decoder seq group from CPU -> GPU.
     decoder_cpu_blocks = block_manager.get_block_table(decoder_prompt)
     cross_cpu_blocks = block_manager.get_cross_block_table(seq_group)
     cpu_blocks = decoder_cpu_blocks + cross_cpu_blocks

@@ -222,7 +222,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def free_cross(self, seq_group: SequenceGroup) -> None:
         request_id = seq_group.request_id
         if request_id not in self.cross_block_tables:
-            # Already freed or hasn't ben scheduled yet.
+            # Already freed or hasn't been scheduled yet.
             return
         self.cross_block_tables[request_id].free()
         del self.cross_block_tables[request_id]
