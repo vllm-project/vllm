@@ -39,15 +39,14 @@ def get_attn_backend(
 
         # We check it here not in _which_attn_to_use because we cannot know
         # the head size until we import FlashAttentionBackend.
-        flash_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
-        if head_size in flash_head_sizes:
+        supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
+        if head_size in supported_head_sizes:
             logger.info("Using FlashAttention-2 backend.")
             return FlashAttentionBackend
-        else:
-            logger.info(
-                "Cannot use FlashAttention-2 backend for head size %d. "
-                "Using XFormers backend instead.", head_size)
-            backend = _Backend.XFORMERS
+        logger.info(
+            "Cannot use FlashAttention-2 backend for head size %d. "
+            "Using XFormers backend instead.", head_size)
+        backend = _Backend.XFORMERS
 
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
