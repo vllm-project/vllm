@@ -7,10 +7,10 @@ import pytest
 import torch
 from PIL import Image
 from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,  
-                          Idefics2Config, 
-                          Idefics2ForConditionalGeneration,
-                          LlavaConfig,
-                          Idefics2ForConditionalGeneration)
+                        Idefics2Config, 
+                        Idefics2ForConditionalGeneration,
+                        LlavaConfig,
+                        LlavaForConditionalGeneration)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
