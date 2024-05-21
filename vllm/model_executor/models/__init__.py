@@ -57,8 +57,8 @@ _GENERATION_MODELS = {
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
 
-    # Added 
-    "Idefics2ForConditionalGeneration": 
+    # Added
+    "Idefics2ForConditionalGeneration":
     ("idefics2", "Idefics2ForConditionalGeneration")
 }
 
