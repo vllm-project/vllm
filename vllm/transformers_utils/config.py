@@ -4,7 +4,7 @@ from transformers import AutoConfig, PretrainedConfig
 
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              JAISConfig, MPTConfig, RWConfig)
-import torch
+
 _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,
     "dbrx": DbrxConfig,
@@ -25,7 +25,6 @@ def get_config(model: str,
             trust_remote_code=trust_remote_code,
             revision=revision,
             code_revision=code_revision)
-
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
