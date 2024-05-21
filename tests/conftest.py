@@ -6,11 +6,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 import torch
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,  
-                        Idefics2Config, 
-                        Idefics2ForConditionalGeneration,
-                        LlavaConfig,
-                        LlavaForConditionalGeneration)
+from transformers import (
+    AutoModelForCausalLM,
+    AutoProcessor,
+    AutoTokenizer,
+    Idefics2Config,
+    Idefics2ForConditionalGeneration,
+    LlavaConfig,
+    LlavaForConditionalGeneration
+)
 
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig

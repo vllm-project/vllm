@@ -7,6 +7,8 @@ from torch import nn
 from transformers import Idefics2Config, SiglipVisionModel
 from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask
 
+from .vlm_base import VisionLanguageModelBase
+
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
@@ -20,7 +22,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
