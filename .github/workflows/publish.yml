@@ -85,6 +85,7 @@ jobs:
         env:
           CMAKE_BUILD_TYPE: Release # do not compile with debug symbol to reduce wheel size
         run: |
+          export CMAKE_BUILD_TYPE=Release
           bash -x .github/workflows/scripts/build.sh ${{ matrix.python-version }} ${{ matrix.cuda-version }}
           wheel_name=$(ls dist/*whl | xargs -n 1 basename)
           asset_name=${wheel_name//"linux"/"manylinux1"}
