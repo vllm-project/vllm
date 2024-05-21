@@ -95,7 +95,7 @@ echo 'vLLM yapf: Done'
 # Run mypy
 echo 'vLLM mypy:'
 mypy vllm/attention --config-file pyproject.toml
-mypy vllm/core/*.py --follow-imports=skip --config-file pyproject.toml
+mypy vllm/core --config-file pyproject.toml
 mypy vllm/distributed --config-file pyproject.toml
 mypy vllm/entrypoints --config-file pyproject.toml
 mypy vllm/executor --config-file pyproject.toml
@@ -105,12 +105,14 @@ mypy vllm/transformers_utils --config-file pyproject.toml
 mypy vllm/engine  --config-file pyproject.toml
 mypy vllm/worker --config-file pyproject.toml
 mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/model_executor/*.py  --config-file pyproject.toml
+mypy vllm/model_executor  --config-file pyproject.toml
 mypy vllm/lora --config-file pyproject.toml
+mypy vllm/logging --config-file pyproject.toml
+mypy vllm/model_executor --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
-    '--skip' '*docs/source/_build/**'
+    '--skip' '*docs/source/_build/**,./tests/lora/data'
 )
 
 # check spelling of specified files
@@ -131,10 +133,9 @@ spell_check_changed() {
     # `diff-filter=ACM` and $MERGEBASE is to ensure we only lint files that
     # exist on both branches.
     MERGEBASE="$(git merge-base origin/main HEAD)"
-
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             codespell "${CODESPELL_EXCLUDES[@]}"
+            codespell "${CODESPELL_EXCLUDES[@]}"
     fi
 }
 

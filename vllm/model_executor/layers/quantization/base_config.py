@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
 from torch import nn
@@ -66,6 +66,17 @@ class QuantizationConfig(ABC):
         """Create a config class from the model's quantization config."""
         raise NotImplementedError
 
+    @classmethod
+    def override_quantization_method(cls, hf_quant_cfg,
+                                     user_quant) -> Optional[str]:
+        """
+           Detects if this quantization method can support a given checkpoint
+           format by overriding the user specified quantization method -- 
+           this method should only be overwritten by subclasses in exceptional 
+           circumstances
+        """
+        return None
+
     @staticmethod
     def get_from_keys(config: Dict[str, Any], keys: List[str]) -> Any:
         """Get a value from the model's quantization config."""
@@ -76,8 +87,16 @@ class QuantizationConfig(ABC):
                          "quantization config.")
 
     @abstractmethod
-    def get_quant_method(self, layer: torch.nn.Module) -> QuantizeMethodBase:
-        """Get the quantize method to use for the quantized layer."""
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+        """Get the quantize method to use for the quantized layer.
+        
+        Args:
+            layer: The layer for the quant method.
+        Returns:
+            The quantize method. None if the given layer doesn't support quant
+            method.
+        """
         raise NotImplementedError
 
     @abstractmethod
