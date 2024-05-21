@@ -16,8 +16,11 @@ import math
 
 import inspect
 
+##TODO
 import torch
 from torch import nn
+
+from transformers.models.idefics2 import Idefics2ImageProcessor
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -28,6 +31,7 @@ _KEYS_TO_MODIFY_MAPPING = {
 '''
 Adapted from https://github.com/huggingface/transformers/blob/main/src/transformers/models/idefics2/modeling_idefics2.py
 '''
+
 
 class Idefics2MLP(nn.Module):
     def __init__(
@@ -347,17 +351,14 @@ class Idefics2Model(nn.Module):
 
         self.config = config
         ##SIGLIP vision encodder
+        print(config.vision_config)
         self.vision_model = SiglipVisionModel(config.vision_config)
-        self.vision_model.half()
         self.connector = Idefics2Connector(config)
         ##Mistral Language Decoder
         self.text_model = LlamaModel(config.text_config, linear_method)
-
         self.image_seq_len = config.perceiver_config.resampler_n_latents
         self.image_token_id = self.config.image_token_id
-
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-
         # self.post_init()
 
 
@@ -370,18 +371,27 @@ class Idefics2Model(nn.Module):
         attn_metadata: AttentionMetadata,
         pixel_values: Optional[torch.Tensor] = None
     ) -> SamplerOutput:   
-        # batch_size, num_channels, height, width = image_input.shape
+        # batch_size, num_channels, height, width = pixel_values.shape
         # pixel_attention_mask = torch.ones(
-        #     size=(image_input.size(0), image_input.size(2), image_input.size(3)),
+        #     size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
         #     dtype=torch.bool,
-        #     device=image_input.device,
+        #     device=pixel_values.device,
         # )
-
         # patch_size = self.config.vision_config.patch_size
         # patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
         # patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
         # patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+        # image_hidden_states = self.vision_model(
+        #     pixel_values=pixel_values,
+        #     patch_attention_mask=patch_attention_mask,
+        # ).last_hidden_state
+        # patch_size = self.config.vision_config.patch_size
+        # patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
+        # patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
+        # patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+        # self.vision_model(pixel_values)
         self.vision_model(pixel_values)
+        breakpoint()
         print("got here")
         return None
     
@@ -497,3 +507,4 @@ class Idefics2ForConditionalGeneration(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+        print("finished loading weights")
