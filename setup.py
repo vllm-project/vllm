@@ -365,10 +365,12 @@ ext_modules = []
 if _is_cuda() and _install_punica():
     ext_modules.append(CMakeExtension(name="vllm._punica_C"))
 
+if _is_cuda() or _is_hip():
+    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
     ext_modules.append(CMakeExtension(name="vllm._custom_C"))
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
 
 package_data = {
     "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
