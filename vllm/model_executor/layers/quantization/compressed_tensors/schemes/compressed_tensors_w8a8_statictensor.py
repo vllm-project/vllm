@@ -53,12 +53,16 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         # When the scales have a single value, it is required that they be
         # on the CPU for 2 reasons,
         # 1. Performance:
-        #   The cutlass interface looks at the shape of the scales and if the
-        #   scales have a single value, it does a .item() on the tensor
-        #   and does a scalar multiply in the epilogue. `.item()` will trigger
-        #   a GPU-CPU copy if the tensor is on the GPU.
+        #   When the scales (input_scale/weight_scales) have only a single
+        #   value, we perform a scalar broadcast of that value during the
+        #   quant/dequant operations. The "quant" and the "gemm+dequant"
+        #   kernels accept the Scalar by-value. These tensors are allocated
+        #   on the CPU in order to avoid the GPU-to-CPU copy when passing
+        #   by-value.
+        #
         # 2. CUDA Graphs:
-        #   CUDA Graphs don't support `.item()` calls on a GPU tensor.
+        #   CUDA Graphs don't support GPU-to-CPU copy operations during
+        #   stream capture.
         #
         # TODO: zero-points are not supported yet. But we expect a similar
         # pattern.
