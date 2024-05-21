@@ -232,9 +232,7 @@ class GPTBigCodeModel(nn.Module):
 class GPTBigCodeForCausalLM(nn.Module):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
 
-    supported_lora_modules = [
-        "c_fc", "c_proj", "wte", "lm_head", "c_attn", "q_attn"
-    ]
+    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
 
     embedding_modules = {
         "wte": "input_embeddings",
@@ -253,7 +251,8 @@ class GPTBigCodeForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPTBigCodeModel(config, cache_config, quant_config, lora_config)
+        self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
+                                           lora_config)
         self.lm_head_weight = self.transformer.wte.weight
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
