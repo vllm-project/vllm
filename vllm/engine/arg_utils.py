@@ -356,9 +356,9 @@ class EngineArgs:
                             help='Maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq_len-to-capture instead'
+                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
                             ')')
-        parser.add_argument('--max-seq_len-to-capture',
+        parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
