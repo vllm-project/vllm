@@ -81,7 +81,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             # now.
             return CompressedTensorsW8A8StaticTensor()
         raise NotImplementedError(
-            "Scheme not supported. Only 8-bit static symmtetric "
+            "Scheme not supported. Only CUDA, 8-bit static symmtetric "
             "per tensor quantization is currently supported")
 
     def get_scheme(

@@ -15,23 +15,8 @@ __all__ = ["CompressedTensorsW8A8StaticTensor"]
 
 class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
 
-    def _quantize(self,
-                  x: torch.Tensor,
-                  scales: torch.Tensor,
-                  logical_widths: List[int],
-                  split_dim: int = 0) -> torch.Tensor:
-
-        x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-        x_q_split = x_q.split(logical_widths, dim=split_dim)
-        x_split = x.split(logical_widths, dim=split_dim)
-
-        for q, dq, scale in zip(x_q_split, x_split, scales):
-            ops.static_scaled_int8_quant(q, dq, scale.item())
-
-        return x_q
-
-    def _quantize_single(self, x: torch.Tensor, scale: float):
-        x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
+    def _quantize(self, x: torch.Tensor, scale: float):
+        x_q = torch.empty_like(x, dtype=torch.int8)
         ops.static_scaled_int8_quant(x_q, x, scale)
         return x_q
 
@@ -62,30 +47,46 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
                        **kwargs):
 
         # TODO: remove zero_point parameters once the configs given remove them
+
+        # Note on input/weight scales and zero_points
+        #
+        # When the scales have a single value, it is required that they be
+        # on the CPU for 2 reasons,
+        # 1. Performance:
+        #   The cutlass interface looks at the shape of the scales and if the
+        #   scales have a single value, it does a .item() on the tensor
+        #   and does a scalar multiply in the epilogue. `.item()` will trigger
+        #   a GPU-CPU copy if the tensor is on the GPU.
+        # 2. CUDA Graphs:
+        #   CUDA Graphs don't support `.item()` calls on a GPU tensor.
+        #
+        # TODO: zero-points are not supported yet. But we expect a similar pattern.
+
         is_tensor_partitioned = len(output_partition_sizes) != 1
-        dim = sum(output_partition_sizes) if is_tensor_partitioned else 1
+        weight_scale_dim = sum(
+            output_partition_sizes) if is_tensor_partitioned else 1
+        weight_scale_device = "cpu" if weight_scale_dim == 1 else "cuda"
 
         input_scale = Parameter(torch.empty(1,
-                                            device="cuda",
+                                            device="cpu",
                                             dtype=torch.float32),
                                 requires_grad=False)
         input_zero_point = Parameter(torch.empty(1,
-                                                 device="cuda",
+                                                 device="cpu",
                                                  dtype=torch.int8),
                                      requires_grad=False)
 
-        weight_scale = Parameter(torch.empty(dim,
-                                             device="cuda",
+        weight_scale = Parameter(torch.empty(weight_scale_dim,
+                                             device=weight_scale_device,
                                              dtype=torch.float32),
                                  requires_grad=False)
         weight_zero_point = Parameter(torch.empty(1,
-                                                  device="cuda",
+                                                  device="cpu",
                                                   dtype=torch.int8),
                                       requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
-                                       device="cuda",
                                        dtype=torch.int8),
                            requires_grad=False)
 
@@ -114,7 +115,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         act_scale = layer.input_scale
 
         # Input quantize
-        x_q = self._quantize_single(x, act_scale[0].item())
+        x_q = self._quantize(x, act_scale[0].item())
 
         return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), act_scale,
                                                weight_scale, x.dtype)
