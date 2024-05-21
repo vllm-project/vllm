@@ -18,27 +18,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """ PyTorch Starcoder2 model."""
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import Starcoder2Config
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
 
 
@@ -46,7 +47,8 @@ class Starcoder2Attention(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
 
@@ -80,13 +82,13 @@ class Starcoder2Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=self.use_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=self.use_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -101,6 +103,7 @@ class Starcoder2Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             sliding_window=self.sliding_window,
+            cache_config=cache_config,
         )
 
     def forward(
@@ -122,21 +125,20 @@ class Starcoder2MLP(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=config.use_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_proj = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=config.use_bias,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.hidden_act, quant_config,
                               config.intermediate_size)
 
@@ -151,12 +153,14 @@ class Starcoder2DecoderLayer(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Starcoder2Attention(config,
-                                             linear_method=linear_method)
-        self.mlp = Starcoder2MLP(config, linear_method=linear_method)
+                                             cache_config,
+                                             quant_config=quant_config)
+        self.mlp = Starcoder2MLP(config, quant_config=quant_config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.norm_epsilon)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
@@ -193,7 +197,8 @@ class Starcoder2Model(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -203,7 +208,9 @@ class Starcoder2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            Starcoder2DecoderLayer(config, linear_method=linear_method)
+            Starcoder2DecoderLayer(config,
+                                   cache_config,
+                                   quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
@@ -228,10 +235,13 @@ class Starcoder2ForCausalLM(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.model = Starcoder2Model(config, linear_method=linear_method)
+        self.model = Starcoder2Model(config,
+                                     cache_config,
+                                     quant_config=quant_config)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:
@@ -274,11 +284,7 @@ class Starcoder2ForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -287,8 +293,7 @@ class Starcoder2ForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 

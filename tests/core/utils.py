@@ -1,5 +1,5 @@
 import time
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -22,22 +22,28 @@ def create_dummy_prompt(
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
     prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
-    seq_group = SequenceGroup(
-        request_id, [prompt],
-        SamplingParams(use_beam_search=use_beam_search, best_of=best_of),
-        time.time(), lora_request)
+    seq_group = SequenceGroup(request_id=request_id,
+                              seqs=[prompt],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(
+                                  use_beam_search=use_beam_search,
+                                  best_of=best_of),
+                              lora_request=lora_request)
 
     return prompt, seq_group
 
 
 def create_seq_group(
-    seq_prompt_len=1024,
-    seq_output_lens=(128, ),
-    request_id='0',
-    seq_id_start=0,
-) -> SequenceGroup:
+        seq_prompt_len: int = 1024,
+        seq_output_lens: Iterable[int] = (128, ),
+        request_id: str = '0',
+        seq_id_start: int = 0,
+        sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:
 
     assert len(seq_output_lens) > 0
+
+    if sampling_params is None:
+        sampling_params = SamplingParams()
 
     prompt_token_ids = [0] * seq_prompt_len
 
@@ -60,7 +66,7 @@ def create_seq_group(
     seq_group = SequenceGroup(
         request_id=request_id,
         seqs=seqs,
-        sampling_params=SamplingParams(),
+        sampling_params=sampling_params,
         arrival_time=time.time(),
     )
 

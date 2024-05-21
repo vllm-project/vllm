@@ -1,24 +1,26 @@
 import enum
 import json
-import os
-from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from dataclasses import dataclass, field, fields
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
-from packaging.version import Version
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
-from vllm.utils import (get_cpu_memory, get_nvcc_cuda_version, is_cpu, is_hip,
-                        is_neuron)
+from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.model_executor.model_loader.loader import BaseModelLoader
+
 logger = init_logger(__name__)
 
 _GB = 1 << 30
+_EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 
 
 class ModelConfig:
@@ -26,23 +28,13 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
+            It is also used as the content for `model_name` tag in metrics 
+            output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
-        download_dir: Directory to download and load the weights, default to the
-            default cache directory of huggingface.
-        load_format: The format of the model weights to load:
-            "auto" will try to load the weights in the safetensors format and
-                fall back to the pytorch bin format if safetensors format is
-                not available.
-            "pt" will load the weights in the pytorch bin format.
-            "safetensors" will load the weights in the safetensors format.
-            "npcache" will load the weights in pytorch format and store
-                a numpy cache to speed up the loading.
-            "dummy" will initialize the weights with random values, which is
-                mainly for profiling.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
@@ -62,15 +54,24 @@ class ModelConfig:
             weights. If None, we assume the model weights are not quantized.
         quantization_param_path: Path to JSON file containing scaling factors.
             Used to load KV cache scaling factors into the model when KV cache
-            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also 
-            be used to load activation and weight scaling factors when the 
+            type is FP8_E4M3 on ROCm (AMD GPU). In the future these will also
+            be used to load activation and weight scaling factors when the
             model dtype is FP8_E4M3 on ROCm.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
         max_context_len_to_capture: Maximum context len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
-            to eager mode.
+            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
+        max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
+            When a sequence has context length larger than this, we fall back
+            to eager mode
+        skip_tokenizer_init: If true, skip initialization of tokenizer and
+            detokenizer.
+        served_model_name: The model name used in metrics tag `model_name`,
+            matches the model name exposed via the APIs. If multiple model 
+            names provided, the first name will be used. If not specified, 
+            the model name will be the same as `model`.
     """
 
     def __init__(
@@ -79,8 +80,6 @@ class ModelConfig:
         tokenizer: str,
         tokenizer_mode: str,
         trust_remote_code: bool,
-        download_dir: Optional[str],
-        load_format: str,
         dtype: Union[str, torch.dtype],
         seed: int,
         revision: Optional[str] = None,
@@ -91,14 +90,15 @@ class ModelConfig:
         quantization_param_path: Optional[str] = None,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,
+        max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        skip_tokenizer_init: bool = False,
+        served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
-        self.download_dir = download_dir
-        self.load_format = load_format
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -107,23 +107,13 @@ class ModelConfig:
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
         self.max_context_len_to_capture = max_context_len_to_capture
+        if self.max_context_len_to_capture is not None:
+            raise ValueError("`max_context_len_to_capture` is deprecated. "
+                             "Use `max_seq_len_to_capture` instead.")
+        self.max_seq_len_to_capture = (max_seq_len_to_capture
+                                       or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
-
-        if os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true":
-            # download model from ModelScope hub,
-            # lazy import so that modelscope is not required for normal use.
-            # pylint: disable=C.
-            from modelscope.hub.snapshot_download import snapshot_download
-
-            if not os.path.exists(model):
-                model_path = snapshot_download(model_id=model,
-                                               cache_dir=download_dir,
-                                               revision=revision)
-            else:
-                model_path = model
-            self.model = model_path
-            self.download_dir = model_path
-            self.tokenizer = model_path
+        self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
                                     code_revision)
@@ -131,40 +121,13 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
                                                      max_model_len)
-        self._verify_load_format()
-        self._verify_tokenizer_mode()
+        self.served_model_name = get_served_model_name(model,
+                                                       served_model_name)
+        if not self.skip_tokenizer_init:
+            self._verify_tokenizer_mode()
+        self._verify_embedding_mode()
         self._verify_quantization()
         self._verify_cuda_graph()
-
-    def _verify_load_format(self) -> None:
-        load_format = self.load_format.lower()
-        supported_load_format = [
-            "auto", "pt", "safetensors", "npcache", "dummy"
-        ]
-        rocm_not_supported_load_format: List[str] = []
-        if load_format not in supported_load_format:
-            raise ValueError(
-                f"Unknown load format: {self.load_format}. Must be one of "
-                "'auto', 'pt', 'safetensors', 'npcache', or 'dummy'.")
-        if is_hip() and load_format in rocm_not_supported_load_format:
-            rocm_supported_load_format = [
-                f for f in supported_load_format
-                if (f not in rocm_not_supported_load_format)
-            ]
-            raise ValueError(
-                f"load format '{load_format}' is not supported in ROCm. "
-                f"Supported load format are "
-                f"{rocm_supported_load_format}")
-
-        # TODO: Remove this check once HF updates the pt weights of Mixtral.
-        architectures = getattr(self.hf_config, "architectures", [])
-        # architectures can be None instead of []
-        if architectures and "MixtralForCausalLM" in architectures \
-            and load_format == "pt":
-            raise ValueError(
-                "Currently, the 'pt' format is not supported for Mixtral. "
-                "Please use the 'safetensors' format instead. ")
-        self.load_format = load_format
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()
@@ -174,9 +137,14 @@ class ModelConfig:
                 "either 'auto' or 'slow'.")
         self.tokenizer_mode = tokenizer_mode
 
+    def _verify_embedding_mode(self) -> None:
+        architectures = getattr(self.hf_config, "architectures", [])
+        self.embedding_mode = any(
+            ModelRegistry.is_embedding_model(arch) for arch in architectures)
+
     def _verify_quantization(self) -> None:
-        supported_quantization = ["awq", "gptq", "squeezellm", "marlin"]
-        rocm_not_supported_quantization = ["awq", "marlin"]
+        supported_quantization = [*QUANTIZATION_METHODS]
+        rocm_supported_quantization = ["gptq", "squeezellm"]
         if self.quantization is not None:
             self.quantization = self.quantization.lower()
 
@@ -184,19 +152,17 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
 
-            # Use marlin if the GPTQ model is serialized in marlin format.
-            if quant_method == "gptq" and is_format_marlin:
-                logger.info("The model is serialized in Marlin format. "
-                            "Using Marlin kernel.")
-                quant_method = "marlin"
-                if self.quantization == "gptq":
-                    self.quantization = quant_method
+            # Detect which checkpoint is it
+            for name, method in QUANTIZATION_METHODS.items():
+                quantization_override = method.override_quantization_method(
+                    quant_cfg, self.quantization)
+                if quantization_override:
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
+                    break
 
+            # Verify quantization configurations.
             if self.quantization is None:
                 self.quantization = quant_method
             elif self.quantization != quant_method:
@@ -212,21 +178,22 @@ class ModelConfig:
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
             if is_hip(
-            ) and self.quantization in rocm_not_supported_quantization:
+            ) and self.quantization not in rocm_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if self.quantization != "marlin":
+            if (self.quantization
+                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
                 logger.warning(
-                    f"{self.quantization} quantization is not fully "
+                    "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
-                    "non-quantized models.")
+                    "non-quantized models.", self.quantization)
 
     def _verify_cuda_graph(self) -> None:
-        if self.max_context_len_to_capture is None:
-            self.max_context_len_to_capture = self.max_model_len
-        self.max_context_len_to_capture = min(self.max_context_len_to_capture,
-                                              self.max_model_len)
+        if self.max_seq_len_to_capture is None:
+            self.max_seq_len_to_capture = self.max_model_len
+        self.max_seq_len_to_capture = min(self.max_seq_len_to_capture,
+                                          self.max_model_len)
 
     def verify_with_parallel_config(
         self,
@@ -322,6 +289,11 @@ class ModelConfig:
         return max(1,
                    total_num_kv_heads // parallel_config.tensor_parallel_size)
 
+    def get_num_attention_heads(self,
+                                parallel_config: "ParallelConfig") -> int:
+        return self.hf_text_config.num_attention_heads // \
+                    parallel_config.tensor_parallel_size
+
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
         total_num_hidden_layers = self.hf_text_config.num_hidden_layers
         return total_num_hidden_layers // parallel_config.pipeline_parallel_size
@@ -379,12 +351,6 @@ class CacheConfig:
         if self.cache_dtype == "auto":
             pass
         elif self.cache_dtype == "fp8":
-            if not is_hip():
-                nvcc_cuda_version = get_nvcc_cuda_version()
-                if nvcc_cuda_version < Version("11.8"):
-                    raise ValueError(
-                        "FP8 is not supported when cuda version is"
-                        "lower than 11.8.")
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
@@ -411,13 +377,13 @@ class CacheConfig:
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
-            logger.warning("Possibly too large swap space. " + msg)
+            logger.warning("Possibly too large swap space. %s", msg)
 
 
 @dataclass
 class TokenizerPoolConfig:
     """Configuration for the tokenizer pool.
-    
+
     Args:
         pool_size: Number of tokenizer workers in the pool.
         pool_type: Type of the pool.
@@ -441,9 +407,9 @@ class TokenizerPoolConfig:
         tokenizer_pool_extra_config: Optional[Union[str, dict]]
     ) -> Optional["TokenizerPoolConfig"]:
         """Create a TokenizerPoolConfig from the given parameters.
-        
+
         If tokenizer_pool_size is 0, return None.
-        
+
         Args:
             tokenizer_pool_size: Number of tokenizer workers in the pool.
             tokenizer_pool_type: Type of the pool.
@@ -466,15 +432,73 @@ class TokenizerPoolConfig:
         return tokenizer_pool_config
 
 
+class LoadFormat(str, enum.Enum):
+    AUTO = "auto"
+    PT = "pt"
+    SAFETENSORS = "safetensors"
+    NPCACHE = "npcache"
+    DUMMY = "dummy"
+    TENSORIZER = "tensorizer"
+    SHARDED_STATE = "sharded_state"
+
+
+@dataclass
+class LoadConfig:
+    """
+        download_dir: Directory to download and load the weights, default to the
+            default cache directory of huggingface.
+        load_format: The format of the model weights to load:
+            "auto" will try to load the weights in the safetensors format and
+                fall back to the pytorch bin format if safetensors format is
+                not available.
+            "pt" will load the weights in the pytorch bin format.
+            "safetensors" will load the weights in the safetensors format.
+            "npcache" will load the weights in pytorch format and store
+                a numpy cache to speed up the loading.
+            "dummy" will initialize the weights with random values, which is
+                mainly for profiling.
+            "tensorizer" will use CoreWeave's tensorizer library for
+                fast weight loading.
+    """
+
+    load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
+    download_dir: Optional[str] = None
+    model_loader_extra_config: Optional[Union[str, dict]] = field(
+        default_factory=dict)
+
+    def __post_init__(self):
+        model_loader_extra_config = self.model_loader_extra_config or {}
+        if isinstance(model_loader_extra_config, str):
+            self.model_loader_extra_config = json.loads(
+                model_loader_extra_config)
+        self._verify_load_format()
+
+    def _verify_load_format(self) -> None:
+        if not isinstance(self.load_format, str):
+            return
+
+        load_format = self.load_format.lower()
+        self.load_format = LoadFormat(load_format)
+
+        rocm_not_supported_load_format: List[str] = []
+        if is_hip() and load_format in rocm_not_supported_load_format:
+            rocm_supported_load_format = [
+                f for f in LoadFormat.__members__
+                if (f not in rocm_not_supported_load_format)
+            ]
+            raise ValueError(
+                f"load format '{load_format}' is not supported in ROCm. "
+                f"Supported load formats are "
+                f"{rocm_supported_load_format}")
+
+
 class ParallelConfig:
     """Configuration for the distributed execution.
 
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -484,22 +508,28 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        placement_group: ray distributed model workers placement group.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -507,14 +537,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -526,7 +571,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -550,6 +596,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
+        embedding_mode: Whether the running model is for embedding.
     """
 
     def __init__(
@@ -561,13 +608,19 @@ class SchedulerConfig:
         num_lookahead_slots: int = 0,
         delay_factor: float = 0.0,
         enable_chunked_prefill: bool = False,
+        embedding_mode: Optional[bool] = False,
     ) -> None:
         if max_num_batched_tokens is not None:
             self.max_num_batched_tokens = max_num_batched_tokens
         else:
             if enable_chunked_prefill:
-                # For chunked prefill, choose the well-tuned batch size.
-                self.max_num_batched_tokens = 768
+                # It is the values that have the best balance between ITL
+                # and TTFT on A100. Note it is not optimized for throughput.
+                self.max_num_batched_tokens = 512
+            elif embedding_mode:
+                # For embedding, choose specific value for higher throughput
+                self.max_num_batched_tokens = max(
+                    max_model_len, _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS)
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -581,6 +634,7 @@ class SchedulerConfig:
         self.num_lookahead_slots = num_lookahead_slots
         self.delay_factor = delay_factor
         self.chunked_prefill_enabled = enable_chunked_prefill
+        self.embedding_mode = embedding_mode
 
         self._verify_args()
 
@@ -647,6 +701,12 @@ class SpeculativeConfig:
         target_dtype: str,
         speculative_model: Optional[str],
         num_speculative_tokens: Optional[int],
+        speculative_max_model_len: Optional[int],
+        enable_chunked_prefill: bool,
+        use_v2_block_manager: bool,
+        speculative_disable_by_batch_size: Optional[int],
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -664,13 +724,29 @@ class SpeculativeConfig:
                 model, if provided.
             num_speculative_tokens (Optional[int]): The number of speculative
                 tokens, if provided.
+            speculative_max_model_len (Optional[int]): The maximum model len of
+                the speculative model. Used when testing the ability to skip
+                speculation for some sequences.
+            enable_chunked_prefill (bool): Whether vLLM is configured to use
+                chunked prefill or not. Used for raising an error since its not
+                yet compatible with spec decode.
+            use_v2_block_manager (bool): Whether vLLM is configured to use the
+                v2 block manager or not. Used for raising an error since the v2
+                block manager is required with spec decode.
+            speculative_disable_by_batch_size (Optional[int]): Disable
+                speculative decoding for new incoming requests when the number
+                of enqueue requests  is larger than this value, if provided.
+            ngram_prompt_lookup_max (Optional[int]): Max size of ngram token
+                window, if provided.
+            ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
+                window, if provided.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
         """
 
-        if (speculative_model is None and num_speculative_tokens is None):
+        if speculative_model is None and num_speculative_tokens is None:
             return None
 
         if speculative_model is not None and num_speculative_tokens is None:
@@ -679,44 +755,121 @@ class SpeculativeConfig:
                 "num_speculative_tokens to be provided, but found "
                 f"{speculative_model=} and {num_speculative_tokens=}.")
 
+        if (speculative_disable_by_batch_size is not None
+                and speculative_disable_by_batch_size < 2):
+            raise ValueError("Expect the batch size threshold of disabling "
+                             "speculative decoding is > 1, but got "
+                             f"{speculative_disable_by_batch_size=}")
+
         assert (speculative_model is not None
                 and num_speculative_tokens is not None)
+
+        if enable_chunked_prefill:
+            raise ValueError(
+                "Speculative decoding and chunked prefill are "
+                f"currently mutually exclusive ({enable_chunked_prefill=}).")
+
+        if not use_v2_block_manager:
+            raise ValueError(
+                "Speculative decoding requires usage of the V2 "
+                "block manager. Enable it with --use-v2-block-manager.")
 
         # TODO: The user should be able to specify revision/quantization/max
         # model len for the draft model. It is not currently supported.
         draft_revision = None
         draft_code_revision = None
         draft_quantization = None
-        draft_max_model_len = None
 
-        draft_model_config = ModelConfig(
-            model=speculative_model,
-            tokenizer=target_model_config.tokenizer,
-            tokenizer_mode=target_model_config.tokenizer_mode,
-            trust_remote_code=target_model_config.trust_remote_code,
-            download_dir=target_model_config.download_dir,
-            load_format=target_model_config.load_format,
-            dtype=target_model_config.dtype,
-            seed=target_model_config.seed,
-            revision=draft_revision,
-            code_revision=draft_code_revision,
-            tokenizer_revision=target_model_config.tokenizer_revision,
-            max_model_len=draft_max_model_len,
-            quantization=draft_quantization,
-            enforce_eager=target_model_config.enforce_eager,
-            max_context_len_to_capture=target_model_config.
-            max_context_len_to_capture,
-            max_logprobs=target_model_config.max_logprobs,
-        )
+        if speculative_model == "[ngram]":
+            if ngram_prompt_lookup_min is None:
+                ngram_prompt_lookup_min = 1
+            if ngram_prompt_lookup_max is None or ngram_prompt_lookup_max < 1:
+                raise ValueError(f"{ngram_prompt_lookup_max=} must be > 0")
+            if ngram_prompt_lookup_min < 1:
+                raise ValueError(f"{ngram_prompt_lookup_min=} must be > 0")
+            if ngram_prompt_lookup_min > ngram_prompt_lookup_max:
+                raise ValueError(f"{ngram_prompt_lookup_min=} cannot be "
+                                 f"larger than {ngram_prompt_lookup_max=}")
 
-        draft_parallel_config = (
-            SpeculativeConfig.create_draft_parallel_config(
-                target_parallel_config))
+            # TODO: current we still need extract vocab_size from target model
+            # config, in future, we may try refactor it out, and set
+            # draft related config as None here.
+            draft_model_config = target_model_config
+            draft_parallel_config = target_parallel_config
+        else:
+            ngram_prompt_lookup_max = 0
+            ngram_prompt_lookup_min = 0
+            draft_model_config = ModelConfig(
+                model=speculative_model,
+                tokenizer=target_model_config.tokenizer,
+                tokenizer_mode=target_model_config.tokenizer_mode,
+                trust_remote_code=target_model_config.trust_remote_code,
+                dtype=target_model_config.dtype,
+                seed=target_model_config.seed,
+                revision=draft_revision,
+                code_revision=draft_code_revision,
+                tokenizer_revision=target_model_config.tokenizer_revision,
+                max_model_len=None,
+                quantization=draft_quantization,
+                enforce_eager=target_model_config.enforce_eager,
+                max_seq_len_to_capture=target_model_config.
+                max_seq_len_to_capture,
+                max_logprobs=target_model_config.max_logprobs,
+            )
+
+            draft_model_config.max_model_len = (
+                SpeculativeConfig._maybe_override_draft_max_model_len(
+                    speculative_max_model_len,
+                    draft_model_config.max_model_len,
+                    target_model_config.max_model_len,
+                ))
+
+            draft_parallel_config = (
+                SpeculativeConfig.create_draft_parallel_config(
+                    target_parallel_config))
 
         return SpeculativeConfig(
             draft_model_config,
             draft_parallel_config,
             num_speculative_tokens,
+            speculative_disable_by_batch_size,
+            ngram_prompt_lookup_max,
+            ngram_prompt_lookup_min,
+        )
+
+    @staticmethod
+    def _maybe_override_draft_max_model_len(
+        speculative_max_model_len: Optional[int],
+        draft_max_model_len: int,
+        target_max_model_len: int,
+    ) -> int:
+        """Determine the max sequence len for the draft model. This is usually
+        the draft_max_model_len, but may be the target_max_model_len if it is
+        less than the draft_max_model_len, or may be speculative_max_model_len
+        if it is specified.
+
+        This is necessary so that sequences do not exceed the capacity of the
+        draft model or the target model.
+
+        speculative_max_model_len is mainly used for testing that sequences can
+        skip speculation.
+        """
+
+        if speculative_max_model_len is not None:
+
+            if speculative_max_model_len > draft_max_model_len:
+                raise ValueError(f"{speculative_max_model_len=} cannot be "
+                                 f"larger than {draft_max_model_len=}")
+
+            if speculative_max_model_len > target_max_model_len:
+                raise ValueError(f"{speculative_max_model_len=} cannot be "
+                                 f"larger than {target_max_model_len=}")
+
+            return speculative_max_model_len
+
+        return min(
+            draft_max_model_len,
+            target_max_model_len,
         )
 
     @staticmethod
@@ -731,7 +884,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
@@ -749,6 +903,9 @@ class SpeculativeConfig:
         draft_model_config: ModelConfig,
         draft_parallel_config: ParallelConfig,
         num_speculative_tokens: int,
+        speculative_disable_by_batch_size: Optional[int],
+        ngram_prompt_lookup_max: Optional[int],
+        ngram_prompt_lookup_min: Optional[int],
     ):
         """Create a SpeculativeConfig object.
 
@@ -757,10 +914,19 @@ class SpeculativeConfig:
             draft_parallel_config: ParallelConfig for the draft model.
             num_speculative_tokens: The number of tokens to sample from the
                 draft model before scoring with the target model.
+            speculative_disable_by_batch_size: Disable speculative
+                decoding for new incoming requests when the number of
+                enqueue requests is larger than this value.
+            ngram_prompt_lookup_max: Max size of ngram token window.
+            ngram_prompt_lookup_min: Min size of ngram token window.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
         self.num_speculative_tokens = num_speculative_tokens
+        self.speculative_disable_by_batch_size = \
+            speculative_disable_by_batch_size
+        self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
+        self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
 
         self._verify_args()
 
@@ -784,7 +950,10 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def __repr__(self) -> str:
-        draft_model = self.draft_model_config.model
+        if self.ngram_prompt_lookup_max > 0:
+            draft_model = "[ngram]"
+        else:
+            draft_model = self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({draft_model=}, {num_spec_tokens=})"
 
@@ -793,11 +962,13 @@ class SpeculativeConfig:
 class LoRAConfig:
     max_lora_rank: int
     max_loras: int
+    fully_sharded_loras: bool = False
     max_cpu_loras: Optional[int] = None
     lora_dtype: Optional[torch.dtype] = None
     lora_extra_vocab_size: int = 256
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
@@ -829,8 +1000,8 @@ class LoRAConfig:
                 "awq", "gptq"
         ]:
             # TODO support marlin and squeezellm
-            logger.warning(f"{model_config.quantization} quantization is not "
-                           "tested with LoRA yet.")
+            logger.warning("%s quantization is not tested with LoRA yet.",
+                           model_config.quantization)
 
     def verify_with_scheduler_config(self, scheduler_config: SchedulerConfig):
         if scheduler_config.max_num_batched_tokens > 65528:
@@ -890,7 +1061,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
 
 def _get_and_verify_dtype(
@@ -909,6 +1080,7 @@ def _get_and_verify_dtype(
             if config_dtype == torch.float32:
                 # Following the common practice, we use float16 for float32
                 # models.
+                logger.info("Casting torch.float32 to torch.float16.")
                 torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
@@ -921,25 +1093,19 @@ def _get_and_verify_dtype(
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
 
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
-
     # Verify the dtype.
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
+            logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)
             pass
         elif config_dtype == torch.float32:
             # Downcasting from float32 to float16 or bfloat16 is allowed.
+            logger.info("Downcasting %s to %s.", config_dtype, torch_dtype)
             pass
         else:
             # Casting between float16 and bfloat16 is allowed with a warning.
-            logger.warning(f"Casting {config_dtype} to {torch_dtype}.")
+            logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
 
     return torch_dtype
 
@@ -982,12 +1148,12 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            f"{possible_keys}. Assuming the model's maximum length is "
-            f"{default_max_len}.")
+            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            default_max_len)
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
-    if rope_scaling is not None:
+    if rope_scaling is not None and rope_scaling["type"] != "su":
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
         if rope_scaling["type"] == "yarn":
@@ -1015,6 +1181,37 @@ def _get_and_verify_max_len(
     return int(max_model_len)
 
 
+def get_served_model_name(model: str,
+                          served_model_name: Optional[Union[str, List[str]]]):
+    """
+    If the input is a non-empty list, the first model_name in 
+    `served_model_name` is taken. 
+    If the input is a non-empty string, it is used directly. 
+    For cases where the input is either an empty string or an 
+    empty list, the fallback is to use `self.model`.
+    """
+    if not served_model_name:
+        return model
+    if isinstance(served_model_name, list):
+        return served_model_name[0]
+    return served_model_name
+
+
+@dataclass
+class DecodingConfig:
+    """Dataclass which contains the decoding strategy of the engine"""
+
+    # Which guided decoding algo to use. 'outlines' / 'lm-format-enforcer'
+    guided_decoding_backend: str = 'outlines'
+
+    def __post_init__(self):
+        valid_guided_backends = ['outlines', 'lm-format-enforcer']
+        backend = self.guided_decoding_backend
+        if backend not in valid_guided_backends:
+            raise ValueError(f"Invalid guided_decoding_backend '{backend},"
+                             f"must be one of {valid_guided_backends}")
+
+
 @dataclass(frozen=True)
 class EngineConfig:
     """Dataclass which contains all engine-related configuration. This
@@ -1026,9 +1223,11 @@ class EngineConfig:
     parallel_config: ParallelConfig
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
+    load_config: LoadConfig
     lora_config: Optional[LoRAConfig]
     vision_language_config: Optional[VisionLanguageConfig]
     speculative_config: Optional[SpeculativeConfig]
+    decoding_config: Optional[DecodingConfig]
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
