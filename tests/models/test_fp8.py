@@ -53,12 +53,9 @@ fp8_not_supported = (capability <
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(
-    monkeypatch,
     example_prompts,
     model_name,
 ) -> None:
-    # Use xformers because phi2 head size is not compatible with flash attn.
-    monkeypatch.setenv("XFORMERS", "1")
     model = LLM(model=model_name,
                 max_model_len=MAX_MODEL_LEN,
                 enforce_eager=True,

@@ -34,9 +34,23 @@ def get_attn_backend(
                                  sliding_window, dtype, kv_cache_dtype,
                                  block_size)
     if backend == _Backend.FLASH_ATTN:
-        logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
+
+        # We check it here not in _which_attn_to_use because we cannot know
+        # the head size until we import FlashAttentionBackend.
+        flash_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
+        if head_size not in flash_head_sizes:
+            from vllm.attention.backends.xformers import (  # noqa: F401
+                XFormersBackend)
+            logger.info(
+                "The model requires head size %d that's not "
+                "compatible with flash attention's head size %s. "
+                "Using XFormers backend instead.", head_size,
+                str(flash_head_sizes))
+            return XFormersBackend
+
+        logger.info("Using FlashAttention-2 backend.")
         return FlashAttentionBackend
     elif backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")

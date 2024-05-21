@@ -9,8 +9,6 @@ from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 
-_SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
-
 
 class FlashAttentionBackend(AttentionBackend):
 
@@ -59,6 +57,10 @@ class FlashAttentionBackend(AttentionBackend):
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         cache_ops.copy_blocks(key_caches, value_caches, src_to_dists)
+
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
 
 
 @dataclass
@@ -237,10 +239,11 @@ class FlashAttentionImpl(AttentionImpl):
             # paged KV cache.
             raise ValueError(
                 "Sliding window is not supported in FlashAttention.")
-        if head_size not in _SUPPORTED_HEAD_SIZES:
+        supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
+        if head_size not in supported_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {_SUPPORTED_HEAD_SIZES}.")
+                f"Supported head sizes are: {supported_head_sizes}.")
 
     def forward(
         self,
