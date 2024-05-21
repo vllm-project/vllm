@@ -171,9 +171,12 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     def do_cross_attn(self, state: bool):
 
         if state:
-            assert self.has_valid_cross_attn_metadata, "Must have self.cross_seq_lens not None in order to enable cross-attention"
+            assert self.has_valid_cross_attn_metadata, \
+            "Must have self.cross_seq_lens not None " + \
+            "in order to enable cross-attention"
 
-            # Infer implicit cross-attention fields from user-provided fields, if needed
+            # Infer implicit cross-attention fields
+            # from user-provided fields, if needed
             if self.cross_seq_lens_tensor is None:
                 assert self.seq_lens_tensor is not None
                 self.cross_seq_lens_tensor = torch.tensor(
@@ -439,7 +442,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory profiling run.
+                # not cached. This happens during the initial memory
+                # profiling run.
                 PagedAttention.write_to_paged_cache(key, value, key_cache,
                                                     value_cache,
                                                     updated_slot_mapping,

@@ -307,12 +307,10 @@ def pack_tensor(unpacked_tensor, prompt_lens, device=CUDA_DEVICE):
 
     for bdx, (prompt_len,
               start_loc) in enumerate(zip(prompt_lens, start_loc_list)):
-        try:
-            packed_tensor[start_loc:(
-                start_loc +
-                prompt_len), :, :] = unpacked_tensor[bdx, :prompt_len, :, :]
-        except:
-            assert False, f"{start_loc} ; {prompt_len} ; {packed_tensor.shape} ; {unpacked_tensor.shape}"
+
+        packed_tensor[start_loc:(
+            start_loc +
+            prompt_len), :, :] = unpacked_tensor[bdx, :prompt_len, :, :]
 
     return packed_tensor, start_loc_list
 
@@ -358,7 +356,11 @@ def pack_qkv(query, key, value, q_prompt_lens, kv_prompt_lens):
                                  packed_key.shape[-1] * packed_key.shape[-2])
     packed_value = packed_value.view(
         -1, packed_value.shape[-1] * packed_value.shape[-2])
-    return packed_query, packed_key, packed_value, q_start_loc_list, kv_start_loc_list
+    return packed_query, \
+           packed_key, \
+           packed_value, \
+           q_start_loc_list, \
+           kv_start_loc_list
 
 
 def make_backend(backend_name: str) -> AttentionBackend:
@@ -376,7 +378,8 @@ def make_backend(backend_name: str) -> AttentionBackend:
     '''
     if backend_name == "xformers":
         return XFormersBackend()
-    assert False, f"Unrecognized backend_name {backend_name} for unit test"
+    raise AssertionError(
+        f"Unrecognized backend_name {backend_name} for unit test")
 
 
 def make_metadata_tensors(is_prompt: bool,
@@ -568,7 +571,13 @@ def make_block_tables_slot_mapping(block_size,
                                              dtype=torch.long,
                                              device=device)
 
-    return decode_block_tables_tensor, decode_slot_mapping_tensor, prefill_slot_mapping_tensor, prefill_block_tables_tensor, slot_mapping_tensor, empty_slot_mapping_tensor, max_block_idx
+    return decode_block_tables_tensor, \
+           decode_slot_mapping_tensor, \
+           prefill_slot_mapping_tensor, \
+           prefill_block_tables_tensor, \
+           slot_mapping_tensor, \
+           empty_slot_mapping_tensor, \
+           max_block_idx
 
 
 def make_metadata_self_cross(
@@ -836,7 +845,12 @@ def self_attn_setup(batch_size,
     prefill_q_prompt_lens, \
     prefill_kv_prompt_lens, \
     decode_q_prompt_lens, \
-    decode_kv_prompt_lens = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,num_heads,head_size,is_cross_attn=False)
+    decode_kv_prompt_lens = make_qkv(batch_size,
+                                     max_q_prompt_len,
+                                     max_kv_prompt_len,
+                                     num_heads,
+                                     head_size,
+                                     is_cross_attn=False)
 
     causal_mask = build_causal_mask(max_q_prompt_len,
                                     max_kv_prompt_len).to(CUDA_DEVICE)
@@ -862,14 +876,26 @@ def self_attn_setup(batch_size,
     decode_packed_ideal_output, _ = pack_tensor(decode_ideal_output,
                                                 [1 for _ in range(batch_size)])
 
-    decode_block_tables, decode_slot_mapping, prefill_slot_mapping, prefill_block_tables, _, _, max_block_idx = make_block_tables_slot_mapping(
+    decode_block_tables, \
+    decode_slot_mapping, \
+    prefill_slot_mapping, \
+    prefill_block_tables, \
+    _, \
+    _, \
+    max_block_idx = make_block_tables_slot_mapping(
         block_size, q_prompt_lens, block_base_addr=block_base_addr)
 
-    prefill_packed_query, prefill_packed_key, prefill_packed_value, _, _ = pack_qkv(
+    prefill_packed_query, \
+    prefill_packed_key, \
+    prefill_packed_value, _, _ = pack_qkv(
         prefill_query, prefill_key, prefill_value, prefill_q_prompt_lens,
         prefill_kv_prompt_lens)
 
-    decode_packed_query, decode_packed_key, decode_packed_value, _, _ = pack_qkv(
+    decode_packed_query, \
+    decode_packed_key, \
+    decode_packed_value, \
+    _, \
+    _ = pack_qkv(
         decode_query, decode_key, decode_value, decode_q_prompt_lens,
         decode_kv_prompt_lens)
 
@@ -983,7 +1009,12 @@ def cross_attn_setup_reuses_query(query,
     _, \
     _, \
     _, \
-    _ = make_qkv(batch_size,max_q_prompt_len,max_kv_prompt_len,num_heads,head_size,is_cross_attn=True)
+    _ = make_qkv(batch_size,
+                 max_q_prompt_len,
+                 max_kv_prompt_len,
+                 num_heads,
+                 head_size,
+                 is_cross_attn=True)
 
     ideal_output = ref_masked_attention(query,
                                         key,
@@ -1008,7 +1039,13 @@ def cross_attn_setup_reuses_query(query,
     # Unlike self-attention:
     # - Prefill slot-mapping includes all key slots
     # - Decode slot-mapping is empty
-    decode_block_tables, _, _, prefill_block_tables, prefill_slot_mapping, decode_slot_mapping, max_block_idx = make_block_tables_slot_mapping(
+    decode_block_tables, \
+    _, \
+    _, \
+    prefill_block_tables, \
+    prefill_slot_mapping, \
+    decode_slot_mapping, \
+    max_block_idx = make_block_tables_slot_mapping(
         block_size, kv_prompt_lens, block_base_addr=block_base_addr)
 
     # Packed key/value (query is already provided)
