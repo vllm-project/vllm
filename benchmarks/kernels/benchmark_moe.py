@@ -113,7 +113,6 @@ def get_configs_compute_bound() -> List[Dict[str, int]]:
                             "BLOCK_SIZE_M": block_m,
                             "BLOCK_SIZE_N": block_n,
                             "BLOCK_SIZE_K": block_k,
-                            "SPLIT_K": 1,
                             "GROUP_SIZE_M": group_size,
                             "num_warps": num_warps,
                             "num_stages": num_stages,
@@ -135,22 +134,10 @@ def get_configs_io_bound() -> List[Dict[str, int]]:
                             "BLOCK_SIZE_M": block_m,
                             "BLOCK_SIZE_N": block_n,
                             "BLOCK_SIZE_K": block_k,
-                            "SPLIT_K": 1,
                             "GROUP_SIZE_M": group_size,
                             "num_warps": num_warps,
                             "num_stages": num_stages,
                         })
-                        # Split-K
-                        for split_k in [2, 4, 8, 16]:
-                            configs.append({
-                                "BLOCK_SIZE_M": block_m,
-                                "BLOCK_SIZE_N": block_n,
-                                "BLOCK_SIZE_K": block_k,
-                                "SPLIT_K": split_k,
-                                "GROUP_SIZE_M": group_size,
-                                "num_warps": num_warps,
-                                "num_stages": num_stages,
-                            })
     return configs
 
 
@@ -237,7 +224,6 @@ def sort_config(config: Dict[str, int]) -> Dict[str, int]:
         "BLOCK_SIZE_M": config["BLOCK_SIZE_M"],
         "BLOCK_SIZE_N": config["BLOCK_SIZE_N"],
         "BLOCK_SIZE_K": config["BLOCK_SIZE_K"],
-        "SPLIT_K": config["SPLIT_K"],
         "GROUP_SIZE_M": config["GROUP_SIZE_M"],
         "num_warps": config["num_warps"],
         "num_stages": config["num_stages"],
@@ -268,13 +254,19 @@ def main(args: argparse.Namespace):
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
     else:
+        # Default: Mixtral.
         E = config.num_local_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
 
     hidden_size = config.hidden_size
     shard_intermediate_size = intermediate_size // args.tp_size
-    dtype = config.torch_dtype
+    if args.dtype == "auto":
+        dtype = config.torch_dtype
+    elif args.dtype == "fp8":
+        dtype = torch.float8_e4m3fn
+    else:
+        raise ValueError(f"Invalid dtype: {args.dtype}")
 
     if args.batch_size is None:
         batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
@@ -296,7 +288,6 @@ def main(args: argparse.Namespace):
             worker_idx = (worker_idx + 1) % num_gpus
         return ray.get(outputs)
 
-    w2_batch_sizes = [batch_size * topk for batch_size in batch_sizes]
     if args.tune:
         search_space = get_configs_compute_bound() + get_configs_io_bound()
 
@@ -312,38 +303,21 @@ def main(args: argparse.Namespace):
 
         logger.info("Start tuning over %d configurations...",
                     len(search_space))
-        # w1
+
         start = time.time()
         _tune(batch_sizes, 2 * shard_intermediate_size, hidden_size, topk)
         end = time.time()
-        logger.info("W1 tuning took %.2f seconds", end - start)
-
-        # w2
-        start = time.time()
-        _tune(w2_batch_sizes, hidden_size, shard_intermediate_size, 1)
-        end = time.time()
-        logger.info("W2 tuning took %.2f seconds", end - start)
+        logger.info("Tuning took %.2f seconds", end - start)
     else:
 
         def _benchmark(Ms: List[int], N: int, K: int, topk_experts: int):
             return _distribute("benchmark",
                                [(M, E, N, K, topk_experts, dtype) for M in Ms])
 
-        # w1
         outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
                              hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
             logger.info("W1 batch size: %d, config: %s", batch_size, config)
-            logger.info("Kernel time: %.2f us", kernel_time)
-
-        # w2
-        outputs = _benchmark(w2_batch_sizes, hidden_size,
-                             shard_intermediate_size, 1)
-        for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            # NOTE(woosuk): Here the batch size is the number of input tokens
-            # to the MoE block. This is not the batch size of the w2 layer.
-            # The actual batch size of the w2 layer is batch_size * topk.
-            logger.info("W2 batch size: %d, config: %s", batch_size, config)
             logger.info("Kernel time: %.2f us", kernel_time)
 
 
@@ -353,6 +327,10 @@ if __name__ == "__main__":
                         type=str,
                         default="mistralai/Mixtral-8x7B-Instruct-v0.1")
     parser.add_argument("--tp-size", type=int, default=2)
+    parser.add_argument("--dtype",
+                        type=str,
+                        choices=["auto", "fp8"],
+                        default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, required=False)
     parser.add_argument("--tune", action="store_true")
