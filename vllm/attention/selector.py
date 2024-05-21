@@ -71,7 +71,7 @@ def _which_attn_to_use(
     block_size: int,
 ) -> _Backend:
     """Returns which flash attention backend to use."""
-    if is_cpu():
+    if is_cpu() or not torch.cuda.is_available():
         return _Backend.TORCH_SDPA
 
     if is_hip():
