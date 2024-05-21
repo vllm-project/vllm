@@ -138,9 +138,8 @@ def _which_attn_to_use(
             from vllm.attention.backends.flash_attn import (  # noqa: F401
                 FlashAttentionBackend)
 
-            supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes(
-            )
-            if head_size not in supported_head_sizes:
+            supported_sizes = FlashAttentionBackend.get_supported_head_sizes()
+            if head_size not in supported_sizes:
                 logger.info(
                     "Cannot use FlashAttention-2 backend for head size %d.",
                     head_size)
