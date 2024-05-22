@@ -96,7 +96,8 @@ class OlmoAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               scale=self.scaling,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
