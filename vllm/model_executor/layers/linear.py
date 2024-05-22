@@ -374,6 +374,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 "We do not currently support output_dim != None and "
                 "shard_splitter != None for a parameter. Please open an issue."
             )
+        # If a parameter has defined a shard_splitter to be used for
+        # the weight, it should be applied before the weight is
+        # loaded/copied to the parameter. The shard_splitter applies
+        # logic by using the loaded_shard_id to ensure that the loaded
+        # param is loaded to the correct location
+        # within the parameter defined by the linear method.
         if loaded_shard_id is None and param_shard_splitter is not None:
             raise NotImplementedError(
                 "We do not currently support loaded_shard_id == None and "
@@ -556,6 +562,12 @@ class QKVParallelLinear(ColumnParallelLinear):
                 "We do not currently support output_dim != None and "
                 "shard_splitter != None for a parameter. Please open an issue."
             )
+        # If a parameter has defined a shard_splitter to be used for
+        # the weight, it should be applied before the weight is
+        # loaded/copied to the parameter. The shard_splitter applies
+        # logic by using the loaded_shard_id to ensure that the loaded
+        # param is loaded to the correct location
+        # within the parameter defined by the linear method.
         if loaded_shard_id is None and param_shard_splitter is not None:
             raise NotImplementedError(
                 "We do not currently support loaded_shard_id == None and "
