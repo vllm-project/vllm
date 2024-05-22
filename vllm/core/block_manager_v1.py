@@ -290,11 +290,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate_self_block_tables(self, seq_group: SequenceGroup) -> None:
-        # NOTE: Here we assume that all sequences in the group have the same
-        # decoder prompt.
-        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-
+    def _allocate_sequence(self, seq: Sequence, ref_count: int) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = len(seq.logical_token_blocks)
 
@@ -304,7 +300,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
                 # Set the reference counts of the token blocks.
-                block.ref_count = seq_group.num_seqs()
+                block.ref_count = ref_count #seq_group.num_seqs()
             elif self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
@@ -312,46 +308,31 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             else:
                 block = self.gpu_allocator.allocate()
                 # Set the reference counts of the token blocks.
-                block.ref_count = seq_group.num_seqs()
+                block.ref_count = ref_count #seq_group.num_seqs()
             block_table.append(block)
 
-        # Assign the decoder block table for each sequence.
+        return block_table
+
+    def allocate(self, seq_group: SequenceGroup) -> None:
+        # Allocate decoder sequences
+        #
+        # NOTE: Here we assume that all sequences in the group have the same
+        # decoder prompt.
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        block_table: BlockTable = self._allocate_sequence(seq, seq_group.num_seqs())
+
+        # Assign the self-attention block tables for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
-    def allocate_cross_block_table(self, seq_group: SequenceGroup) -> None:
-        # NOTE: Here we assume that all sequences in the group have the same
-        # encoder prompt.
-
-        # Allocate new physical token blocks that will store the prompt tokens.
-        seq = seq_group.get_encoder_seq()
-        if seq is not None:
-            block_table: BlockTable = []
-            num_prompt_blocks = len(seq.logical_token_blocks)
-            for logical_idx in range(num_prompt_blocks):
-                if (self.block_sliding_window is not None
-                        and logical_idx >= self.block_sliding_window):
-                    block = block_table[logical_idx %
-                                        self.block_sliding_window]
-                    # Set the reference counts of the token blocks.
-                    block.ref_count = seq_group.num_seqs()
-                elif self.enable_caching:
-                    block = self.gpu_allocator.allocate(
-                        seq.hash_of_block(logical_idx),
-                        seq.num_hashed_tokens_of_block(logical_idx))
-                else:
-                    block = self.gpu_allocator.allocate()
-                    # Set the reference counts of the token blocks.
-                    # TODO: feature not supported with encoder/decoder
-                    block.ref_count = seq_group.num_seqs()
-                block_table.append(block)
-
+        # Allocate encoder sequence
+        encoder_seq = seq_group.get_encoder_seq()
+        if encoder_seq is not None:
+            # A SequenceGroup has only a single encoder sequence (at most),
+            # thus allocate with a ref count of 1
+            block_table: BlockTable = self._allocate_sequence(encoder_seq, 1)
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
-
-    def allocate(self, seq_group: SequenceGroup) -> None:
-        self.allocate_self_block_tables(seq_group)
-        self.allocate_cross_block_table(seq_group)
 
     def can_append_slots(self,
                          seq_group: SequenceGroup,
