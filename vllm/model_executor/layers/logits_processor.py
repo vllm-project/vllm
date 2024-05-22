@@ -95,31 +95,25 @@ def _apply_logits_processors(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
-        use_prompt_tokens_seq = \
-            sampling_params.use_prompt_tokens
+        use_prompt_tokens_seq = sampling_params.use_prompt_tokens
         if logits_processors:
             found_logits_processors = True
             for seq_id, logits_row_idx in zip(seq_ids,
                                               seq_group.sample_indices):
                 logits_row = logits[logits_row_idx]
 
-                token_ids = seq_group.seq_data[seq_id].output_token_ids
+                generated_token_ids = seq_group.seq_data[
+                    seq_id].output_token_ids
+                prompt_token_ids = seq_group.seq_data[seq_id].prompt_token_ids
+                token_ids_seq = [
+                    prompt_token_ids + generated_token_ids
+                    if use_prompt_tokens else generated_token_ids
+                    for use_prompt_tokens in use_prompt_tokens_seq
+                ]
 
-                token_ids_seq = []
-                for use_prompt_tokens in use_prompt_tokens_seq:
-                    if use_prompt_tokens:
-                        # The i-th logit processor need prompt tokens ids
-                        token_ids_seq.append(
-                            seq_group.seq_data[seq_id].prompt_token_ids +
-                            token_ids)
-                    else:
-                        # The i-th logit processor need only generated
-                        # tokens ids
-                        token_ids_seq.append(token_ids)
-
-                for l_p_idx, logits_processor in enumerate(logits_processors):
-                    logits_row = logits_processor(token_ids_seq[l_p_idx],
-                                                  logits_row)
+                for logits_processor, token_ids in zip(logits_processors,
+                                                       token_ids_seq):
+                    logits_row = logits_processor(token_ids, logits_row)
 
                 logits[logits_row_idx] = logits_row
 

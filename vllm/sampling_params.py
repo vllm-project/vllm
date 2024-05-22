@@ -96,8 +96,8 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
-        use_prompt_tokens: Boolean list of whether to add
-            prompt tokens to the 'token_ids' argument of the logit processor.
+        use_prompt_tokens: List of booleans indicating whether to include prompt
+            tokens IDs in the logits processors functions.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
@@ -180,14 +180,13 @@ class SamplingParams:
         else:
             self.output_text_buffer_length = 0
 
-        if logits_processors and use_prompt_tokens is None:
+        if logits_processors is not None and use_prompt_tokens is None:
             assert self.logits_processors is not None
             # Not use prompt tokens in each logit processor
             self.use_prompt_tokens: Optional[List[bool]] \
                 = [False] * len(self.logits_processors)
         else:
-            self.use_prompt_tokens = \
-                use_prompt_tokens
+            self.use_prompt_tokens = use_prompt_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -260,8 +259,8 @@ class SamplingParams:
             assert self.use_prompt_tokens is not None
             if len(self.logits_processors) != \
                     len(self.use_prompt_tokens):
-                raise ValueError("logits_processors_use_prompt_tokens must"
-                                 " be the same length as logits_processors")
+                raise ValueError("use_prompt_tokens must be the "
+                                 "same length as logits_processors")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
