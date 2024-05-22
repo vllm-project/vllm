@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm import RequestOutput, SamplingParams
 
 MODELS = ["facebook/opt-125m"]
 
@@ -54,6 +54,6 @@ def test_logits_processor_force_generate(
         params=SamplingParams(max_tokens=max_tokens),
     )
 
-    outputs = vllm_model.model._run_engine(False)
+    outputs = vllm_model.model._run_engine(RequestOutput, use_tqdm=False)
 
     assert outputs[0].outputs[0].text == enforced_answers * repeat_times

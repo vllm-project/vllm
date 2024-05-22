@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 import vllm
-from vllm import SamplingParams
+from vllm import RequestOutput, SamplingParams
 from vllm.lora.layers import LinearScalingRotaryEmbeddingWithLora
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.rotary_embedding import (
@@ -100,7 +100,7 @@ def batched_generate(
         # Add requests to the engine and run the engine
         for request_data in requests_data:
             llm._add_request(**request_data)
-    outputs = llm._run_engine(use_tqdm=True)
+    outputs = llm._run_engine(RequestOutput, use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
 

@@ -1,4 +1,5 @@
-from typing import List, Optional, Sequence, Union, cast, overload
+from typing import (List, Optional, Sequence, Type, TypeVar, Union, cast,
+                    overload)
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -17,6 +18,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
 logger = init_logger(__name__)
+
+_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class LLM:
@@ -267,12 +270,14 @@ class LLM:
             # Use default sampling params.
             sampling_params = SamplingParams()
 
-        return self._validate_and_add_requests(
+        self._validate_and_add_requests(
             inputs=inputs,
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
+
+        return self._run_engine(RequestOutput, use_tqdm=use_tqdm)
 
     @overload  # DEPRECATED: single (prompt + optional token ids)
     def encode(
@@ -399,12 +404,14 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        return self._validate_and_add_requests(
+        self._validate_and_add_requests(
             inputs=inputs,
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
+
+        return self._run_engine(EmbeddingRequestOutput, use_tqdm=use_tqdm)
 
     # DEPRECATED
     def _convert_v1_inputs(
@@ -461,26 +468,6 @@ class LLM:
 
         return inputs
 
-    @overload
-    def _validate_and_add_requests(
-        self,
-        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-        params: Union[SamplingParams, Sequence[SamplingParams]],
-        use_tqdm: bool,
-        lora_request: Optional[LoRARequest],
-    ) -> List[RequestOutput]:
-        ...
-
-    @overload
-    def _validate_and_add_requests(  # type: ignore[misc]
-        self,
-        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
-        params: Union[PoolingParams, Sequence[PoolingParams]],
-        use_tqdm: bool,
-        lora_request: Optional[LoRARequest],
-    ) -> List[EmbeddingRequestOutput]:
-        ...
-
     def _validate_and_add_requests(
         self,
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
@@ -488,7 +475,7 @@ class LLM:
                       Sequence[PoolingParams]],
         use_tqdm: bool,
         lora_request: Optional[LoRARequest],
-    ) -> Union[List[RequestOutput], List[EmbeddingRequestOutput]]:
+    ) -> None:
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
             inputs = [inputs]
@@ -507,8 +494,6 @@ class LLM:
                 lora_request=lora_request,
             )
 
-        return self._run_engine(use_tqdm)
-
     def _add_request(
         self,
         inputs: PromptInputs,
@@ -521,9 +506,8 @@ class LLM:
                                     params,
                                     lora_request=lora_request)
 
-    def _run_engine(
-        self, use_tqdm: bool
-    ) -> Union[List[RequestOutput], List[EmbeddingRequestOutput]]:
+    def _run_engine(self, output_type: Type[_O], *,
+                    use_tqdm: bool) -> List[_O]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -556,9 +540,8 @@ class LLM:
         # its previous requests.
         outputs = sorted(outputs, key=lambda x: int(x.request_id))
 
-        if len(outputs) > 0:
-            first, *rest = outputs
-            assert all(isinstance(r, type(first)) for r in rest), (
-                f"Expected all outputs to be of the same type {type(first)}")
+        if len(outputs) > 0 and not isinstance(outputs[0], output_type):
+            raise TypeError(f"Expected output type to be {output_type}, "
+                            f"but found type {type(outputs[0])}")
 
-        return outputs  # type: ignore
+        return cast(List[_O], outputs)

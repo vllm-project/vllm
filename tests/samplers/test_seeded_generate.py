@@ -8,7 +8,7 @@ from itertools import combinations
 
 import pytest
 
-from vllm import SamplingParams
+from vllm import RequestOutput, SamplingParams
 from vllm.model_executor.utils import set_random_seed
 
 MODEL = "facebook/opt-125m"
@@ -59,7 +59,7 @@ def test_random_sample_with_seed(
         ):
             llm._add_request(prompt, params=params)
 
-    results = llm._run_engine(use_tqdm=False)
+    results = llm._run_engine(RequestOutput, use_tqdm=False)
     all_outputs = [[out.token_ids for out in output.outputs]
                    for output in results]
 
