@@ -87,7 +87,7 @@ class EngineArgs:
     speculative_disable_by_batch_size: Optional[int] = None
     ngram_prompt_lookup_max: Optional[int] = None
     ngram_prompt_lookup_min: Optional[int] = None
-    draft_tensor_parallel_size: Optional[int] = 1
+    draft_tensor_parallel_size: Optional[int] = None
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -498,10 +498,12 @@ class EngineArgs:
             help='Min size of window for ngram prompt lookup in speculative '
             'decoding.')
 
-        parser.add_argument('--draft-tensor-parallel-size',
-                            type=int,
-                            default=EngineArgs.draft_tensor_parallel_size,
-                            help='Tensor parallel size for the draft model.')
+        parser.add_argument(
+            '--draft-tensor-parallel-size',
+            type=int,
+            default=EngineArgs.draft_tensor_parallel_size,
+            help='Tensor parallel size for the draft model.'
+            ' If not specified, will use target model\'s tensor parallel size')
 
         parser.add_argument('--model-loader-extra-config',
                             type=nullable_str,
