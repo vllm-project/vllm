@@ -119,6 +119,8 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         self,
         model: torch.nn.Module,
     ) -> Any:
+        if not hasattr(model, "supported_lora_modules"):
+            raise ValueError(f"Model {type(model)} is not supported for LoRA.")
         lora_manager = LoRAModelManager(
             model=model,
             max_num_seqs=self.max_num_seqs,
@@ -234,6 +236,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         self,
         model: torch.nn.Module,
     ) -> Any:
+        if not hasattr(model, "supported_lora_modules"):
+            raise ValueError(f"Model {type(model)} is not supported for LoRA.")
         lora_manager = LRUCacheLoRAModelManager(
             model=model,
             max_num_seqs=self.max_num_seqs,
