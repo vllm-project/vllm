@@ -4,8 +4,10 @@
 #include "../../dispatch_utils.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
-  static constexpr float dt_min = static_cast<float>(std::numeric_limits<int8_t>::min());
-  static constexpr float dt_max = static_cast<float>(std::numeric_limits<int8_t>::max());
+  static constexpr float dt_min =
+      static_cast<float>(std::numeric_limits<int8_t>::min());
+  static constexpr float dt_max =
+      static_cast<float>(std::numeric_limits<int8_t>::max());
   // round
   float dst = round(x);
   // saturate
