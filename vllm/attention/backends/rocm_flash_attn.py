@@ -244,7 +244,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.use_naive_attn = True
 
             if self.use_naive_attn:
-                self.attn_func = _naive_attention
+                self.naive_use_sdpa = envs.VLLM_NAIVE_USE_SDPA
+                if self.naive_use_sdpa:
+                    self.attn_func = _sdpa_attention
+                else:
+                    self.attn_func = _naive_attention
+
                 logger.debug("Using naive attention in ROCmBackend")
 
     def repeat_kv(self, x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -339,13 +344,23 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         # Interleave for MQA workaround.
                         key = self.repeat_kv(key, self.num_queries_per_kv)
                         value = self.repeat_kv(value, self.num_queries_per_kv)
-                    out = self.attn_func(
-                        query,
-                        key,
-                        value,
-                        prefill_meta.seq_lens,
-                        self.scale,
-                    )
+                    if self.naive_use_sdpa:
+                        query = query.movedim(0, query.dim() - 2)
+                        key = key.movedim(0, key.dim() - 2)
+                        value = value.movedim(0, value.dim() - 2)
+                        # sdpa math backend attention
+                        out = self.attn_func(query, key, value, prefill_meta,
+                                             attn_metadata, num_tokens,
+                                             self.num_heads, self.head_size,
+                                             self.scale)
+                    else:
+                        out = self.attn_func(
+                            query,
+                            key,
+                            value,
+                            prefill_meta.seq_lens,
+                            self.scale,
+                        )
                 else:
                     out = self.attn_func(
                         q=query,
@@ -441,3 +456,33 @@ def _naive_masked_attention(
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("hqk,khd->qhd", attn_weights, value)
     return out
+
+
+def _sdpa_attention(query, key, value, prefill_meta, attn_metadata, num_tokens,
+                    num_heads, head_size, scale):
+    att_masks = [None] * len(prefill_meta.seq_lens)
+    attn_metadata.attn_bias = att_masks
+
+    start = 0
+    output = torch.empty((num_tokens, num_heads, head_size),
+                         dtype=query.dtype,
+                         device=query.device)
+
+    for seq_len, mask in zip(prefill_meta.seq_lens,
+                            attn_metadata.attn_bias):
+        end = start + seq_len
+        with torch.backends.cuda.sdp_kernel(enable_math=True,
+                                            enable_flash=False,
+                                            enable_mem_efficient=False):
+            sub_out = torch.nn.functional.scaled_dot_product_attention(
+                query[:, start:end, :],
+                key[:, start:end, :],
+                value[:, start:end, :],
+                attn_mask=mask,
+                dropout_p=0.0,
+                is_causal=True,
+                scale=scale).movedim(query.dim() - 2, 0)
+            output[start:end, :, :] = sub_out
+            start = end
+
+    return output
