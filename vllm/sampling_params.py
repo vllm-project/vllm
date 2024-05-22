@@ -96,7 +96,7 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
-        logits_processors_use_prompt_tokens: Boolean list of whether to add
+        use_prompt_tokens: Boolean list of whether to add
             prompt tokens to the 'token_ids' argument of the logit processor.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
@@ -130,7 +130,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        logits_processors_use_prompt_tokens: Optional[List[bool]] = None,
+        use_prompt_tokens: Optional[List[bool]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> None:
         self.n = n
@@ -180,14 +180,14 @@ class SamplingParams:
         else:
             self.output_text_buffer_length = 0
 
-        if logits_processors and logits_processors_use_prompt_tokens is None:
+        if logits_processors and use_prompt_tokens is None:
             assert self.logits_processors is not None
             # Not use prompt tokens in each logit processor
-            self.logits_processors_use_prompt_tokens: Optional[List[bool]] \
+            self.use_prompt_tokens: Optional[List[bool]] \
                 = [False] * len(self.logits_processors)
         else:
-            self.logits_processors_use_prompt_tokens = \
-                logits_processors_use_prompt_tokens
+            self.use_prompt_tokens = \
+                use_prompt_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -257,9 +257,9 @@ class SamplingParams:
                 "Set detokenize=True to use stop.")
         if self.logits_processors is not None:
             assert self.logits_processors is not None
-            assert self.logits_processors_use_prompt_tokens is not None
+            assert self.use_prompt_tokens is not None
             if len(self.logits_processors) != \
-                    len(self.logits_processors_use_prompt_tokens):
+                    len(self.use_prompt_tokens):
                 raise ValueError("logits_processors_use_prompt_tokens must"
                                  " be the same length as logits_processors")
 
