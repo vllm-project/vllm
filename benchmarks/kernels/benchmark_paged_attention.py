@@ -183,13 +183,11 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8"],
+        choices=["auto", "fp8", "fp8_e5m2", "fp8_e4m3"],
         default="auto",
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
-        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
-        'common inference criteria.')
+        help="Data type for kv cache storage. If 'auto', will use model "
+        "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
+        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
     args = parser.parse_args()
     print(args)
 

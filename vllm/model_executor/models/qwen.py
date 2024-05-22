@@ -106,7 +106,8 @@ class QWenAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,

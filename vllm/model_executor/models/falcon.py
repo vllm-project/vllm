@@ -153,7 +153,8 @@ class FalconAttention(nn.Module):
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   self.inv_norm_factor,
-                                  num_kv_heads=self.num_kv_heads)
+                                  num_kv_heads=self.num_kv_heads,
+                                  quant_config=quant_config)
         elif self.use_alibi:
             tp_rank = get_tensor_model_parallel_rank()
             head_start = tp_rank * self.num_heads
@@ -165,13 +166,15 @@ class FalconAttention(nn.Module):
                                   self.head_dim,
                                   self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
-                                  alibi_slopes=alibi_slopes)
+                                  alibi_slopes=alibi_slopes,
+                                  quant_config=quant_config)
         else:
             self.attn = Attention(self.num_heads,
                                   self.head_dim,
                                   scale=self.inv_norm_factor,
                                   num_kv_heads=self.num_kv_heads,
-                                  cache_config=cache_config)
+                                  cache_config=cache_config,
+                                  quant_config=quant_config)
 
     def forward(
         self,

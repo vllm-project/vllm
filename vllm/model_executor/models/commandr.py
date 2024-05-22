@@ -177,13 +177,12 @@ class CohereAttention(nn.Module):
             rope_scaling=self.rope_scaling,
             is_neox_style=False,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
         if self.use_qk_norm:
             self.q_norm = LayerNorm(param_shape=(self.num_heads,
                                                  self.head_dim),

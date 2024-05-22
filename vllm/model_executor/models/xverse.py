@@ -135,7 +135,8 @@ class XverseAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               sliding_window=sliding_window,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,

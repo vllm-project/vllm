@@ -213,14 +213,13 @@ class MixtralAttention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            sliding_window=self.sliding_window,
-            cache_config=cache_config,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              sliding_window=self.sliding_window,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
