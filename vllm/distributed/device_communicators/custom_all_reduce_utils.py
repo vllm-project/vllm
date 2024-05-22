@@ -1,9 +1,12 @@
 import json
 import os
-from typing import Dict, Optional
+import sys
+from contextlib import contextmanager
+from typing import Callable, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -13,51 +16,55 @@ from .parallel_state import get_cpu_world_group, get_local_rank
 logger = init_logger(__name__)
 
 
-import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-import os
-import sys
+@contextmanager
+def mute_output():
+    with open(os.devnull, "w") as f:
+        sys.stderr = f
+        sys.stdout = f
+        yield
+
 
 def producer(i):
     # launch process, discard output
-    sys.stdout = open(os.devnull, "w")
-    sys.stderr = open(os.devnull, "w")
-    dist.init_process_group(
-        backend="gloo",
-        init_method="tcp://127.0.0.1:12345",
-        world_size=2,
-        rank=0,
-    )
-    # produce a tensor in GPU i
-    data = torch.zeros((128,), device=f"cuda:{i}")
-    func, args = torch.multiprocessing.reductions.reduce_tensor(data)
-    args = list(args)
-    dist.broadcast_object_list([(func, args)], src=0)
-    dist.barrier()
-    torch.cuda.synchronize()
-    assert data.mean().item() == 1
+    with mute_output():
+        dist.init_process_group(
+            backend="gloo",
+            init_method="tcp://127.0.0.1:12345",
+            world_size=2,
+            rank=0,
+        )
+        # produce a tensor in GPU i
+        data = torch.zeros((128, ), device=f"cuda:{i}")
+        func, args = torch.multiprocessing.reductions.reduce_tensor(data)
+        args = list(args)
+        dist.broadcast_object_list([(func, args)], src=0)
+        dist.barrier()
+        torch.cuda.synchronize()
+        assert data.mean().item() == 1
+
 
 def consumer(j):
     # launch process, discard output
-    sys.stdout = open(os.devnull, "w")
-    sys.stderr = open(os.devnull, "w")
-    dist.init_process_group(
-        backend="gloo",
-        init_method="tcp://127.0.0.1:12345",
-        world_size=2,
-        rank=1,
-    )
-    torch.cuda.set_device(j)
-    recv = [None]
-    dist.broadcast_object_list(recv, src=0)
-    func, args = recv[0]
-    args[6] = j
-    data = func(*args)
-    data += 1
-    dist.barrier()
-    torch.cuda.synchronize()
-    assert data.mean().item() == 1
+    with mute_output():
+        dist.init_process_group(
+            backend="gloo",
+            init_method="tcp://127.0.0.1:12345",
+            world_size=2,
+            rank=1,
+        )
+        torch.cuda.set_device(j)
+        recv = [None]
+        dist.broadcast_object_list(recv, src=0)
+        func: Callable
+        args: List
+        func, args = recv[0]  # type: ignore
+        args[6] = j
+        data = func(*args)
+        data += 1
+        dist.barrier()
+        torch.cuda.synchronize()
+        assert data.mean().item() == 1
+
 
 def can_actually_p2p(i, j):
     """
@@ -77,8 +84,8 @@ def can_actually_p2p(i, j):
                                  |shared|
     GPU j --> cuda context j --> tensor j --> process j
     """
-    pi = mp.Process(target=producer, args=(i,))
-    pj = mp.Process(target=consumer, args=(j,))
+    pi = mp.Process(target=producer, args=(i, ))
+    pj = mp.Process(target=consumer, args=(j, ))
     pi.start()
     pj.start()
     pi.join()
