@@ -1,23 +1,16 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
-#include <assert.h>
 
 #include "../../dispatch_utils.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
-#ifdef USE_ROCM
-  float dst;
-  // Round to nearest even
-  asm volatile("v_rndne_f32 %0, %1;" : "=v"(dst) : "v"(x));
-  // Saturate
-  dst = dst < -128.0f ? -128.0f : dst;
-  dst = dst > 127.0f ? 127.0f : dst;
+  static constexpr float dt_min = static_cast<float>(std::numeric_limits<int8_t>::min());
+  static constexpr float dt_max = static_cast<float>(std::numeric_limits<int8_t>::max());
+  // round
+  float dst = round(x);
+  // saturate
+  dst = std::clamp(dst, dt_min, dt_max);
   return static_cast<int8_t>(dst);
-#else
-  uint32_t dst;
-  asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
-  return reinterpret_cast<const int8_t&>(dst);
-#endif
 }
 
 namespace vllm {
@@ -39,8 +32,8 @@ __global__ void static_scaled_int8_quant_kernel(
 void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
                               torch::Tensor& input,  // [..., hidden_size]
                               float scale) {
-  assert(input.is_contiguous());
-  assert(out.is_contiguous());
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   dim3 grid(num_tokens);

@@ -3,9 +3,7 @@ from typing import Callable, List, Tuple, Union
 import torch
 from torch.nn import Parameter
 
-# TODO (varun) : Unify ops and custom ops
 from vllm import _custom_ops as custom_ops
-from vllm._C import ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
@@ -14,11 +12,6 @@ __all__ = ["CompressedTensorsW8A8StaticTensor"]
 
 
 class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
-
-    def _quantize(self, x: torch.Tensor, scale: float):
-        x_q = torch.empty_like(x, dtype=torch.int8)
-        ops.static_scaled_int8_quant(x_q, x, scale)
-        return x_q
 
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
@@ -120,7 +113,7 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         act_scale = layer.input_scale
 
         # Input quantize
-        x_q = self._quantize(x, act_scale[0].item())
+        x_q = custom_ops.static_scaled_int8_quant(x, act_scale[0].item())
 
         return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), act_scale,
                                                weight_scale, x.dtype)
