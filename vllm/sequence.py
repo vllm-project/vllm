@@ -527,8 +527,8 @@ class SequenceGroup:
             seq for seq in self.seqs_dict.values() if seq.status == status
         ]
 
-    def get_encoder_seq(self) -> Sequence:
-        return self.encoder_seq  # type: ignore
+    def get_encoder_seq(self) -> Optional[Sequence]:
+        return self.encoder_seq
 
     def get_unfinished_seqs(self) -> List[Sequence]:
         return [
@@ -635,7 +635,7 @@ class SequenceGroupMetadata:
         state: Optional[SequenceGroupState] = None,
         multi_modal_data: Optional[MultiModalData] = None,
         encoder_seq_data: Optional[SequenceData] = None,
-        cross_block_table: Optional[Dict[int, List[int]]] = None,
+        cross_block_table: Optional[List[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.is_prompt = is_prompt
