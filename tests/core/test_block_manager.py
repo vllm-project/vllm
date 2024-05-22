@@ -386,6 +386,9 @@ def test_free_encoder_decoder():
     # Block table for freed encoder & decoder seq's are deleted.
     with pytest.raises(KeyError):
         block_manager.get_block_table(decoder_prompt)
+
+    # Block table for freed encoder & decoder seq's are deleted.
+    with pytest.raises(KeyError):
         block_manager.get_block_table(encoder_prompt)
 
 
