@@ -1,4 +1,5 @@
 import time
+import warnings
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
@@ -168,11 +169,21 @@ class ModelRunner:
             self.model = self.lora_manager.create_lora_manager(self.model)
 
         if self.kv_cache_dtype == "fp8" and is_hip():
-            # Currently scaled KV cache is only enabled on ROCm
+            # Currently only ROCm accepts kv-cache scaling factors
+            # via quantization_param_path and this will be deprecated
+            # in the future.
             if self.model_config.quantization_param_path is not None:
                 if callable(getattr(self.model, "load_kv_cache_scales", None)):
+                    warnings.warn(
+                        "Loading kv cache scaling factor from JSON is "
+                        "deprecated and will be removed. Please include "
+                        "kv cache scaling factors in the model checkpoint.",
+                        FutureWarning,
+                        stacklevel=2)
                     self.model.load_kv_cache_scales(
                         self.model_config.quantization_param_path)
+                    logger.info("Loaded KV cache scaling factors from %s",
+                                self.model_config.quantization_param_path)
                 else:
                     raise RuntimeError(
                         "Using FP8 KV cache and scaling factors provided but "
@@ -183,10 +194,6 @@ class ModelRunner:
                     "Using FP8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
-        elif self.model_config.quantization_param_path is not None:
-            logger.warning("KV cache scaling factors provided, "
-                           "but the KV cache data type is not FP8. "
-                           "KV cache scaling factors will not be used.")
 
     def save_sharded_state(
         self,
