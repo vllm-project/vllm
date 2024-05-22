@@ -130,8 +130,8 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
-        use_prompt_tokens: Optional[List[bool]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        use_prompt_tokens: Optional[List[bool]] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
