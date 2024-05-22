@@ -120,10 +120,10 @@ struct cutlass_3x_gemm {
 };
 
 template <typename Gemm>
-void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
-                                     torch::Tensor const &b,
-                                     torch::Tensor const &a_scales,
-                                     torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     torch::Tensor const& a_scales,
+                                     torch::Tensor const& b_scales) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -146,12 +146,12 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   using GemmKernel = typename Gemm::GemmKernel;
   typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
 
-  auto a_ptr = static_cast<ElementAB *>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB *>(b.data_ptr());
+  auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
+  auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
   typename GemmKernel::MainloopArguments mainloop_args{a_ptr, a_stride, b_ptr,
                                                        b_stride};
 
-  auto c_ptr = static_cast<ElementD *>(out.data_ptr());
+  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
   typename GemmKernel::EpilogueArguments epilogue_args{
       {}, c_ptr, c_stride, c_ptr, c_stride};
 
@@ -183,10 +183,10 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
 }
 }  // namespace
 
-void cutlass_scaled_mm_dq_sm90(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
 
