@@ -9,9 +9,8 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_cpu_world_group, get_local_rank
 from vllm.logger import init_logger
-
-from .parallel_state import get_cpu_world_group, get_local_rank
 
 logger = init_logger(__name__)
 
