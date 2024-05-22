@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -51,6 +52,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
+    rope_scaling: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     # UPSTREAM SYNC: keep sparsity argument
@@ -345,6 +347,11 @@ class EngineArgs:
             'None, we first check the `sparsity_config` attribute '
             'in the model config file. If that is None we assume '
             'the model weights are dense')
+        parser.add_argument('--rope-scaling',
+                            default=None,
+                            type=json.loads,
+                            help='RoPE scaling configuration in JSON format. '
+                            'For example, {"type":"dynamic","factor":2.0}')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -569,6 +576,7 @@ class EngineArgs:
             self.seed,
             self.revision,
             self.code_revision,
+            self.rope_scaling,
             self.tokenizer_revision,
             self.max_model_len,
             self.quantization,

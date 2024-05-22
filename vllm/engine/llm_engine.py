@@ -104,11 +104,11 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "tokenizer_revision=%s, trust_remote_code=%s, dtype=%s, "
+            "rope_scaling=%r, tokenizer_revision=%s, "
+            "trust_remote_code=%s, dtype=%s, "
             "max_seq_len=%d, download_dir=%r, load_format=%s, "
             "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
-            "quantization=%s, sparsity=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
+            "quantization=%s, sparsity=%s, enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
             vllm.__version__,
@@ -118,6 +118,7 @@ class LLMEngine:
             model_config.skip_tokenizer_init,
             model_config.tokenizer_mode,
             model_config.revision,
+            model_config.rope_scaling,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
