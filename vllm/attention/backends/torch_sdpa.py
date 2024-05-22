@@ -1,19 +1,18 @@
 """ Attention layer with torch scaled_dot_product_attention
     and PagedAttention."""
-import os
-
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Type
 
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.utils import is_cpu
 
-if is_cpu() and os.getenv("VLLM_CPU_IPEX", "0") == "1":
+if is_cpu() and envs.VLLM_CPU_IPEX:
     from vllm.attention.ops.ipex_attn import PagedAttention
 else:
     from vllm.attention.ops.paged_attn import PagedAttention
@@ -207,7 +206,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                         attn_mask=mask,
                         dropout_p=0.0,
                         is_causal=not self.need_mask,
-                        scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
+                        scale=self.scale).squeeze(0).movedim(
+                            query.dim() - 2, 0)
                     output[start:end, :, :] = sub_out
                     start = end
             else:
