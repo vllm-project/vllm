@@ -105,8 +105,6 @@ def convert_mapping(
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
-        # SANG-TODO
-        # index_mapping_indices[i] = i
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
         index_mapping_indices, lora_indices, embedding_indices
