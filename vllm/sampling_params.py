@@ -173,20 +173,14 @@ class SamplingParams:
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
+        self.use_prompt_tokens = use_prompt_tokens
+
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.output_text_buffer_length = 0
-
-        if logits_processors is not None and use_prompt_tokens is None:
-            assert self.logits_processors is not None
-            # Not use prompt tokens in each logit processor
-            self.use_prompt_tokens: Optional[List[bool]] \
-                = [False] * len(self.logits_processors)
-        else:
-            self.use_prompt_tokens = use_prompt_tokens
 
         self._verify_args()
         if self.use_beam_search:

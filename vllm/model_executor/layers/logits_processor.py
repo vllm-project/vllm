@@ -97,6 +97,11 @@ def _apply_logits_processors(
         logits_processors = sampling_params.logits_processors
         use_prompt_tokens_seq = sampling_params.use_prompt_tokens
         if logits_processors:
+
+            if not use_prompt_tokens_seq:
+                # Not use prompt tokens in each logit processor
+                use_prompt_tokens_seq = [False] * len(logits_processors)
+
             found_logits_processors = True
             for seq_id, logits_row_idx in zip(seq_ids,
                                               seq_group.sample_indices):
