@@ -116,7 +116,7 @@ def test_allocate_encoder_decoder():
                                         watermark=1 / num_gpu_blocks)
     for i in range((num_gpu_blocks - 1) // block_req_per_seq_group):
         _, _, seq_group = create_dummy_prompt_encoder_decoder(
-            str(i), block_size // 2, block_size // 2)
+            str(i), block_size, block_size)
         assert block_manager.can_allocate(seq_group)
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
@@ -365,8 +365,8 @@ def test_free_encoder_decoder():
     decoder_prompt, encoder_prompt, seq_group = \
         create_dummy_prompt_encoder_decoder(
         "1",
-        decoder_prompt_length=block_size // 2,
-        encoder_prompt_length=block_size // 2)
+        decoder_prompt_length=block_size,
+        encoder_prompt_length=block_size)
     block_manager.allocate(seq_group)
 
     # Free allocated seq.
