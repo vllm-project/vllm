@@ -117,10 +117,10 @@ struct cutlass_2x_gemm {
 };
 
 template <typename Gemm>
-void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
-                                     torch::Tensor const &b,
-                                     torch::Tensor const &a_scales,
-                                     torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
+                                     torch::Tensor const& b,
+                                     torch::Tensor const& a_scales,
+                                     torch::Tensor const& b_scales) {
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
 
@@ -136,9 +136,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
   using StrideC = Stride<int64_t, Int<1>, Int<0>>;
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
-  auto a_ptr = static_cast<ElementAB const *>(a.data_ptr());
-  auto b_ptr = static_cast<ElementAB const *>(b.data_ptr());
-  auto c_ptr = static_cast<ElementD *>(out.data_ptr());
+  auto a_ptr = static_cast<ElementAB const*>(a.data_ptr());
+  auto b_ptr = static_cast<ElementAB const*>(b.data_ptr());
+  auto c_ptr = static_cast<ElementD*>(out.data_ptr());
 
   auto a_scales_ptr = a_scales.data_ptr<float>();
   auto b_scales_ptr = b_scales.data_ptr<float>();
@@ -196,10 +196,10 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor &out, torch::Tensor const &a,
 
 }  // namespace
 
-void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm75(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -223,10 +223,10 @@ void cutlass_scaled_mm_dq_sm75(torch::Tensor &out, torch::Tensor const &a,
   }
 }
 
-void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm80(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   TORCH_CHECK(a.dtype() == torch::kInt8);
   TORCH_CHECK(b.dtype() == torch::kInt8);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
@@ -250,10 +250,10 @@ void cutlass_scaled_mm_dq_sm80(torch::Tensor &out, torch::Tensor const &a,
   }
 }
 
-void cutlass_scaled_mm_dq_sm89(torch::Tensor &out, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq_sm89(torch::Tensor& out, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales) {
   using TileShape = typename cutlass::gemm::GemmShape<128, 128, 64>;
   using WarpShape = typename cutlass::gemm::GemmShape<64, 64, 64>;
   using InstructionShape = typename cutlass::gemm::GemmShape<16, 8, 32>;
