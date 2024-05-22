@@ -248,7 +248,8 @@ class SamplingParams:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
-        if self.logits_processors is not None:
+        if (self.logits_processors is not None
+                and self.use_prompt_tokens is not None):
             assert self.logits_processors is not None
             assert self.use_prompt_tokens is not None
             if len(self.logits_processors) != \
