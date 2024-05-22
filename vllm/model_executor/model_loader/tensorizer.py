@@ -1,9 +1,7 @@
 import argparse
 import dataclasses
-import io
-import os
+import re
 import time
-import typing
 from dataclasses import dataclass
 from functools import partial
 from typing import Generator, Optional, Tuple, Type, Union
@@ -14,7 +12,6 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -48,9 +45,9 @@ logger = init_logger(__name__)
 
 @dataclass
 class TensorizerConfig:
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int]
+    tensorizer_uri: str
     vllm_tensorized: Optional[bool] = False
+    is_sharded: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
@@ -78,13 +75,17 @@ class TensorizerConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        if (parallel_config.tensor_parallel_size > 1
-                and self.tensorizer_uri is not None):
-            raise ValueError(
-                "Loading to multiple GPUs is not currently supported with "
-                "vLLM-serialized models. Please set tensor_parallel_size=1."
-                " or use a non-vLLM-serialized model, such as a "
-                "serialized Hugging Face `PretrainedModel`.")
+        if (parallel_config.tensor_parallel_size == 1):
+            return
+
+        if (uri := self.tensorizer_uri) is not None:
+            rank_format_match = re.search('%0(\d)d', uri)
+            if not rank_format_match:
+                raise ValueError(
+                    "For a sharded model, Tensorizer URI should include a"
+                    " string format template like '%04d' to be formatted"
+                    " with the rank of the shard")
+            self.is_sharded = True
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if (model_config.quantization is not None
@@ -102,8 +103,7 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
 
 @dataclass
 class TensorizerArgs:
-    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, typing.BinaryIO,
-                          str, bytes, os.PathLike, int]
+    tensorizer_uri: str
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -332,6 +332,7 @@ class TensorizerAgent:
         ) as stream, TensorDeserializer(
                 stream,
                 dtype=self.tensorizer_config.dtype,
+                device=f'cuda:{torch.cuda.current_device()}',
                 **self.tensorizer_args.deserializer_params) as deserializer:
             deserializer.load_into_module(self.model)
             end = time.perf_counter()
@@ -400,30 +401,21 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     return False
 
 
-def get_pretensorized_vllm_model(engine: "LLMEngine") -> nn.Module:
-    model = (engine.model_executor.driver_worker.model_runner.model)
+def serialize_vllm_model(model: nn.Module,
+                         tensorizer_config : TensorizerConfig,
+                         encryption_params: EncryptionParams = None) \
+        -> nn.Module:
     model.register_parameter(
         "vllm_tensorized_marker",
         nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False))
-    return model
-
-
-def serialize_vllm_model(engine: "LLMEngine",
-                         tensorizer_config : TensorizerConfig,
-                         encryption_key_path: Optional[str] = None) \
-        -> nn.Module:
-
-    model = get_pretensorized_vllm_model(engine)
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
-    encryption_params = None
-    if encryption_key_path is not None:
-        encryption_params = EncryptionParams.random()
-        with _write_stream(encryption_key_path,
-                           **tensorizer_args.stream_params) as stream:
-            stream.write(encryption_params.key)
 
-    with _write_stream(tensorizer_args.tensorizer_uri,
-                       **tensorizer_args.stream_params) as stream:
+    output_file = tensorizer_args.tensorizer_uri
+    if tensorizer_config.is_sharded:
+        from vllm.distributed import get_tensor_model_parallel_rank
+        output_file = output_file % get_tensor_model_parallel_rank()
+
+    with _write_stream(output_file, **tensorizer_args.stream_params) as stream:
         serializer = TensorSerializer(stream, encryption=encryption_params)
         serializer.write_module(model)
         serializer.close()

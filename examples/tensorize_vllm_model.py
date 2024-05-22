@@ -5,16 +5,15 @@ import os
 import uuid
 from functools import partial
 
-from tensorizer import stream_io
+from tensorizer import EncryptionParams, stream_io
 
 from vllm import LLM
-from vllm.distributed import (init_distributed_environment,
-                              initialize_model_parallel)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
                                                          serialize_vllm_model)
+from vllm.worker.worker_base import WorkerBase
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -173,72 +172,120 @@ def deserialize():
     return llm
 
 
+# Monkey patch the Worker, adding a method to serialize a sharded model with
+# tensorizer
+# FIXME: monkey patching like this doesn't work for Ray...
+def worker_serialize(self,
+                    tensorizer_config: TensorizerConfig,
+                    encryption_params: EncryptionParams
+    ) -> None:
+    serialize_vllm_model(self.model_runner.model,
+                         tensorizer_config,
+                         encryption_params
+    )
+WorkerBase.worker_serialize = worker_serialize
 
-args = parse_args()
+if __name__ == '__main__':
+    args = parse_args()
 
-s3_access_key_id = (getattr(args, 's3_access_key_id', None)
-                    or os.environ.get("S3_ACCESS_KEY_ID", None))
-s3_secret_access_key = (getattr(args, 's3_secret_access_key', None)
-                        or os.environ.get("S3_SECRET_ACCESS_KEY", None))
-s3_endpoint = (getattr(args, 's3_endpoint', None)
-               or os.environ.get("S3_ENDPOINT_URL", None))
+    s3_access_key_id = (getattr(args, 's3_access_key_id', None)
+                        or os.environ.get("S3_ACCESS_KEY_ID", None))
+    s3_secret_access_key = (getattr(args, 's3_secret_access_key', None)
+                            or os.environ.get("S3_SECRET_ACCESS_KEY", None))
+    s3_endpoint = (getattr(args, 's3_endpoint', None)
+                or os.environ.get("S3_ENDPOINT_URL", None))
 
-credentials = {
-    "s3_access_key_id": s3_access_key_id,
-    "s3_secret_access_key": s3_secret_access_key,
-    "s3_endpoint": s3_endpoint
-}
+    credentials = {
+        "s3_access_key_id": s3_access_key_id,
+        "s3_secret_access_key": s3_secret_access_key,
+        "s3_endpoint": s3_endpoint
+    }
 
-_read_stream, _write_stream = (partial(
-    stream_io.open_stream,
-    mode=mode,
-    s3_access_key_id=s3_access_key_id,
-    s3_secret_access_key=s3_secret_access_key,
-    s3_endpoint=s3_endpoint,
-) for mode in ("rb", "wb+"))
+    _, _write_stream = (partial(
+        stream_io.open_stream,
+        mode=mode,
+        s3_access_key_id=s3_access_key_id,
+        s3_secret_access_key=s3_secret_access_key,
+        s3_endpoint=s3_endpoint,
+    ) for mode in ("rb", "wb+"))
 
-model_ref = args.model
+    model_ref = args.model
 
-model_name = model_ref.split("/")[1]
+    model_name = model_ref.split("/")[1]
 
-os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["MASTER_PORT"] = "8080"
+    keyfile = args.keyfile if args.keyfile else None
 
-init_distributed_environment(world_size=1, rank=0, local_rank=0)
-initialize_model_parallel()
+    if args.model_loader_extra_config:
+        config = json.loads(args.model_loader_extra_config)
+        tensorizer_args = \
+            TensorizerConfig(**config)._construct_tensorizer_args()
+        tensorizer_args.tensorizer_uri = args.path_to_tensors
+    else:
+        tensorizer_args = None
 
-keyfile = args.keyfile if args.keyfile else None
+    if args.command == "serialize":
+        eng_args_dict = {f.name: getattr(args, f.name) for f in
+                        dataclasses.fields(EngineArgs)}
 
-
-if args.model_loader_extra_config:
-    config = json.loads(args.model_loader_extra_config)
-    tensorizer_args = TensorizerConfig(**config)._construct_tensorizer_args()
-    tensorizer_args.tensorizer_uri = args.path_to_tensors
-else:
-    tensorizer_args = None
-
-if args.command == "serialize":
-    eng_args_dict = {f.name: getattr(args, f.name) for f in
-                     dataclasses.fields(EngineArgs)}
-
-    engine_args = EngineArgs.from_cli_args(argparse.Namespace(**eng_args_dict))
-    engine = LLMEngine.from_engine_args(engine_args)
-
-    input_dir = args.serialized_directory.rstrip('/')
-    suffix = args.suffix if args.suffix else uuid.uuid4().hex
-    base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
-    model_path = f"{base_path}/model.tensors"
-    tensorizer_config = TensorizerConfig(
-        tensorizer_uri=model_path,
-        **credentials)
-    serialize_vllm_model(engine, tensorizer_config, keyfile)
-elif args.command == "deserialize":
-    if not tensorizer_args:
-        tensorizer_config = TensorizerConfig(
-            tensorizer_uri=args.path_to_tensors,
-            encryption_keyfile = keyfile,
-            **credentials
+        engine_args = EngineArgs.from_cli_args(
+            argparse.Namespace(**eng_args_dict)
         )
-    deserialize()
-else:
-    raise ValueError("Either serialize or deserialize must be specified.")
+
+        input_dir = args.serialized_directory.rstrip('/')
+        suffix = args.suffix if args.suffix else uuid.uuid4().hex
+        base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
+        is_sharded = False
+        if engine_args.tensor_parallel_size > 1:
+            model_path = f"{base_path}/model-rank-%03d.tensors"
+            is_sharded = True
+        else:
+            model_path = f"{base_path}/model.tensors"
+            is_sharded = False
+
+        # Only multiprocessing is supported currently due to the monkey patching
+        # of the Worker class
+        if is_sharded:
+            parallel_config = engine_args.create_engine_config() \
+                                .parallel_config
+            if parallel_config.distributed_executor_backend != "mp":
+                raise ValueError(
+                    "Tensorizing a sharded model is only supported with the"
+                    "multiproc backend. Use --distributed-executor-backend=mp"
+                )
+
+        # create and write encryption key before initializing engine to support
+        # sharded models
+        encryption_params = None
+        if keyfile is not None:
+            encryption_params = EncryptionParams.random()
+            with _write_stream(keyfile) as stream:
+                stream.write(encryption_params.key)
+
+        tensorizer_config = TensorizerConfig(
+            tensorizer_uri=model_path,
+            is_sharded=is_sharded,
+            **credentials)
+
+        engine = LLMEngine.from_engine_args(engine_args)
+        if args.tensor_parallel_size > 1:
+            engine.model_executor._run_workers("worker_serialize",
+                tensorizer_config = tensorizer_config,
+                encryption_params = encryption_params
+            )
+        else:
+            serialize_vllm_model(
+                engine.model_executor.driver_worker.model_runner.model,
+                tensorizer_config,
+                encryption_params
+            )
+
+    elif args.command == "deserialize":
+        if not tensorizer_args:
+            tensorizer_config = TensorizerConfig(
+                tensorizer_uri=args.path_to_tensors,
+                encryption_keyfile = keyfile,
+                **credentials
+            )
+        deserialize()
+    else:
+        raise ValueError("Either serialize or deserialize must be specified.")
