@@ -1,5 +1,7 @@
 #include <torch/extension.h>
 
+#include <ATen/cuda/CUDAContext.h>
+
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -178,7 +180,8 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
   size_t workspace_size = gemm_op.get_workspace_size(args);
   TORCH_CHECK(workspace_size == 0);
 
-  cutlass::Status status = gemm_op.run(args);
+  auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
+  cutlass::Status status = gemm_op.run(args, stream);
   CUTLASS_CHECK(status);
 }
 }  // namespace
