@@ -47,7 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-from vllm.utils import is_hip
+from vllm.utils import is_hip, print_warning_once
 
 
 class LlamaMLP(nn.Module):
@@ -119,15 +119,6 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        # This will be overwritten by model initialization if we are using it.
-        # N.B. currently we only support per tensor scalar scaling factors
-        # & only applicable to ROCm (AMD GPU).
-        # The scaling factor convention we are assuming is
-        # quantized_value * scaling_factor ~= true_value
-        # which is consistent with the practice of setting
-        # scaling_factor = tensor_amax / FPtype_max
-        self.kv_scale = 1.0
-
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -155,7 +146,8 @@ class LlamaAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               sliding_window=sliding_window,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -167,8 +159,7 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                self.kv_scale)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -421,6 +412,19 @@ class LlamaForCausalLM(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Remapping the name of FP8 kv-scale.
+                if name.endswith("kv_scale"):
+                    remapped_kv_scale_name = name.replace(
+                        ".kv_scale", ".attn.kv_scale")
+                    if remapped_kv_scale_name not in params_dict:
+                        print_warning_once(
+                            f"Found kv scale in the checkpoint (e.g. {name}), "
+                            "but not found the expected name in the model "
+                            f"(e.g. {remapped_kv_scale_name}). kv-scale is "
+                            "not loaded.")
+                        continue
+                    else:
+                        name = remapped_kv_scale_name
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
@@ -445,7 +449,7 @@ class LlamaForCausalLM(nn.Module):
                 # scaling_factor = tensor_amax / FPtype_max
                 scaling_factor *= 2
             if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.kv_scale = scaling_factor
+                layer_self_attn.attn._kv_scale = scaling_factor
             else:
                 raise RuntimeError("Self attention has no KV cache scaling "
                                    "factor attribute!")

@@ -387,14 +387,12 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8":
+        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop without scaling "
-                "factors. FP8_E5M2 (without scaling) is only supported on "
-                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
-                "is instead supported for common inference criteria.")
+                "Meanwhile, it may cause accuracy drop without a proper "
+                "scaling factor")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
