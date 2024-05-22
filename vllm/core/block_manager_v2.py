@@ -260,22 +260,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 block_ids,  # type: ignore
                 now)
 
-    def access_all_cross_blocks_in_seq_group(
-        self,
-        seq_group: SequenceGroup,
-        now: float,
-    ) -> None:
-        if self.enable_caching:
-            # Update the last accessed time of all the blocks accessed
-            # in this step.
-            block_table = self.cross_block_tables[seq_group.request_id]
-            block_ids = []
-            for block_id in block_table.physical_block_ids:
-                block_ids.append(block_id)
-            self.block_allocator.mark_blocks_as_accessed(
-                block_ids,  # type: ignore
-                now)
-
     def mark_blocks_as_computed(self, seq_group: SequenceGroup):
         # The only need for mark block as computed is for prefix caching,
         # while currently we could determine whether one block is computed
