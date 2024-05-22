@@ -57,7 +57,7 @@ class LlamaMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QKVParallelLinear] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
     ) -> None:
         super().__init__()
