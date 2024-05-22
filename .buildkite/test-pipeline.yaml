@@ -109,6 +109,9 @@ steps:
   mirror_hardwares: [amd]
   command: pytest -v -s test_logits_processor.py
 
+- label: Utils Test
+  command: pytest -v -s test_utils.py
+
 - label: Worker Test
   mirror_hardwares: [amd]
   command: pytest -v -s worker
