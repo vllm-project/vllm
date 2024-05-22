@@ -570,12 +570,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self.cpu_allocator.free(cpu_block)
             self.cross_block_tables[request_id] = new_block_table
 
-        block_number_mapping = {
-            cpu_block.block_number: gpu_block.block_number
-            for cpu_block, gpu_block in mapping.items()
-        }
-        # convert to list of tuples once here
-        return list(block_number_mapping.items())
+        return [(cpu_block.block_number, gpu_block.block_number) for cpu_block, gpu_block in mapping.items()]
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         blocks = self._get_physical_blocks(seq_group)
@@ -621,12 +616,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self.gpu_allocator.free(gpu_block)
             self.cross_block_tables[request_id] = new_block_table
 
-        block_number_mapping = {
-            gpu_block.block_number: cpu_block.block_number
-            for gpu_block, cpu_block in mapping.items()
-        }
-        # convert to list of tuples once here
-        return list(block_number_mapping.items())
+        return [(cpu_block.block_number, gpu_block.block_number) for cpu_block, gpu_block in mapping.items()]
 
     def _free_block_table(self, block_table: BlockTable) -> None:
         # when using a sliding window, each seq will only use up
