@@ -933,7 +933,7 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
 
   constexpr int max_m_blocks = 4;
 
-  int *locks = (int *)workspace;
+  int* locks = (int*)workspace;
   for (int i = 0; i < tot_n_blocks; i += max_m_blocks) {
     int thread_n_blocks = tot_n_blocks - i;
     prob_n = tot_n - 16 * i;
@@ -942,8 +942,7 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
       // Note that parallel > 1 currently only works for inputs without any
       // padding
       par = (16 * thread_n_blocks - pad) / (max_m_blocks * 16);
-      if (par > max_par)
-        par = max_par;
+      if (par > max_par) par = max_par;
       prob_n = (max_m_blocks * 16) * par;
       i += max_m_blocks * (par - 1);
       thread_n_blocks = max_m_blocks;
@@ -955,23 +954,23 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
 
     // the false is start of the CALL_IF macros
     if (false) {
-    } //         BMxBNxBK,   group
+    }  //         BMxBNxBK,   group
     // 4-bit
-    CALL_IF_2_4(4, 8, 1, 4, -1) // e.g., 16x128x128
-    CALL_IF_2_4(4, 8, 1, 4, 4)  // e.g., 16x128x128, 64
+    CALL_IF_2_4(4, 8, 1, 4, -1)  // e.g., 16x128x128
+    CALL_IF_2_4(4, 8, 1, 4, 4)   // e.g., 16x128x128, 64
 
-    CALL_IF_2_4(4, 16, 1, 2, -1) // e.g., 16x256x64
-    CALL_IF_2_4(4, 16, 1, 2, 4)  // e.g., 16x256x64,  64
-    CALL_IF_2_4(4, 16, 2, 2, -1) // e.g.. 32x256x64
+    CALL_IF_2_4(4, 16, 1, 2, -1)  // e.g., 16x256x64
+    CALL_IF_2_4(4, 16, 1, 2, 4)   // e.g., 16x256x64,  64
+    CALL_IF_2_4(4, 16, 2, 2, -1)  // e.g.. 32x256x64
     CALL_IF_2_4(4, 16, 2, 2, 4)
     CALL_IF_2_4(4, 16, 3, 2, -1)
     CALL_IF_2_4(4, 16, 3, 2, 4)
     CALL_IF_2_4(4, 16, 4, 2, -1)
     CALL_IF_2_4(4, 16, 4, 2, 4)
 
-    CALL_IF_2_4(4, 32, 1, 1, -1) // e.g., 16x256x64
-    CALL_IF_2_4(4, 32, 1, 1, 4)  // e.g., 16x256x64,  64
-    CALL_IF_2_4(4, 32, 2, 1, -1) // e.g.. 32x256x64
+    CALL_IF_2_4(4, 32, 1, 1, -1)  // e.g., 16x256x64
+    CALL_IF_2_4(4, 32, 1, 1, 4)   // e.g., 16x256x64,  64
+    CALL_IF_2_4(4, 32, 2, 1, -1)  // e.g.. 32x256x64
     CALL_IF_2_4(4, 32, 2, 1, 4)
     CALL_IF_2_4(4, 32, 3, 1, -1)
     CALL_IF_2_4(4, 32, 3, 1, 4)
@@ -979,21 +978,21 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
     CALL_IF_2_4(4, 32, 4, 1, 4)
 
     // 8-bit
-    CALL_IF_2_4(8, 8, 1, 4, -1) // e.g., 16x128x128
-    CALL_IF_2_4(8, 8, 1, 4, 4)  // e.g., 16x128x128, 64
+    CALL_IF_2_4(8, 8, 1, 4, -1)  // e.g., 16x128x128
+    CALL_IF_2_4(8, 8, 1, 4, 4)   // e.g., 16x128x128, 64
 
-    CALL_IF_2_4(8, 16, 1, 2, -1) // e.g., 16x256x64
-    CALL_IF_2_4(8, 16, 1, 2, 4)  // e.g., 16x256x64,  64
-    CALL_IF_2_4(8, 16, 2, 2, -1) // e.g.. 32x256x64
+    CALL_IF_2_4(8, 16, 1, 2, -1)  // e.g., 16x256x64
+    CALL_IF_2_4(8, 16, 1, 2, 4)   // e.g., 16x256x64,  64
+    CALL_IF_2_4(8, 16, 2, 2, -1)  // e.g.. 32x256x64
     CALL_IF_2_4(8, 16, 2, 2, 4)
     CALL_IF_2_4(8, 16, 3, 2, -1)
     CALL_IF_2_4(8, 16, 3, 2, 4)
     CALL_IF_2_4(8, 16, 4, 2, -1)
     CALL_IF_2_4(8, 16, 4, 2, 4)
 
-    CALL_IF_2_4(8, 32, 1, 1, -1) // e.g., 16x256x64
-    CALL_IF_2_4(8, 32, 1, 1, 4)  // e.g., 16x256x64,  64
-    CALL_IF_2_4(8, 32, 2, 1, -1) // e.g.. 32x256x64
+    CALL_IF_2_4(8, 32, 1, 1, -1)  // e.g., 16x256x64
+    CALL_IF_2_4(8, 32, 1, 1, 4)   // e.g., 16x256x64,  64
+    CALL_IF_2_4(8, 32, 2, 1, -1)  // e.g.. 32x256x64
     CALL_IF_2_4(8, 32, 2, 1, 4)
     CALL_IF_2_4(8, 32, 3, 1, -1)
     CALL_IF_2_4(8, 32, 3, 1, 4)
