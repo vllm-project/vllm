@@ -468,8 +468,7 @@ def _sdpa_attention(query, key, value, prefill_meta, attn_metadata, num_tokens,
                          dtype=query.dtype,
                          device=query.device)
 
-    for seq_len, mask in zip(prefill_meta.seq_lens,
-                            attn_metadata.attn_bias):
+    for seq_len, mask in zip(prefill_meta.seq_lens, attn_metadata.attn_bias):
         end = start + seq_len
         with torch.backends.cuda.sdp_kernel(enable_math=True,
                                             enable_flash=False,
