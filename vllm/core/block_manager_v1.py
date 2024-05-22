@@ -260,7 +260,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # request ID
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
-    def get_seq_num_required_blocks(self, seq: Sequence) -> int:
+    def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
         if seq is None:
             return 0
         return len(seq.logical_token_blocks)
@@ -269,9 +269,9 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        self_num_required_blocks = self.get_seq_num_required_blocks(
+        self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
-        cross_num_required_blocks = self.get_seq_num_required_blocks(
+        cross_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_encoder_seq())
         num_required_blocks = self_num_required_blocks + \
                               cross_num_required_blocks
