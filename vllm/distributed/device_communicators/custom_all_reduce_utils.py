@@ -34,6 +34,7 @@ def producer(i):
         )
         # produce a tensor in GPU i
         data = torch.zeros((128, ), device=f"cuda:{i}")
+        # get the information to reconstruct the shared tensor
         func, args = torch.multiprocessing.reductions.reduce_tensor(data)
         args = list(args)
         dist.broadcast_object_list([(func, args)], src=0)
@@ -57,6 +58,9 @@ def consumer(j):
         func: Callable
         args: List
         func, args = recv[0]  # type: ignore
+        # `args[6]` is the device id
+        # by default pytorch will use `i` from the producer
+        # here we need to set it to `j` to test P2P access
         args[6] = j
         data = func(*args)
         data += 1
@@ -67,9 +71,10 @@ def consumer(j):
 
 def can_actually_p2p(i, j):
     """
-    Usually, checking if P2P access is enabled is done by
-    `torch.cuda.can_device_access_peer(i, j)`. However, on some platforms,
-    the driver might return True even if P2P access is not actually possible.
+    Usually, checking if P2P access is enabled can be done by
+    `torch.cuda.can_device_access_peer(i, j)`. However, sometimes
+    the driver might be broken, and `torch.cuda.can_device_access_peer(i, j)`
+    returns `True` even if P2P access is not actually possible.
     See https://github.com/vllm-project/vllm/issues/2728
     Therefore, we have to perform a real P2P access to check if it is actually
     possible.
@@ -82,6 +87,12 @@ def can_actually_p2p(i, j):
     GPU i --> cuda context i --> tensor i --> process i
                                  |shared|
     GPU j --> cuda context j --> tensor j --> process j
+    That is to say, process i creates a tensor in GPU i, passes IPC handle to
+    process j, and process j accesses the tensor in GPU j. Any operation on the
+    tensor in process j will be reflected in the tensor in process i, because
+    they are the same memory segment.
+    It is important to note that process j accesses the tensor in GPU j, not
+    GPU i. That's why we need p2p access.
     """
     pi = mp.Process(target=producer, args=(i, ))
     pj = mp.Process(target=consumer, args=(j, ))
