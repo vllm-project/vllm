@@ -95,7 +95,8 @@ def _apply_logits_processors(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
-        logits_processors_use_prompt_tokens = sampling_params.logits_processors_use_prompt_tokens
+        logits_processors_use_prompt_tokens = \
+            sampling_params.logits_processors_use_prompt_tokens
         if logits_processors:
             found_logits_processors = True
             for seq_id, logits_row_idx in zip(seq_ids,
@@ -108,13 +109,18 @@ def _apply_logits_processors(
                 for use_prompt_tokens in logits_processors_use_prompt_tokens:
                     if use_prompt_tokens:
                         # The i-th logit processor need prompt tokens ids
-                        token_ids_seq.append(seq_group.seq_data[seq_id].prompt_token_ids + token_ids)
+                        token_ids_seq.append(
+                            seq_group.seq_data[seq_id].prompt_token_ids
+                            + token_ids
+                        )
                     else:
-                        # The i-th logit processor need only generated tokens ids
+                        # The i-th logit processor need only generated
+                        # tokens ids
                         token_ids_seq.append(token_ids)
 
                 for l_p_idx, logits_processor in enumerate(logits_processors):
-                    logits_row = logits_processor(token_ids_seq[l_p_idx], logits_row)
+                    logits_row = logits_processor(token_ids_seq[l_p_idx],
+                                                  logits_row)
 
                 logits[logits_row_idx] = logits_row
 
