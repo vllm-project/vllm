@@ -131,15 +131,17 @@ def bench_run(results, model, act_order, is_k_full, num_bits, group_size,
             description="gptq_marlin_gemm",
         ).blocked_autorange(min_run_time=min_run_time))
 
-    results.append(
-        benchmark.Timer(
-            stmt=
-            "output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, num_bits, size_m, size_n, size_k)",  # noqa: E501
-            globals=globals,
-            label=label,
-            sub_label=sub_label,
-            description="gptq_marlin_24_gemm",
-        ).blocked_autorange(min_run_time=min_run_time))
+    if (num_bits in GPTQ_MARLIN_24_SUPPORTED_NUM_BITS
+            and group_size in GPTQ_MARLIN_24_SUPPORTED_GROUP_SIZES):
+        results.append(
+            benchmark.Timer(
+                stmt=
+                "output = gptq_marlin_24_gemm(a, marlin_24_q_w_comp, marlin_24_meta, marlin_24_s, marlin_24_workspace.scratch, num_bits, size_m, size_n, size_k)",  # noqa: E501
+                globals=globals,
+                label=label,
+                sub_label=sub_label,
+                description="gptq_marlin_24_gemm",
+            ).blocked_autorange(min_run_time=min_run_time))
 
     results.append(
         benchmark.Timer(
