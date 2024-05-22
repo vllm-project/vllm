@@ -4,16 +4,16 @@
 namespace {
 template <typename scalar_t>
 void rotary_embedding_impl(
-    const int64_t
-        *__restrict__ positions, // [batch_size, seq_len] or [num_tokens]
-    scalar_t
-        *__restrict__ query, /// [batch_size, seq_len, num_heads, head_size] or
-                             /// [num_tokens, num_heads, head_size]
-    scalar_t
-        *__restrict__ key, // [batch_size, seq_len, num_kv_heads, head_size] or
-                           // [num_tokens, num_kv_heads, head_size]
-    const scalar_t
-        *__restrict__ cos_sin_cache, // [max_position, 2, rot_dim // 2]
+    const int64_t* __restrict__ positions,  // [batch_size, seq_len] or
+                                            // [num_tokens]
+    scalar_t* __restrict__ query,           /// [batch_size, seq_len, num_heads,
+                                   /// head_size] or [num_tokens, num_heads,
+                                   /// head_size]
+    scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
+                                 // head_size] or [num_tokens, num_kv_heads,
+                                 // head_size]
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                 // 2]
     const int rot_dim, const int64_t query_stride, const int64_t key_stride,
     const int num_heads, const int num_kv_heads, const int head_size,
     const int num_tokens) {
@@ -26,7 +26,7 @@ void rotary_embedding_impl(
 #pragma omp parallel for
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     int64_t pos = positions[token_idx];
-    const scalar_t *cache_ptr = cos_sin_cache + pos * rot_dim;
+    const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
 
     for (int i = 0; i < num_heads; ++i) {
       const int head_idx = i;
@@ -94,16 +94,16 @@ void rotary_embedding_impl(
 
 template <typename scalar_t>
 void rotary_embedding_gptj_impl(
-    const int64_t
-        *__restrict__ positions, // [batch_size, seq_len] or [num_tokens]
-    scalar_t
-        *__restrict__ query, /// [batch_size, seq_len, num_heads, head_size] or
-                             /// [num_tokens, num_heads, head_size]
-    scalar_t
-        *__restrict__ key, // [batch_size, seq_len, num_kv_heads, head_size] or
-                           // [num_tokens, num_kv_heads, head_size]
-    const scalar_t
-        *__restrict__ cos_sin_cache, // [max_position, 2, rot_dim // 2]
+    const int64_t* __restrict__ positions,  // [batch_size, seq_len] or
+                                            // [num_tokens]
+    scalar_t* __restrict__ query,           /// [batch_size, seq_len, num_heads,
+                                   /// head_size] or [num_tokens, num_heads,
+                                   /// head_size]
+    scalar_t* __restrict__ key,  // [batch_size, seq_len, num_kv_heads,
+                                 // head_size] or [num_tokens, num_kv_heads,
+                                 // head_size]
+    const scalar_t* __restrict__ cos_sin_cache,  // [max_position, 2, rot_dim //
+                                                 // 2]
     const int rot_dim, const int64_t query_stride, const int64_t key_stride,
     const int num_heads, const int num_kv_heads, const int head_size,
     const int num_tokens) {
@@ -113,13 +113,13 @@ void rotary_embedding_gptj_impl(
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     for (int i = 0; i < num_heads; ++i) {
       int64_t pos = positions[token_idx];
-      const scalar_t *cache_ptr = cos_sin_cache + pos * rot_dim;
-      const scalar_t *cos_cache_ptr = cache_ptr;
-      const scalar_t *sin_cache_ptr = cache_ptr + embed_dim;
+      const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+      const scalar_t* cos_cache_ptr = cache_ptr;
+      const scalar_t* sin_cache_ptr = cache_ptr + embed_dim;
       const int head_idx = i;
       const int64_t token_head =
           token_idx * query_stride + head_idx * head_size;
-      scalar_t *head_query = token_head + query;
+      scalar_t* head_query = token_head + query;
       for (int j = 0; j < embed_dim; j += 1) {
         const int rot_offset = j;
         const int x_index = 2 * rot_offset;
@@ -141,12 +141,12 @@ void rotary_embedding_gptj_impl(
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     for (int i = 0; i < num_kv_heads; ++i) {
       int64_t pos = positions[token_idx];
-      const scalar_t *cache_ptr = cos_sin_cache + pos * rot_dim;
-      const scalar_t *cos_cache_ptr = cache_ptr;
-      const scalar_t *sin_cache_ptr = cache_ptr + embed_dim;
+      const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
+      const scalar_t* cos_cache_ptr = cache_ptr;
+      const scalar_t* sin_cache_ptr = cache_ptr + embed_dim;
       const int head_idx = i;
       const int64_t token_head = token_idx * key_stride + head_idx * head_size;
-      scalar_t *head_key = key + token_head;
+      scalar_t* head_key = key + token_head;
       for (int j = 0; j < embed_dim; j += 1) {
         const int rot_offset = j;
         const int x_index = 2 * rot_offset;
@@ -164,11 +164,11 @@ void rotary_embedding_gptj_impl(
     }
   }
 }
-}; // namespace
+};  // namespace
 
-void rotary_embedding(torch::Tensor &positions, torch::Tensor &query,
-                          torch::Tensor &key, int head_size,
-                          torch::Tensor &cos_sin_cache, bool is_neox) {
+void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
+                      torch::Tensor& key, int head_size,
+                      torch::Tensor& cos_sin_cache, bool is_neox) {
   int num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;

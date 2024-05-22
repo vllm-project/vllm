@@ -5,6 +5,7 @@ tomli==2.0.1
 ruff==0.1.5
 codespell==2.2.6
 isort==5.13.2
+clang-format==18.1.5
 
 # type checking
 mypy==1.9.0

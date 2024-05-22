@@ -26,12 +26,14 @@ constexpr int ceildiv(int a, int b) { return (a + b - 1) / b; }
 // corresponding index accesses must be compile-time constants, which is why we
 // extensively use `#pragma unroll` throughout the kernel code to guarantee
 // this.
-template <typename T, int n> struct Vec {
+template <typename T, int n>
+struct Vec {
   T elems[n];
-  __device__ T &operator[](int i) { return elems[i]; }
+  __device__ T& operator[](int i) { return elems[i]; }
 };
 
-template <int M_, int N_, int K_> struct ShapeBase {
+template <int M_, int N_, int K_>
+struct ShapeBase {
   static constexpr int M = M_, N = N_, K = K_;
 };
 
@@ -44,6 +46,6 @@ using FragA = Vec<half2, 4>;
 using FragB = Vec<half2, 2>;
 using FragM = Vec<uint, 1>;
 using FragC = Vec<float, 4>;
-using FragS = Vec<half2, 1>; // quantization scales
+using FragS = Vec<half2, 1>;  // quantization scales
 
-} // namespace marlin_24
+}  // namespace marlin_24
