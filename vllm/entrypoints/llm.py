@@ -1,5 +1,6 @@
-from typing import (List, Optional, Sequence, Type, TypeVar, Union, cast,
-                    overload)
+from contextlib import contextmanager
+from typing import (ClassVar, List, Optional, Sequence, Type, TypeVar, Union,
+                    cast, overload)
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -87,6 +88,18 @@ class LLM:
         disable_custom_all_reduce: See ParallelConfig
     """
 
+    DEPRECATE_LEGACY: ClassVar[bool] = False
+    """A flag to toggle whether to deprecate the legacy generate/encode API."""
+
+    @staticmethod
+    @contextmanager
+    def deprecate_legacy_ctx():
+        LLM.DEPRECATE_LEGACY = True
+
+        yield
+
+        LLM.DEPRECATE_LEGACY = False
+
     def __init__(
         self,
         model: str,
@@ -144,7 +157,7 @@ class LLM:
     ) -> None:
         self.llm_engine.tokenizer.tokenizer = tokenizer
 
-    @overload  # DEPRECATED: single (prompt + optional token ids)
+    @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
         self,
         prompts: str,
@@ -157,7 +170,7 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @overload  # DEPRECATED: multi (prompt + optional token ids)
+    @overload  # LEGACY: multi (prompt + optional token ids)
     def generate(
         self,
         prompts: List[str],
@@ -170,7 +183,7 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @overload  # DEPRECATED: single (token ids + optional prompt)
+    @overload  # LEGACY: single (token ids + optional prompt)
     def generate(
         self,
         prompts: Optional[str] = None,
@@ -184,7 +197,7 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @overload  # DEPRECATED: multi (token ids + optional prompt)
+    @overload  # LEGACY: multi (token ids + optional prompt)
     def generate(
         self,
         prompts: Optional[List[str]] = None,
@@ -198,7 +211,7 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @overload  # DEPRECATED: single or multi token ids [pos-only]
+    @overload  # LEGACY: single or multi token ids [pos-only]
     def generate(
         self,
         prompts: None,
@@ -223,7 +236,10 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @deprecate_kwargs('prompts', 'prompt_token_ids', 'multi_modal_data')
+    @deprecate_kwargs('prompts',
+                      'prompt_token_ids',
+                      'multi_modal_data',
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY)
     def generate(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
@@ -279,7 +295,7 @@ class LLM:
 
         return self._run_engine(RequestOutput, use_tqdm=use_tqdm)
 
-    @overload  # DEPRECATED: single (prompt + optional token ids)
+    @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
         self,
         prompts: str,
@@ -292,7 +308,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @overload  # DEPRECATED: multi (prompt + optional token ids)
+    @overload  # LEGACY: multi (prompt + optional token ids)
     def encode(
         self,
         prompts: List[str],
@@ -305,7 +321,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @overload  # DEPRECATED: single (token ids + optional prompt)
+    @overload  # LEGACY: single (token ids + optional prompt)
     def encode(
         self,
         prompts: Optional[str] = None,
@@ -319,7 +335,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @overload  # DEPRECATED: multi (token ids + optional prompt)
+    @overload  # LEGACY: multi (token ids + optional prompt)
     def encode(
         self,
         prompts: Optional[List[str]] = None,
@@ -333,7 +349,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @overload  # DEPRECATED: single or multi token ids [pos-only]
+    @overload  # LEGACY: single or multi token ids [pos-only]
     def encode(
         self,
         prompts: None,
@@ -358,7 +374,10 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @deprecate_kwargs('prompts', 'prompt_token_ids', 'multi_modal_data')
+    @deprecate_kwargs('prompts',
+                      'prompt_token_ids',
+                      'multi_modal_data',
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY)
     def encode(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
@@ -413,7 +432,7 @@ class LLM:
 
         return self._run_engine(EmbeddingRequestOutput, use_tqdm=use_tqdm)
 
-    # DEPRECATED
+    # LEGACY
     def _convert_v1_inputs(
         self,
         prompts: Optional[Union[str, List[str]]],

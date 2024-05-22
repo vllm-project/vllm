@@ -655,24 +655,36 @@ def enable_trace_function_call_for_thread() -> None:
         enable_trace_function_call(log_path)
 
 
+def identity(value: T) -> T:
+    return value
+
+
 F = TypeVar('F', bound=Callable[..., Any])
 
 
-def deprecate_kwargs(*kws: str) -> Callable[[F], F]:
+def deprecate_kwargs(
+        *kws: str,
+        is_deprecated: Union[bool, Callable[[],
+                                            bool]] = True) -> Callable[[F], F]:
     deprecated_kws = set(kws)
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
 
     def wrapper(fn: F) -> F:
 
         @wraps(fn)
         def inner(*args, **kwargs):
-            deprecated_kwargs = kwargs.keys() & deprecated_kws
-            if deprecated_kwargs:
-                warnings.warn(
-                    DeprecationWarning(
-                        f"The keyword arguments {deprecated_kwargs} are "
-                        "deprecated and will be removed in a future update."),
-                    stacklevel=3,  # The inner function takes up one level
-                )
+            if is_deprecated():
+                deprecated_kwargs = kwargs.keys() & deprecated_kws
+                if deprecated_kwargs:
+                    warnings.warn(
+                        DeprecationWarning(
+                            f"The keyword arguments {deprecated_kwargs} are "
+                            "deprecated and will be removed in a future update."
+                        ),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
 
             return fn(*args, **kwargs)
 
