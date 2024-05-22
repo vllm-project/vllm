@@ -76,7 +76,7 @@ Build from source
 Intel Extension for PyTorch
 ---------------------------
 
-- `Intel Extension for PyTorch (IPEX) <https://github.com/intel/intel-extension-for-pytorch>` extends PyTorch with up-to-date features optimizations for an extra performance boost on Intel hardware. IPEX can be enabled in the CPU backend by ``VLLM_CPU_IPEX=1``, for example:
+- `Intel Extension for PyTorch (IPEX) <https://github.com/intel/intel-extension-for-pytorch>`_ extends PyTorch with up-to-date features optimizations for an extra performance boost on Intel hardware. IPEX can be enabled in the CPU backend by ``VLLM_CPU_IPEX=1``, for example:
 
 .. code-block:: console
 
