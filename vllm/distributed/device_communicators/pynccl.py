@@ -126,6 +126,34 @@ class PyNcclCommunicator:
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
 
+    def send(self, tensor: torch.Tensor, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        # Hardcoded to send to the next rank for now for simplicity.
+        dst = (self.rank + 1) % self.world_size
+        self.nccl.ncclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           ncclDataTypeEnum.from_torch(tensor.dtype), dst,
+                           self.comm, cudaStream_t(stream.cuda_stream))
+
+    def recv(self, tensor: torch.Tensor, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        # Hardcoded to receive from the previous rank for now for simplicity.
+        src = (self.rank - 1) % self.world_size
+        self.nccl.ncclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           ncclDataTypeEnum.from_torch(tensor.dtype), src,
+                           self.comm, cudaStream_t(stream.cuda_stream))
+
     @contextmanager
     def change_state(self,
                      enable: Optional[bool] = None,
