@@ -96,6 +96,8 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
+        logits_processors_use_prompt_tokens: Boolean list of whether to add prompt tokens
+            to the 'token_ids' argument of the logit processor.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
@@ -128,6 +130,7 @@ class SamplingParams:
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
+        logits_processors_use_prompt_tokens: Optional[List[bool]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
     ) -> None:
         self.n = n
@@ -176,6 +179,12 @@ class SamplingParams:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
         else:
             self.output_text_buffer_length = 0
+
+        if logits_processors and logits_processors_use_prompt_tokens is None:
+            # Not use prompt tokens in each logit processor
+            self.logits_processors_use_prompt_tokens = [False] * len(self.logits_processors)
+        else:
+            self.logits_processors_use_prompt_tokens = logits_processors_use_prompt_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -243,6 +252,11 @@ class SamplingParams:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
+        if (self.logits_processors is not None and
+                len(self.logits_processors) != len(self.logits_processors_use_prompt_tokens)):
+            raise ValueError(
+                "logits_processors_use_prompt_tokens must be the same length as logits_processors"
+            )
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
@@ -258,6 +272,7 @@ class SamplingParams:
             raise ValueError(
                 f"early_stopping must be True, False, or 'never', "
                 f"got {self.early_stopping}.")
+
 
     def _verify_non_beam_search(self) -> None:
         if self.early_stopping is not False:
