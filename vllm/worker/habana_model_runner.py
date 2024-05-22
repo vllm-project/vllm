@@ -29,6 +29,8 @@ from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (HabanaMemoryProfiler, is_pin_memory_available,
                         make_tensor_with_pad, format_bytes)
 
+from .profiler import Profiler
+
 logger = init_logger(__name__)
 
 _PAD_SLOT_ID = 0
@@ -156,6 +158,7 @@ class HabanaModelRunner:
         self.lora_config = lora_config
         self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.profiler = Profiler()
 
         self.sliding_window = (model_config.get_sliding_window()
                                if model_config is not None else None)
@@ -696,16 +699,22 @@ class HabanaModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
+        event_start = self.profiler.get_timestamp_us()
+        is_prompt = seq_group_metadata_list[0].is_prompt
+        base_event_name = 'prompt' if is_prompt else 'decode'
+        self.profiler.start('internal', base_event_name)
+
         if self.is_driver_worker:
-            is_prompt = seq_group_metadata_list[0].is_prompt
             real_batch_size = len(seq_group_metadata_list)
             bucket_cfg = self.prompt_bs_bucket_cfg if is_prompt else self.decode_bs_bucket_cfg
-            batch_size_padding = find_bucket(real_batch_size, bucket_cfg) - real_batch_size
+            batch_size_padded = find_bucket(real_batch_size, bucket_cfg)
+            batch_size_padding = batch_size_padded - real_batch_size
             seq_group_metadata_list = seq_group_metadata_list.copy()
             seq_group_metadata_list.extend(seq_group_metadata_list[0] for _ in range(batch_size_padding))
-        (input_tokens, input_positions, attn_metadata, sampling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
-         ) = self.prepare_input_tensors(seq_group_metadata_list)
+        with self.profiler.record_event('internal', 'prepare_input_tensors'):
+            (input_tokens, input_positions, attn_metadata, sampling_metadata,
+            lora_requests, lora_mapping, multi_modal_input
+            ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
@@ -720,11 +729,13 @@ class HabanaModelRunner:
             execute_model_kwargs.update({"image_input": multi_modal_input})
 
         htorch.core.mark_step()
-        hidden_states = self.model(**execute_model_kwargs)
+        with self.profiler.record_event('internal', f'model_{base_event_name}_eager_bs{real_batch_size}'):
+            hidden_states = self.model(**execute_model_kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        with self.profiler.record_event('internal', 'compute_logits'):
+            logits = self.model.compute_logits(hidden_states, sampling_metadata)
         htorch.core.mark_step()
 
         # Only perform sampling in the driver worker.
@@ -732,12 +743,30 @@ class HabanaModelRunner:
             return None
 
         # Sample the next token.
-        output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        with self.profiler.record_event('internal', 'sample'):
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
         output.outputs = output.outputs[:real_batch_size]
         htorch.core.mark_step()
+
+        # Stop recording 'execute_model' event
+        self.profiler.end()
+
+        if self.profiler.enabled:
+            event_end = self.profiler.get_timestamp_us()
+            duration = event_end - event_start
+            throughput = batch_size_padded / (duration / 1e6)
+            throughput_effective = real_batch_size / (duration / 1e6)
+            counters = {
+                'batch_size': batch_size_padded,
+                'batch_size_effective': real_batch_size,
+                'throughput': throughput,
+                'throughput_effective': throughput_effective
+            }
+            self.profiler.record_counter(event_start, counters)
+
         return output
 
     def create_dummy_seq_group_metadata(self, group_id, seq_len, is_prompt):
@@ -770,12 +799,16 @@ class HabanaModelRunner:
         self.warmup_scenario(self.max_num_seqs, seq_len, True, kv_caches)
 
     def warmup_scenario(self, batch_size, seq_len, is_prompt, kv_caches) -> None:
+        scenario_name = f"warmup_{'prompt' if is_prompt else 'decode'}_bs{batch_size}_seq{seq_len}"
+        self.profiler.start('internal', scenario_name)
         seqs = [self.create_dummy_seq_group_metadata(i, seq_len, is_prompt) for i in range(batch_size)]
         _ = self.execute_model(seqs, kv_caches)
         torch.hpu.synchronize()
+        self.profiler.end()
 
     @torch.inference_mode()
     def warmup_model(self, kv_caches: List[torch.Tensor]) -> None:
+        self.profiler.start('internal', 'warmup')
         times = 1  # TODO: this is will be updated once HPU graphs are reintroduced
         scenarios = []
         scenarios.extend(itertools.product(warmup_buckets(self.decode_bs_bucket_cfg), warmup_buckets(self.decode_seq_bucket_cfg), [False]))
@@ -792,6 +825,7 @@ class HabanaModelRunner:
         end_mem = HabanaMemoryProfiler.current_memory_usage()
         elapsed_time = end_time - start_time
         logger.info(f"Warmup finished in {elapsed_time:.0f} secs, allocated {format_bytes(end_mem - start_mem)} of device memory")
+        self.profiler.end()
 
     @property
     def vocab_size(self) -> int:
