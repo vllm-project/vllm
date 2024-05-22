@@ -727,7 +727,6 @@ class LLMEngine:
         num_running_sys = len(self.scheduler.running)
         num_swapped_sys = len(self.scheduler.swapped)
         num_waiting_sys = len(self.scheduler.waiting)
-        num_preempted = scheduler_outputs.num_preempted
 
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
@@ -848,7 +847,6 @@ class LLMEngine:
             #   Scheduler State
             num_running_sys=num_running_sys,
             num_swapped_sys=num_swapped_sys,
-            num_preempted=num_preempted,
             num_waiting_sys=num_waiting_sys,
             #   KV Cache Usage in %
             gpu_cache_usage_sys=gpu_cache_usage_sys,
