@@ -75,7 +75,8 @@ class GPT2Attention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               scale=self.scale,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
