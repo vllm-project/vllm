@@ -176,6 +176,7 @@ class Stats:
     num_running_sys: int
     num_waiting_sys: int
     num_swapped_sys: int
+    num_preempted: int
     #   KV Cache Usage in %
     gpu_cache_usage_sys: float
     cpu_cache_usage_sys: float
@@ -348,6 +349,7 @@ class StatLogger:
                 generation_throughput,
                 stats.num_running_sys,
                 stats.num_swapped_sys,
+                stats.num_preempted,
                 stats.num_waiting_sys,
                 stats.gpu_cache_usage_sys * 100,
                 stats.cpu_cache_usage_sys * 100,
