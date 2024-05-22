@@ -6,12 +6,12 @@ if TYPE_CHECKING:
 
 
 class ParsedText(TypedDict):
-    text: str
+    content: str
     is_tokens: Literal[False]
 
 
 class ParsedTokens(TypedDict):
-    text: List[int]
+    content: List[int]
     is_tokens: Literal[True]
 
 
@@ -33,7 +33,7 @@ def parse_and_batch_prompt(
 ) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
     if isinstance(prompt, str):
         # case 1: a string
-        return [ParsedText(text=prompt, is_tokens=False)]
+        return [ParsedText(content=prompt, is_tokens=False)]
 
     if isinstance(prompt, list):
         if len(prompt) == 0:
@@ -42,13 +42,13 @@ def parse_and_batch_prompt(
         if isinstance(prompt[0], str):
             # case 2: array of strings
             return [
-                ParsedText(text=elem, is_tokens=False)
+                ParsedText(content=elem, is_tokens=False)
                 for elem in cast(List[str], prompt)
             ]
         if isinstance(prompt[0], int):
             # case 3: array of tokens
             elem = cast(List[int], prompt)
-            return [ParsedTokens(text=elem, is_tokens=True)]
+            return [ParsedTokens(content=elem, is_tokens=True)]
         if isinstance(prompt[0], list):
             if len(prompt[0]) == 0:
                 raise ValueError("please provide at least one prompt")
@@ -56,7 +56,7 @@ def parse_and_batch_prompt(
             if isinstance(prompt[0][0], int):
                 # case 4: array of token arrays
                 return [
-                    ParsedTokens(text=elem, is_tokens=True)
+                    ParsedTokens(content=elem, is_tokens=True)
                     for elem in cast(List[List[int]], prompt)
                 ]
 

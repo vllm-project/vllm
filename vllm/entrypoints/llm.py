@@ -442,10 +442,10 @@ class LLM:
         # skip_tokenizer_init is now checked in engine
 
         if prompts is not None:
-            prompts = [p["text"] for p in parse_and_batch_prompt(prompts)]
+            prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
         if prompt_token_ids is not None:
             prompt_token_ids = [
-                p["text"] for p in parse_and_batch_prompt(prompt_token_ids)
+                p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
             ]
 
         num_requests = None
