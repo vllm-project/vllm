@@ -4,20 +4,19 @@
 
 #include "../../dispatch_utils.h"
 
-static inline __device__ int8_t float_to_int8_rn(float x)
-{
+static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
-    float dst;
-    // Round to nearest even
-    asm volatile("v_rndne_f32 %0, %1;" : "=v"(dst) : "v"(x));
-    // Saturate
-    dst = dst < -128.0f ? -128.0f : dst;
-    dst = dst > 127.0f ? 127.0f : dst;
-    return static_cast<int8_t>(dst);
+  float dst;
+  // Round to nearest even
+  asm volatile("v_rndne_f32 %0, %1;" : "=v"(dst) : "v"(x));
+  // Saturate
+  dst = dst < -128.0f ? -128.0f : dst;
+  dst = dst > 127.0f ? 127.0f : dst;
+  return static_cast<int8_t>(dst);
 #else
-    uint32_t dst;
-    asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
-    return reinterpret_cast<const int8_t&>(dst);
+  uint32_t dst;
+  asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
+  return reinterpret_cast<const int8_t&>(dst);
 #endif
 }
 
@@ -25,10 +24,8 @@ namespace vllm {
 
 template <typename scalar_t, typename scale_type>
 __global__ void static_scaled_int8_quant_kernel(
-  const scalar_t* __restrict__ input,
-  int8_t* __restrict__ out,
-  scale_type scale,
-  const int hidden_size) {
+    const scalar_t* __restrict__ input, int8_t* __restrict__ out,
+    scale_type scale, const int hidden_size) {
   const int tid = threadIdx.x;
   const int token_idx = blockIdx.x;
 
@@ -37,12 +34,11 @@ __global__ void static_scaled_int8_quant_kernel(
         float_to_int8_rn(((float)input[token_idx * hidden_size + i]) / scale);
   }
 }
-} // namespace vllm
+}  // namespace vllm
 
-void static_scaled_int8_quant(
-  torch::Tensor& out,   // [..., hidden_size]
-  torch::Tensor& input, // [..., hidden_size]
-  float scale) {
+void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
+                              torch::Tensor& input,  // [..., hidden_size]
+                              float scale) {
   assert(input.is_contiguous());
   assert(out.is_contiguous());
   int hidden_size = input.size(-1);
@@ -50,11 +46,11 @@ void static_scaled_int8_quant(
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
-    vllm::static_scaled_int8_quant_kernel<scalar_t, float><<<grid, block, 0, stream>>>(
-      input.data_ptr<scalar_t>(),
-      out.data_ptr<int8_t>(),
-      scale,
-      hidden_size);
-  });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
+        vllm::static_scaled_int8_quant_kernel<scalar_t, float>
+            <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
+                                         out.data_ptr<int8_t>(), scale,
+                                         hidden_size);
+      });
 }
