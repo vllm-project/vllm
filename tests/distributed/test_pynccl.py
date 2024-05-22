@@ -151,6 +151,68 @@ def test_pynccl_with_cudagraph():
     distributed_run(worker_fn_with_cudagraph, 2)
 
 
+@worker_fn_wrapper
+def pp_worker_fn():
+    pynccl_comm = PyNcclCommunicator()
+    if pynccl_comm.rank == 0:
+        tensor = torch.ones(16, 1024, 1024,
+                            dtype=torch.float32).cuda(pynccl_comm.rank)
+    else:
+        tensor = torch.empty(16, 1024, 1024,
+                             dtype=torch.float32).cuda(pynccl_comm.rank)
+    with pynccl_comm.change_state(enable=True):
+        if pynccl_comm.rank == 0:
+            pynccl_comm.send(tensor)
+        else:
+            pynccl_comm.recv(tensor)
+    result = tensor.mean().cpu().item()
+    assert result == 1
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Need at least 2 GPUs to run the test.")
+def test_pynccl_pp():
+    distributed_run(pp_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def multiple_pp_worker_fn():
+    device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+    groups = [
+        torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
+        torch.distributed.new_group(ranks=[1, 3], backend="gloo")
+    ]
+    group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
+    pynccl_comm = PyNcclCommunicator(group=group, device=device)
+    if pynccl_comm.rank == 0:
+        tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
+    elif pynccl_comm.rank == 1:
+        tensor = 2 * torch.ones(
+            16, 1024, 1024, dtype=torch.float32, device=device)
+    else:
+        tensor = torch.empty(16,
+                             1024,
+                             1024,
+                             dtype=torch.float32,
+                             device=device)
+    with pynccl_comm.change_state(enable=True):
+        if pynccl_comm.rank in [0, 1]:
+            pynccl_comm.send(tensor)
+        else:
+            pynccl_comm.recv(tensor)
+    result = tensor.mean().cpu().item()
+    if pynccl_comm.rank in [0, 2]:
+        assert result == 1
+    else:
+        assert result == 2
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 4,
+                    reason="Need at least 4 GPUs to run the test.")
+def test_pynccl_multiple_pp():
+    distributed_run(multiple_pp_worker_fn, 4)
+
+
 def test_ncclGetUniqueId():
     lib = NCCLLibrary()
     unique_id = lib.ncclGetUniqueId()
