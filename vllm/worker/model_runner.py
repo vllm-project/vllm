@@ -167,11 +167,12 @@ class SingleStepSpeculativeModelRunner:
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
-                if seq_group_metadata.request_id in self.prev_request_context_lengths:
-                    prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
-                    accepted_length = context_len - prev_context_length
-                    accepted_lengths_list.append(accepted_length)
-                self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
+                if self.model.current_head_index == 0:
+                    if seq_group_metadata.request_id in self.prev_request_context_lengths:
+                        prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
+                        accepted_length = context_len - prev_context_length
+                        accepted_lengths_list.append(accepted_length)
+                    self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
 
         if not self.model.first_decode_step:
             self.model.accepted_token_lengths = torch.tensor(accepted_lengths_list, device=self.device, dtype=torch.long)
@@ -197,24 +198,19 @@ class SingleStepSpeculativeModelRunner:
             kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
         # only do this on the first head since the inputs will be the same throughout
-        if self.model.current_head_index == 0:
-            input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
-            self.input_tokens = input_tokens
-            self.input_positions = input_positions
-            self.seq_lens = seq_lens
-            self.query_lens = query_lens
+        input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": self.input_tokens,
-            "positions": self.input_positions,
+            "input_ids": input_tokens,
+            "positions": input_positions,
             "kv_caches": None,
             "attn_metadata": None,
         }
         hidden_states = model_executable(**execute_model_kwargs)
 
         sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, self.seq_lens, self.query_lens, self.device,
+            seq_group_metadata_list, seq_lens, query_lens, self.device,
             self.pin_memory)
 
         # Compute the logits.

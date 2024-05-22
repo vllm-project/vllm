@@ -4,13 +4,16 @@ from fms_extras.models.hf.modeling_mlp_speculator import MLPSpeculatorConfig
 from vllm import LLM, SamplingParams
 AutoConfig.register("mlp_speculator", MLPSpeculatorConfig)
 
+template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{}\n\n### Response:"
+
 # Sample prompts.
 prompts = [
-    # "Hello, my name is",
-    "The president of the United States is",
+    "Hello, my name is",
+    # "The president of the United States is",
     # "The capital of France is",
     # "The future of AI is",
 ]
+prompts = [template.format(prompt) for prompt in prompts]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=100)
 
