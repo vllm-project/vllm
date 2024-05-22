@@ -23,8 +23,9 @@ def mute_output():
         yield
 
 
-def producer(i):
-    # launch process, discard output
+def producer(i, CUDA_VISIBLE_DEVICES=None):
+    if CUDA_VISIBLE_DEVICES is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
     with mute_output():
         dist.init_process_group(
             backend="gloo",
@@ -43,8 +44,9 @@ def producer(i):
         assert data.mean().item() == 1
 
 
-def consumer(j):
-    # launch process, discard output
+def consumer(j, CUDA_VISIBLE_DEVICES=None):
+    if CUDA_VISIBLE_DEVICES is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = CUDA_VISIBLE_DEVICES
     with mute_output():
         dist.init_process_group(
             backend="gloo",
@@ -94,8 +96,11 @@ def can_actually_p2p(i, j):
     It is important to note that process j accesses the tensor in GPU j, not
     GPU i. That's why we need p2p access.
     """
-    pi = mp.Process(target=producer, args=(i, ))
-    pj = mp.Process(target=consumer, args=(j, ))
+    CUDA_VISIBLE_DEVICES = os.getenv('CUDA_VISIBLE_DEVICES', None)
+    # pass the CUDA_VISIBLE_DEVICES to the child process
+    # to make sure they see the same set of GPUs
+    pi = mp.Process(target=producer, args=(i, CUDA_VISIBLE_DEVICES))
+    pj = mp.Process(target=consumer, args=(j, CUDA_VISIBLE_DEVICES))
     pi.start()
     pj.start()
     pi.join()
