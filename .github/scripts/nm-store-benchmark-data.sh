@@ -17,6 +17,7 @@ usage() {
     echo "  -o    - path to the destination-root"
     echo "  -e    - github event name"
     echo "  -l    - github instance label"
+    echo "  -p    - python version"
     echo "  -b    - github branch name"
     echo "  -c    - github commit hash"
     echo "  -r    - github run id"
@@ -28,11 +29,12 @@ INPUT_PATH=""
 OUTPUT_PATH=""
 GITHUB_EVENT_NAME=""
 GITHUB_LABEL=""
+PYTHON_VERSION=""
 GITHUB_BRANCH=""
 GITHUB_COMMIT=""
 GITHUB_RUN_ID=""
 
-while getopts "hi:o:e:l:b:c:r:" OPT; do
+while getopts "hi:o:e:l:p:b:c:r:" OPT; do
     case "${OPT}" in
         h)
             usage
@@ -49,6 +51,9 @@ while getopts "hi:o:e:l:b:c:r:" OPT; do
             ;;
         l)
             GITHUB_LABEL="${OPTARG}"
+            ;;
+        p)
+            PYTHON_VERSION="${OPTARG}"
             ;;
         b)
             GITHUB_BRANCH="${OPTARG}"
@@ -68,12 +73,13 @@ echo "INPUT_PATH : ${INPUT_PATH}"
 echo "OUTPUT_PATH : ${OUTPUT_PATH}"
 echo "GITHUB_EVENT_NAME : ${GITHUB_EVENT_NAME}"
 echo "GITHUB_LABEL : ${GITHUB_LABEL}"
+echo "PYTHON VERSION: ${PYTHON_VERSION}"
 echo "GITHUB_BRANCH : ${GITHUB_BRANCH}"
 echo "GITHUB_COMMIT : ${GITHUB_COMMIT}"
 echo "GITHUB_RUN_ID : ${GITHUB_RUN_ID}"
 
 # Make sure we have all the information to construct a correct path
-if [[ "${INPUT_PATH}" == "" || "${OUTPUT_PATH}" == "" || "${GITHUB_EVENT_NAME}" == "" || "${GITHUB_LABEL}" == "" || "${GITHUB_BRANCH}" == "" || "${GITHUB_COMMIT}" == "" || "${GITHUB_RUN_ID}" == "" ]];
+if [[ "${INPUT_PATH}" == "" || "${OUTPUT_PATH}" == "" || "${GITHUB_EVENT_NAME}" == "" || "${GITHUB_LABEL}" == "" || "${PYTHON_VERSION}" == "" || "${GITHUB_BRANCH}" == "" || "${GITHUB_COMMIT}" == "" || "${GITHUB_RUN_ID}" == "" ]];
 then
   echo "Error : Incomplete arg list - Atleast one of the arguments is an empty string"
   exit 1
@@ -86,7 +92,7 @@ GITHUB_COMMIT=${GITHUB_COMMIT:0:7}
 # Get today's date
 TODAY=`date '+%Y-%m-%d'`
 
-DESTINATION_DIR=${OUTPUT_PATH}/${TODAY}/${GITHUB_EVENT_NAME}/${GITHUB_LABEL}/${GITHUB_BRANCH}/${GITHUB_COMMIT}/${GITHUB_RUN_ID}
+DESTINATION_DIR=${OUTPUT_PATH}/${TODAY}/${GITHUB_EVENT_NAME}/${GITHUB_LABEL}/${PYTHON_VERSION}/${GITHUB_BRANCH}/${GITHUB_COMMIT}/${GITHUB_RUN_ID}
 echo "Destination DIR : ${DESTINATION_DIR}"
 
 # Create destination dir
@@ -102,6 +108,6 @@ then
   exit 1
 fi
 # Tar file
-tar -cvf ${DESTINATION_TAR} ${INPUT_PATH} 
+tar -cvf ${DESTINATION_TAR} ${INPUT_PATH}
 
 exit 0

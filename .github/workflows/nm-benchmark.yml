@@ -135,7 +135,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.run_id }}-${{ inputs.label }}
+          name: ${{ github.run_id }}-${{ inputs.label }}-${{ inputs.python }}
           path: benchmark-results
           retention-days: 2
 
@@ -144,6 +144,7 @@ jobs:
         uses: ./.github/actions/nm-copy-benchmark-data-to-efs
         with:
           label: ${{ inputs.label }}
+          python: ${{ inputs.python }}
           src: benchmark-results
           efs_dst: /EFS/benchmark_results
 
@@ -164,7 +165,7 @@ jobs:
       - name: set gh action benchmark input artifact name
         id: set_gh_action_benchmark_input_artifact_name
         run: |
-          GH_ACTION_BENCHMARK_INPUT_ARTIFACT_NAME=`echo "gh_action_benchmark_jsons-${{ github.run_id }}-${{ inputs.label }}"`
+          GH_ACTION_BENCHMARK_INPUT_ARTIFACT_NAME=`echo "gh_action_benchmark_jsons-${{ github.run_id }}-${{ inputs.label }}-${{ inputs.python }}"`
           echo "gh_action_benchmark_input_artifact_name=$GH_ACTION_BENCHMARK_INPUT_ARTIFACT_NAME" >> $GITHUB_OUTPUT
 
       - name: store gh action benchmark input artifacts
@@ -180,6 +181,7 @@ jobs:
         uses: ./.github/actions/nm-copy-benchmark-data-to-efs
         with:
           label: ${{ inputs.label }}
+          python: ${{ inputs.python }}
           src: gh-action-benchmark-jsons
           efs_dst: /EFS/benchmark_results
 

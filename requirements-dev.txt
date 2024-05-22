@@ -9,7 +9,7 @@ isort==5.13.2
 # type checking
 mypy==1.9.0
 types-PyYAML
-types-requests
+types-requests==2.31.0.2
 types-setuptools
 
 # testing
@@ -21,7 +21,7 @@ pytest-rerunfailures
 pytest-shard
 httpx
 einops # required for MPT
-requests
+requests==2.31
 ray
 peft
 awscli

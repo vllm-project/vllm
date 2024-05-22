@@ -4,6 +4,9 @@ This tests bigger models and use half precision.
 
 Run `pytest tests/models/test_big_models.py`.
 """
+# UPSTREAM SYNC
+import sys
+
 import pytest
 
 MODELS = [
@@ -27,6 +30,11 @@ SKIPPED_MODELS_OOM = [
     "EleutherAI/gpt-j-6b",
 ]
 
+# UPSTREAM SYNC
+SKIPPED_MODELS_PY38 = [
+    "mosaicml/mpt-7b",
+]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
@@ -45,6 +53,10 @@ def test_models(
     if model in SKIPPED_MODELS_OOM:
         pytest.skip(reason="These models cause OOM issue on the CPU"
                     "because it is a fp32 checkpoint.")
+    # UPSTREAM SYNC
+    if model in SKIPPED_MODELS_PY38 and sys.version_info < (3, 9):
+        pytest.skip(reason="This model has custom code that does not "
+                    "support Python 3.8")
 
     hf_model = hf_runner(model, dtype=dtype)
     hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)

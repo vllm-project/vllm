@@ -1,4 +1,4 @@
-name: copy benchmark data to EFS 
+name: copy benchmark data to EFS
 description: "Copies the given input folder to EFS under a well-defined directory structure.
               The directory structure is as follows,
               date/github_event/label/branch/commit-hash/github_run_id/.
@@ -6,28 +6,28 @@ description: "Copies the given input folder to EFS under a well-defined director
 inputs:
   label:
     description: "requested runner label (specifies instance)"
-    type: string
+    required: true
+  python:
+    description: 'python version, e.g. 3.10.12'
     required: true
   src:
     description: "Src benchmark folder to copy"
-    type: string
     required: true
   efs_dst:
     description: "Destination EFS path to copy the src folder to"
-    type: string
     required: true
 
 runs:
   using: composite
   steps:
-  - id: copy_benchmark_data_to_efs 
+  - id: copy_benchmark_data_to_efs
     run: |
       echo "event name ${{ github.event_name }}"
       echo "ref ${{ github.ref }}"
       echo "sha ${{ github.sha }}"
       echo "run ${{ github.run_id }}"
       SUCCESS=0
-      ./.github/scripts/nm-store-benchmark-data.sh -i ${{ inputs.src }}  -o ${{ inputs.efs_dst }} -l ${{ inputs.label }} -e ${{ github.event_name }} -b ${{ github.ref }} -c ${{ github.sha }} -r ${{ github.run_id }} || SUCCESS=$?
+      ./.github/scripts/nm-store-benchmark-data.sh -i ${{ inputs.src }}  -o ${{ inputs.efs_dst }} -l ${{ inputs.label }} -p ${{ inputs.python }} -e ${{ github.event_name }} -b ${{ github.ref }} -c ${{ github.sha }} -r ${{ github.run_id }} || SUCCESS=$?
       echo "test=${SUCCESS}" >> "$GITHUB_OUTPUT"
       exit ${SUCCESS}
     shell: bash
