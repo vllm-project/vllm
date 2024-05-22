@@ -401,14 +401,20 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
     return False
 
 
-def serialize_vllm_model(model: nn.Module,
-                         tensorizer_config : TensorizerConfig,
-                         encryption_params: EncryptionParams = None) \
-        -> nn.Module:
+def serialize_vllm_model(
+    model: nn.Module,
+    tensorizer_config: TensorizerConfig,
+) -> nn.Module:
     model.register_parameter(
         "vllm_tensorized_marker",
         nn.Parameter(torch.tensor((1, ), device="meta"), requires_grad=False))
     tensorizer_args = tensorizer_config._construct_tensorizer_args()
+
+    encryption_params = None
+    if (keyfile := tensorizer_config.encryption_keyfile) is not None:
+        with open(keyfile, "rb") as f:
+            key = f.read()
+        encryption_params = EncryptionParams(key=key)
 
     output_file = tensorizer_args.tensorizer_uri
     if tensorizer_config.is_sharded:
@@ -419,6 +425,5 @@ def serialize_vllm_model(model: nn.Module,
         serializer = TensorSerializer(stream, encryption=encryption_params)
         serializer.write_module(model)
         serializer.close()
-    logger.info("Successfully serialized model to %s",
-                str(tensorizer_args.tensorizer_uri))
+    logger.info("Successfully serialized model to %s", str(output_file))
     return model

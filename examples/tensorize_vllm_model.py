@@ -13,7 +13,6 @@ from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
                                                          serialize_vllm_model)
-from vllm.worker.worker_base import WorkerBase
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -172,19 +171,6 @@ def deserialize():
     return llm
 
 
-# Monkey patch the Worker, adding a method to serialize a sharded model with
-# tensorizer
-# FIXME: monkey patching like this doesn't work for Ray...
-def worker_serialize(self,
-                    tensorizer_config: TensorizerConfig,
-                    encryption_params: EncryptionParams
-    ) -> None:
-    serialize_vllm_model(self.model_runner.model,
-                         tensorizer_config,
-                         encryption_params
-    )
-WorkerBase.worker_serialize = worker_serialize
-
 if __name__ == '__main__':
     args = parse_args()
 
@@ -242,20 +228,8 @@ if __name__ == '__main__':
             model_path = f"{base_path}/model.tensors"
             is_sharded = False
 
-        # Only multiprocessing is supported currently due to the monkey patching
-        # of the Worker class
-        if is_sharded:
-            parallel_config = engine_args.create_engine_config() \
-                                .parallel_config
-            if parallel_config.distributed_executor_backend != "mp":
-                raise ValueError(
-                    "Tensorizing a sharded model is only supported with the"
-                    "multiproc backend. Use --distributed-executor-backend=mp"
-                )
-
         # create and write encryption key before initializing engine to support
         # sharded models
-        encryption_params = None
         if keyfile is not None:
             encryption_params = EncryptionParams.random()
             with _write_stream(keyfile) as stream:
@@ -263,20 +237,19 @@ if __name__ == '__main__':
 
         tensorizer_config = TensorizerConfig(
             tensorizer_uri=model_path,
+            encryption_keyfile=keyfile,
             is_sharded=is_sharded,
             **credentials)
 
         engine = LLMEngine.from_engine_args(engine_args)
         if args.tensor_parallel_size > 1:
-            engine.model_executor._run_workers("worker_serialize",
+            engine.model_executor._run_workers("save_tensorized_model",
                 tensorizer_config = tensorizer_config,
-                encryption_params = encryption_params
             )
         else:
             serialize_vllm_model(
                 engine.model_executor.driver_worker.model_runner.model,
                 tensorizer_config,
-                encryption_params
             )
 
     elif args.command == "deserialize":
