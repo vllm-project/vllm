@@ -15,7 +15,7 @@ prompts = [
 ]
 prompts = [template.format(prompt) for prompt in prompts]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=100)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 # Create an LLM.
 llm = LLM(model="ibm-granite/granite-7b-instruct", use_v2_block_manager=True, enforce_eager=True, speculative_model="ibm-granite/granite-7b-instruct-accelerator", num_speculative_tokens=5)

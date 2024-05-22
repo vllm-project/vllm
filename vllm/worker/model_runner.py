@@ -197,7 +197,6 @@ class SingleStepSpeculativeModelRunner:
             seq_group_metadata_list: List[SequenceGroupMetadata],
             kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        # only do this on the first head since the inputs will be the same throughout
         input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
 
         model_executable = self.model

@@ -75,6 +75,4 @@ class HiddenStatesWorker(Worker):
         if execute_model_req.seq_group_metadata_list[0].is_prompt:
             self.speculator.first_decode_step = True
         self.speculator.previous_hidden_state = hidden_states
-        # else:
-        #     self.speculator.previous_hidden_state = hidden_states[:6]
         return [sampler_output]
