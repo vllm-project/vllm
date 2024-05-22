@@ -319,7 +319,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # decoder prompt.
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        block_table: BlockTable = self._allocate_sequence(seq, seq_group.num_seqs())
+        block_table: BlockTable = \
+            self._allocate_sequence(seq, seq_group.num_seqs())
 
         # Assign the self-attention block tables for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
@@ -330,7 +331,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if encoder_seq is not None:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
-            block_table: BlockTable = self._allocate_sequence(encoder_seq, 1)
+            block_table = self._allocate_sequence(encoder_seq, 1)
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
 
