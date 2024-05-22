@@ -1,18 +1,25 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
+#include <cmath>
 
 #include "../../dispatch_utils.h"
 
 static inline __device__ int8_t float_to_int8_rn(float x) {
-  static constexpr float dt_min =
+#ifdef USE_ROCM
+  static const float i8_min =
       static_cast<float>(std::numeric_limits<int8_t>::min());
-  static constexpr float dt_max =
+  static const float i8_max =
       static_cast<float>(std::numeric_limits<int8_t>::max());
   // round
-  float dst = round(x);
+  float dst = std::nearbyint(x);
   // saturate
-  dst = std::clamp(dst, dt_min, dt_max);
+  dst = std::clamp(dst, i8_min, i8_max);
   return static_cast<int8_t>(dst);
+#else
+  uint32_t dst;
+  asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
+  return reinterpret_cast<const int8_t&>(dst);
+#endif
 }
 
 namespace vllm {
