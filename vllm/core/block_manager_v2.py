@@ -121,7 +121,18 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
-    def allocate_self_block_tables(self, seq_group: SequenceGroup) -> None:
+    def _allocate_sequence(self, seq: Sequence) -> BlockTable:
+        block_table = BlockTable(
+            block_size=self.block_size,
+            block_allocator=self.block_allocator,
+        )
+        assert self.block_sliding_window is None
+        block_table.allocate(seq.get_token_ids())
+
+        return block_table
+
+    def allocate(self, seq_group: SequenceGroup) -> None:
+        # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
@@ -129,42 +140,33 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
         seq = waiting_seqs[0]
-
-        block_table = BlockTable(
-            block_size=self.block_size,
-            block_allocator=self.block_allocator,
-        )
-        assert self.block_sliding_window is None
-        block_table.allocate(seq.get_token_ids())
+        block_table: BlockTable = self._allocate_sequence(seq)
         self.block_tables[seq.seq_id] = block_table
 
         # Assign the block table for each sequence.
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
 
-    def allocate_cross_block_table(self, seq_group: SequenceGroup) -> None:
+        # Allocate cross-attention block table for encoder sequence
+        #
         # NOTE: Here we assume that all sequences in the group have the same
-        # prompt.
+        # encoder prompt.
         request_id = seq_group.request_id
-        seq = seq_group.encoder_seq
+        encoder_seq = seq_group.encoder_seq
 
         assert (request_id
                 not in self.cross_block_tables), \
                 "block table already exists"
 
-        seq = seq_group.get_encoder_seq()
-        if seq is not None:
+        encoder_seq = seq_group.get_encoder_seq()
+        if encoder_seq is not None:
             block_table = BlockTable(
                 block_size=self.block_size,
                 block_allocator=self.block_allocator,
             )
             assert self.block_sliding_window is None
-            block_table.allocate(seq.get_token_ids())
+            block_table.allocate(encoder_seq.get_token_ids())
             self.cross_block_tables[request_id] = block_table
-
-    def allocate(self, seq_group: SequenceGroup) -> None:
-        self.allocate_self_block_tables(seq_group)
-        self.allocate_cross_block_table(seq_group)
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
