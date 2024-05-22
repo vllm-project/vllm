@@ -124,7 +124,7 @@ steps:
   parallelism: 4
 
 - label: LoRA Long Context (Distributed)
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   num_gpus: 4
   # This test runs llama 13B, so it is required to run on 4 GPUs.
   commands:
