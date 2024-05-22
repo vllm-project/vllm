@@ -1,0 +1,67 @@
+[build-system]
+# Should be mirrored in requirements-build.txt
+requires = [
+    "cmake>=3.21",
+    "ninja",
+    "packaging",
+    "setuptools >= 49.4.0",
+    "torch == 2.3.0",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+exclude = [
+    # External file, leaving license intact
+    "examples/fp8/quantizer/quantize.py"
+]
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+]
+
+[tool.mypy]
+python_version = "3.8"
+
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "skip"
+
+files = "vllm"
+# TODO(woosuk): Include the code from Megatron and HuggingFace.
+exclude = [
+    "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
+    # Ignore triton kernels in ops.
+    'vllm/attention/ops/.*\.py$'
+]
+
+[tool.codespell]
+ignore-words-list = "dout, te, indicies"
+skip = "./tests/prompts,./benchmarks/sonnet.txt"
+
+[tool.isort]
+use_parentheses = true
+skip_gitignore = true
