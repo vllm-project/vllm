@@ -3,6 +3,7 @@ import os
 
 import pytest
 import torch
+import torch.distributed
 
 from vllm.distributed.communication_op import (  # noqa
     graph_capture, tensor_model_parallel_all_reduce)
@@ -184,9 +185,9 @@ def multiple_pp_worker_fn():
     ]
     group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
-    if pynccl_comm.rank == 0:
+    if torch.distributed.get_rank() == 0:
         tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
-    elif pynccl_comm.rank == 1:
+    elif torch.distributed.get_rank() == 1:
         tensor = 2 * torch.ones(
             16, 1024, 1024, dtype=torch.float32, device=device)
     else:
@@ -196,12 +197,12 @@ def multiple_pp_worker_fn():
                              dtype=torch.float32,
                              device=device)
     with pynccl_comm.change_state(enable=True):
-        if pynccl_comm.rank in [0, 1]:
+        if torch.distributed.get_rank() in [0, 1]:
             pynccl_comm.send(tensor)
         else:
             pynccl_comm.recv(tensor)
     result = tensor.mean().cpu().item()
-    if pynccl_comm.rank in [0, 2]:
+    if torch.distributed.get_rank() in [0, 2]:
         assert result == 1
     else:
         assert result == 2
