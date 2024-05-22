@@ -300,7 +300,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     and logical_idx >= self.block_sliding_window):
                 block = block_table[logical_idx % self.block_sliding_window]
                 # Set the reference counts of the token blocks.
-                block.ref_count = ref_count #seq_group.num_seqs()
+                block.ref_count = ref_count  #seq_group.num_seqs()
             elif self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
@@ -308,7 +308,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             else:
                 block = self.gpu_allocator.allocate()
                 # Set the reference counts of the token blocks.
-                block.ref_count = ref_count #seq_group.num_seqs()
+                block.ref_count = ref_count  #seq_group.num_seqs()
             block_table.append(block)
 
         return block_table
@@ -507,6 +507,26 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
+    def _swap_in_block_table(
+            self, block_table: BlockTable,
+            mapping: Dict[PhysicalTokenBlock,
+                          PhysicalTokenBlock]) -> BlockTable:
+        new_block_table = []
+
+        for cpu_block in block_table:
+            if cpu_block in mapping:
+                gpu_block = mapping[cpu_block]
+                gpu_block.ref_count += 1
+            else:
+                gpu_block = self.gpu_allocator.allocate(
+                    cpu_block.block_hash, cpu_block.num_hashed_tokens)
+                mapping[cpu_block] = gpu_block
+            new_block_table.append(gpu_block)
+            # Free the CPU block swapped in to GPU.
+            self.cpu_allocator.free(cpu_block)
+
+        return new_block_table
+
     def swap_in(self,
                 seq_group: SequenceGroup,
                 num_lookahead_slots: int = 0) -> List[Tuple[int, int]]:
@@ -519,38 +539,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # dict is efficient in lookup `if cpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            new_block_table: BlockTable = []
-            block_table = self.block_tables[seq.seq_id]
-
-            for cpu_block in block_table:
-                if cpu_block in mapping:
-                    gpu_block = mapping[cpu_block]
-                    gpu_block.ref_count += 1
-                else:
-                    gpu_block = self.gpu_allocator.allocate(
-                        cpu_block.block_hash, cpu_block.num_hashed_tokens)
-                    mapping[cpu_block] = gpu_block
-                new_block_table.append(gpu_block)
-                # Free the CPU block swapped in to GPU.
-                self.cpu_allocator.free(cpu_block)
-            self.block_tables[seq.seq_id] = new_block_table
+            self.block_tables[seq.seq_id] = \
+                self._swap_in_block_table(self.block_tables[seq.seq_id],
+                                          mapping)
 
         if seq_group.encoder_seq is not None:
-            new_block_table = []
-            block_table = self.cross_block_tables[request_id]
-
-            for cpu_block in block_table:
-                if cpu_block in mapping:
-                    gpu_block = mapping[cpu_block]
-                    gpu_block.ref_count += 1
-                else:
-                    gpu_block = self.gpu_allocator.allocate(
-                        cpu_block.block_hash, cpu_block.num_hashed_tokens)
-                    mapping[cpu_block] = gpu_block
-                new_block_table.append(gpu_block)
-                # Free the CPU block swapped in to GPU.
-                self.cpu_allocator.free(cpu_block)
-            self.cross_block_tables[request_id] = new_block_table
+            self.cross_block_tables[request_id] = \
+                self._swap_in_block_table(self.cross_block_tables[request_id],
+                                          mapping)
 
         return [(cpu_block.block_number, gpu_block.block_number)
                 for cpu_block, gpu_block in mapping.items()]
@@ -559,6 +555,26 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         blocks = self._get_physical_blocks(seq_group)
         return len(blocks) <= self.cpu_allocator.get_num_free_blocks()
 
+    def _swap_out_block_table(
+            self, block_table: BlockTable,
+            mapping: Dict[PhysicalTokenBlock,
+                          PhysicalTokenBlock]) -> BlockTable:
+
+        new_block_table: BlockTable = []
+        for gpu_block in block_table:
+            if gpu_block in mapping:
+                cpu_block = mapping[gpu_block]
+                cpu_block.ref_count += 1
+            else:
+                cpu_block = self.cpu_allocator.allocate(
+                    gpu_block.block_hash, gpu_block.num_hashed_tokens)
+                mapping[gpu_block] = cpu_block
+            new_block_table.append(cpu_block)
+            # Free the GPU block swapped out to CPU.
+            self.gpu_allocator.free(gpu_block)
+
+        return new_block_table
+
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         request_id = seq_group.request_id
 
@@ -566,38 +582,14 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # dict is efficient in lookup `if gpu_block in mapping`
         mapping: Dict[PhysicalTokenBlock, PhysicalTokenBlock] = {}
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            new_block_table: BlockTable = []
-            block_table = self.block_tables[seq.seq_id]
-
-            for gpu_block in block_table:
-                if gpu_block in mapping:
-                    cpu_block = mapping[gpu_block]
-                    cpu_block.ref_count += 1
-                else:
-                    cpu_block = self.cpu_allocator.allocate(
-                        gpu_block.block_hash, gpu_block.num_hashed_tokens)
-                    mapping[gpu_block] = cpu_block
-                new_block_table.append(cpu_block)
-                # Free the GPU block swapped out to CPU.
-                self.gpu_allocator.free(gpu_block)
-            self.block_tables[seq.seq_id] = new_block_table
+            self.block_tables[seq.seq_id] = \
+                self._swap_out_block_table(self.block_tables[seq.seq_id],
+                                           mapping)
 
         if seq_group.encoder_seq is not None:
-            new_block_table = []
-            block_table = self.cross_block_tables[request_id]
-
-            for gpu_block in block_table:
-                if gpu_block in mapping:
-                    cpu_block = mapping[gpu_block]
-                    cpu_block.ref_count += 1
-                else:
-                    cpu_block = self.cpu_allocator.allocate(
-                        gpu_block.block_hash, gpu_block.num_hashed_tokens)
-                    mapping[gpu_block] = cpu_block
-                new_block_table.append(cpu_block)
-                # Free the GPU block swapped out to CPU.
-                self.gpu_allocator.free(gpu_block)
-            self.cross_block_tables[request_id] = new_block_table
+            self.cross_block_tables[request_id] = \
+                self._swap_out_block_table(self.cross_block_tables[request_id],
+                                           mapping)
 
         return [(cpu_block.block_number, gpu_block.block_number)
                 for cpu_block, gpu_block in mapping.items()]
