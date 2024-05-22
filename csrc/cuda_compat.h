@@ -1,7 +1,7 @@
 #pragma once
 
 #ifdef USE_ROCM
-#include <hip/hip_runtime.h>
+  #include <hip/hip_runtime.h>
 #endif
 
 #ifndef USE_ROCM
@@ -31,7 +31,8 @@
 #endif
 
 #ifndef USE_ROCM
-  #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) __shfl_down_sync(uint32_t(-1), var, lane_delta)
+  #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) \
+    __shfl_down_sync(uint32_t(-1), var, lane_delta)
 #else
   #define VLLM_SHFL_DOWN_SYNC(var, lane_delta) __shfl_down(var, lane_delta)
 #endif
@@ -43,4 +44,3 @@
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
-

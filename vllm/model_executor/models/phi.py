@@ -42,7 +42,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -229,11 +229,32 @@ class PhiModel(nn.Module):
 
 
 class PhiForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ]
+    }
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "dense",
+        "fc1",
+        "fc2",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
+        del lora_config  # Unused.
         super().__init__()
         self.config = config
         self.quant_config = quant_config
