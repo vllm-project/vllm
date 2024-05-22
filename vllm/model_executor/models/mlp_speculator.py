@@ -87,19 +87,14 @@ class MLPSpeculator(nn.Module):
     ) -> torch.Tensor:
         # prune the hidden states
         if self.current_head_index == 0:
-            accepted_tokens_len = positions #.max(dim=0)[0] + 1  # add 1 for length
             if self.first_decode_step:
-                self.prev_context_lengths = accepted_tokens_len
                 self.first_decode_step = False
             else:
-                accepted_tokens_len -= self.prev_context_lengths
-                self.prev_context_lengths += accepted_tokens_len
-            # self.previous_hidden_state = self.previous_hidden_state.contiguous().unsqueeze(0)
-            # self.previous_hidden_state = self.previous_hidden_state.gather(
-            #     1,
-            #     (accepted_tokens_len - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
-            # ) # b x 1 x d
-            self.previous_hidden_state = self.previous_hidden_state[accepted_tokens_len - 1]
+                self.previous_hidden_state = self.previous_hidden_state.reshape(-1, self.n_predict + 1, self.previous_hidden_state.size(1))
+                self.previous_hidden_state = self.previous_hidden_state.gather(
+                    1,
+                    (self.accepted_token_lengths - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
+                ).squeeze(1) # b x d
 
         # Project and predict
         z = self.emb[self.current_head_index](input_ids[-1])  # b k d

@@ -92,6 +92,7 @@ class SingleStepSpeculativeModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
+        self.prev_request_context_lengths = {}
 
     def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
@@ -124,24 +125,13 @@ class SingleStepSpeculativeModelRunner:
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ):
-        """Prepare the model input based on a given sequence group.
-
-        The API assumes seq_group_metadata_list is sorted by prefill -> decode.
-
-        The result tensors and data structure also batches input in prefill
-        -> decode order. For example,
-
-        - input_tokens[:num_prefill_tokens] contains prefill tokens.
-        - input_tokens[num_prefill_tokens:] contains decode tokens.
-
-        If cuda graph is required, this API automatically pads inputs.
-        """
         input_tokens: List[int] = []
         input_positions: List[int] = []
 
         seq_lens: List[int] = []
         context_lens: List[int] = []
         query_lens: List[int] = []
+        accepted_lengths_list: List[int] = []
 
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
@@ -177,7 +167,14 @@ class SingleStepSpeculativeModelRunner:
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
+                if seq_group_metadata.request_id in self.prev_request_context_lengths:
+                    prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
+                    accepted_length = context_len - prev_context_length
+                    accepted_lengths_list.append(accepted_length)
+                self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
 
+        if not self.model.first_decode_step:
+            self.model.accepted_token_lengths = torch.tensor(accepted_lengths_list, device=self.device, dtype=torch.long)
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
@@ -199,19 +196,25 @@ class SingleStepSpeculativeModelRunner:
             seq_group_metadata_list: List[SequenceGroupMetadata],
             kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
+        # only do this on the first head since the inputs will be the same throughout
+        if self.model.current_head_index == 0:
+            input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
+            self.input_tokens = input_tokens
+            self.input_positions = input_positions
+            self.seq_lens = seq_lens
+            self.query_lens = query_lens
 
         model_executable = self.model
         execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
+            "input_ids": self.input_tokens,
+            "positions": self.input_positions,
             "kv_caches": None,
             "attn_metadata": None,
         }
         hidden_states = model_executable(**execute_model_kwargs)
 
         sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, seq_lens, query_lens, self.device,
+            seq_group_metadata_list, self.seq_lens, self.query_lens, self.device,
             self.pin_memory)
 
         # Compute the logits.

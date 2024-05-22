@@ -33,7 +33,10 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config = kwargs.get("speculative_config")
     assert speculative_config is not None
 
-    target_worker = HiddenStatesWorker(*args, **kwargs)
+    if speculative_config.draft_model_config.hf_config.model_type == "mlp_speculator":
+        target_worker = HiddenStatesWorker(*args, **kwargs)
+    else:
+        target_worker = Worker(*args, **kwargs)
 
     draft_worker_kwargs = kwargs.copy()
     # Override draft-model specific worker args.
@@ -154,7 +157,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         # Lazy initiazliation.
         self.scorer: SpeculativeScorer
-        self.steps = 0
 
     def init_device(self) -> None:
         """Initialize both scorer and proposer models.
@@ -167,7 +169,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
-        self.scorer_worker.speculator = self.proposer_worker.model_runner.model
+        if isinstance(self.scorer_worker, HiddenStatesWorker):
+            self.scorer_worker.speculator = self.proposer_worker.model_runner.model
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
@@ -215,14 +218,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         num_gpu_blocks, num_cpu_blocks = (
             self.scorer_worker.determine_num_available_blocks())
 
-        # scorer_cache_block_size_bytes = (
-        #     self.scorer_worker.get_cache_block_size_bytes())
-        # proposer_cache_block_size_bytes = (
-        #     self.proposer_worker.get_cache_block_size_bytes())
-        #
-        # new_num_gpu_blocks = split_num_cache_blocks_evenly(
-        #     scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
-        #     num_gpu_blocks)
+        if not isinstance(self.scorer_worker, HiddenStatesWorker):
+            scorer_cache_block_size_bytes = (
+                self.scorer_worker.get_cache_block_size_bytes())
+            proposer_cache_block_size_bytes = (
+                self.proposer_worker.get_cache_block_size_bytes())
+
+            num_gpu_blocks = split_num_cache_blocks_evenly(
+                scorer_cache_block_size_bytes, proposer_cache_block_size_bytes,
+                num_gpu_blocks)
+
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -231,8 +236,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
-        # self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
-        #                                       num_cpu_blocks=num_cpu_blocks)
+
+        if not isinstance(self.scorer_worker, HiddenStatesWorker):
+            self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
+                                              num_cpu_blocks=num_cpu_blocks)
 
     def _broadcast_control_flow_decision(
             self,
@@ -289,14 +296,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self._maybe_disable_speculative_tokens(
                 disable_all_speculation,
                 execute_model_req.seq_group_metadata_list)
-            self.steps += 1
-            print(self.steps)
+
             # If no spec tokens, call the proposer and scorer workers normally.
             # Used for prefill.
             if num_lookahead_slots == 0 or len(
                     execute_model_req.seq_group_metadata_list) == 0:
+                disable_all_speculation = disable_all_speculation or isinstance(self.scorer_worker, HiddenStatesWorker)
                 return self._run_no_spec(execute_model_req,
-                                         skip_proposer=True)
+                                         skip_proposer=disable_all_speculation)
 
             return self._run_speculative_decoding_step(execute_model_req,
                                                        num_lookahead_slots)
@@ -339,16 +346,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         if not skip_proposer:
             self.proposer_worker.execute_model(execute_model_req)
 
-        sampler_output = [self.scorer_worker.execute_model(execute_model_req)]
+        sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
-        sampler_output = sampler_output[0][0]
+        sampler_output = sampler_output[0]
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
         sampler_output.probs = None
         sampler_output.sampled_tokens = None
         sampler_output.logprobs = None
-        return [[sampler_output]]
+        return [sampler_output]
 
     def _run_non_driver_rank(self, num_lookahead_slots: int) -> None:
         """Run proposer and verifier model in non-driver workers. This is used

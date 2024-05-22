@@ -8,6 +8,7 @@ from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
                            SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.top1_proposer import Top1Proposer
+from vllm.worker.model_runner import SingleStepSpeculativeModelRunner
 from vllm.worker.worker import Worker
 
 
@@ -28,6 +29,7 @@ class MultiStepWorker(Worker):
 
         # Lazy initialization list.
         self._proposer: Top1Proposer
+        self.requires_kv_cache: bool
 
     def init_device(self):
         super().init_device()
@@ -38,6 +40,8 @@ class MultiStepWorker(Worker):
             self.vocab_size,
             max_proposal_len=self.max_model_len,
         )
+
+        self.requires_kv_cache = not isinstance(self.model_runner, SingleStepSpeculativeModelRunner)
 
     def set_include_gpu_probs_tensor(self):
         # Need include_gpu_probs_tensor for multi_step_worker
@@ -66,8 +70,8 @@ class MultiStepWorker(Worker):
             copied_seq_group_metadata_list)
 
         # Assert enough KV space for sample_len tokens per sequence.
-        # self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list,
-        #                              sample_len)
+        if self.requires_kv_cache:
+            self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list, sample_len)
 
         # Run model sample_len times.
         model_outputs = []

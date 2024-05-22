@@ -1,6 +1,5 @@
 from typing import List, Optional
 
-from vllm.model_executor.models.mlp_speculator import MLPSpeculator
 from vllm.sequence import SequenceGroupMetadata, ExecuteModelRequest, SamplerOutput
 from vllm.worker.worker import Worker
 import torch
@@ -10,6 +9,7 @@ class HiddenStatesWorker(Worker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.speculator = None
+        self.prev_request_context_lengths = {}
 
     def _get_hidden_states(
         self,
@@ -74,8 +74,6 @@ class HiddenStatesWorker(Worker):
         # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently
         if execute_model_req.seq_group_metadata_list[0].is_prompt:
             self.speculator.first_decode_step = True
-            self.speculator.previous_hidden_state = hidden_states
-        else:
-            # set the previous hidden states based on the output hidden states of the base model
-            self.speculator.previous_hidden_state = hidden_states[:6]
-        return sampler_output
+
+        self.speculator.previous_hidden_state = hidden_states
+        return [sampler_output]

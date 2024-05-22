@@ -935,9 +935,9 @@ class SpeculativeConfig:
             raise ValueError("Expected num_speculative_tokens to be greater "
                              f"than zero ({self.num_speculative_tokens}).")
 
-        # if self.draft_model_config:
-            # self.draft_model_config.verify_with_parallel_config(
-            #     self.draft_parallel_config)
+        if self.draft_model_config and self.draft_model_config.hf_config.model_type != "mlp_speculator":
+            self.draft_model_config.verify_with_parallel_config(
+                self.draft_parallel_config)
 
     @property
     def num_lookahead_slots(self) -> int:
@@ -1232,8 +1232,8 @@ class EngineConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        # self.model_config.verify_with_parallel_config(self.parallel_config)
-        # self.cache_config.verify_with_parallel_config(self.parallel_config)
+        self.model_config.verify_with_parallel_config(self.parallel_config)
+        self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
