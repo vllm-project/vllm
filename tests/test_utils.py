@@ -6,6 +6,7 @@ from .utils import error_on_warning
 
 
 def test_deprecate_kwargs_always():
+
     @deprecate_kwargs("old_arg", is_deprecated=True)
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
@@ -18,6 +19,7 @@ def test_deprecate_kwargs_always():
 
 
 def test_deprecate_kwargs_never():
+
     @deprecate_kwargs("old_arg", is_deprecated=False)
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
@@ -41,7 +43,7 @@ def test_deprecate_kwargs_func():
 
     with error_on_warning():
         dummy(new_arg=1)
-    
+
     is_deprecated = False
 
     with error_on_warning():
