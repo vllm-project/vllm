@@ -47,7 +47,9 @@ class NGramWorker(LoraNotSupportedWorkerBase):
         # NGram don't need gpu sampler
         pass
 
-    def execute_model(self, execute_model_req: ExecuteModelRequest) -> None:
+    def execute_model(
+            self,
+            execute_model_req: Optional[ExecuteModelRequest] = None) -> None:
         """NGram doesn't depend on model execution, just pass this function"""
         pass
 

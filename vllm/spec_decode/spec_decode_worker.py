@@ -231,35 +231,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
 
-    def _broadcast_control_flow_decision(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest] = None,
-            disable_all_speculation: bool = False) -> Tuple[int, bool]:
-        """Broadcast how many lookahead slots are scheduled for this step, and
-        whether all speculation is disabled, to all non-driver workers.
-
-        This is required as if the number of draft model runs changes
-        dynamically, the non-driver workers won't know unless we perform a
-        communication to inform then.
-
-        Returns the broadcasted num_lookahead_slots and disable_all_speculation.
-        """
-
-        if self.rank == self._driver_rank:
-            assert execute_model_req is not None
-
-            broadcast_dict = dict(
-                num_lookahead_slots=execute_model_req.num_lookahead_slots,
-                disable_all_speculation=disable_all_speculation,
-            )
-            broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
-        else:
-            assert execute_model_req is None
-            broadcast_dict = broadcast_tensor_dict(src=self._driver_rank)
-
-        return (broadcast_dict["num_lookahead_slots"],
-                broadcast_dict["disable_all_speculation"])
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -267,38 +238,57 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
-
-        disable_all_speculation = False
-        if self.rank == self._driver_rank:
-            disable_all_speculation = self._should_disable_all_speculation(
-                execute_model_req)
-
-        (num_lookahead_slots,
-         disable_all_speculation) = self._broadcast_control_flow_decision(
-             execute_model_req, disable_all_speculation)
-
-        if self.rank == self._driver_rank:
-            assert execute_model_req is not None
-            assert execute_model_req.seq_group_metadata_list is not None, (
-                "speculative decoding requires non-None seq_group_metadata_list"
-            )
-
-            self._maybe_disable_speculative_tokens(
-                disable_all_speculation,
-                execute_model_req.seq_group_metadata_list)
-
-            # If no spec tokens, call the proposer and scorer workers normally.
-            # Used for prefill.
-            if num_lookahead_slots == 0 or len(
-                    execute_model_req.seq_group_metadata_list) == 0:
-                return self._run_no_spec(execute_model_req,
-                                         skip_proposer=disable_all_speculation)
-
-            return self._run_speculative_decoding_step(execute_model_req,
-                                                       num_lookahead_slots)
-        else:
-            self._run_non_driver_rank(num_lookahead_slots)
+        if self.rank != self._driver_rank:
+            self._run_non_driver_rank()
             return []
+
+        if execute_model_req is None:
+            # This signals that there's no more requests to process for now.
+            # All workers are running infinite loop with broadcast_tensor_dict,
+            # and it stops the loop when the driver broadcasts an empty input.
+            # Send an empty input to notify all other workers to stop their
+            # execution loop.
+            broadcast_tensor_dict({}, src=0)
+            return []
+
+        disable_all_speculation = self._should_disable_all_speculation(
+            execute_model_req)
+        num_lookahead_slots = execute_model_req.num_lookahead_slots
+
+        # Broadcast how many lookahead slots are scheduled for this step, and
+        # whether all speculation is disabled, to all non-driver workers.
+
+        # This is required as if the number of draft model runs changes
+        # dynamically, the non-driver workers won't know unless we perform a
+        # communication to inform then.
+        broadcast_dict = dict(
+            num_lookahead_slots=num_lookahead_slots,
+            disable_all_speculation=disable_all_speculation,
+        )
+        broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
+
+        assert execute_model_req.seq_group_metadata_list is not None, (
+            "speculative decoding requires non-None seq_group_metadata_list")
+
+        self._maybe_disable_speculative_tokens(
+            disable_all_speculation, execute_model_req.seq_group_metadata_list)
+
+        # If no spec tokens, call the proposer and scorer workers normally.
+        # Used for prefill.
+        if num_lookahead_slots == 0 or len(
+                execute_model_req.seq_group_metadata_list) == 0:
+            return self._run_no_spec(execute_model_req,
+                                     skip_proposer=disable_all_speculation)
+
+        return self._run_speculative_decoding_step(execute_model_req,
+                                                   num_lookahead_slots)
+
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop to perform speculative decoding
+        in parallel worker."""
+        while self._run_non_driver_rank():
+            pass
 
     def _should_disable_all_speculation(
             self, execute_model_req: ExecuteModelRequest) -> bool:
@@ -346,13 +336,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.logprobs = None
         return [sampler_output]
 
-    def _run_non_driver_rank(self, num_lookahead_slots: int) -> None:
+    def _run_non_driver_rank(self) -> bool:
         """Run proposer and verifier model in non-driver workers. This is used
         for both speculation cases (num_lookahead_slots>0) and non-speculation
         cases (e.g. prefill).
+
+        Returns True iff there are remaining sequences to process.
         """
-        # In non-driver workers the input is None
-        execute_model_req = None
+        assert self.rank != self._driver_rank
+
+        data = broadcast_tensor_dict(src=self._driver_rank)
+        if not data:
+            return False
+        num_lookahead_slots = data["num_lookahead_slots"]
 
         # Even if num_lookahead_slots is zero, we want to run the proposer model
         # as it may have KV.
@@ -360,9 +356,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # We run the proposer once per lookahead slot. In the future we should
         # delegate how many times it runs to the proposer.
         for _ in range(max(num_lookahead_slots, 1)):
-            self.proposer_worker.execute_model(execute_model_req)
+            self.proposer_worker.execute_model()
 
-        self.scorer_worker.execute_model(execute_model_req)
+        self.scorer_worker.execute_model()
+        return True
 
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
