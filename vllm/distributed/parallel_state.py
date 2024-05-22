@@ -187,10 +187,11 @@ def initialize_model_parallel(
             _TP_CPU_GROUP = cpu_group
 
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
-        group=_TP_CPU_GROUP,
-        device=_LOCAL_RANK,
-    )
+    if tensor_model_parallel_size > 1:
+        _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
+            group=_TP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
     # Initialize a custom fast all-reduce implementation.
     if _ENABLE_CUSTOM_ALL_REDUCE:
@@ -216,10 +217,11 @@ def initialize_model_parallel(
             _PP_CPU_GROUP = cpu_group
             _PP_GLOBAL_RANKS = ranks
 
-    _PP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
-        group=_PP_CPU_GROUP,
-        device=_LOCAL_RANK,
-    )
+    if pipeline_model_parallel_size > 1:
+        _PP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
+            group=_PP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
 
 def ensure_model_parallel_initialized(

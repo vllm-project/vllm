@@ -69,7 +69,7 @@ def test_pynccl():
 
 
 @worker_fn_wrapper
-def multiple_tp_worker_fn():
+def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     groups = [
         torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
@@ -93,14 +93,14 @@ def multiple_tp_worker_fn():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
-def test_pynccl_multiple_tp():
+def test_pynccl_multiple_allreduce():
     # this tests pynccl for multiple tp groups, in a standalone way
     # i.e. call `pynccl_comm.all_reduce` directly
-    distributed_run(multiple_tp_worker_fn, 4)
+    distributed_run(multiple_allreduce_worker_fn, 4)
 
 
 @worker_fn_wrapper
-def multiple_tp_with_vllm_worker_fn():
+def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
@@ -119,10 +119,10 @@ def multiple_tp_with_vllm_worker_fn():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
-def test_pynccl_multiple_tp_with_vllm():
+def test_pynccl_multiple_allreduce_with_vllm():
     # this tests pynccl for multiple tp groups, together with vllm
     # i.e. call `tensor_model_parallel_all_reduce`
-    distributed_run(multiple_tp_with_vllm_worker_fn, 4)
+    distributed_run(multiple_allreduce_with_vllm_worker_fn, 4)
 
 
 @worker_fn_wrapper
@@ -153,7 +153,7 @@ def test_pynccl_with_cudagraph():
 
 
 @worker_fn_wrapper
-def pp_worker_fn():
+def send_recv_worker_fn():
     pynccl_comm = PyNcclCommunicator()
     if pynccl_comm.rank == 0:
         tensor = torch.ones(16, 1024, 1024,
@@ -172,12 +172,12 @@ def pp_worker_fn():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
                     reason="Need at least 2 GPUs to run the test.")
-def test_pynccl_pp():
-    distributed_run(pp_worker_fn, 2)
+def test_pynccl_send_recv():
+    distributed_run(send_recv_worker_fn, 2)
 
 
 @worker_fn_wrapper
-def multiple_pp_worker_fn():
+def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     groups = [
         torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
@@ -210,8 +210,8 @@ def multiple_pp_worker_fn():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 4,
                     reason="Need at least 4 GPUs to run the test.")
-def test_pynccl_multiple_pp():
-    distributed_run(multiple_pp_worker_fn, 4)
+def test_pynccl_multiple_send_recv():
+    distributed_run(multiple_send_recv_worker_fn, 4)
 
 
 def test_ncclGetUniqueId():
