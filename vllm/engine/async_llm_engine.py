@@ -235,7 +235,11 @@ class _AsyncLLMEngine(LLMEngine):
         self.do_log_stats(scheduler_outputs, output)
 
         if not request_outputs:
-            # Stop the execute model loop in parallel workers for now
+            # Stop the execute model loop in parallel workers until there are
+            # more requests to process. This avoids waiting indefinitely in
+            # torch.distributed ops which may otherwise timeout, and unblocks
+            # the RPC thread in the workers so that they can process any other
+            # queued control plane messages, such as add/remove lora adapters.
             await self.model_executor.stop_remote_worker_execution_loop_async()
 
         return request_outputs
