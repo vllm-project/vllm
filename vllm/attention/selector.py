@@ -30,9 +30,12 @@ def get_attn_backend(
     kv_cache_dtype: Optional[str],
     block_size: int,
 ) -> Type[AttentionBackend]:
-    backend = _which_attn_to_use(num_heads, head_size, num_kv_heads,
-                                 sliding_window, dtype, kv_cache_dtype,
-                                 block_size)
+    """Determine which attention backend to use and only import
+    the selected backend module.
+    """
+    backend = which_attn_to_use(num_heads, head_size, num_kv_heads,
+                                sliding_window, dtype, kv_cache_dtype,
+                                block_size)
     if backend == _Backend.FLASH_ATTN:
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
@@ -61,7 +64,7 @@ def get_attn_backend(
         raise ValueError("Invalid attention backend.")
 
 
-def _which_attn_to_use(
+def which_attn_to_use(
     num_heads: int,
     head_size: int,
     num_kv_heads: int,
