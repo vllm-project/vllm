@@ -110,9 +110,8 @@ def _apply_logits_processors(
                     if use_prompt_tokens:
                         # The i-th logit processor need prompt tokens ids
                         token_ids_seq.append(
-                            seq_group.seq_data[seq_id].prompt_token_ids
-                            + token_ids
-                        )
+                            seq_group.seq_data[seq_id].prompt_token_ids +
+                            token_ids)
                     else:
                         # The i-th logit processor need only generated
                         # tokens ids

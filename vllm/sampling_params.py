@@ -181,13 +181,13 @@ class SamplingParams:
             self.output_text_buffer_length = 0
 
         if logits_processors and logits_processors_use_prompt_tokens is None:
-            assert logits_processors is not None
+            assert self.logits_processors is not None
             # Not use prompt tokens in each logit processor
             self.logits_processors_use_prompt_tokens: Optional[List[bool]] \
                 = [False] * len(self.logits_processors)
         else:
-            self.logits_processors_use_prompt_tokens: Optional[List[bool]] \
-                = logits_processors_use_prompt_tokens
+            self.logits_processors_use_prompt_tokens = \
+                logits_processors_use_prompt_tokens
 
         self._verify_args()
         if self.use_beam_search:
@@ -260,10 +260,8 @@ class SamplingParams:
             assert self.logits_processors_use_prompt_tokens is not None
             if len(self.logits_processors) != \
                     len(self.logits_processors_use_prompt_tokens):
-                raise ValueError(
-                    "logits_processors_use_prompt_tokens must"
-                    " be the same length as logits_processors"
-                )
+                raise ValueError("logits_processors_use_prompt_tokens must"
+                                 " be the same length as logits_processors")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
@@ -279,7 +277,6 @@ class SamplingParams:
             raise ValueError(
                 f"early_stopping must be True, False, or 'never', "
                 f"got {self.early_stopping}.")
-
 
     def _verify_non_beam_search(self) -> None:
         if self.early_stopping is not False:
