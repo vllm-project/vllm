@@ -34,11 +34,21 @@ def get_attn_backend(
                                  sliding_window, dtype, kv_cache_dtype,
                                  block_size)
     if backend == _Backend.FLASH_ATTN:
-        logger.info("Using FlashAttention-2 backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
-        return FlashAttentionBackend
-    elif backend == _Backend.XFORMERS:
+
+        # We check it here not in _which_attn_to_use because we cannot know
+        # the head size until we import FlashAttentionBackend.
+        supported_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
+        if head_size in supported_head_sizes:
+            logger.info("Using FlashAttention-2 backend.")
+            return FlashAttentionBackend
+        logger.info(
+            "Cannot use FlashAttention-2 backend for head size %d. "
+            "Using XFormers backend instead.", head_size)
+        backend = _Backend.XFORMERS
+
+    if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
             XFormersBackend)
@@ -91,6 +101,20 @@ def _which_attn_to_use(
     if dtype not in (torch.float16, torch.bfloat16):
         logger.info("Cannot use FlashAttention-2 backend for dtype other than "
                     "torch.float16 or torch.bfloat16.")
+        return _Backend.XFORMERS
+
+    if kv_cache_dtype is not None and kv_cache_dtype.startswith("fp8"):
+        logger.info("Cannot use FlashAttention-2 backend for FP8 KV cache.")
+        return _Backend.XFORMERS
+
+    if block_size % 16 != 0:
+        logger.info("Cannot use FlashAttention-2 backend for block size not "
+                    "divisible by 16.")
+        return _Backend.XFORMERS
+
+    if sliding_window is not None:
+        logger.info(
+            "Cannot use FlashAttention-2 backend due to sliding window.")
         return _Backend.XFORMERS
 
     try:
