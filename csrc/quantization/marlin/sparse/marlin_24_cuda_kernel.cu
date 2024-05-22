@@ -899,7 +899,7 @@ void marlin_cuda_2_4(const void* A, const void* B, const void* meta, void* C,
       // than better compute utilization
       thread_k = 128;
       thread_m = 128;
-    } else if (prob_n <= 128) {
+    } else if (prob_n <= 256) {
       thread_k = 64;
       thread_m = 256;
     } else {
