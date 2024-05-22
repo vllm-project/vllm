@@ -372,7 +372,9 @@ class LLM:
         into a single list and pass it to this method.
 
         Args:
-            inputs: The inputs to the LLM.
+            inputs: The inputs to the LLM. You may pass a sequence of inputs for
+                batch inference. See :class:`~vllm.inputs.PromptStrictInputs`
+                for more details about the format of each input.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: Whether to use tqdm to display the progress bar.

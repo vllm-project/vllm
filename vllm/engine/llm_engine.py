@@ -152,8 +152,6 @@ class LLMEngine:
         self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
 
-        self.tokenizer: Optional[BaseTokenizerGroup]
-
         if not self.model_config.skip_tokenizer_init:
             tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(tokenizer)
@@ -446,7 +444,9 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            inputs: The inputs to the LLM.
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
             params: Parameters for sampling or pooling.
                 :class:`~vllm.SamplingParams` for text generation.
                 :class:`~vllm.PoolingParams` for pooling.

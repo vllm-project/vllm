@@ -5,7 +5,7 @@ if TYPE_CHECKING:
     from vllm.sequence import MultiModalData
 
 
-class ParsedString(TypedDict):
+class ParsedText(TypedDict):
     text: str
     is_tokens: Literal[False]
 
@@ -18,7 +18,7 @@ class ParsedTokens(TypedDict):
 # https://github.com/vllm-project/vllm/pull/4028
 @overload
 def parse_and_batch_prompt(
-        prompt: Union[str, List[str]]) -> Sequence[ParsedString]:
+        prompt: Union[str, List[str]]) -> Sequence[ParsedText]:
     ...
 
 
@@ -30,10 +30,10 @@ def parse_and_batch_prompt(
 
 def parse_and_batch_prompt(
     prompt: Union[str, List[str], List[int], List[List[int]]],
-) -> Union[Sequence[ParsedString], Sequence[ParsedTokens]]:
+) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
     if isinstance(prompt, str):
         # case 1: a string
-        return [ParsedString(text=prompt, is_tokens=False)]
+        return [ParsedText(text=prompt, is_tokens=False)]
 
     if isinstance(prompt, list):
         if len(prompt) == 0:
@@ -42,7 +42,7 @@ def parse_and_batch_prompt(
         if isinstance(prompt[0], str):
             # case 2: array of strings
             return [
-                ParsedString(text=elem, is_tokens=False)
+                ParsedText(text=elem, is_tokens=False)
                 for elem in cast(List[str], prompt)
             ]
         if isinstance(prompt[0], int):
@@ -64,42 +64,62 @@ def parse_and_batch_prompt(
                      "array of tokens, or array of token arrays")
 
 
-class MultiModalPrompt(TypedDict, total=False):
-    multi_modal_data: Optional["MultiModalData"]
-    """Multi modal data."""
+class TextPrompt(TypedDict):
+    """Schema for a text prompt."""
 
-
-class StringPrompt(MultiModalPrompt, TypedDict):
     prompt: str
-    """The prompt string."""
+    """The input text to be tokenized before passing to the model."""
+
+    multi_modal_data: Optional["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
 
 
-class TokensPrompt(MultiModalPrompt, TypedDict):
+class TokensPrompt(TypedDict):
+    """Schema for a tokenized prompt."""
+
     prompt_token_ids: List[int]
-    """The token IDs of the prompt. If None, we use the
-    tokenizer to convert the prompts to token IDs."""
+    """A list of token IDs to pass to the model."""
+
+    multi_modal_data: Optional["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
 
 
-class StringTokensPrompt(MultiModalPrompt, TypedDict):
+class TextTokensPrompt(TypedDict):
     """It is assumed that :attr:`prompt` is consistent with
     :attr:`prompt_token_ids`. This is currently used in
     :class:`AsyncLLMEngine` for logging both the text and token IDs."""
 
     prompt: str
-    """The prompt string."""
+    """The prompt text."""
 
     prompt_token_ids: List[int]
     """The token IDs of the prompt. If None, we use the
     tokenizer to convert the prompts to token IDs."""
 
+    multi_modal_data: Optional["MultiModalData"]
+    """
+    Optional multi-modal data to pass to the model,
+    if the model supports it.
+    """
 
-PromptStrictInputs = Union[str, StringPrompt, TokensPrompt]
-"""The prompt string. More complex inputs should be represented by
-:class:`StringPrompt` or :class:`TokensPrompt`."""
 
-PromptInputs = Union[str, StringPrompt, TokensPrompt, StringTokensPrompt]
-"""As :const:`PromptStrictInputs` but additionally accepts
-:class:`StringTokensPrompt`."""
+PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+"""
+The inputs to the LLM, which can take one of the following forms:
+
+- A text prompt (:class:`str` or :class:`TextPrompt`)
+- A tokenized prompt (:class:`TokensPrompt`)
+"""
+
+PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
+"""Same as :const:`PromptStrictInputs` but additionally accepts
+:class:`TextTokensPrompt`."""
 
 
 class LLMInputs(TypedDict):

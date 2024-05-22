@@ -599,7 +599,9 @@ class AsyncLLMEngine:
         from the LLMEngine to the caller.
 
         Args:
-            inputs: The inputs to the LLM.
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
             sampling_params: The sampling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
@@ -673,7 +675,9 @@ class AsyncLLMEngine:
         from the LLMEngine to the caller.
 
         Args:
-            inputs: The inputs to the LLM.
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
             pooling_params: The pooling parameters of the request.
             request_id: The unique id of the request.
             lora_request: LoRA request to use for generation, if any.
