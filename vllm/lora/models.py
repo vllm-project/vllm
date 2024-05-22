@@ -26,6 +26,7 @@ from vllm.utils import LRUCache, is_pin_memory_available
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
+HF_ENDPOINT = os.getenv("HF_ENDPOINT", None)
 
 
 @dataclass
@@ -303,7 +304,7 @@ class LoRAModel:
         if lora_path.exists():
             file_system = LocalFileSystem()
         else:
-            file_system = HfFileSystem(endpoint=os.getenv("HF_ENDPOINT", None))
+            file_system = HfFileSystem(endpoint=HF_ENDPOINT)
 
         # Since HfFileSystem and Posix use same path separator, we can use
         # pathlib.Path to join the path for convenience
