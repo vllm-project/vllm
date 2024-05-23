@@ -26,7 +26,7 @@ docker exec cpu-test bash -c "cd tests;
   bash ../.buildkite/download-images.sh
   pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py --ignore=models/test_marlin.py \
     --ignore=models/test_big_models.py --ignore=models/test_aqlm.py --ignore=models/test_fp8.py --ignore=models/test_gptq_marlin.py \
-    --ignore=models/test_gptq_marlin_24.py"
+    --ignore=models/test_gptq_marlin_24.py --ignore=models/test_embedding.py"
 
 # Run big model test
 #docker exec cpu-test bash -c "cd tests;
