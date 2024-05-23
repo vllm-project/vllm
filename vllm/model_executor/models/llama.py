@@ -54,7 +54,6 @@ class LlamaMLP(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
@@ -87,7 +86,6 @@ class LlamaAttention(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -180,7 +178,6 @@ class LlamaDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        parent_name: str,
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -201,7 +198,6 @@ class LlamaDecoderLayer(nn.Module):
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False)
         self.self_attn = LlamaAttention(
-            parent_name=f"{parent_name}.self_attn",
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
@@ -215,7 +211,6 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
         )
         self.mlp = LlamaMLP(
-            parent_name=f"{parent_name}.mlp",
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -278,8 +273,7 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(parent_name=f"model.layers.{idx}",
-                              config=config,
+            LlamaDecoderLayer(config=config,
                               cache_config=cache_config,
                               quant_config=quant_config)
             for idx in range(config.num_hidden_layers)
