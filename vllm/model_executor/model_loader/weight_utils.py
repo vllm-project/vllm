@@ -12,10 +12,10 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import LoadConfig, ModelConfig
 from vllm.logger import init_logger
@@ -243,8 +243,7 @@ def download_safetensors_index_file_from_hf(
         except huggingface_hub.utils.EntryNotFoundError:
             logger.info("No %s found in remote.", SAFE_WEIGHTS_INDEX_NAME)
         except huggingface_hub.utils.LocalEntryNotFoundError:
-            logger.info("No %s found in local cache.",
-                        SAFE_WEIGHTS_INDEX_NAME)
+            logger.info("No %s found in local cache.", SAFE_WEIGHTS_INDEX_NAME)
 
 
 # For models like Mistral-7B-v0.3
