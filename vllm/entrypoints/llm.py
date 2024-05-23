@@ -546,7 +546,7 @@ class LLM:
             for output in step_outputs:
                 # To improve performance, we only check the first result
                 if is_first:
-                    if not isinstance(outputs[0], output_type):
+                    if not isinstance(output, output_type):
                         raise TypeError(
                             f"Expected output of type {output_type}, "
                             f"but found type {type(output)}")
