@@ -352,7 +352,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         # Allocate encoder sequence
         encoder_seq = seq_group.get_encoder_seq()
-        if encoder_seq is not None:
+        if not decoder_only:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
             block_table = self._allocate_sequence(encoder_seq, 1, decoder_only)

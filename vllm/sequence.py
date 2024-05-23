@@ -420,7 +420,8 @@ class SequenceGroup:
             for an embedding model.
         pooling_params: The pooling parameters used to generate the pooling
             for an embedding model.
-        encoder_seq: Optional, the single encoder sequence.
+        encoder_seq: Optional, the single encoder sequence. Should be None
+                     unless you are working with an encoder/decoder model.
     """
 
     def __init__(

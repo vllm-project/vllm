@@ -132,6 +132,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
+        decoder_only = \
+            seq_group.get_encoder_seq() is None
+
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
@@ -156,6 +159,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert (request_id
                 not in self.cross_block_tables), \
                 "block table already exists"
+
+        if (self.block_sliding_window is not None) and \
+           (not decoder_only):
+            raise NotImplementedError(
+                "Sliding window attention for encoder/decoder models " + \
+                "is not currently supported.")
+
+        if self.enable_caching and (not decoder_only):
+            raise NotImplementedError(
+                "Automatic prefix caching currently not " + \
+                "supported for encoder/decoder models.")
 
         encoder_seq = seq_group.get_encoder_seq()
         if encoder_seq is not None:
