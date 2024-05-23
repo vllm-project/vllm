@@ -496,6 +496,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def _get_physical_blocks(
             self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = \
+            encoder_seq is None
+
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
         request_id = seq_group.request_id
@@ -505,7 +509,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 continue
             blocks.update(self.block_tables[seq.seq_id])
         # Cross-attention blocks
-        if seq_group.encoder_seq is not None:
+        if not decoder_only:
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 
@@ -514,9 +518,12 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     num_lookahead_slots: int = 0) -> AllocStatus:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = encoder_seq is None
+
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-        if seq_group.encoder_seq is not None:
+        if not decoder_only:
             num_swapped_seqs += 1
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         # NOTE: Conservatively, we assume that every sequence will allocate
@@ -556,6 +563,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = encoder_seq is None
         request_id = seq_group.request_id
 
         # CPU block -> GPU block.
@@ -566,7 +575,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self._swap_in_block_table(self.block_tables[seq.seq_id],
                                           mapping)
 
-        if seq_group.encoder_seq is not None:
+        if not decoder_only:
             self.cross_block_tables[request_id] = \
                 self._swap_in_block_table(self.cross_block_tables[request_id],
                                           mapping)
@@ -600,6 +609,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         request_id = seq_group.request_id
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = encoder_seq is None
 
         # GPU block -> CPU block.
         # dict is efficient in lookup `if gpu_block in mapping`
@@ -609,7 +620,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self._swap_out_block_table(self.block_tables[seq.seq_id],
                                            mapping)
 
-        if seq_group.encoder_seq is not None:
+        if not decoder_only:
             self.cross_block_tables[request_id] = \
                 self._swap_out_block_table(self.cross_block_tables[request_id],
                                            mapping)

@@ -91,6 +91,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = encoder_seq is None
+
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
         num_required_blocks = BlockTable.get_num_required_blocks(
@@ -98,7 +101,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        if seq_group.encoder_seq is not None:
+        if not decoder_only:
             num_required_blocks += BlockTable.get_num_required_blocks(
                 seq_group.encoder_seq.get_token_ids(),
                 block_size=self.block_size,
