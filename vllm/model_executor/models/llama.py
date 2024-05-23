@@ -62,11 +62,12 @@ class LlamaMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
+        self.down_proj = RowParallelLinear(input_size=intermediate_size,
+                                           output_size=hidden_size,
                                            bias=bias,
                                            quant_config=quant_config)
         if hidden_act != "silu":
@@ -120,16 +121,16 @@ class LlamaAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
+            hidden_size=hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=self.total_num_heads,
+            total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            hidden_size,
+            input_size=self.total_num_heads * self.head_dim,
+            output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
         )
@@ -263,8 +264,10 @@ class LlamaModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
+            LlamaDecoderLayer(config=config,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
+            for idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
