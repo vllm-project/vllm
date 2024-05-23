@@ -338,7 +338,6 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                 attn_metadata: AttentionMetadata,
                 image_input: Optional[dict] = None):
         if image_input is not None:
-            print(image_input.shape)
             inputs_embeds = self.vision_embed_tokens(input_ids, image_input, self.vision_language_config.image_input_shape)
 
             input_ids = None
