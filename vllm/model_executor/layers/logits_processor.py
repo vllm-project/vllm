@@ -1,4 +1,5 @@
 """A layer that compute logits from hidden_stats."""
+import inspect
 from typing import Optional
 
 import torch
@@ -95,15 +96,25 @@ def _apply_logits_processors(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
-
         if logits_processors:
             found_logits_processors = True
+
             for seq_id, logits_row_idx in zip(seq_ids,
                                               seq_group.sample_indices):
                 logits_row = logits[logits_row_idx]
-                token_ids = seq_group.seq_data[seq_id].output_token_ids
+                past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
+                prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
+
                 for logits_processor in logits_processors:
-                    logits_row = logits_processor(token_ids, logits_row)
+                    parameters = inspect.signature(logits_processor).parameters
+                    if len(parameters) == 3:
+                        logits_row = logits_processor(prompt_tokens_ids,
+                                                      past_tokens_ids,
+                                                      logits_row)
+                    else:
+                        logits_row = logits_processor(past_tokens_ids,
+                                                      logits_row)
+
                 logits[logits_row_idx] = logits_row
 
         logits_processed += len(seq_group.sample_indices) + len(
