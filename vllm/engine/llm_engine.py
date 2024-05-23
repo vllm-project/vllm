@@ -336,7 +336,7 @@ class LLMEngine:
         return self.get_tokenizer_group().get_lora_tokenizer(
             sequence.lora_request)
 
-    def _init_tokenizer(self, **tokenizer_init_kwargs):
+    def _init_tokenizer(self, **tokenizer_init_kwargs) -> BaseTokenizerGroup:
         init_kwargs = dict(
             tokenizer_id=self.model_config.tokenizer,
             enable_lora=bool(self.lora_config),
@@ -486,7 +486,7 @@ class LLMEngine:
                                                      inputs=inputs,
                                                      lora_request=lora_request)
 
-        return self._add_processed_request(
+        self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,

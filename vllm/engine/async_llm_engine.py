@@ -278,7 +278,7 @@ class _AsyncLLMEngine(LLMEngine):
         processed_inputs = await self.process_model_inputs_async(
             request_id=request_id, inputs=inputs, lora_request=lora_request)
 
-        return self._add_processed_request(
+        self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,
