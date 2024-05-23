@@ -8,6 +8,7 @@ from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+
 '''
 Exception strings for non-implemented encoder/decoder scenarios
 '''
