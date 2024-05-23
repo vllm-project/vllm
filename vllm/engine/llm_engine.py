@@ -765,7 +765,10 @@ class LLMEngine:
 
             for idx, scheduled_seq_group in enumerate(
                     scheduler_outputs.scheduled_seq_groups):
+                # print(f"SANG-TODO {scheduler_outputs.num_prefill_groups=}")
                 group_was_prefill = idx < scheduler_outputs.num_prefill_groups
+                # print(f"SANG-TODO {group_was_prefill=}")
+                # print(f"SANG-TODO {idx=}")
                 seq_group = scheduled_seq_group.seq_group
 
                 # NOTE: a seq_group that completed all of its prefill tokens

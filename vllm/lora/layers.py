@@ -1174,6 +1174,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
                            nan=float("-inf"),
                            posinf=float("inf"),
                            neginf=float("-inf")))
+        # print(f"SANG-TODO { logits[:,self.base_layer.org_vocab_size:self.base_layer.org_vocab_size + lora_logits.shape[1]].shape=} {lora_logits.shape=} {self.indices_padded[:self.indices_len[2]]=} {hidden_states.shape=}")
         logits[:,
                self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
                lora_logits.shape[1]] = lora_logits

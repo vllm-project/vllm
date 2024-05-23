@@ -144,6 +144,7 @@ def convert_mapping(
     if long_lora_indices_len is not None:
         indices_len.append(long_lora_indices_len)
 
+    # print(f"{mapping.prompt_mapping=} {sampler_indices=} {sampler_indices_padded=} {indices_len=}")
     return (base_indices, sampler_indices, sampler_indices_padded,
             embeddings_indices, long_lora_indices, indices_len)
 

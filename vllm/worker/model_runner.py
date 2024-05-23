@@ -379,12 +379,19 @@ class ModelRunner:
                     lora_requests.add(seq_group_metadata.lora_request)
 
                 lora_index_mapping += [lora_id] * (seq_len - context_len)
-                lora_prompt_mapping.extend(
-                    [lora_id] *
-                    (seq_len -
-                     context_len if seq_group_metadata.sampling_params
-                     and seq_group_metadata.sampling_params.prompt_logprobs
-                     else 1))
+                if (seq_group_metadata.sampling_params
+                        and seq_group_metadata.sampling_params.prompt_logprobs):
+                    lora_prompt_mapping.extend([lora_id] * (seq_len - context_len))
+                else:
+                    if seq_group_metadata.do_sample:
+                        lora_prompt_mapping.append(lora_id)
+                # lora_prompt_mapping.extend(
+                #     [lora_id] *
+                #     (seq_len -
+                #      context_len if seq_group_metadata.sampling_params
+                #      and seq_group_metadata.sampling_params.prompt_logprobs
+                #      else 1))
+                # print(f"{len(lora_prompt_mapping)=}")
 
                 if seq_group_metadata.multi_modal_data:
                     multi_modal_input_list.append(
@@ -675,6 +682,7 @@ class ModelRunner:
         (input_tokens, input_positions, attn_metadata, sampling_metadata,
          lora_requests, lora_mapping, multi_modal_input
          ) = self.prepare_input_tensors(seq_group_metadata_list)
+        # print(f"{input_tokens.shape=}")
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
