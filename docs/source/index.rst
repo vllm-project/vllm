@@ -42,6 +42,7 @@ vLLM is flexible and easy to use with:
 * Streaming outputs
 * OpenAI-compatible API server
 * Support NVIDIA GPUs and AMD GPUs
+* (Experimental) Support for Intel® Gaudi® 2 accelerators
 * (Experimental) Prefix caching support
 * (Experimental) Multi-lora support
 
@@ -64,6 +65,7 @@ Documentation
    getting_started/amd-installation
    getting_started/neuron-installation
    getting_started/cpu-installation
+   getting_started/gaudi-installation
    getting_started/quickstart
    getting_started/examples/examples_index
 
