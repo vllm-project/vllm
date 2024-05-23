@@ -12,12 +12,12 @@ The [nm-vllm PyPi package](https://pypi.org/project/nm-vllm/) includes pre-compi
 
 Install it using pip:
 ```bash
-pip install nm-vllm
+pip install nm-vllm --extra-index-url https://pypi.neuralmagic.com/simple
 ```
 
 For utilizing weight-sparsity kernels, such as through `sparsity="sparse_w16a16"`, you can extend the installation with the `sparsity` extras:
 ```bash
-pip install nm-vllm[sparse]
+pip install nm-vllm[sparse] --extra-index-url https://pypi.neuralmagic.com/simple
 ```
 
 You can also build and install `nm-vllm` from source (this will take ~10 minutes):

@@ -123,6 +123,11 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
 
+# UPSTREAM SYNC: Install sparsity extras
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install nm-magic-wand-nightly --extra-index-url https://pypi.neuralmagic.com/simple
+
 RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
     --mount=type=cache,target=/root/.cache/pip \
     pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
@@ -134,10 +139,6 @@ RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,ta
 FROM vllm-base AS test
 
 ADD . /vllm-workspace/
-
-# UPSTREAM SYNC: Install sparsity extras
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip3 install nm-magic-wand-nightly
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
