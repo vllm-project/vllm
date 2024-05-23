@@ -2,6 +2,7 @@ import pytest
 
 from vllm.lora.models import LoRAModel
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
+from vllm.model_executor.models.llama import LlamaForCausalLM
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "chatglm3-6b"]
 
@@ -56,3 +57,22 @@ def test_load_checkpoints(
                 device="cpu",
                 embedding_modules=embedding_modules,
                 embedding_padding_modules=embed_padding_modules)
+
+
+def test_load_remote_checkpoints():
+    supported_lora_modules = LlamaForCausalLM.supported_lora_modules
+    packed_modules_mapping = LlamaForCausalLM.packed_modules_mapping
+    embedding_modules = LlamaForCausalLM.embedding_modules
+    embed_padding_modules = LlamaForCausalLM.embedding_padding_modules
+    expected_lora_modules = []
+    for module in supported_lora_modules:
+        if module in packed_modules_mapping:
+            expected_lora_modules.extend(packed_modules_mapping[module])
+        else:
+            expected_lora_modules.append(module)
+    LoRAModel.from_checkpoint("yard1/llama-2-7b-sql-lora-test",
+                              expected_lora_modules,
+                              lora_model_id=1,
+                              device="cpu",
+                              embedding_modules=embedding_modules,
+                              embedding_padding_modules=embed_padding_modules)
