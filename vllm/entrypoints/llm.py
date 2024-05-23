@@ -537,13 +537,24 @@ class LLM:
                 postfix=f"Generation Speed: {0:.2f} toks/s",
             )
         # Run the engine.
-        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        outputs: List[_O] = []
         total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            is_first = True
+
             for output in step_outputs:
+                # To improve performance, we only check the first result
+                if is_first:
+                    if not isinstance(outputs[0], output_type):
+                        raise TypeError(
+                            f"Expected output of type {output_type}, "
+                            f"but found type {type(output)}")
+
+                    is_first = False
+
                 if output.finished:
-                    outputs.append(output)
+                    outputs.append(output)  # type: ignore
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
@@ -557,10 +568,4 @@ class LLM:
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
-        outputs = sorted(outputs, key=lambda x: int(x.request_id))
-
-        if len(outputs) > 0 and not isinstance(outputs[0], output_type):
-            raise TypeError(f"Expected output type to be {output_type}, "
-                            f"but found type {type(outputs[0])}")
-
-        return cast(List[_O], outputs)
+        return sorted(outputs, key=lambda x: int(x.request_id))

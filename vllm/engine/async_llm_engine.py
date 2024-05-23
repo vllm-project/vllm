@@ -2,7 +2,7 @@ import asyncio
 import time
 from functools import partial
 from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, Union, overload)
+                    Set, Tuple, Type, TypeVar, Union)
 
 from transformers import PreTrainedTokenizer
 
@@ -288,6 +288,9 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
+
+
+_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class AsyncLLMEngine:
@@ -653,10 +656,11 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in self.process_request(
+        async for output in self._process_request(
                 request_id,
                 inputs,
                 sampling_params,
+                output_type=RequestOutput,
                 lora_request=lora_request,
         ):
             yield output
@@ -727,63 +731,53 @@ class AsyncLLMEngine:
             >>> # Process and return the final output
             >>> ...
         """
-        async for output in self.process_request(
+        async for output in self._process_request(
                 request_id,
                 inputs,
                 pooling_params,
+                output_type=EmbeddingRequestOutput,
                 lora_request=lora_request,
         ):
             yield output
 
-    @overload
-    def process_request(
-        self,
-        request_id: str,
-        inputs: PromptInputs,
-        params: SamplingParams,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AsyncIterator[RequestOutput]:
-        ...
-
-    @overload
-    def process_request(  # type: ignore[misc]
-        self,
-        request_id: str,
-        inputs: PromptInputs,
-        params: PoolingParams,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AsyncIterator[EmbeddingRequestOutput]:
-        ...
-
-    def process_request(
+    async def _process_request(
         self,
         request_id: str,
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
+        *,
+        output_type: Type[_O],
         lora_request: Optional[LoRARequest] = None,
-    ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
+    ) -> AsyncIterator[_O]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
+        arrival_time = time.time()
 
-        async def generator():
-            arrival_time = time.time()
+        stream = await self.add_request(
+            request_id,
+            inputs,
+            params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
-            stream = await self.add_request(
-                request_id,
-                inputs,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-            )
+        try:
+            is_first = True
 
-            try:
-                async for request_output in stream:
-                    yield request_output
-            except (Exception, asyncio.CancelledError) as e:
-                self._abort(request_id)
-                raise e
+            async for request_output in stream:
+                # To improve performance, we only check the first result
+                if is_first:
+                    if not isinstance(request_output, output_type):
+                        raise TypeError(
+                            f"Expected output of type {output_type}, "
+                            f"but found type {type(request_output)}")
 
-        return generator()
+                    is_first = False
+
+                yield request_output  # type: ignore
+        except (Exception, asyncio.CancelledError) as e:
+            self._abort(request_id)
+            raise e
 
     async def abort(self, request_id: str) -> None:
         """Abort a request.
