@@ -15,6 +15,17 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 logger = init_logger(__name__)
+'''
+Exception strings for non-implemented encoder/decoder scenarios
+'''
+
+str_not_impl_enc_dec_swa = \
+    "Sliding window attention for encoder/decoder models " + \
+                    "is not currently supported."
+
+str_not_impl_enc_dec_prefix_cache = \
+    "Prefix caching for encoder/decoder models " + \
+                    "is not currently supported."
 
 
 class BlockAllocatorBase(ABC):
@@ -269,6 +280,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
+        is_encoder_decoder = seq_group.is_encoder_decoder()
+        if self.enable_caching and is_encoder_decoder:
+            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
+
         self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
         cross_num_required_blocks = self._get_seq_num_required_blocks(
@@ -277,10 +292,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                               cross_num_required_blocks
 
         if self.block_sliding_window is not None:
-            if seq_group.is_encoder_decoder():
-                raise NotImplementedError(
-                    "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported.")
+            if is_encoder_decoder:
+                raise NotImplementedError(str_not_impl_enc_dec_swa)
 
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
@@ -327,14 +340,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if (self.block_sliding_window is not None) and \
            is_encoder_decoder:
-            raise NotImplementedError(
-                "Sliding window attention for encoder/decoder models " + \
-                "is not currently supported.")
+            raise NotImplementedError(str_not_impl_enc_dec_swa)
 
         if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(
-                "Automatic prefix caching currently not " + \
-                "supported for encoder/decoder models.")
+            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
 
         # Allocate decoder sequences
         #
