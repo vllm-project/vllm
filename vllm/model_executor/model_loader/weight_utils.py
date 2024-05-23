@@ -24,6 +24,8 @@ from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
 
+_SAFETENSORS_INDEX_FILE_NAME = "model.safetensors.index.json"
+
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
@@ -195,6 +197,8 @@ def download_weights_from_hf(
             if len(matching) > 0:
                 allow_patterns = [pattern]
                 break
+                
+        allow_patterns.append("*model.safetensors.index.json")
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
@@ -210,6 +214,30 @@ def download_weights_from_hf(
         )
     return hf_folder
 
+# For models like Mistral-v0.3 (https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
+# there are both sharded safetensors files and a consolidated safetensors file.
+# Passing both of these to the weight loader functionality breaks.
+# So, we use the _SAFETENSORS_INDEX_FILE `model.safetensors.index.json` to look up 
+# which safetensors files should be used.
+def filter_duplicate_safetensors_files(
+        hf_weights_files: List[str], hf_folder: str) -> List[str]:
+    # model.safetensors.index.json is a mapping from keys in the 
+    # torch state_dict to safetensors file holding that weight.
+    index_file = os.path.join(hf_folder, _SAFETENSORS_INDEX_FILE_NAME)
+    if not os.path.isfile(index_file):
+        return hf_weights_files
+    
+    # Iterate through the weight_map (weight_name: safetensors files)
+    # to identify weights that we should use.
+    weight_map = json.load(open(index_file))["weight_map"]
+    weight_files_in_index = set()
+    for weight_name in weight_map:
+        weight_files_in_index.add(os.path.join(hf_folder,
+                                               weight_map[weight_name]))
+    # Filter out any fields that are not found in the index file.
+    hf_weights_files = [f for f in 
+                        hf_weights_files if f in weight_files_in_index]
+    return hf_weights_files
 
 def filter_files_not_needed_for_inference(
         hf_weights_files: List[str]) -> List[str]:

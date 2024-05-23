@@ -1,6 +1,7 @@
 # ruff: noqa: SIM117
 import collections
 import copy
+import json
 import glob
 import os
 from abc import ABC, abstractmethod
@@ -24,12 +25,12 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, filter_files_not_needed_for_inference,
-    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
+    filter_duplicate_safetensors_files, get_quant_config, 
+    initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 
 logger = init_logger(__name__)
-
 
 def _get_quantization_config(
         model_config: ModelConfig,
@@ -186,9 +187,13 @@ class DefaultModelLoader(BaseModelLoader):
             if len(hf_weights_files) > 0:
                 if pattern == "*.safetensors":
                     use_safetensors = True
+                
                 break
-
-        if not use_safetensors:
+        
+        if use_safetensors:
+            hf_weights_files = filter_duplicate_safetensors_files(
+                    hf_weights_files, hf_folder)
+        else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
 
