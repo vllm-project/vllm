@@ -160,7 +160,7 @@ def test_can_allocate_encoder_decoder_fails_with_swa(block_size: int,
     # 1. Block manager v2 constructor fails with assertion that sliding window
     #    is not yet supported (most likely near-term outcome at time of
     #    writing), or
-    # 2. can_allocate() fails with NotImplementedError due to combiantion of
+    # 2. can_allocate() fails with NotImplementedError due to combination of
     #    encoder/decoder and sliding window attention
     if isinstance(exc_info.value, NotImplementedError):
         assert str(exc_info.value) == str_not_impl_enc_dec_swa
