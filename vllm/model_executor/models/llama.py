@@ -63,17 +63,14 @@ class LlamaMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            layer_name=f"{parent_name}.gate_up_proj",
             input_size=hidden_size,
             output_sizes=[intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config)
-        self.down_proj = RowParallelLinear(
-            layer_name=f"{parent_name}.down_proj",
-            input_size=intermediate_size,
-            output_size=hidden_size,
-            bias=bias,
-            quant_config=quant_config)
+        self.down_proj = RowParallelLinear(input_size=intermediate_size,
+                                           output_size=hidden_size,
+                                           bias=bias,
+                                           quant_config=quant_config)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -135,7 +132,6 @@ class LlamaAttention(nn.Module):
         self.kv_scale = 1.0
 
         self.qkv_proj = QKVParallelLinear(
-            layer_name=f"{parent_name}.qkv_proj",
             hidden_size=hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
@@ -144,7 +140,6 @@ class LlamaAttention(nn.Module):
             quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
-            layer_name=f"{parent_name}.o_proj",
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,

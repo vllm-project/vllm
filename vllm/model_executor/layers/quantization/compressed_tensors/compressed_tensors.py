@@ -84,17 +84,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             "Scheme not supported. Only CUDA, 8-bit static symmtetric "
             "per tensor quantization is currently supported")
 
-    def get_scheme(
-            self,
-            layer: torch.nn.Module,
-            layer_name: Optional[str] = None) -> "CompressedTensorsScheme":
-
-        if layer_name is None:
-            raise ValueError(
-                "layer_name must be provided for CompressedTensorsConfig")
-
-        if layer_name in self.ignore:
-            return CompressedTensorsUnquantized()
+    def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
 
         # TODO: update with matching function from `compressed_tensors`
         layer_type_name = None
@@ -110,7 +100,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             layer_type_name, None)
         if layer_quant_details is None:
             raise ValueError(
-                f"Could not find quantization details for {layer_name}.")
+                f"Could not find quantization details for {layer}.")
 
         return self._get_schema(weight_quant=layer_quant_details["weight"],
                                 input_quant=layer_quant_details["input"])
@@ -121,14 +111,10 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def __init__(self, quantization_config: CompressedTensorsConfig):
         self.quantization_config = quantization_config
 
-    def create_weights(self,
-                       layer: torch.nn.Module,
+    def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int],
-                       input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype,
-                       layer_name: Optional[str] = None,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         """
         Use the CompressedTensorsScheme associated with each layer to create 
@@ -136,8 +122,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        scheme = self.quantization_config.get_scheme(layer=layer,
-                                                     layer_name=layer_name)
+        scheme = self.quantization_config.get_scheme(layer=layer)
         scheme.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,

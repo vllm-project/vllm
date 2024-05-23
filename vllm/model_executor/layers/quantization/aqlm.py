@@ -227,14 +227,10 @@ class AQLMLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: AQLMConfig):
         self.quant_config = quant_config
 
-    def create_weights(self,
-                       layer: torch.nn.Module,
+    def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_partition_sizes: List[int],
-                       input_size: int,
-                       output_size: int,
-                       params_dtype: torch.dtype,
-                       layer_name: Optional[str] = None,
+                       output_partition_sizes: List[int], input_size: int,
+                       output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         del output_size  # Unused.
         del input_size  # Unused.
