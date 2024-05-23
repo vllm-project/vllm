@@ -91,19 +91,16 @@ class BlockSpaceManagerV2(BlockSpaceManager):
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = encoder_seq is None
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-
         num_required_blocks = BlockTable.get_num_required_blocks(
             seq.get_token_ids(),
             block_size=self.block_size,
         )
 
-        if not decoder_only:
+        if seq_group.is_encoder_decoder():
             num_required_blocks += BlockTable.get_num_required_blocks(
-                seq_group.encoder_seq.get_token_ids(),
+                seq_group.get_encoder_seq().get_token_ids(),
                 block_size=self.block_size,
             )
 
@@ -136,8 +133,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = \
-            encoder_seq is None
+        is_encoder_decoder = seq_group.is_encoder_decoder()
 
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -165,17 +161,17 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 "block table already exists"
 
         if (self.block_sliding_window is not None) and \
-           (not decoder_only):
+           is_encoder_decoder:
             raise NotImplementedError(
                 "Sliding window attention for encoder/decoder models " + \
                 "is not currently supported.")
 
-        if self.enable_caching and (not decoder_only):
+        if self.enable_caching and is_encoder_decoder:
             raise NotImplementedError(
                 "Automatic prefix caching currently not " + \
                 "supported for encoder/decoder models.")
 
-        if not decoder_only:
+        if is_encoder_decoder:
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 

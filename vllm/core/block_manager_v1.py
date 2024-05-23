@@ -277,7 +277,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                               cross_num_required_blocks
 
         if self.block_sliding_window is not None:
-            if seq_group.get_encoder_seq() is not None:
+            if seq_group.is_encoder_decoder():
                 raise NotImplementedError(
                     "Sliding window attention for encoder/decoder models " + \
                     "is not currently supported.")
@@ -298,7 +298,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _allocate_sequence(self, \
                            seq: Sequence, \
                            ref_count: int, \
-                           decoder_only: bool = True) -> BlockTable:
+                           is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = len(seq.logical_token_blocks)
 
@@ -309,7 +309,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 block = block_table[logical_idx % self.block_sliding_window]
                 # Set the reference counts of the token blocks.
                 block.ref_count = ref_count
-            elif decoder_only and self.enable_caching:
+            elif not is_encoder_decoder and self.enable_caching:
                 block = self.gpu_allocator.allocate(
                     seq.hash_of_block(logical_idx),
                     seq.num_hashed_tokens_of_block(logical_idx))
@@ -323,15 +323,15 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = encoder_seq is None
+        is_encoder_decoder = seq_group.is_encoder_decoder()
 
         if (self.block_sliding_window is not None) and \
-           (not decoder_only):
+           is_encoder_decoder:
             raise NotImplementedError(
                 "Sliding window attention for encoder/decoder models " + \
                 "is not currently supported.")
 
-        if self.enable_caching and (not decoder_only):
+        if self.enable_caching and is_encoder_decoder:
             raise NotImplementedError(
                 "Automatic prefix caching currently not " + \
                 "supported for encoder/decoder models.")
@@ -344,17 +344,18 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_table: BlockTable = \
             self._allocate_sequence(seq,
                                     seq_group.num_seqs(),
-                                    decoder_only)
+                                    is_encoder_decoder)
 
         # Assign the self-attention block tables for each sequence.
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             self.block_tables[seq.seq_id] = block_table.copy()
 
         # Allocate encoder sequence
-        if not decoder_only:
+        if is_encoder_decoder:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
-            block_table = self._allocate_sequence(encoder_seq, 1, decoder_only)
+            block_table = self._allocate_sequence(encoder_seq, 1,
+                                                  is_encoder_decoder)
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
 
@@ -496,9 +497,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def _get_physical_blocks(
             self, seq_group: SequenceGroup) -> List[PhysicalTokenBlock]:
-        encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = \
-            encoder_seq is None
 
         # NOTE: Here, we assume that the physical blocks are only shared by
         # the sequences in the same group.
@@ -509,7 +507,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 continue
             blocks.update(self.block_tables[seq.seq_id])
         # Cross-attention blocks
-        if not decoder_only:
+        if seq_group.is_encoder_decoder():
             blocks.update(self.cross_block_tables[request_id])
         return list(blocks)
 
@@ -518,12 +516,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                     num_lookahead_slots: int = 0) -> AllocStatus:
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
-        encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = encoder_seq is None
 
         blocks = self._get_physical_blocks(seq_group)
         num_swapped_seqs = seq_group.num_seqs(status=SequenceStatus.SWAPPED)
-        if not decoder_only:
+        if seq_group.is_encoder_decoder():
             num_swapped_seqs += 1
         num_free_blocks = self.gpu_allocator.get_num_free_blocks()
         # NOTE: Conservatively, we assume that every sequence will allocate
@@ -563,8 +559,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         assert (num_lookahead_slots == 0
                 ), "BlockSpaceManagerV1 does not support lookahead allocation"
 
-        encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = encoder_seq is None
         request_id = seq_group.request_id
 
         # CPU block -> GPU block.
@@ -575,7 +569,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self._swap_in_block_table(self.block_tables[seq.seq_id],
                                           mapping)
 
-        if not decoder_only:
+        if seq_group.is_encoder_decoder():
             self.cross_block_tables[request_id] = \
                 self._swap_in_block_table(self.cross_block_tables[request_id],
                                           mapping)
@@ -609,8 +603,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         request_id = seq_group.request_id
-        encoder_seq = seq_group.get_encoder_seq()
-        decoder_only = encoder_seq is None
 
         # GPU block -> CPU block.
         # dict is efficient in lookup `if gpu_block in mapping`
@@ -620,7 +612,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 self._swap_out_block_table(self.block_tables[seq.seq_id],
                                            mapping)
 
-        if not decoder_only:
+        if seq_group.is_encoder_decoder():
             self.cross_block_tables[request_id] = \
                 self._swap_out_block_table(self.cross_block_tables[request_id],
                                            mapping)
