@@ -169,6 +169,13 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+def get_vllm_version() -> str:
+    # Avoid circular import
+    import vllm
+
+    return vllm.__version__
+
+
 @lru_cache(maxsize=None)
 def get_vllm_instance_id():
     """
