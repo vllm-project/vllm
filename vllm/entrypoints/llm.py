@@ -238,7 +238,7 @@ class LLM:
                       "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
-                                         "instead.")
+                      "instead.")
     def generate(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
@@ -379,7 +379,7 @@ class LLM:
                       "multi_modal_data",
                       is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
                       additional_message="Please use the 'inputs' parameter "
-                                         "instead.")
+                      "instead.")
     def encode(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],

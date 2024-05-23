@@ -54,6 +54,7 @@ def test_deprecate_kwargs_dynamic():
 
 
 def test_deprecate_kwargs_additional_message():
+
     @deprecate_kwargs("old_arg", is_deprecated=True, additional_message="abcd")
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass

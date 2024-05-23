@@ -678,8 +678,9 @@ def deprecate_kwargs(
             if is_deprecated():
                 deprecated_kwargs = kwargs.keys() & deprecated_kws
                 if deprecated_kwargs:
-                    msg = (f"The keyword arguments {deprecated_kwargs} are "
-                           "deprecated and will be removed in a future update.")
+                    msg = (
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update.")
                     if additional_message is not None:
                         msg += f" {additional_message}"
 
