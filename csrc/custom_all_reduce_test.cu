@@ -48,7 +48,7 @@ __global__ void dummy_kernel() {
 }
 
 template <typename T>
-__global__ void set_data(T *data, int size, int myRank) {
+__global__ void set_data(T* data, int size, int myRank) {
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     data[idx] = myRank * 0.11f;
@@ -56,8 +56,8 @@ __global__ void set_data(T *data, int size, int myRank) {
 }
 
 template <typename T>
-__global__ void convert_data(const T *data1, const T *data2, double *fdata1,
-                             double *fdata2, int size) {
+__global__ void convert_data(const T* data1, const T* data2, double* fdata1,
+                             double* fdata2, int size) {
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     fdata1[idx] = data1[idx];
@@ -65,7 +65,7 @@ __global__ void convert_data(const T *data1, const T *data2, double *fdata1,
   }
 }
 
-__global__ void init_rand(curandState_t *state, int size, int nRanks) {
+__global__ void init_rand(curandState_t* state, int size, int nRanks) {
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
     for (int i = 0; i < nRanks; i++) {
@@ -75,7 +75,7 @@ __global__ void init_rand(curandState_t *state, int size, int nRanks) {
 }
 
 template <typename T>
-__global__ void gen_data(curandState_t *state, T *data, double *ground_truth,
+__global__ void gen_data(curandState_t* state, T* data, double* ground_truth,
                          int myRank, int nRanks, int size) {
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < size;
        idx += gridDim.x * blockDim.x) {
@@ -91,9 +91,9 @@ __global__ void gen_data(curandState_t *state, T *data, double *ground_truth,
 }
 
 template <typename T>
-void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
+void run(int myRank, int nRanks, ncclComm_t& comm, int threads, int block_limit,
          int data_size, bool performance_test) {
-  T *result;
+  T* result;
   cudaStream_t stream;
   CUDACHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
   CUDACHECK(cudaMalloc(&result, data_size * sizeof(T)));
@@ -101,8 +101,8 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
 
   cudaIpcMemHandle_t self_data_handle;
   cudaIpcMemHandle_t data_handles[8];
-  vllm::Signal *buffer;
-  T *self_data_copy;
+  vllm::Signal* buffer;
+  T* self_data_copy;
   /**
    * Allocate IPC buffer
    *
@@ -125,22 +125,22 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
                          MPI_BYTE, data_handles, sizeof(cudaIpcMemHandle_t),
                          MPI_BYTE, MPI_COMM_WORLD));
 
-  void *rank_data;
+  void* rank_data;
   size_t rank_data_sz = 16 * 1024 * 1024;
   CUDACHECK(cudaMalloc(&rank_data, rank_data_sz));
   std::vector<int64_t> offsets(nRanks, 0);
   vllm::CustomAllreduce fa(buffer, rank_data, rank_data_sz, data_handles,
                            offsets, myRank);
-  auto *self_data =
-      reinterpret_cast<T *>(reinterpret_cast<char *>(buffer) +
-                            sizeof(vllm::Signal) + data_size * sizeof(T));
+  auto* self_data =
+      reinterpret_cast<T*>(reinterpret_cast<char*>(buffer) +
+                           sizeof(vllm::Signal) + data_size * sizeof(T));
   // hack buffer registration
   {
     std::vector<std::string> handles;
     handles.reserve(nRanks);
     for (int i = 0; i < nRanks; i++) {
-      char *begin = (char *)&data_handles[i];
-      char *end = (char *)&data_handles[i + 1];
+      char* begin = (char*)&data_handles[i];
+      char* end = (char*)&data_handles[i + 1];
       handles.emplace_back(begin, end);
     }
     std::vector<int64_t> offsets(nRanks,
@@ -148,9 +148,9 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
     fa.register_buffer(handles, offsets, self_data);
   }
 
-  double *ground_truth;
+  double* ground_truth;
   CUDACHECK(cudaMallocHost(&ground_truth, data_size * sizeof(double)));
-  curandState_t *states;
+  curandState_t* states;
   CUDACHECK(cudaMalloc(&states, sizeof(curandState_t) * nRanks * data_size));
   init_rand<<<108, 1024, 0, stream>>>(states, data_size, nRanks);
   gen_data<T><<<108, 1024, 0, stream>>>(states, self_data, ground_truth, myRank,
@@ -287,7 +287,7 @@ void run(int myRank, int nRanks, ncclComm_t &comm, int threads, int block_limit,
   CUDACHECK(cudaStreamDestroy(stream));
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   int nRanks, myRank;
   MPICHECK(MPI_Init(&argc, &argv));
   MPICHECK(MPI_Comm_rank(MPI_COMM_WORLD, &myRank));
@@ -296,7 +296,7 @@ int main(int argc, char **argv) {
   ncclUniqueId id;
   ncclComm_t comm;
   if (myRank == 0) ncclGetUniqueId(&id);
-  MPICHECK(MPI_Bcast(static_cast<void *>(&id), sizeof(id), MPI_BYTE, 0,
+  MPICHECK(MPI_Bcast(static_cast<void*>(&id), sizeof(id), MPI_BYTE, 0,
                      MPI_COMM_WORLD));
   NCCLCHECK(ncclCommInitRank(&comm, nRanks, id, myRank));
 
