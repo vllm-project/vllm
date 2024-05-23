@@ -3,7 +3,8 @@ import os
 import pickle
 from collections import defaultdict
 from itertools import islice, repeat
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import (TYPE_CHECKING, Any, Awaitable, Dict, List, Optional, Set,
+                    Tuple, Union)
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
@@ -72,6 +73,13 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self.forward_dag = None
         if USE_RAY_COMPILED_DAG:
             self.forward_dag = self._compiled_ray_dag()
+
+        # This is non-None when the execute model loop is running
+        # in the parallel workers. It's a coroutine in the AsyncLLMEngine case.
+        self.parallel_worker_tasks: Optional[Union[Any, Awaitable[Any]]] = None
+        # Updated by implementations that require additional args to be passed
+        # to the _run_workers execute_model call
+        self.extra_execute_model_run_workers_kwargs: Dict[str, Any] = {}
 
     def _init_executor(self) -> None:
         pass
@@ -221,17 +229,17 @@ class RayXPUExecutor(DistributedGPUExecutor):
                           num_gpu_blocks=num_gpu_blocks,
                           num_cpu_blocks=num_cpu_blocks)
 
-    def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        all_outputs = self._run_workers(
-            "execute_model",
-            driver_kwargs={"execute_model_req": execute_model_req},
-            use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
+    def _driver_execute_model(
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        """Run execute_model in the driver worker.
 
-        # Only the driver worker returns the sampling results.
-        output = all_outputs[0]
-        return output
+        Passing None will cause the driver to stop the model execution
+        loop running in each of the remote workers.
+        """
+        return self.driver_worker.execute_method("execute_model",
+                                                 execute_model_req)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
@@ -254,8 +262,7 @@ class RayXPUExecutor(DistributedGPUExecutor):
         self,
         method: str,
         *args,
-        driver_args: Optional[Tuple[Any, ...]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
+        async_run_remote_workers_only: bool = False,
         all_args: Optional[List[Tuple[Any, ...]]] = None,
         all_kwargs: Optional[List[Dict[str, Any]]] = None,
         use_dummy_driver: bool = False,
@@ -277,11 +284,6 @@ class RayXPUExecutor(DistributedGPUExecutor):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        if driver_args is None:
-            driver_args = args if all_args is None else all_args[0]
-        if driver_kwargs is None:
-            driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
-
         count = len(self.workers)
         all_worker_args = repeat(args, count) if all_args is None \
             else islice(all_args, 1, None)
@@ -301,6 +303,12 @@ class RayXPUExecutor(DistributedGPUExecutor):
                 for (worker, worker_args, worker_kwargs
                      ) in zip(self.workers, all_worker_args, all_worker_kwargs)
             ]
+        if async_run_remote_workers_only:
+            # Just return futures
+            return ray_worker_outputs
+
+        driver_args = args if all_args is None else all_args[0]
+        driver_kwargs = kwargs if all_kwargs is None else all_kwargs[0]
 
         # Start the driver worker after all the ray workers.
         if not use_dummy_driver:
@@ -327,6 +335,11 @@ class RayXPUExecutor(DistributedGPUExecutor):
                 ray_worker_outputs = ray.get(ray_worker_outputs)
 
         return [driver_worker_output] + ray_worker_outputs
+
+    def _wait_for_tasks_completion(self, parallel_worker_tasks: Any) -> None:
+        """Wait for futures returned from _run_workers() with
+        async_run_remote_workers_only to complete."""
+        ray.get(parallel_worker_tasks)
 
     def _compiled_ray_dag(self):
         import pkg_resources
@@ -371,31 +384,18 @@ class RayXPUExecutorAsync(RayXPUExecutor, DistributedGPUExecutorAsync):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.driver_executor = make_async(self.driver_worker.execute_method)
+        self.driver_exec_method = make_async(self.driver_worker.execute_method)
 
-    async def _run_workers_async(
+    async def _driver_execute_model_async(
         self,
-        method: str,
-        *args,
-        driver_args: Optional[Tuple[Any]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-        coros = []
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
+        return await self.driver_exec_method("execute_model",
+                                             execute_model_req)
 
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        # Run the driver worker asynchronously.
-        driver_executor = make_async(getattr(self.driver_worker, method))
-        coros.append(driver_executor(*driver_args, **driver_kwargs))
-
-        # Run the ray workers asynchronously.
-        for worker in self.workers:
-            coros.append(worker.execute_method.remote(method, *args, **kwargs))
-
-        all_outputs = await asyncio.gather(*coros)
-        return all_outputs
+    async def _start_worker_execution_loop(self):
+        coros = [
+            worker.execute_method.remote("start_worker_execution_loop")
+            for worker in self.workers
+        ]
+        return await asyncio.gather(*coros)
