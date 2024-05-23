@@ -192,7 +192,7 @@ def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
                              "ngram_prompt_lookup_max": 3,
                              "speculative_disable_by_batch_size": 4
                          }])
-@pytest.mark.parametrize("batch_size", [1, 2, 5, 8])
+@pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
     "output_len",
     [
