@@ -1,4 +1,5 @@
 """A layer that compute logits from hidden_stats."""
+import inspect
 from typing import Optional
 
 import torch
@@ -95,30 +96,26 @@ def _apply_logits_processors(
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
-        use_prompt_tokens_seq = sampling_params.use_prompt_tokens
         if logits_processors:
-
-            if not use_prompt_tokens_seq:
-                # Not use prompt tokens in each logit processor
-                use_prompt_tokens_seq = [False] * len(logits_processors)
-
             found_logits_processors = True
+
             for seq_id, logits_row_idx in zip(seq_ids,
                                               seq_group.sample_indices):
                 logits_row = logits[logits_row_idx]
+                past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
+                prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
 
-                generated_token_ids = seq_group.seq_data[
-                    seq_id].output_token_ids
-                prompt_token_ids = seq_group.seq_data[seq_id].prompt_token_ids
-                token_ids_seq = [
-                    prompt_token_ids + generated_token_ids
-                    if use_prompt_tokens else generated_token_ids
-                    for use_prompt_tokens in use_prompt_tokens_seq
-                ]
-
-                for logits_processor, token_ids in zip(logits_processors,
-                                                       token_ids_seq):
-                    logits_row = logits_processor(token_ids, logits_row)
+                for logits_processor in logits_processors:
+                    parameters = inspect.signature(logits_processor).parameters
+                    names = [param_name for param_name in parameters]
+                    if names == ['prompt_tokens', 'past_tokens', 'logits']:
+                        logits_row = logits_processor(
+                            promt_tokens=prompt_tokens_ids,
+                            past_tokens=past_tokens_ids,
+                            logits=logits_row)
+                    else:
+                        logits_row = logits_processor(past_tokens_ids,
+                                                      logits_row)
 
                 logits[logits_row_idx] = logits_row
 

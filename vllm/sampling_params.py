@@ -131,7 +131,6 @@ class SamplingParams:
         spaces_between_special_tokens: bool = True,
         logits_processors: Optional[List[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-        use_prompt_tokens: Optional[List[bool]] = None,
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -173,7 +172,6 @@ class SamplingParams:
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
-        self.use_prompt_tokens = use_prompt_tokens
 
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
@@ -248,14 +246,6 @@ class SamplingParams:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
-        if (self.logits_processors is not None
-                and self.use_prompt_tokens is not None):
-            assert self.logits_processors is not None
-            assert self.use_prompt_tokens is not None
-            if len(self.logits_processors) != \
-                    len(self.use_prompt_tokens):
-                raise ValueError("use_prompt_tokens must be the "
-                                 "same length as logits_processors")
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
