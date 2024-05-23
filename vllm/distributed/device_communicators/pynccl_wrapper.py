@@ -151,6 +151,22 @@ class NCCLLibrary:
             ncclRedOp_t, ncclComm_t, cudaStream_t
         ]),
 
+        # ncclResult_t  ncclSend(
+        #   const void* sendbuff, size_t count, ncclDataType_t datatype,
+        #   int dest, ncclComm_t comm, cudaStream_t stream);
+        Function("ncclSend", ncclResult_t, [
+            buffer_type, ctypes.c_size_t, ncclDataType_t, ctypes.c_int,
+            ncclComm_t, cudaStream_t
+        ]),
+
+        # ncclResult_t  ncclRecv(
+        #   void* recvbuff, size_t count, ncclDataType_t datatype,
+        #   int src, ncclComm_t comm, cudaStream_t stream);
+        Function("ncclRecv", ncclResult_t, [
+            buffer_type, ctypes.c_size_t, ncclDataType_t, ctypes.c_int,
+            ncclComm_t, cudaStream_t
+        ]),
+
         # be cautious! this is a collective call, it will block until all
         # processes in the communicator have called this function.
         # because Python object destruction can happen in random order,
@@ -247,6 +263,16 @@ class NCCLLibrary:
         self.NCCL_CHECK(self._funcs["ncclAllReduce"](sendbuff, recvbuff, count,
                                                      datatype, op, comm,
                                                      stream))
+
+    def ncclSend(self, sendbuff: buffer_type, count: int, datatype: int,
+                 dest: int, comm: ncclComm_t, stream: cudaStream_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclSend"](sendbuff, count, datatype,
+                                                dest, comm, stream))
+
+    def ncclRecv(self, recvbuff: buffer_type, count: int, datatype: int,
+                 src: int, comm: ncclComm_t, stream: cudaStream_t) -> None:
+        self.NCCL_CHECK(self._funcs["ncclRecv"](recvbuff, count, datatype, src,
+                                                comm, stream))
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
