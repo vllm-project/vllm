@@ -245,8 +245,8 @@ def download_safetensors_index_file_from_hf(
             logger.info("No %s found in local cache.", SAFE_WEIGHTS_INDEX_NAME)
 
 
-# For models like Mistral-7B-v0.3
-# there are both sharded safetensors files and a consolidated safetensors file.
+# For models like Mistral-7B-v0.3, there are both sharded
+# safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
 # So, we use the SAFE_WEIGHTS_INDEX_NAME
 # to look up which safetensors files should be used.
