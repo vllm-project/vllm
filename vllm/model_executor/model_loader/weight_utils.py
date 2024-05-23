@@ -12,7 +12,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfFileSystem, snapshot_download, hf_hub_download
+from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -197,7 +197,7 @@ def download_weights_from_hf(
             if len(matching) > 0:
                 allow_patterns = [pattern]
                 break
-                
+
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
@@ -210,14 +210,13 @@ def download_weights_from_hf(
             revision=revision,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )
-        
+
     return hf_folder
 
 
 def download_safetensors_index_file_from_hf(
     model_name_or_path: str,
     cache_dir: Optional[str],
-    allow_patterns: List[str],
     revision: Optional[str] = None,
 ) -> None:
     """Download hf safetensors index file from Hugging Face Hub.
@@ -243,34 +242,39 @@ def download_safetensors_index_file_from_hf(
         # If file not found on remote or locally, we should not fail since
         # only some models will have _SAFETENSORS_INDEX_FILE_NAME.
         except huggingface_hub.utils.EntryNotFoundError:
-            logger.info(f"No {_SAFETENSORS_INDEX_FILE_NAME} found in remote.")
+            logger.info("No %s found in remote.", _SAFETENSORS_INDEX_FILE_NAME)
         except huggingface_hub.utils.LocalEntryNotFoundError:
-            logger.info(f"No {_SAFETENSORS_INDEX_FILE_NAME} found in local cache.")
+            logger.info("No %s found in local cache.",
+                        _SAFETENSORS_INDEX_FILE_NAME)
 
-# For models like Mistral-v0.3 (https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
+
+# For models like Mistral-7B-v0.3
 # there are both sharded safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the _SAFETENSORS_INDEX_FILE `model.safetensors.index.json` to look up 
-# which safetensors files should be used.
-def filter_duplicate_safetensors_files(
-        hf_weights_files: List[str], hf_folder: str) -> List[str]:
-    # model.safetensors.index.json is a mapping from keys in the 
+# So, we use the _SAFETENSORS_INDEX_FILE `model.safetensors.index.json`
+# to look up which safetensors files should be used.
+def filter_duplicate_safetensors_files(hf_weights_files: List[str],
+                                       hf_folder: str) -> List[str]:
+    # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
-    index_file = os.path.join(hf_folder, _SAFETENSORS_INDEX_FILE_NAME)
-    if not os.path.isfile(index_file):
+    index_file_name = os.path.join(hf_folder, _SAFETENSORS_INDEX_FILE_NAME)
+    if not os.path.isfile(index_file_name):
         return hf_weights_files
-    
+
     # Iterate through the weight_map (weight_name: safetensors files)
     # to identify weights that we should use.
-    weight_map = json.load(open(index_file))["weight_map"]
+    with open(index_file_name) as index_file:
+        weight_map = json.load(index_file)["weight_map"]
     weight_files_in_index = set()
     for weight_name in weight_map:
-        weight_files_in_index.add(os.path.join(hf_folder,
-                                               weight_map[weight_name]))
+        weight_files_in_index.add(
+            os.path.join(hf_folder, weight_map[weight_name]))
     # Filter out any fields that are not found in the index file.
-    hf_weights_files = [f for f in 
-                        hf_weights_files if f in weight_files_in_index]
+    hf_weights_files = [
+        f for f in hf_weights_files if f in weight_files_in_index
+    ]
     return hf_weights_files
+
 
 def filter_files_not_needed_for_inference(
         hf_weights_files: List[str]) -> List[str]:

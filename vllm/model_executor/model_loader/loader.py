@@ -1,7 +1,6 @@
 # ruff: noqa: SIM117
 import collections
 import copy
-import json
 import glob
 import os
 from abc import ABC, abstractmethod
@@ -24,14 +23,14 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, download_safetensors_index_file_from_hf,
-    filter_files_not_needed_for_inference,
-    filter_duplicate_safetensors_files, get_quant_config,
-    initialize_dummy_weights, np_cache_weights_iterator,
+    download_safetensors_index_file_from_hf, download_weights_from_hf,
+    filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
+    get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 
 logger = init_logger(__name__)
+
 
 def _get_quantization_config(
         model_config: ModelConfig,
@@ -190,12 +189,12 @@ class DefaultModelLoader(BaseModelLoader):
                 if pattern == "*.safetensors":
                     use_safetensors = True
                 break
-        
+
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3
-            # there are both sharded safetensors files and a consolidated safetensors file.
-            # Passing both of these to the weight loader functionality breaks.
-            # Here, we download the `model.safetensors.index.json` and filter out 
+            # there are both sharded safetensors files and a consolidated
+            # safetensors file. Using both in the weight_loader breaks.
+            # Here, we download the `model.safetensors.index.json` and filter
             # any safetensors files not found.
             download_safetensors_index_file_from_hf(
                 model_name_or_path, self.load_config.download_dir, revision)
