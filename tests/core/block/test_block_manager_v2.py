@@ -109,10 +109,10 @@ def test_can_allocate_seq_group_encoder_decoder(block_size: int,
 @pytest.mark.parametrize("num_gpu_blocks", [16])
 @pytest.mark.parametrize("num_seqs_per_group", [1])
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_allocate_encoder_decoder_fails_with_swa(block_size: int,
-                                                 num_seqs_per_group: int,
-                                                 num_gpu_blocks: int,
-                                                 watermark: float):
+def test_can_allocate_encoder_decoder_fails_with_swa(block_size: int,
+                                                     num_seqs_per_group: int,
+                                                     num_gpu_blocks: int,
+                                                     watermark: float):
     '''
     SWA short for Sliding Window Attention.
 
@@ -172,7 +172,7 @@ def test_allocate_encoder_decoder_fails_with_swa(block_size: int,
 @pytest.mark.parametrize("num_gpu_blocks", [16])
 @pytest.mark.parametrize("num_seqs_per_group", [1])
 @pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_allocate_encoder_decoder_fails_with_prefix_cache(
+def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
         block_size: int, num_seqs_per_group: int, num_gpu_blocks: int,
         watermark: float):
 
