@@ -73,7 +73,7 @@ def test_allocate():
     # Allocate same sequence group to all available gpu blocks.
     for i in range(num_gpu_blocks):
         _, seq_group = create_dummy_prompt(str(i), block_size)
-        assert block_manager.can_allocate(seq_group)
+        assert block_manager.can_allocate(seq_group) == AllocStatus.OK
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
@@ -85,7 +85,7 @@ def test_allocate():
                                         watermark=1 / num_gpu_blocks)
     for i in range(num_gpu_blocks - 1):
         _, seq_group = create_dummy_prompt(str(i), block_size)
-        assert block_manager.can_allocate(seq_group)
+        assert block_manager.can_allocate(seq_group) == AllocStatus.OK
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
@@ -103,8 +103,10 @@ def test_allocate_encoder_decoder():
     # Allocate same sequence group to all available gpu blocks.
     for i in range(num_gpu_blocks // block_req_per_seq_group):
         _, _, seq_group = create_dummy_prompt_encoder_decoder(
-            str(i), block_size, block_size)
-        assert block_manager.can_allocate(seq_group)
+            str(i),
+            decoder_prompt_length=block_size,
+            encoder_prompt_length=block_size)
+        assert block_manager.can_allocate(seq_group) == AllocStatus.OK
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
@@ -116,8 +118,10 @@ def test_allocate_encoder_decoder():
                                         watermark=1 / num_gpu_blocks)
     for i in range((num_gpu_blocks - 1) // block_req_per_seq_group):
         _, _, seq_group = create_dummy_prompt_encoder_decoder(
-            str(i), block_size // 2, block_size // 2)
-        assert block_manager.can_allocate(seq_group)
+            str(i),
+            decoder_prompt_length=block_size,
+            encoder_prompt_length=block_size)
+        assert block_manager.can_allocate(seq_group) == AllocStatus.OK
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
 
@@ -314,7 +318,7 @@ def test_swap_encoder_decoder():
     assert before_gpu_blocks + len(gpu_blocks) == after_gpu_blocks
     decoder_prompt.status = SequenceStatus.SWAPPED
 
-    # Swap decoder seq group from CPU -> GPU.
+    # Swap encoder/decoder seq group from CPU -> GPU.
     decoder_cpu_blocks = block_manager.get_block_table(decoder_prompt)
     cross_cpu_blocks = block_manager.get_cross_block_table(seq_group)
     cpu_blocks = decoder_cpu_blocks + cross_cpu_blocks
@@ -365,8 +369,8 @@ def test_free_encoder_decoder():
     decoder_prompt, encoder_prompt, seq_group = \
         create_dummy_prompt_encoder_decoder(
         "1",
-        decoder_prompt_length=block_size // 2,
-        encoder_prompt_length=block_size // 2)
+        decoder_prompt_length=block_size,
+        encoder_prompt_length=block_size)
     block_manager.allocate(seq_group)
 
     # Free allocated seq.
@@ -382,6 +386,9 @@ def test_free_encoder_decoder():
     # Block table for freed encoder & decoder seq's are deleted.
     with pytest.raises(KeyError):
         block_manager.get_block_table(decoder_prompt)
+
+    # Block table for freed encoder & decoder seq's are deleted.
+    with pytest.raises(KeyError):
         block_manager.get_block_table(encoder_prompt)
 
 
