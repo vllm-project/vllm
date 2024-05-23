@@ -664,8 +664,8 @@ F = TypeVar('F', bound=Callable[..., Any])
 
 def deprecate_kwargs(
         *kws: str,
-        is_deprecated: Union[bool, Callable[[],
-                                            bool]] = True) -> Callable[[F], F]:
+        is_deprecated: Union[bool, Callable[[], bool]] = True,
+        additional_message: Optional[str] = None) -> Callable[[F], F]:
     deprecated_kws = set(kws)
 
     if not callable(is_deprecated):
@@ -678,11 +678,13 @@ def deprecate_kwargs(
             if is_deprecated():
                 deprecated_kwargs = kwargs.keys() & deprecated_kws
                 if deprecated_kwargs:
+                    msg = (f"The keyword arguments {deprecated_kwargs} are "
+                           "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
                     warnings.warn(
-                        DeprecationWarning(
-                            f"The keyword arguments {deprecated_kwargs} are "
-                            "deprecated and will be removed in a future update."
-                        ),
+                        DeprecationWarning(msg),
                         stacklevel=3,  # The inner function takes up one level
                     )
 

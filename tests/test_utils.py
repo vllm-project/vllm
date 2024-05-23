@@ -31,7 +31,7 @@ def test_deprecate_kwargs_never():
         dummy(new_arg=1)
 
 
-def test_deprecate_kwargs_func():
+def test_deprecate_kwargs_dynamic():
     is_deprecated = True
 
     @deprecate_kwargs("old_arg", is_deprecated=lambda: is_deprecated)
@@ -51,3 +51,12 @@ def test_deprecate_kwargs_func():
 
     with error_on_warning():
         dummy(new_arg=1)
+
+
+def test_deprecate_kwargs_additional_message():
+    @deprecate_kwargs("old_arg", is_deprecated=True, additional_message="abcd")
+    def dummy(*, old_arg: object = None, new_arg: object = None):
+        pass
+
+    with pytest.warns(DeprecationWarning, match="abcd"):
+        dummy(old_arg=1)

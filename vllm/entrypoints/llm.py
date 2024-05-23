@@ -233,10 +233,12 @@ class LLM:
     ) -> List[RequestOutput]:
         ...
 
-    @deprecate_kwargs('prompts',
-                      'prompt_token_ids',
-                      'multi_modal_data',
-                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY)
+    @deprecate_kwargs("prompts",
+                      "prompt_token_ids",
+                      "multi_modal_data",
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+                      additional_message="Please use the 'inputs' parameter "
+                                         "instead.")
     def generate(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
@@ -372,10 +374,12 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         ...
 
-    @deprecate_kwargs('prompts',
-                      'prompt_token_ids',
-                      'multi_modal_data',
-                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY)
+    @deprecate_kwargs("prompts",
+                      "prompt_token_ids",
+                      "multi_modal_data",
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+                      additional_message="Please use the 'inputs' parameter "
+                                         "instead.")
     def encode(
         self,
         prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
