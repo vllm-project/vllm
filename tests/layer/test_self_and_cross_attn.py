@@ -1063,19 +1063,18 @@ def cross_attn_setup_reuses_query(query,
     max_block_idx
 
 
-def run_self_attention_test(attn, packed_query, packed_key, packed_value,
-                            kv_cache, attn_metadata: AttentionMetadata, scale):
+def run_self_attention_test(attn: Attention, packed_query, packed_key, packed_value,
+                            kv_cache, attn_metadata: AttentionMetadata):
     attn_metadata.do_cross_attn = False
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
-                        attn_metadata, scale)
+                        attn_metadata)
 
 
-def run_cross_attention_test(attn, packed_query, packed_key, packed_value,
-                             kv_cache, attn_metadata: AttentionMetadata,
-                             scale):
+def run_cross_attention_test(attn: Attention, packed_query, packed_key, packed_value,
+                             kv_cache, attn_metadata: AttentionMetadata):
     attn_metadata.do_cross_attn = True
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
-                        attn_metadata, scale)
+                        attn_metadata)
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -1201,7 +1200,7 @@ def test_prefill_decode_self_and_cross_attention(
 
     self_prefill_packed_actual_output: torch.Tensor = run_self_attention_test(
         attn, prefill_packed_query, self_prefill_packed_key,
-        self_prefill_packed_value, kv_cache, prefill_attn_metadata, scale)
+        self_prefill_packed_value, kv_cache, prefill_attn_metadata)
 
     # - Prefill self-attention correct?
     assert torch.allclose(
@@ -1211,7 +1210,7 @@ def test_prefill_decode_self_and_cross_attention(
 
     cross_prefill_packed_actual_output: torch.Tensor = run_cross_attention_test(
         attn, prefill_packed_query, cross_prefill_packed_key,
-        cross_prefill_packed_value, kv_cache, prefill_attn_metadata, scale)
+        cross_prefill_packed_value, kv_cache, prefill_attn_metadata)
 
     # - Prefill cross-attention correct?
     assert torch.allclose(
@@ -1237,7 +1236,7 @@ def test_prefill_decode_self_and_cross_attention(
 
     self_decode_packed_actual_output: torch.Tensor = run_self_attention_test(
         attn, decode_packed_query, self_decode_packed_key,
-        self_decode_packed_value, kv_cache, decode_attn_metadata, scale)
+        self_decode_packed_value, kv_cache, decode_attn_metadata)
 
     # - Decode self-attention correct?
     assert torch.allclose(
@@ -1246,8 +1245,7 @@ def test_prefill_decode_self_and_cross_attention(
             self_decode_packed_ideal_output))
 
     cross_decode_packed_actual_output: torch.Tensor = run_cross_attention_test(
-        attn, decode_packed_query, None, None, kv_cache, decode_attn_metadata,
-        scale)
+        attn, decode_packed_query, None, None, kv_cache, decode_attn_metadata)
 
     # - Decode cross-attention correct?
     assert torch.allclose(
