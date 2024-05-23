@@ -96,8 +96,6 @@ class SamplingParams:
             tokens in the output.  Defaults to True.
         logits_processors: List of functions that modify logits based on
             previously generated tokens.
-        use_prompt_tokens: List of booleans indicating whether to include prompt
-            tokens IDs in the logits processors functions.
         truncate_prompt_tokens: If set to an integer k, will use only the last k
             tokens from the prompt (i.e., left truncation). Defaults to None
             (i.e., no truncation).
