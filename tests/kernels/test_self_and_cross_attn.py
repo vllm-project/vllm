@@ -43,22 +43,20 @@ def build_causal_mask(q_max_seq_len, kv_max_seq_len):
     '''
 
     # Create a matrix where entry (i, j) is True if i >= j
-    mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len),
-                      diagonal=1)
+    mask = torch.triu(torch.ones(q_max_seq_len, kv_max_seq_len), diagonal=1)
     # Replace True with float('-inf') and False with 0
     mask = mask.masked_fill(mask == 1,
                             float('-inf')).masked_fill(mask == 0, 0.0)
     return mask
 
 
-def ref_masked_attention(
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        scale: float,
-        custom_mask: Optional[torch.Tensor] = None,
-        q_seq_lens: Optional[List] = None,
-        kv_seq_lens: Optional[List] = None) -> torch.Tensor:
+def ref_masked_attention(query: torch.Tensor,
+                         key: torch.Tensor,
+                         value: torch.Tensor,
+                         scale: float,
+                         custom_mask: Optional[torch.Tensor] = None,
+                         q_seq_lens: Optional[List] = None,
+                         kv_seq_lens: Optional[List] = None) -> torch.Tensor:
     '''
     "Golden" masked attention reference. Supports two types of masking:
 
@@ -215,26 +213,23 @@ def make_qkv(batch_size,
     decode_value = torch.zeros(
         (batch_size, 1, num_heads * head_size)).to(device)
 
-    for bdx, (q_seq_len,
-              kv_seq_len) in enumerate(zip(q_seq_lens, kv_seq_lens)):
+    for bdx, (q_seq_len, kv_seq_len) in enumerate(zip(q_seq_lens,
+                                                      kv_seq_lens)):
         query[bdx, q_seq_len:, :] = 0
         key[bdx, kv_seq_len:, :] = 0
         value[bdx, kv_seq_len:, :] = 0
 
-        prefill_query[bdx,
-                      0:(q_seq_len - 1), :] = query[bdx,
-                                                       0:(q_seq_len - 1), :]
-        prefill_key[bdx,
-                    0:(kv_seq_len - 1), :] = key[bdx,
-                                                    0:(kv_seq_len - 1), :]
-        prefill_value[bdx, 0:(kv_seq_len -
-                              1), :] = value[bdx, 0:(kv_seq_len - 1), :]
+        prefill_query[bdx, 0:(q_seq_len - 1), :] = query[bdx,
+                                                         0:(q_seq_len - 1), :]
+        prefill_key[bdx, 0:(kv_seq_len - 1), :] = key[bdx,
+                                                      0:(kv_seq_len - 1), :]
+        prefill_value[bdx,
+                      0:(kv_seq_len - 1), :] = value[bdx,
+                                                     0:(kv_seq_len - 1), :]
 
-        decode_query[bdx, :, :] = query[bdx,
-                                        (q_seq_len - 1):q_seq_len, :]
+        decode_query[bdx, :, :] = query[bdx, (q_seq_len - 1):q_seq_len, :]
         decode_key[bdx, :, :] = key[bdx, (kv_seq_len - 1):kv_seq_len, :]
-        decode_value[bdx, :, :] = value[bdx,
-                                        (kv_seq_len - 1):kv_seq_len, :]
+        decode_value[bdx, :, :] = value[bdx, (kv_seq_len - 1):kv_seq_len, :]
 
     prefill_q_seq_lens = [plen - 1 for plen in q_seq_lens]
     prefill_kv_seq_lens = [plen - 1 for plen in kv_seq_lens]
@@ -304,12 +299,10 @@ def pack_tensor(unpacked_tensor, seq_lens, device=CUDA_DEVICE):
     start_loc_list = [0] + list(itertools.accumulate(seq_lens))
     packed_tensor = torch.zeros((num_tok, num_heads, head_size), device=device)
 
-    for bdx, (seq_len,
-              start_loc) in enumerate(zip(seq_lens, start_loc_list)):
+    for bdx, (seq_len, start_loc) in enumerate(zip(seq_lens, start_loc_list)):
 
         packed_tensor[start_loc:(
-            start_loc +
-            seq_len), :, :] = unpacked_tensor[bdx, :seq_len, :, :]
+            start_loc + seq_len), :, :] = unpacked_tensor[bdx, :seq_len, :, :]
 
     return packed_tensor, start_loc_list
 
@@ -405,9 +398,7 @@ def make_metadata_tensors(is_prompt: bool,
     * seq_start_loc: start idx of each sequence
     * query_start_loc: start idx of each query
     '''
-    seq_lens_tensor = torch.tensor(seq_lens,
-                                      dtype=torch.int,
-                                      device=device)
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
     context_lens_tensor = None if context_lens is None else torch.tensor(
         context_lens, dtype=torch.int, device=device)
     max_context_len = None if context_lens is None else max(context_lens)
@@ -1063,15 +1054,17 @@ def cross_attn_setup_reuses_query(query,
     max_block_idx
 
 
-def run_self_attention_test(attn: Attention, packed_query, packed_key, packed_value,
-                            kv_cache, attn_metadata: AttentionMetadata):
+def run_self_attention_test(attn: Attention, packed_query, packed_key,
+                            packed_value, kv_cache,
+                            attn_metadata: AttentionMetadata):
     attn_metadata.do_cross_attn = False
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
 
-def run_cross_attention_test(attn: Attention, packed_query, packed_key, packed_value,
-                             kv_cache, attn_metadata: AttentionMetadata):
+def run_cross_attention_test(attn: Attention, packed_query, packed_key,
+                             packed_value, kv_cache,
+                             attn_metadata: AttentionMetadata):
     attn_metadata.do_cross_attn = True
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
@@ -1084,10 +1077,13 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key, packed_v
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
 @pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
-def test_prefill_decode_self_and_cross_attention(
-        num_heads: int, head_size: int, backend_name: str, batch_size: int,
-        block_size: int, max_q_seq_len: int,
-        max_kv_seq_len: int) -> None:
+def test_prefill_decode_self_and_cross_attention(num_heads: int,
+                                                 head_size: int,
+                                                 backend_name: str,
+                                                 batch_size: int,
+                                                 block_size: int,
+                                                 max_q_seq_len: int,
+                                                 max_kv_seq_len: int) -> None:
     '''
     Test:
 
