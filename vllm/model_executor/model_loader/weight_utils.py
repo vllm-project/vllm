@@ -12,6 +12,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
@@ -23,8 +24,6 @@ from vllm.model_executor.layers.quantization import (QuantizationConfig,
 from vllm.model_executor.layers.quantization.schema import QuantParamSchema
 
 logger = init_logger(__name__)
-
-_SAFETENSORS_INDEX_FILE_NAME = "model.safetensors.index.json"
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
@@ -234,30 +233,30 @@ def download_safetensors_index_file_from_hf(
             # Download the safetensors index file.
             _ = hf_hub_download(
                 repo_id=model_name_or_path,
-                filename=_SAFETENSORS_INDEX_FILE_NAME,
+                filename=SAFE_WEIGHTS_INDEX_NAME,
                 cache_dir=cache_dir,
                 revision=revision,
                 local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
             )
         # If file not found on remote or locally, we should not fail since
-        # only some models will have _SAFETENSORS_INDEX_FILE_NAME.
+        # only some models will have SAFE_WEIGHTS_INDEX_NAME.
         except huggingface_hub.utils.EntryNotFoundError:
-            logger.info("No %s found in remote.", _SAFETENSORS_INDEX_FILE_NAME)
+            logger.info("No %s found in remote.", SAFE_WEIGHTS_INDEX_NAME)
         except huggingface_hub.utils.LocalEntryNotFoundError:
             logger.info("No %s found in local cache.",
-                        _SAFETENSORS_INDEX_FILE_NAME)
+                        SAFE_WEIGHTS_INDEX_NAME)
 
 
 # For models like Mistral-7B-v0.3
 # there are both sharded safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the _SAFETENSORS_INDEX_FILE `model.safetensors.index.json`
+# So, we use the SAFE_WEIGHTS_INDEX_NAME
 # to look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
                                        hf_folder: str) -> List[str]:
     # model.safetensors.index.json is a mapping from keys in the
     # torch state_dict to safetensors file holding that weight.
-    index_file_name = os.path.join(hf_folder, _SAFETENSORS_INDEX_FILE_NAME)
+    index_file_name = os.path.join(hf_folder, SAFE_WEIGHTS_INDEX_NAME)
     if not os.path.isfile(index_file_name):
         return hf_weights_files
 
