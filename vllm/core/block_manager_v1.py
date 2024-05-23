@@ -281,7 +281,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                 raise NotImplementedError(
                     "Sliding window attention for encoder/decoder models " + \
                     "is not currently supported.")
-            
+
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()

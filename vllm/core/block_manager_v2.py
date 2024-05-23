@@ -159,7 +159,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         encoder_seq = seq_group.get_encoder_seq()
         if encoder_seq is not None:
-            block_table: BlockTable = self._allocate_sequence(encoder_seq)
+            block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
