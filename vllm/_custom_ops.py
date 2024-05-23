@@ -191,6 +191,20 @@ def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
     return out
 
 
+def cutlass_scaled_mm_qout(a: torch.Tensor, b: torch.Tensor,
+                           a_scales: torch.Tensor, b_scales: torch.Tensor,
+                           c_scales: torch.Tensor) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=a.dtype, device=a.device)
+
+    vllm_ops.cutlass_scaled_mm_qout(out, a, b, a_scales, b_scales, c_scales)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,

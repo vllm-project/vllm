@@ -81,6 +81,40 @@ def cutlass_int8_gemm_helper(m: int,
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
+@pytest.mark.parametrize("m", [512, 222, 33, 1])
+@pytest.mark.parametrize("n", [256, 1024])
+@pytest.mark.parametrize("k", [128, 496, 1024])
+@pytest.mark.parametrize("per_token_act_quant", [True, False])
+@pytest.mark.parametrize("per_out_ch_weight_quant", [True, False])
+@pytest.mark.parametrize("per_token_out_quant", [True, False])
+def test_cutlass_int8_q_gemm(m, n, k,
+                             per_token_act_quant: bool, 
+                             per_out_ch_weight_quant: bool,
+                             per_token_out_quant: bool):
+
+    # Test for a cutlass kernel with per-token activation quantization
+    # and per-output channel weight quantization.
+    a = to_int8(torch.randn((m, k), device="cuda") * 5)
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+
+    m_a_scales = m if per_token_act_quant else 1
+    n_b_scales = n if per_out_ch_weight_quant else 1
+    n_c_scales = n if per_token_out_quant else 1
+
+    scale_a = (torch.randn(
+        (m_a_scales, 1), device="cuda", dtype=torch.float32) / 10)
+    scale_b = (torch.randn(
+        (1, n_b_scales), device="cuda", dtype=torch.float32) / 10)
+    scale_c = (torch.randn(
+        (1, n_c_scales), device="cuda", dtype=torch.float32) / 10)
+
+    out = ops.cutlass_scaled_mm_qout(a, b, scale_a, scale_b, scale_c)
+    baseline = (scale_c * torch.mm(scale_a * a.to(dtype=torch.float32),
+                        scale_b *
+                        b.to(dtype=torch.float32))).to(dtype=torch.int8)
+
+    assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
+
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
