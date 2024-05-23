@@ -614,11 +614,15 @@ class SequenceGroupMetadata:
             used in prefix caching.
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
-        encoder_seq_data: Optional, the sequence data
-                          for the single encoder prompt.
-        cross_block_table: Optional, the cross-attention 
-                           block table associated with 
-                           the single encoder prompt.
+        encoder_seq_data: Optional sequence data for encoder prompt
+                          (SequenceGroup.encoder_seq). Should be None 
+                          unless you are working with an encoder/decoder
+                          model.
+        cross_block_table: Optional cross-attention block table associated
+                           with the encoder prompt
+                           (SequenceGroup.encoder_seq). Should be None
+                           unless you are working with an encoder/decoder
+                           model.
     """
 
     def __init__(
