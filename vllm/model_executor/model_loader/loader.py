@@ -195,8 +195,10 @@ class DefaultModelLoader(BaseModelLoader):
             # safetensors file. Using both in the weight_loader breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any safetensors files not found.
-            download_safetensors_index_file_from_hf(
-                model_name_or_path, self.load_config.download_dir, revision)
+            if not is_local:
+                download_safetensors_index_file_from_hf(
+                    model_name_or_path, self.load_config.download_dir,
+                    revision)
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder)
         else:
