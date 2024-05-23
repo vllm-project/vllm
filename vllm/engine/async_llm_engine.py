@@ -761,9 +761,11 @@ class AsyncLLMEngine:
             lora_request=lora_request,
         )
 
+        validate_output_types = LLMEngine.VALIDATE_OUTPUT_TYPES
+
         try:
             async for request_output in stream:
-                if ((TYPE_CHECKING or LLMEngine.VALIDATE_OUTPUT_TYPES)
+                if ((TYPE_CHECKING or validate_output_types)
                         and not isinstance(request_output, output_type)):
                     raise TypeError(f"Expected output of type {output_type}, "
                                     f"but found type {type(request_output)}")

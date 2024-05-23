@@ -28,15 +28,15 @@ pytestmark = pytest.mark.llm
 
 @pytest.fixture(scope="module")
 def llm():
-    with LLM.deprecate_legacy_ctx():
-        # pytest caches the fixture so we use weakref.proxy to
-        # enable garbage collection
-        llm = LLM(model=MODEL_NAME,
-                  max_num_batched_tokens=4096,
-                  tensor_parallel_size=1,
-                  gpu_memory_utilization=0.10,
-                  enforce_eager=True)
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_NAME,
+                max_num_batched_tokens=4096,
+                tensor_parallel_size=1,
+                gpu_memory_utilization=0.10,
+                enforce_eager=True)
 
+    with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
 
         del llm

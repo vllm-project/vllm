@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 from typing import ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Type, Union
@@ -89,6 +90,15 @@ class LLMEngine:
 
     VALIDATE_OUTPUT_TYPES: ClassVar[bool] = False
     """A flag to toggle whether to validate the type of request output."""
+
+    @classmethod
+    @contextmanager
+    def validate_output_types(cls):
+        cls.VALIDATE_OUTPUT_TYPES = True
+
+        yield
+
+        cls.VALIDATE_OUTPUT_TYPES = False
 
     tokenizer: Optional[BaseTokenizerGroup]
 

@@ -91,14 +91,14 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
-    @staticmethod
+    @classmethod
     @contextmanager
-    def deprecate_legacy_ctx():
-        LLM.DEPRECATE_LEGACY = True
+    def deprecate_legacy_api(cls):
+        cls.DEPRECATE_LEGACY = True
 
         yield
 
-        LLM.DEPRECATE_LEGACY = False
+        cls.DEPRECATE_LEGACY = False
 
     def __init__(
         self,
@@ -541,8 +541,10 @@ class LLM:
         total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            validate_output_types = LLMEngine.VALIDATE_OUTPUT_TYPES
+
             for output in step_outputs:
-                if ((TYPE_CHECKING or LLMEngine.VALIDATE_OUTPUT_TYPES)
+                if ((TYPE_CHECKING or validate_output_types)
                         and not isinstance(output, output_type)):
                     raise TypeError(f"Expected output of type {output_type}, "
                                     f"but found type {type(output)}")
