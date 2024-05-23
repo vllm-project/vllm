@@ -12,7 +12,7 @@ import filelock
 import huggingface_hub.constants
 import numpy as np
 import torch
-from huggingface_hub import HfFileSystem, snapshot_download
+from huggingface_hub import HfFileSystem, snapshot_download, hf_hub_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -198,8 +198,6 @@ def download_weights_from_hf(
                 allow_patterns = [pattern]
                 break
                 
-        allow_patterns.append("*model.safetensors.index.json")
-
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
@@ -212,7 +210,42 @@ def download_weights_from_hf(
             revision=revision,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )
+        
     return hf_folder
+
+
+def download_safetensors_index_file_from_hf(
+    model_name_or_path: str,
+    cache_dir: Optional[str],
+    allow_patterns: List[str],
+    revision: Optional[str] = None,
+) -> None:
+    """Download hf safetensors index file from Hugging Face Hub.
+
+    Args:
+        model_name_or_path (str): The model name or path.
+        cache_dir (Optional[str]): The cache directory to store the model
+            weights. If None, will use HF defaults.
+        revision (Optional[str]): The revision of the model.
+    """
+    # Use file lock to prevent multiple processes from
+    # downloading the same model weights at the same time.
+    with get_lock(model_name_or_path, cache_dir):
+        try:
+            # Download the safetensors index file.
+            _ = hf_hub_download(
+                repo_id=model_name_or_path,
+                filename=_SAFETENSORS_INDEX_FILE_NAME,
+                cache_dir=cache_dir,
+                revision=revision,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+            )
+        # If file not found on remote or locally, we should not fail since
+        # only some models will have _SAFETENSORS_INDEX_FILE_NAME.
+        except huggingface_hub.utils.EntryNotFoundError:
+            logger.info(f"No {_SAFETENSORS_INDEX_FILE_NAME} found in remote.")
+        except huggingface_hub.utils.LocalEntryNotFoundError:
+            logger.info(f"No {_SAFETENSORS_INDEX_FILE_NAME} found in local cache.")
 
 # For models like Mistral-v0.3 (https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)
 # there are both sharded safetensors files and a consolidated safetensors file.

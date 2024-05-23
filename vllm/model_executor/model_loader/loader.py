@@ -24,8 +24,9 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
-    download_weights_from_hf, filter_files_not_needed_for_inference,
-    filter_duplicate_safetensors_files, get_quant_config, 
+    download_weights_from_hf, download_safetensors_index_file_from_hf,
+    filter_files_not_needed_for_inference,
+    filter_duplicate_safetensors_files, get_quant_config,
     initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
@@ -164,6 +165,7 @@ class DefaultModelLoader(BaseModelLoader):
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
+
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
@@ -187,12 +189,18 @@ class DefaultModelLoader(BaseModelLoader):
             if len(hf_weights_files) > 0:
                 if pattern == "*.safetensors":
                     use_safetensors = True
-                
                 break
         
         if use_safetensors:
+            # For models like Mistral-7B-Instruct-v0.3
+            # there are both sharded safetensors files and a consolidated safetensors file.
+            # Passing both of these to the weight loader functionality breaks.
+            # Here, we download the `model.safetensors.index.json` and filter out 
+            # any safetensors files not found.
+            download_safetensors_index_file_from_hf(
+                model_name_or_path, self.load_config.download_dir, revision)
             hf_weights_files = filter_duplicate_safetensors_files(
-                    hf_weights_files, hf_folder)
+                hf_weights_files, hf_folder)
         else:
             hf_weights_files = filter_files_not_needed_for_inference(
                 hf_weights_files)
