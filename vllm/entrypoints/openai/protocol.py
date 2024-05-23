@@ -489,12 +489,28 @@ class ChatMessage(OpenAIBaseModel):
     content: str
 
 
+class ChatCompletionLogProb(OpenAIBaseModel):
+    token: str
+    logprob: float
+    bytes: Optional[List[int]] = None
+
+
+class ChatCompletionLogProbsContent(OpenAIBaseModel):
+    token: str
+    logprob: float = -9999.0
+    bytes: Optional[List[int]]
+    top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
+
+
+class ChatCompletionLogProbs(OpenAIBaseModel):
+    content: List[ChatCompletionLogProbsContent] = Field(default_factory=list)
+
+
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -514,9 +530,8 @@ class DeltaMessage(OpenAIBaseModel):
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):

@@ -1,8 +1,8 @@
 import codecs
 import time
 from dataclasses import dataclass
-from typing import (AsyncGenerator, AsyncIterator, Iterable, List, Optional,
-                    TypedDict, Union, cast, final)
+from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
+                    Optional, TypedDict, Union, cast, final)
 
 from fastapi import Request
 from openai.types.chat import ChatCompletionContentPartTextParam
@@ -10,8 +10,9 @@ from openai.types.chat import ChatCompletionContentPartTextParam
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionContentPartParam, ChatCompletionMessageParam,
-    ChatCompletionRequest, ChatCompletionResponse,
+    ChatCompletionContentPartParam, ChatCompletionLogProb,
+    ChatCompletionLogProbs, ChatCompletionLogProbsContent,
+    ChatCompletionMessageParam, ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaMessage, ErrorResponse,
     UsageInfo)
@@ -21,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
+from vllm.sequence import Logprob
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -277,11 +279,10 @@ class OpenAIServingChat(OpenAIServing):
                         previous_num_tokens[i]:] if output.logprobs else None
 
                     if request.logprobs:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
-                            num_output_top_logprobs=request.logprobs,
-                            initial_text_offset=len(previous_texts[i]),
+                            num_output_top_logprobs=request.top_logprobs,
                         )
                     else:
                         logprobs = None
@@ -364,10 +365,10 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs = output.logprobs
 
             if request.logprobs:
-                logprobs = self._create_logprobs(
+                logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
-                    num_output_top_logprobs=request.logprobs,
+                    num_output_top_logprobs=request.top_logprobs,
                 )
             else:
                 logprobs = None
@@ -408,3 +409,47 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         return response
+
+    def _get_top_logprobs(
+            self, logprobs: Dict[int, Logprob],
+            top_logprobs: Optional[int]) -> List[ChatCompletionLogProb]:
+        return [
+            ChatCompletionLogProb(
+                token=p.decoded_token,
+                logprob=p.logprob,
+                bytes=list(p.decoded_token.encode("utf-8", errors="replace")))
+            for i, p in enumerate(logprobs.values())
+            if top_logprobs and i < top_logprobs
+        ]
+
+    def _create_chat_logprobs(
+        self,
+        token_ids: List[int],
+        top_logprobs: List[Optional[Dict[int, Logprob]]],
+        num_output_top_logprobs: Optional[int] = None,
+    ) -> ChatCompletionLogProbs:
+        """Create OpenAI-style logprobs."""
+        logprobs = ChatCompletionLogProbs()
+
+        for i, token_id in enumerate(token_ids):
+            logprob_response_object = ChatCompletionLogProbsContent()
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
+                token = self.tokenizer.decode(token_id)
+                logprob_response_object.token = token
+                logprob_response_object.bytes = list(
+                    token.encode("utf-8", errors="replace"))
+                assert logprob_response_object.top_logprobs is not None and len(
+                    logprob_response_object.top_logprobs) == 0
+            else:
+                token = step_top_logprobs[token_id].decoded_token
+                logprob_response_object.token = token
+                logprob_response_object.logprob = step_top_logprobs[
+                    token_id].logprob
+                logprob_response_object.bytes = list(
+                    token.encode("utf-8", errors="replace"))
+                logprob_response_object.top_logprobs = self._get_top_logprobs(
+                    step_top_logprobs, num_output_top_logprobs)
+            logprobs.content.append(logprob_response_object)
+
+        return logprobs
