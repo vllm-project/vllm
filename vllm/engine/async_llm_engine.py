@@ -239,7 +239,7 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def process_model_inputs_async(
         self,
-        request_id: str,  # pylint: disable=unused-argument
+        request_id: str,
         inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
     ) -> LLMInputs:
