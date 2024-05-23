@@ -170,7 +170,6 @@ class SamplingParams:
         self.logits_processors = logits_processors
         self.include_stop_str_in_output = include_stop_str_in_output
         self.truncate_prompt_tokens = truncate_prompt_tokens
-
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not include_stop_str_in_output:
