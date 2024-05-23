@@ -467,26 +467,29 @@ class ShardedStateLoader(BaseModelLoader):
             for path in filepaths:
                 with safe_open(path, framework="pt") as f:
                     for key in f.keys():  # noqa: SIM118
-                        tensor = f.get_tensor(key)
-                        # If loading with LoRA enabled, additional padding may
-                        # be added to certain parameters. We only load into a
-                        # narrowed view of the parameter data.
-                        param_data = state_dict[key].data
-                        param_shape = state_dict[key].shape
-                        for dim, size in enumerate(tensor.shape):
-                            if size < param_shape[dim]:
-                                param_data = param_data.narrow(dim, 0, size)
-                        if tensor.shape != param_shape:
-                            logger.warning(
-                                "loading tensor of shape %s into "
-                                "parameter '%s' of shape %s", tensor.shape,
-                                key, param_shape)
-                        param_data.copy_(tensor)
+                        state_dict[key].data.copy_(f.get_tensor(key))
                         state_dict.pop(key)
             if state_dict:
                 raise ValueError(
                     f"Missing keys {tuple(state_dict)} in loaded state!")
         return model.eval()
+
+    @staticmethod
+    def _unwrap_lora(
+        model: torch.nn.Module,
+        state_dict: Dict[str, torch.Tensor],
+    ) -> Dict[str, torch.Tensor]:
+        from vllm.lora.layers import BaseLayerWithLoRA
+        state_dict = state_dict.copy()
+        for name, module in model.named_modules():
+            if isinstance(module, BaseLayerWithLoRA):
+                assert hasattr(module, "base_layer")
+                base_name = f"{name}.base_layer"
+                for key in list(state_dict):
+                    if key.startswith(base_name):
+                        new_key = key.replace(base_name, name)
+                        state_dict[new_key] = state_dict.pop(key)
+        return state_dict
 
     @staticmethod
     def save_model(
@@ -503,7 +506,8 @@ class ShardedStateLoader(BaseModelLoader):
         rank = get_tensor_model_parallel_rank()
         part_idx = 0
         total_size = 0
-        state_dict = ShardedStateLoader._filter_subtensors(model.state_dict())
+        state_dict = ShardedStateLoader._unwrap_lora(model, model.state_dict())
+        state_dict = ShardedStateLoader._filter_subtensors(state_dict)
         state_dict_part: Dict[str, torch.Tensor] = {}
         for key, tensor in state_dict.items():
             param_size = tensor.nelement() * tensor.element_size()

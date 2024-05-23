@@ -54,6 +54,7 @@ def test_sharded_state_loader(enable_lora):
         llm = LLM(
             model=input_dir,
             worker_use_ray=True,
+            enable_lora=enable_lora,
             gpu_memory_utilization=0.3,
         )
 

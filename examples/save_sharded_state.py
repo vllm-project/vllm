@@ -46,8 +46,6 @@ parser.add_argument("--max-file-size",
 
 def main(args):
     engine_args = EngineArgs.from_cli_args(args)
-    if engine_args.enable_lora:
-        raise ValueError("Saving with enable_lora=True is not supported!")
     model_path = engine_args.model
     if not Path(model_path).is_dir():
         raise ValueError("model path must be a local directory")
