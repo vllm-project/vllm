@@ -229,6 +229,7 @@ set(CUSTOM_SRC
 "csrc/custom/custom_kernels.cu"
 "csrc/custom/fused_kernels.cu"
 "csrc/custom/custom.cu"
+"csrc/custom/paged_attention/attention_ll4mi.cu"
 )
 
 define_gpu_extension_target(
