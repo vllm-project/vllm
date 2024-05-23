@@ -24,8 +24,8 @@ void rotary_embedding_impl(
   bool flag = (embed_dim % VEC_ELEM_NUM == 0);
   const int loop_upper = flag ? embed_dim : embed_dim - VEC_ELEM_NUM;
 
-  auto compute_loop = [&](const int64_t token_head, const scalar_t *cache_ptr,
-                          scalar_t *qk) {
+  auto compute_loop = [&](const int64_t token_head, const scalar_t* cache_ptr,
+                          scalar_t* qk) {
     int j = 0;
     for (; j < loop_upper; j += VEC_ELEM_NUM) {
       const int rot_offset = j;
@@ -76,7 +76,7 @@ void rotary_embedding_impl(
 #pragma omp parallel for
   for (int token_idx = 0; token_idx < num_tokens; ++token_idx) {
     int64_t pos = positions[token_idx];
-    const scalar_t *cache_ptr = cos_sin_cache + pos * rot_dim;
+    const scalar_t* cache_ptr = cos_sin_cache + pos * rot_dim;
 
     for (int i = 0; i < num_heads; ++i) {
       const int head_idx = i;
@@ -167,9 +167,9 @@ void rotary_embedding_gptj_impl(
 }
 };  // namespace
 
-void rotary_embedding(torch::Tensor &positions, torch::Tensor &query,
-                      torch::Tensor &key, int head_size,
-                      torch::Tensor &cos_sin_cache, bool is_neox) {
+void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
+                      torch::Tensor& key, int head_size,
+                      torch::Tensor& cos_sin_cache, bool is_neox) {
   int num_tokens = query.numel() / query.size(-1);
   int rot_dim = cos_sin_cache.size(1);
   int num_heads = query.size(-1) / head_size;

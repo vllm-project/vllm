@@ -20,7 +20,6 @@ from vllm.multimodal.image import ImageFeatureData, ImagePixelData
 from vllm.sequence import SampleLogprobs
 
 logger = init_logger(__name__)
-from vllm.transformers_utils.tokenizer import get_tokenizer
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -172,16 +171,18 @@ class HfRunner:
         if model_name in _EMBEDDING_MODELS:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
-            self.model = self.wrap_device(SentenceTransformer(
-                model_name,
-                device="cpu",
-            ).to(dtype=torch_dtype))
+            self.model = self.wrap_device(
+                SentenceTransformer(
+                    model_name,
+                    device="cpu",
+                ).to(dtype=torch_dtype))
         else:
-            self.model = self.wrap_device(AutoModelForCausalLM.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ))
+            self.model = self.wrap_device(
+                AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch_dtype,
+                    trust_remote_code=True,
+                ))
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name,
