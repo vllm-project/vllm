@@ -251,6 +251,24 @@ def scaled_fp8_quant(
     return output, scale
 
 
+# int8
+def static_scaled_int8_quant(input: torch.Tensor,
+                             scale: float) -> torch.Tensor:
+    """
+    Quantize the input tensor to int8 and return the quantized tensor.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Scaling factor for the int8 quantization.
+
+    Returns:
+        torch.Tensor: Output tensor in int8.
+    """
+    q = torch.empty_like(input, dtype=torch.int8)
+    vllm_ops.static_scaled_int8_quant(q, input, scale)
+    return q
+
+
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
