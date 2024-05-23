@@ -17,4 +17,6 @@ RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.py
 
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
+WORKDIR /workspace/
+
 CMD ["/bin/bash"]

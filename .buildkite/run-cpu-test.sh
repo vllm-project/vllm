@@ -11,4 +11,4 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --network host --env VLLM_CPU_KVCACHE_SPACE=1 --name cpu-test cpu-test python3 examples/offline_inference.py
+docker run --network host --env VLLM_CPU_KVCACHE_SPACE=1 --name cpu-test cpu-test python3 vllm/examples/offline_inference.py
