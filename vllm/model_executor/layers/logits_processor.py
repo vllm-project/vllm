@@ -107,12 +107,11 @@ def _apply_logits_processors(
 
                 for logits_processor in logits_processors:
                     parameters = inspect.signature(logits_processor).parameters
-                    names = [param_name for param_name in parameters]
-                    if names == ['prompt_tokens', 'past_tokens', 'logits']:
+                    if len(parameters) == 3:
                         logits_row = logits_processor(
-                            promt_tokens=prompt_tokens_ids,
-                            past_tokens=past_tokens_ids,
-                            logits=logits_row)
+                            prompt_tokens_ids,
+                            past_tokens_ids,
+                            logits_row)
                     else:
                         logits_row = logits_processor(past_tokens_ids,
                                                       logits_row)
