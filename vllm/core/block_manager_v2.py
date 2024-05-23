@@ -132,8 +132,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
+        encoder_seq = seq_group.get_encoder_seq()
         decoder_only = \
-            seq_group.get_encoder_seq() is None
+            encoder_seq is None
 
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -171,8 +172,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 "Automatic prefix caching currently not " + \
                 "supported for encoder/decoder models.")
 
-        encoder_seq = seq_group.get_encoder_seq()
-        if encoder_seq is not None:
+        if not decoder_only:
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 
