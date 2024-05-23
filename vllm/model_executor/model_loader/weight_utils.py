@@ -231,7 +231,7 @@ def download_safetensors_index_file_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         try:
             # Download the safetensors index file.
-            _ = hf_hub_download(
+            hf_hub_download(
                 repo_id=model_name_or_path,
                 filename=SAFE_WEIGHTS_INDEX_NAME,
                 cache_dir=cache_dir,
