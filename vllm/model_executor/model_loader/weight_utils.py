@@ -248,8 +248,8 @@ def download_safetensors_index_file_from_hf(
 # For models like Mistral-7B-v0.3, there are both sharded
 # safetensors files and a consolidated safetensors file.
 # Passing both of these to the weight loader functionality breaks.
-# So, we use the SAFE_WEIGHTS_INDEX_NAME
-# to look up which safetensors files should be used.
+# So, we use the SAFE_WEIGHTS_INDEX_NAME to 
+# look up which safetensors files should be used.
 def filter_duplicate_safetensors_files(hf_weights_files: List[str],
                                        hf_folder: str) -> List[str]:
     # model.safetensors.index.json is a mapping from keys in the
