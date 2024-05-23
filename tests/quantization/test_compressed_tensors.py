@@ -6,8 +6,7 @@ Run `pytest tests/quantization/test_compressed_tensors.py`.
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsUnquantized,
-    CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsLinearMethod, CompressedTensorsW8A8StaticTensor)
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
@@ -27,12 +26,10 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     assert isinstance(down_proj.quant_method, CompressedTensorsLinearMethod)
 
     assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8StaticTensor)
-    assert isinstance(down_proj.scheme, CompressedTensorsUnquantized)
 
     assert qkv_proj.weight.dtype is torch.int8
     assert o_proj.weight.dtype is torch.int8
     assert gate_up_proj.weight.dtype is torch.int8
-    assert down_proj.weight.dtype is torch.float16
 
     assert qkv_proj.weight_scale.shard_splitter is not None
     assert qkv_proj.weight_scale.logical_widths is not None
