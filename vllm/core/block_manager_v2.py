@@ -152,7 +152,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # encoder prompt.
         request_id = seq_group.request_id
-        encoder_seq = seq_group.encoder_seq
 
         assert (request_id
                 not in self.cross_block_tables), \
@@ -160,12 +159,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         encoder_seq = seq_group.get_encoder_seq()
         if encoder_seq is not None:
-            block_table = BlockTable(
-                block_size=self.block_size,
-                block_allocator=self.block_allocator,
-            )
-            assert self.block_sliding_window is None
-            block_table.allocate(encoder_seq.get_token_ids())
+            block_table: BlockTable = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
@@ -228,8 +222,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             return
         self.cross_block_tables[request_id].free()
         del self.cross_block_tables[request_id]
-
-        del self.cross_block_tables[seq_group.request_id]
 
     def get_block_table(self, seq: Sequence) -> List[int]:
         assert seq.seq_id in self.block_tables
