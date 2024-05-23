@@ -1,6 +1,5 @@
 from contextlib import contextmanager
-from typing import (TYPE_CHECKING, ClassVar, List, Optional, Sequence, Type,
-                    TypeVar, Union, cast, overload)
+from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -19,8 +18,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_kwargs
 
 logger = init_logger(__name__)
-
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class LLM:
@@ -293,7 +290,8 @@ class LLM:
             lora_request=lora_request,
         )
 
-        return self._run_engine(RequestOutput, use_tqdm=use_tqdm)
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, RequestOutput)
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def encode(
@@ -430,7 +428,8 @@ class LLM:
             lora_request=lora_request,
         )
 
-        return self._run_engine(EmbeddingRequestOutput, use_tqdm=use_tqdm)
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
 
     # LEGACY
     def _convert_v1_inputs(
@@ -525,8 +524,9 @@ class LLM:
                                     params,
                                     lora_request=lora_request)
 
-    def _run_engine(self, output_type: Type[_O], *,
-                    use_tqdm: bool) -> List[_O]:
+    def _run_engine(
+            self, *, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -537,18 +537,11 @@ class LLM:
                 postfix=f"Generation Speed: {0:.2f} toks/s",
             )
         # Run the engine.
-        outputs: List[_O] = []
+        outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
-            validate_output_types = LLMEngine.VALIDATE_OUTPUT_TYPES
-
             for output in step_outputs:
-                if ((TYPE_CHECKING or validate_output_types)
-                        and not isinstance(output, output_type)):
-                    raise TypeError(f"Expected output of type {output_type}, "
-                                    f"but found type {type(output)}")
-
                 if output.finished:
                     outputs.append(output)
                     if use_tqdm:

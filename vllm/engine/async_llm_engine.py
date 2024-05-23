@@ -1,8 +1,8 @@
 import asyncio
 import time
 from functools import partial
-from typing import (TYPE_CHECKING, AsyncIterator, Callable, Dict, Iterable,
-                    List, Optional, Set, Tuple, Type, TypeVar, Union)
+from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
+                    Set, Tuple, Type, Union)
 
 from transformers import PreTrainedTokenizer
 
@@ -288,9 +288,6 @@ class _AsyncLLMEngine(LLMEngine):
 
     async def check_health_async(self) -> None:
         self.model_executor.check_health()
-
-
-_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class AsyncLLMEngine:
@@ -660,10 +657,9 @@ class AsyncLLMEngine:
                 request_id,
                 inputs,
                 sampling_params,
-                output_type=RequestOutput,
                 lora_request=lora_request,
         ):
-            yield output
+            yield LLMEngine.validate_output(output, RequestOutput)
 
     async def encode(
         self,
@@ -735,10 +731,9 @@ class AsyncLLMEngine:
                 request_id,
                 inputs,
                 pooling_params,
-                output_type=EmbeddingRequestOutput,
                 lora_request=lora_request,
         ):
-            yield output
+            yield LLMEngine.validate_output(output, EmbeddingRequestOutput)
 
     async def _process_request(
         self,
@@ -746,9 +741,8 @@ class AsyncLLMEngine:
         inputs: PromptInputs,
         params: Union[SamplingParams, PoolingParams],
         *,
-        output_type: Type[_O],
         lora_request: Optional[LoRARequest] = None,
-    ) -> AsyncIterator[_O]:
+    ) -> AsyncIterator[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Common logic to process requests with SamplingParams or
         PoolingParams."""
         arrival_time = time.time()
@@ -761,15 +755,8 @@ class AsyncLLMEngine:
             lora_request=lora_request,
         )
 
-        validate_output_types = LLMEngine.VALIDATE_OUTPUT_TYPES
-
         try:
             async for request_output in stream:
-                if ((TYPE_CHECKING or validate_output_types)
-                        and not isinstance(request_output, output_type)):
-                    raise TypeError(f"Expected output of type {output_type}, "
-                                    f"but found type {type(request_output)}")
-
                 yield request_output
         except (Exception, asyncio.CancelledError) as e:
             self._abort(request_id)

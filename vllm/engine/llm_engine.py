@@ -1,8 +1,8 @@
 import time
 from contextlib import contextmanager
-from typing import ClassVar, Iterable, List, Optional
+from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Type, Union
+from typing import Type, TypeVar, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
@@ -54,6 +54,9 @@ def _load_generation_config_dict(model_config: ModelConfig):
         return {}
 
 
+_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
+
+
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
 
@@ -88,17 +91,54 @@ class LLMEngine:
         usage_context: Specified entry point, used for usage info collection.
     """
 
-    VALIDATE_OUTPUT_TYPES: ClassVar[bool] = False
+    DO_VALIDATE_OUTPUT: ClassVar[bool] = False
     """A flag to toggle whether to validate the type of request output."""
 
     @classmethod
     @contextmanager
-    def validate_output_types(cls):
-        cls.VALIDATE_OUTPUT_TYPES = True
+    def enable_output_validation(cls):
+        cls.DO_VALIDATE_OUTPUT = True
 
         yield
 
-        cls.VALIDATE_OUTPUT_TYPES = False
+        cls.DO_VALIDATE_OUTPUT = False
+
+    @classmethod
+    def validate_output(
+        cls,
+        output: object,
+        output_type: Type[_O],
+    ) -> _O:
+        do_validate = cls.DO_VALIDATE_OUTPUT
+
+        if ((TYPE_CHECKING or do_validate)
+                and not isinstance(output, output_type)):
+            raise TypeError(f"Expected output of type {output_type}, "
+                            f"but found type {type(output)}")
+
+        return output
+
+    @classmethod
+    def validate_outputs(
+        cls,
+        outputs: GenericSequence[object],
+        output_type: Type[_O],
+    ) -> List[_O]:
+        do_validate = cls.DO_VALIDATE_OUTPUT
+
+        outputs_: List[_O]
+        if TYPE_CHECKING or do_validate:
+            outputs_ = []
+            for output in outputs:
+                if not isinstance(output, output_type):
+                    raise TypeError(f"Expected output of type {output_type}, "
+                                    f"but found type {type(output)}")
+
+                outputs_.append(output)
+        else:
+            outputs_ = outputs
+
+        return outputs_
 
     tokenizer: Optional[BaseTokenizerGroup]
 
