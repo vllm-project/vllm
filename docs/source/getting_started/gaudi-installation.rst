@@ -61,7 +61,7 @@ To build and install vLLM-fork from source, run:
 
    $ git clone https://github.com/HabanaAI/vllm-fork.git
    $ cd vllm-fork
-   # git checkout 0.4.2-Gaudi-1.16.0
+   # git checkout v0.4.2-Gaudi-1.16.0
    $ pip install -e .  # This may take 5-10 minutes.
 
 Supported Features
