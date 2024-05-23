@@ -164,7 +164,6 @@ class DefaultModelLoader(BaseModelLoader):
         elif load_format == LoadFormat.SAFETENSORS:
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
-
         elif load_format == LoadFormat.PT:
             allow_patterns = ["*.pt"]
         elif load_format == LoadFormat.NPCACHE:
