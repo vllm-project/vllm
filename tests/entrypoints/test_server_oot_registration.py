@@ -1,4 +1,3 @@
-import multiprocessing
 import sys
 import time
 
@@ -37,7 +36,7 @@ def server_function(port):
 
 def test_oot_registration_for_api_server():
     port = get_open_port()
-    ctx = multiprocessing.get_context("spawn")
+    ctx = torch.multiprocessing.get_context()
     server = ctx.Process(target=server_function, args=(port, ))
     server.start()
     client = OpenAI(
