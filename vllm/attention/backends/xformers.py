@@ -395,14 +395,29 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
     def forward(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: Optional[torch.Tensor],
+        value: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor],
         attn_metadata: "XFormersMetadata",
         kv_scale: float = 1.0,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
+        For decoder-only models: query, key and value must be non-None.
+
+        For encoder/decoder models:
+        * XFormersImpl.forward() may be invoked for both self- and cross-
+          attention layers.
+        * For self-attention: query, key and value must be non-None.
+        * For cross-attention:
+            * Query must be non-None
+            * During prefill, key and value must be non-None; key and value
+              get cached for use during decode.
+            * During decode, key and value may be None, since:
+              (1) key and value tensors were cached during prefill, and
+              (2) cross-attention key and value tensors do not grow during
+                  decode
+        
         Args:
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
