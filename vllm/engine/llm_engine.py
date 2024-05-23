@@ -1,5 +1,5 @@
 import time
-from typing import Iterable, List, Optional, Type, Union
+from typing import Iterable, List, Optional, Set, Type, Union
 
 from transformers import GenerationConfig, PreTrainedTokenizer
 
@@ -880,7 +880,7 @@ class LLMEngine:
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_executor.remove_lora(lora_id)
 
-    def list_loras(self) -> List[int]:
+    def list_loras(self) -> Set[int]:
         return self.model_executor.list_loras()
 
     def check_health(self) -> None:

@@ -99,8 +99,8 @@ class WorkerWrapperBase:
     """
 
     def __init__(self,
-                 worker_module_name=None,
-                 worker_class_name=None,
+                 worker_module_name: str,
+                 worker_class_name: str,
                  trust_remote_code: bool = False) -> None:
         self.worker_module_name = worker_module_name
         self.worker_class_name = worker_class_name

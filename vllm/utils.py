@@ -19,11 +19,11 @@ from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
 
 import psutil
 import torch
+from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 
-T = TypeVar("T")
 logger = init_logger(__name__)
 
 STR_DTYPE_TO_TORCH_DTYPE = {
@@ -34,6 +34,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
 }
+
+P = ParamSpec('P')
+T = TypeVar("T")
 
 
 class Device(enum.Enum):
@@ -185,7 +188,7 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(uname()).lower()
 
 
-def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
+def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     """Take a blocking function, and run it on in an executor thread.
 
     This function prevents the blocking function from blocking the
@@ -193,7 +196,7 @@ def make_async(func: Callable[..., T]) -> Callable[..., Awaitable[T]]:
     The code in this function needs to be thread safe.
     """
 
-    def _async_wrapper(*args, **kwargs) -> asyncio.Future:
+    def _async_wrapper(*args: P.args, **kwargs: P.kwargs) -> asyncio.Future:
         loop = asyncio.get_event_loop()
         p_func = partial(func, *args, **kwargs)
         return loop.run_in_executor(executor=None, func=p_func)
