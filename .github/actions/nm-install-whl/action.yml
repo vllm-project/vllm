@@ -23,5 +23,5 @@ runs:
         BASE=$(./.github/scripts/convert-version ${{ inputs.python }})
         WHL=$(find . -type f -iname "*${BASE}*.whl")
         WHL_BASENAME=$(basename ${WHL})
-        pip3 install ${WHL}[sparse]
+        pip3 install ${WHL}[sparse] --extra-index-url https://pypi.neuralmagic.com/simple
       shell: bash

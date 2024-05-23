@@ -49,7 +49,7 @@ runs:
         WHL=$(find . -type f -iname "*${BASE}*.whl")
         WHL_BASENAME=$(basename ${WHL})
         echo "whl=${WHL_BASENAME}" >> "$GITHUB_OUTPUT"
-        pip3 install ${WHL}[sparse]
+        pip3 install ${WHL}[sparse] --extra-index-url https://pypi.neuralmagic.com/simple
         # report magic_wand version
         MAGIC_WAND=$(pip3 show nm-magic-wand-nightly | grep "Version" | cut -d' ' -f2) || echo "nightly not installed"
         if [ -z "${MAGIC_WAND}" ]; then

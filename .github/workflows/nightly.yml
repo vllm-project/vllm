@@ -17,7 +17,43 @@ on:
 
 jobs:
 
-    BUILD-TEST:
+    PYTHON-3-8:
+        uses: ./.github/workflows/build-test.yml
+        with:
+            wf_category: NIGHTLY
+            python: 3.8.17
+            gitref: ${{ github.ref }}
+
+            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_timeout: 480
+            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+
+            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
+            benchmark_timeout: 720
+            push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
+        secrets: inherit
+
+    PYTHON-3-9:
+        uses: ./.github/workflows/build-test.yml
+        with:
+            wf_category: NIGHTLY
+            python: 3.9.17
+            gitref: ${{ github.ref }}
+
+            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_timeout: 480
+            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
+
+            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
+            benchmark_timeout: 720
+            push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
+        secrets: inherit
+
+    PYTHON-3-10:
         uses: ./.github/workflows/build-test.yml
         with:
             wf_category: NIGHTLY
@@ -28,6 +64,24 @@ jobs:
             test_label_multi: aws-avx2-192G-4-a10g-96G
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-nightly.txt
+
+            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
+            benchmark_timeout: 720
+            push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
+        secrets: inherit
+
+    PYTHON-3-11:
+        uses: ./.github/workflows/build-test.yml
+        with:
+            wf_category: NIGHTLY
+            python: 3.11.4
+            gitref: ${{ github.ref }}
+
+            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_timeout: 480
+            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
             benchmark_label: aws-avx2-32G-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
