@@ -1,5 +1,5 @@
 import time
-from typing import Iterable, List, Optional
+from typing import ClassVar, Iterable, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Type, Union
 
@@ -86,6 +86,10 @@ class LLMEngine:
         log_stats: Whether to log statistics.
         usage_context: Specified entry point, used for usage info collection.
     """
+
+    VALIDATE_OUTPUT_TYPES: ClassVar[bool] = False
+    """A flag to toggle whether to validate the type of request output."""
+
     tokenizer: Optional[BaseTokenizerGroup]
 
     def __init__(

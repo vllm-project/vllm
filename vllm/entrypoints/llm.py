@@ -1,6 +1,6 @@
 from contextlib import contextmanager
-from typing import (ClassVar, List, Optional, Sequence, Type, TypeVar, Union,
-                    cast, overload)
+from typing import (TYPE_CHECKING, ClassVar, List, Optional, Sequence, Type,
+                    TypeVar, Union, cast, overload)
 
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -541,20 +541,14 @@ class LLM:
         total_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
-            is_first = True
-
             for output in step_outputs:
-                # To improve performance, we only check the first result
-                if is_first:
-                    if not isinstance(output, output_type):
-                        raise TypeError(
-                            f"Expected output of type {output_type}, "
-                            f"but found type {type(output)}")
-
-                    is_first = False
+                if ((TYPE_CHECKING or LLMEngine.VALIDATE_OUTPUT_TYPES)
+                        and not isinstance(output, output_type)):
+                    raise TypeError(f"Expected output of type {output_type}, "
+                                    f"but found type {type(output)}")
 
                 if output.finished:
-                    outputs.append(output)  # type: ignore
+                    outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput

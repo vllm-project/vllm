@@ -1,8 +1,8 @@
 import asyncio
 import time
 from functools import partial
-from typing import (AsyncIterator, Callable, Dict, Iterable, List, Optional,
-                    Set, Tuple, Type, TypeVar, Union)
+from typing import (TYPE_CHECKING, AsyncIterator, Callable, Dict, Iterable,
+                    List, Optional, Set, Tuple, Type, TypeVar, Union)
 
 from transformers import PreTrainedTokenizer
 
@@ -762,19 +762,13 @@ class AsyncLLMEngine:
         )
 
         try:
-            is_first = True
-
             async for request_output in stream:
-                # To improve performance, we only check the first result
-                if is_first:
-                    if not isinstance(request_output, output_type):
-                        raise TypeError(
-                            f"Expected output of type {output_type}, "
-                            f"but found type {type(request_output)}")
+                if ((TYPE_CHECKING or LLMEngine.VALIDATE_OUTPUT_TYPES)
+                        and not isinstance(request_output, output_type)):
+                    raise TypeError(f"Expected output of type {output_type}, "
+                                    f"but found type {type(request_output)}")
 
-                    is_first = False
-
-                yield request_output  # type: ignore
+                yield request_output
         except (Exception, asyncio.CancelledError) as e:
             self._abort(request_id)
             raise e
