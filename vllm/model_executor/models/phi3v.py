@@ -58,7 +58,7 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(
 )
 
 
-# copy from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_embedding_phi3_v.py
+# adapted from https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_embedding_phi3_v.py
 class Phi3ImageEmbedding(nn.Module):
     """Phi3 Image embedding."""
 
@@ -158,7 +158,7 @@ class Phi3ImageEmbedding(nn.Module):
 
         raise NotImplementedError
 
-    def forward(self, input_ids: torch.LongTensor, pixel_values: torch.FloatTensor, image_sizes=None, **kwargs) -> torch.FloatTensor:
+    def forward(self, input_ids: torch.LongTensor, pixel_values: torch.FloatTensor, image_sizes=None) -> torch.FloatTensor:
 
         MAX_INPUT_ID = int(1e9)
         img_embeds = pixel_values
@@ -215,7 +215,7 @@ class Phi3ImageEmbedding(nn.Module):
                 if isinstance(img_sizes, torch.Tensor):
                     img_sizes = img_sizes.view(-1, 2)
                 for _bs in range(bs):
-                    h, w = img_sizes[_bs]
+                    h, w = img_sizes
                     h = h // 336 
                     w = w // 336
                     B_ = h * w
@@ -314,10 +314,7 @@ class Phi3ImageEmbedding(nn.Module):
                         )
                     idx += cnt
 
-        if self.drop is not None:
-            hidden_states = self.drop(hidden_states)
-
-        return hidden_states
+        return hidden_states.squeeze(0)
 
 
 class Phi3VForCausalLM(VisionLanguageModelBase):
@@ -340,9 +337,9 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
                 image_input: Optional[dict] = None):
-
         if image_input is not None:
-            inputs_embeds = self.vision_embed_tokens(input_ids, **image_input)
+            print(image_input.shape)
+            inputs_embeds = self.vision_embed_tokens(input_ids, image_input, self.vision_language_config.image_input_shape)
 
             input_ids = None
         else:
