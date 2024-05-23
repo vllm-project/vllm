@@ -6,8 +6,7 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsUnquantized,
-    CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsScheme, CompressedTensorsW8A8StaticTensor)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
