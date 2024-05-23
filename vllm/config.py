@@ -249,9 +249,6 @@ class ModelConfig:
         """
         # If user disables sliding window, return None.
         if self.disable_sliding_window:
-            logger.info("Sliding window is disabled per configuration. "
-                        "Model max length will be capped at sliding window "
-                        "length.")
             return None
         # Otherwise get the value from the hf config.
         return self.get_hf_config_sliding_window()
