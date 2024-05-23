@@ -277,6 +277,11 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                               cross_num_required_blocks
 
         if self.block_sliding_window is not None:
+            if seq_group.get_encoder_seq() is not None:
+                raise NotImplementedError(
+                    "Sliding window attention for encoder/decoder models " + \
+                    "is not currently supported.")
+            
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
@@ -320,9 +325,16 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         decoder_only = \
             seq_group.get_encoder_seq() is None
 
-        assert decoder_only or (not self.enable_caching), \
-               "Automatic prefix caching currently not " + \
-               "supported for encoder/decoder models."
+        if (self.block_sliding_window is not None) and \
+           (not decoder_only):
+            raise NotImplementedError(
+                "Sliding window attention for encoder/decoder models " + \
+                "is not currently supported.")
+
+        if self.enable_caching and (not decoder_only):
+            raise NotImplementedError(
+                "Automatic prefix caching currently not " + \
+                "supported for encoder/decoder models.")
 
         # Allocate decoder sequences
         #
