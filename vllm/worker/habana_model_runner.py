@@ -699,12 +699,13 @@ class HabanaModelRunner:
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        event_start = self.profiler.get_timestamp_us()
-        is_prompt = seq_group_metadata_list[0].is_prompt
-        base_event_name = 'prompt' if is_prompt else 'decode'
-        self.profiler.start('internal', base_event_name)
-
         if self.is_driver_worker:
+            # profiler is enabled only for rank == 0 (profiler.py:L57)
+            event_start = self.profiler.get_timestamp_us()
+            is_prompt = seq_group_metadata_list[0].is_prompt
+            base_event_name = 'prompt' if is_prompt else 'decode'
+            self.profiler.start('internal', base_event_name)
+
             real_batch_size = len(seq_group_metadata_list)
             bucket_cfg = self.prompt_bs_bucket_cfg if is_prompt else self.decode_bs_bucket_cfg
             batch_size_padded = find_bucket(real_batch_size, bucket_cfg)
@@ -729,7 +730,11 @@ class HabanaModelRunner:
             execute_model_kwargs.update({"image_input": multi_modal_input})
 
         htorch.core.mark_step()
-        with self.profiler.record_event('internal', f'model_{base_event_name}_eager_bs{real_batch_size}'):
+        if self.is_driver_worker:
+            model_event_name = f'model_{base_event_name}_eager_bs{real_batch_size}'
+        else:
+            model_event_name = 'model_executable'
+        with self.profiler.record_event('internal', model_event_name):
             hidden_states = self.model(**execute_model_kwargs)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
@@ -751,10 +756,9 @@ class HabanaModelRunner:
         output.outputs = output.outputs[:real_batch_size]
         htorch.core.mark_step()
 
-        # Stop recording 'execute_model' event
-        self.profiler.end()
-
-        if self.profiler.enabled:
+        if self.is_driver_worker:
+            # Stop recording 'execute_model' event
+            self.profiler.end()
             event_end = self.profiler.get_timestamp_us()
             duration = event_end - event_start
             throughput = batch_size_padded / (duration / 1e6)
