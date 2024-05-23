@@ -100,6 +100,22 @@ class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
     type: Literal["text", "json_object"]
 
+class FunctionDefinition(OpenAIBaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+class ChatCompletionToolsParam(OpenAIBaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDefinition
+
+class ChatCompletionNamedFunction(OpenAIBaseModel):
+    name: str
+
+class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
+    function: ChatCompletionNamedFunction
+    type: Literal["function"] = "function"
+
 
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -121,6 +137,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stream: Optional[bool] = False
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
+    tools: Optional[List[ChatCompletionToolsParam]] = None
+    tool_choice: Optional[Union[Literal["none", "required"],
+                                ChatCompletionNamedToolChoiceParam]] = "none"
     user: Optional[str] = None
 
     # doc: begin-chat-completion-sampling-params
@@ -484,22 +503,31 @@ class EmbeddingResponse(BaseModel):
     usage: UsageInfo
 
 
+class FunctionCall(OpenAIBaseModel):
+    name: str
+    arguments: str
+
+class ToolCall(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
 class ChatMessage(OpenAIBaseModel):
     role: str
     content: str
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion"
+    object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseChoice]
@@ -509,19 +537,19 @@ class ChatCompletionResponse(OpenAIBaseModel):
 class DeltaMessage(OpenAIBaseModel):
     role: Optional[str] = None
     content: Optional[str] = None
+    tool_calls: List[ToolCall] = Field(default_factory=list)
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
     logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Optional[Union[int, str]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
-    object: str = "chat.completion.chunk"
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
