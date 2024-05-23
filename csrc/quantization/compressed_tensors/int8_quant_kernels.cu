@@ -16,6 +16,7 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
   dst = std::clamp(dst, i8_min, i8_max);
   return static_cast<int8_t>(dst);
 #else
+  // CUDA path
   uint32_t dst;
   asm volatile("cvt.rni.sat.s8.f32 %0, %1;" : "=r"(dst) : "f"(x));
   return reinterpret_cast<const int8_t&>(dst);
