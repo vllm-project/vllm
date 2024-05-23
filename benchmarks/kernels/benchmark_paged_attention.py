@@ -7,9 +7,12 @@ import torch
 
 from vllm._C import ops
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
+#from vllm.custom_ops import paged_attention_custom
+from vllm._custom_C import paged_attention_custom
 
 NUM_BLOCKS = 1024
-PARTITION_SIZE = 512
+#PARTITION_SIZE = 512
+PARTITION_SIZE = 256
 
 
 @torch.inference_mode()
@@ -118,7 +121,25 @@ def main(
                     kv_scale,
                 )
             elif version == "v2":
-                ops.paged_attention_v2(
+                #ops.paged_attention_v2(
+                #    output,
+                #    exp_sums,
+                #    max_logits,
+                #    tmp_output,
+                #    query,
+                #    key_cache,
+                #    value_cache,
+                #    num_kv_heads,
+                #    scale,
+                #    block_tables,
+                #    context_lens,
+                #    block_size,
+                #    max_context_len,
+                #    alibi_slopes,
+                #    kv_cache_dtype,
+                #    kv_scale,
+                #)
+                paged_attention_custom(
                     output,
                     exp_sums,
                     max_logits,
@@ -134,7 +155,6 @@ def main(
                     max_context_len,
                     alibi_slopes,
                     kv_cache_dtype,
-                    kv_scale,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")

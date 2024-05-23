@@ -5,9 +5,12 @@ import torch
 
 from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
+#from vllm.custom_ops import paged_attention_custom
+from vllm._custom_C import paged_attention_custom
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 512
+#_PARTITION_SIZE = 512
+_PARTITION_SIZE = 256
 
 
 @dataclass
@@ -114,6 +117,7 @@ class PagedAttention:
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_context_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+        use_v1 = False
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
@@ -145,7 +149,25 @@ class PagedAttention:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            ops.paged_attention_v2(
+            #ops.paged_attention_v2(
+            #    output,
+            #    exp_sums,
+            #    max_logits,
+            #    tmp_output,
+            #    query,
+            #    key_cache,
+            #    value_cache,
+            #    num_kv_heads,
+            #    scale,
+            #    block_tables,
+            #    context_lens,
+            #    block_size,
+            #    max_context_len,
+            #    alibi_slopes,
+            #    kv_cache_dtype,
+            #    kv_scale,
+            #)
+            paged_attention_custom(
                 output,
                 exp_sums,
                 max_logits,
@@ -161,7 +183,6 @@ class PagedAttention:
                 max_context_len,
                 alibi_slopes,
                 kv_cache_dtype,
-                kv_scale,
             )
         return output
 
