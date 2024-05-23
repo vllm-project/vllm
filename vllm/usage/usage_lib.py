@@ -16,6 +16,7 @@ import requests
 import torch
 
 import vllm.envs as envs
+from vllm.utils import get_vllm_version
 
 _config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "vllm/usage_stats.json")
@@ -163,9 +164,8 @@ class UsageMessage:
         ])
 
         # vLLM information
-        import vllm  # delayed import to prevent circular import
         self.context = usage_context.value
-        self.vllm_version = vllm.__version__
+        self.vllm_version = get_vllm_version()
         self.model_architecture = model_architecture
 
         # Metadata
