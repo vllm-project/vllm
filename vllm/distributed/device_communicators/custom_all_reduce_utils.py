@@ -77,7 +77,8 @@ def can_actually_p2p(i, j):
     `torch.cuda.can_device_access_peer(i, j)`. However, sometimes
     the driver might be broken, and `torch.cuda.can_device_access_peer(i, j)`
     returns `True` even if P2P access is not actually possible.
-    See https://github.com/vllm-project/vllm/issues/2728
+    See https://github.com/vllm-project/vllm/issues/2728 and
+    https://forums.developer.nvidia.com/t/direct-gpu-gpu-communication-does-not-seem-to-work-properly/283264/10
     Therefore, we have to perform a real P2P access to check if it is actually
     possible.
 
@@ -94,7 +95,7 @@ def can_actually_p2p(i, j):
     tensor in process j will be reflected in the tensor in process i, because
     they are the same memory segment.
     It is important to note that process j accesses the tensor in GPU j, not
-    GPU i. That's why we need p2p access.
+    GPU i. That's why we need p2p access. # noqa
     """
     CUDA_VISIBLE_DEVICES = os.getenv('CUDA_VISIBLE_DEVICES', None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
