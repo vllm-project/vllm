@@ -1,5 +1,6 @@
 """Benchmark the latency of processing a single batch of requests."""
 import argparse
+import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -18,6 +19,8 @@ def main(args: argparse.Namespace):
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
     llm = LLM(model=args.model,
+              speculative_model=args.speculative_model,
+              num_speculative_tokens=args.num_speculative_tokens,
               tokenizer=args.tokenizer,
               quantization=args.quantization,
               tensor_parallel_size=args.tensor_parallel_size,
@@ -28,6 +31,7 @@ def main(args: argparse.Namespace):
               quantization_param_path=args.quantization_param_path,
               device=args.device,
               ray_workers_use_nsight=args.ray_workers_use_nsight,
+              use_v2_block_manager=args.use_v2_block_manager,
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size)
@@ -93,12 +97,24 @@ def main(args: argparse.Namespace):
     for percentage, percentile in zip(percentages, percentiles):
         print(f'{percentage}% percentile latency: {percentile} seconds')
 
+    # Output JSON results if specified
+    if args.output_json:
+        results = {
+            "avg_latency": np.mean(latencies),
+            "latencies": latencies.tolist(),
+            "percentiles": dict(zip(percentages, percentiles.tolist())),
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
     parser.add_argument('--model', type=str, default='facebook/opt-125m')
+    parser.add_argument('--speculative-model', type=str, default=None)
+    parser.add_argument('--num-speculative-tokens', type=int, default=None)
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
@@ -137,15 +153,13 @@ if __name__ == '__main__':
                         action='store_true',
                         help='enforce eager mode and disable CUDA graph')
     parser.add_argument(
-        "--kv-cache-dtype",
+        '--kv-cache-dtype',
         type=str,
-        choices=['auto', 'fp8'],
-        default='auto',
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type. '
-        'FP8_E5M2 (without scaling) is only supported on cuda version greater '
-        'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
-        'common inference criteria.')
+        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+        default="auto",
+        help='Data type for kv cache storage. If "auto", will use model '
+        'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
+        'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
     parser.add_argument(
         '--quantization-param-path',
         type=str,
@@ -181,6 +195,7 @@ if __name__ == '__main__':
         action='store_true',
         help='If True, the prefill requests can be chunked based on the '
         'max_num_batched_tokens')
+    parser.add_argument('--use-v2-block-manager', action='store_true')
     parser.add_argument(
         "--ray-workers-use-nsight",
         action='store_true',
@@ -191,5 +206,10 @@ if __name__ == '__main__':
                         default=None,
                         help='directory to download and load the weights, '
                         'default to the default cache dir of huggingface')
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Path to save the latency results in JSON format.')
     args = parser.parse_args()
     main(args)

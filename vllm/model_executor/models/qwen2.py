@@ -29,7 +29,7 @@ from torch import nn
 from transformers import Qwen2Config
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -87,8 +87,10 @@ class Qwen2Attention(nn.Module):
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
                  use_sliding_window: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 rope_scaling: Optional[Tuple] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -132,12 +134,15 @@ class Qwen2Attention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position,
             base=self.rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              sliding_window=self.sliding_window)
+                              sliding_window=self.sliding_window,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -160,12 +165,14 @@ class Qwen2DecoderLayer(nn.Module):
         self,
         config: Qwen2Config,
         layer_idx: int,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         use_sliding_window = (config.use_sliding_window
                               and layer_idx < config.max_window_layers)
         self.self_attn = Qwen2Attention(
@@ -175,8 +182,10 @@ class Qwen2DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             use_sliding_window=use_sliding_window,
+            cache_config=cache_config,
             quant_config=quant_config,
-            sliding_window=config.sliding_window)
+            sliding_window=config.sliding_window,
+            rope_scaling=rope_scaling)
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -222,6 +231,7 @@ class Qwen2Model(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -234,7 +244,7 @@ class Qwen2Model(nn.Module):
             config.hidden_size,
         )
         self.layers = nn.ModuleList([
-            Qwen2DecoderLayer(config, layer_idx, quant_config)
+            Qwen2DecoderLayer(config, layer_idx, cache_config, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -287,6 +297,7 @@ class Qwen2ForCausalLM(nn.Module):
     def __init__(
         self,
         config: Qwen2Config,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -294,7 +305,7 @@ class Qwen2ForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = Qwen2Model(config, quant_config)
+        self.model = Qwen2Model(config, cache_config, quant_config)
 
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight

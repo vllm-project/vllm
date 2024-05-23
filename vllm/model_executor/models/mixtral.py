@@ -29,7 +29,7 @@ from transformers import MixtralConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -95,7 +95,7 @@ class MixtralMoE(nn.Module):
                                      params_dtype=self.params_dtype,
                                      quant_config=None)
 
-        if self.use_fp8:
+        if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
 
         self.w13_weight = nn.Parameter(
@@ -252,6 +252,7 @@ class MixtralAttention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None) -> None:
         super().__init__()
@@ -307,13 +308,13 @@ class MixtralAttention(nn.Module):
             base=int(self.rope_theta),
             is_neox_style=True,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            sliding_window=self.sliding_window,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              sliding_window=self.sliding_window,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -335,6 +336,7 @@ class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -348,6 +350,7 @@ class MixtralDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
+            cache_config=cache_config,
             quant_config=quant_config)
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
@@ -394,6 +397,7 @@ class MixtralModel(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -410,7 +414,9 @@ class MixtralModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config, quant_config=quant_config)
+            MixtralDecoderLayer(config,
+                                cache_config,
+                                quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -460,12 +466,14 @@ class MixtralForCausalLM(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.model = MixtralModel(config,
+                                  cache_config,
                                   quant_config,
                                   lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
@@ -572,6 +580,20 @@ class MixtralForCausalLM(nn.Module):
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
+                    # Remapping the name of FP8 kv-scale.
+                    if name.endswith("kv_scale"):
+                        remapped_kv_scale_name = name.replace(
+                            ".kv_scale", ".attn.kv_scale")
+                        if remapped_kv_scale_name not in params_dict:
+                            print_warning_once(
+                                "Found kv scale in the checkpoint "
+                                f"(e.g. {name}), but not found the expected "
+                                f"name in the model "
+                                f"(e.g. {remapped_kv_scale_name}). "
+                                "kv-scale is not loaded.")
+                            continue
+                        else:
+                            name = remapped_kv_scale_name
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)

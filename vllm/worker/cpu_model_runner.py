@@ -53,7 +53,15 @@ class CPUModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
-        self.attn_backend = get_attn_backend(self.model_config.dtype)
+        self.attn_backend = get_attn_backend(
+            self.model_config.get_num_attention_heads(self.parallel_config),
+            self.model_config.get_head_size(),
+            self.model_config.get_num_kv_heads(self.parallel_config),
+            self.model_config.get_sliding_window(),
+            self.model_config.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+        )
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
@@ -66,7 +74,8 @@ class CPUModelRunner:
             vision_language_config=self.vision_language_config,
             lora_config=self.lora_config,
             parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config)
+            scheduler_config=self.scheduler_config,
+            cache_config=self.cache_config)
 
     def _prepare_prompt(
         self,
@@ -150,15 +159,12 @@ class CPUModelRunner:
             is_prompt=True,
             seq_lens=seq_lens,
             seq_lens_tensor=None,
-            max_seq_len=None,
+            max_decode_seq_len=None,
             num_prefills=len(seq_lens),
             num_prefill_tokens=num_prompt_tokens,
             num_decode_tokens=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_input)
@@ -205,7 +211,7 @@ class CPUModelRunner:
                     block_table = block_table[-sliding_window_blocks:]
                 block_tables.append(block_table)
 
-        max_seq_len = max(seq_lens)
+        max_decode_seq_len = max(seq_lens)
 
         input_tokens = torch.tensor(input_tokens,
                                     dtype=torch.long,
@@ -235,14 +241,11 @@ class CPUModelRunner:
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_seq_len=max_seq_len,
+            max_decode_seq_len=max_decode_seq_len,
             num_prefill_tokens=0,
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
-            prefill_metadata=None,
-            decode_metadata=None,
             block_tables=block_tables,
-            kv_cache_dtype=self.kv_cache_dtype,
         )
         return (
             input_tokens,

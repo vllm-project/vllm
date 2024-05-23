@@ -22,9 +22,11 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
-                                              CompletionRequest, ErrorResponse)
+                                              CompletionRequest,
+                                              EmbeddingRequest, ErrorResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
@@ -32,6 +34,8 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
+openai_serving_embedding: OpenAIServingEmbedding
+
 logger = init_logger(__name__)
 
 _running_tasks: Set[asyncio.Task] = set()
@@ -123,6 +127,17 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump())
 
 
+@app.post("/v1/embeddings")
+async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+    generator = await openai_serving_embedding.create_embedding(
+        request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    else:
+        return JSONResponse(content=generator.model_dump())
+
+
 if __name__ == "__main__":
     args = parse_args()
 
@@ -139,6 +154,8 @@ if __name__ == "__main__":
         @app.middleware("http")
         async def authentication(request: Request, call_next):
             root_path = "" if args.root_path is None else args.root_path
+            if request.method == "OPTIONS":
+                return await call_next(request)
             if not request.url.path.startswith(f"{root_path}/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
@@ -190,7 +207,8 @@ if __name__ == "__main__":
                                             args.chat_template)
     openai_serving_completion = OpenAIServingCompletion(
         engine, model_config, served_model_names, args.lora_modules)
-
+    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
+                                                      served_model_names)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,

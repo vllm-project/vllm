@@ -16,13 +16,21 @@ Alongside each architecture, we include some popular models that use it.
     - Example HuggingFace Models
     - :ref:`LoRA <lora>`
   * - :code:`AquilaForCausalLM`
-    - Aquila
+    - Aquila & Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
     - ✅︎
+  * - :code:`ArcticForCausalLM`
+    - Arctic
+    - :code:`Snowflake/snowflake-arctic-base`, :code:`Snowflake/snowflake-arctic-instruct`, etc.
+    -
   * - :code:`BaiChuanForCausalLM`
-    - Baichuan
+    - Baichuan & Baichuan2
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
     - ✅︎
+  * - :code:`BloomForCausalLM`
+    - BLOOM, BLOOMZ, BLOOMChat
+    - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
+    -
   * - :code:`ChatGLMModel`
     - ChatGLM
     - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
@@ -38,10 +46,6 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`DeciLMForCausalLM`
     - DeciLM
     - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
-    -
-  * - :code:`BloomForCausalLM`
-    - BLOOM, BLOOMZ, BLOOMChat
-    - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
     -
   * - :code:`FalconForCausalLM`
     - Falcon
@@ -114,7 +118,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
-    -
+    - ✅︎
   * - :code:`Phi3ForCausalLM`
     - Phi-3
     - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
@@ -135,6 +139,15 @@ Alongside each architecture, we include some popular models that use it.
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
     -
+  * - :code:`Starcoder2ForCausalLM`
+    - Starcoder2
+    - :code:`bigcode/starcoder2-3b`, :code:`bigcode/starcoder2-7b`, :code:`bigcode/starcoder2-15b`, etc.
+    -
+  * - :code:`XverseForCausalLM`
+    - Xverse
+    - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
+    -
+
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.

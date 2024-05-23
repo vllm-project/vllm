@@ -11,6 +11,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -68,6 +69,7 @@ class QWenAttention(nn.Module):
         max_position_embeddings: int,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -101,7 +103,11 @@ class QWenAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_heads, self.head_dim, self.scaling)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -123,6 +129,7 @@ class QWenBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -135,6 +142,7 @@ class QWenBlock(nn.Module):
                                   config.max_position_embeddings,
                                   rope_theta=rope_theta,
                                   rope_scaling=rope_scaling,
+                                  cache_config=cache_config,
                                   quant_config=quant_config)
 
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -175,6 +183,7 @@ class QWenModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -186,7 +195,7 @@ class QWenModel(nn.Module):
             config.hidden_size,
         )
         self.h = nn.ModuleList([
-            QWenBlock(config, quant_config)
+            QWenBlock(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -218,12 +227,13 @@ class QWenLMHeadModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = QWenModel(config, quant_config)
+        self.transformer = QWenModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

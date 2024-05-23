@@ -5,6 +5,7 @@ tomli==2.0.1
 ruff==0.1.5
 codespell==2.2.6
 isort==5.13.2
+clang-format==18.1.5
 
 # type checking
 mypy==1.9.0
@@ -14,17 +15,20 @@ types-setuptools
 
 # testing
 pytest
-tensorizer==2.9.0
+tensorizer>=2.9.0
 pytest-forked
 pytest-asyncio
 pytest-rerunfailures
 pytest-shard
-httpx
+
+# testing utils
+awscli
 einops # required for MPT
+httpx
+peft
 requests
 ray
-peft
-awscli
+sentence-transformers # required for embedding
 
 # Benchmarking
 aiohttp

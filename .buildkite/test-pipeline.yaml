@@ -5,13 +5,16 @@
 
 steps:
 - label: Regression Test
+  mirror_hardwares: [amd]
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: AsyncEngine Test
+  #mirror_hardwares: [amd]
   command: pytest -v -s async_engine
 
 - label: Basic Correctness Test
+  mirror_hardwares: [amd]
   commands:
   - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py
@@ -24,34 +27,41 @@ steps:
   command: pytest -v -s core
 
 - label: Distributed Comm Ops Test
-  command: pytest -v -s test_comm_ops.py
-  working_dir: "/vllm-workspace/tests/distributed"
+  #mirror_hardwares: [amd]
+  command: pytest -v -s distributed/test_comm_ops.py
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
 
 - label: Distributed Tests
-  working_dir: "/vllm-workspace/tests/distributed"
-
-  num_gpus: 2 # only support 1 or 2 for now.
   mirror_hardwares: [amd]
-
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
   commands:
-  - pytest -v -s test_pynccl_library.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_basic_distributed_correctness.py
-  - TEST_DIST_MODEL=facebook/opt-125m pytest -v -s test_chunked_prefill_distributed.py
-  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf pytest -v -s test_chunked_prefill_distributed.py
+  - pytest -v -s distributed/test_pynccl_library.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py
+  - TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py
+  - pytest -v -s spec_decode/e2e/test_integration_dist.py 
 
 - label: Distributed Tests (Multiple Groups)
-  working_dir: "/vllm-workspace/tests/distributed"
+  #mirror_hardwares: [amd]
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   commands:
-  - pytest -v -s test_pynccl.py
+  - pytest -v -s distributed/test_pynccl.py
 
 - label: Engine Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
+  mirror_hardwares: [amd]
+
   commands:
   # these tests have to be separated, because each one will allocate all posible GPU memory
   - pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py
@@ -62,13 +72,16 @@ steps:
   mirror_hardwares: [amd]
   commands:
     # install aws cli for llava_example.py
-    - pip install awscli
+    # install tensorizer for tensorize_vllm_model.py
+    - pip install awscli tensorizer
     - python3 offline_inference.py
     - python3 offline_inference_with_prefix.py
     - python3 llm_engine_example.py
     - python3 llava_example.py
+    - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
 
 - label: Kernels Test %N
+  #mirror_hardwares: [amd]
   command: pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 4
 
@@ -79,7 +92,7 @@ steps:
     - pytest -v -s models --ignore=models/test_llava.py
 
 - label: Llava Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
   commands:
     - bash ../.buildkite/download-images.sh
     - pytest -v -s models/test_llava.py
@@ -90,6 +103,7 @@ steps:
     - pytest -v -s prefix_caching
 
 - label: Samplers Test
+  #mirror_hardwares: [amd]
   command: pytest -v -s samplers
 
 - label: LogitsProcessor Test
@@ -105,16 +119,34 @@ steps:
   command: pytest -v -s spec_decode
 
 - label: LoRA Test %N
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  #mirror_hardwares: [amd]
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py
   parallelism: 4
 
+- label: LoRA Long Context (Distributed)
+  #mirror_hardwares: [amd]
+  num_gpus: 4
+  # This test runs llama 13B, so it is required to run on 4 GPUs.
+  commands:
+    # Temporarily run this way because we cannot clean up GPU mem usage
+    # for multi GPU tests.
+    # TODO(sang): Fix it.
+    - pytest -v -s lora/test_long_context.py::test_rotary_emb_replaced
+    - pytest -v -s lora/test_long_context.py::test_batched_rope_kernel
+    - pytest -v -s lora/test_long_context.py::test_self_consistency
+    - pytest -v -s lora/test_long_context.py::test_quality
+    - pytest -v -s lora/test_long_context.py::test_max_len
+
 - label: Tensorizer Test
+  #mirror_hardwares: [amd]
   command: apt-get install curl libsodium23 && pytest -v -s tensorizer_loader
 
 - label: Metrics Test
+  mirror_hardwares: [amd]
   command: pytest -v -s metrics
 
 - label: Quantization Test
+  #mirror_hardwares: [amd]
   command: pytest -v -s quantization
 
 - label: Benchmarks

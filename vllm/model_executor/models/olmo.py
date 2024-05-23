@@ -28,6 +28,7 @@ from torch import nn
 from transformers import OlmoConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -55,6 +56,7 @@ class OlmoAttention(nn.Module):
     def __init__(
         self,
         config: OlmoConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -93,7 +95,9 @@ class OlmoAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(self.num_heads,
                               self.head_dim,
-                              scale=self.scaling)
+                              scale=self.scaling,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -175,10 +179,11 @@ class OlmoDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: OlmoConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         # Attention block.
-        self.self_attn = OlmoAttention(config, quant_config)
+        self.self_attn = OlmoAttention(config, cache_config, quant_config)
 
         # MLP block.
         self.mlp = OlmoMLP(config, quant_config)
@@ -217,6 +222,7 @@ class OlmoModel(nn.Module):
 
     def __init__(self,
                  config: OlmoConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
@@ -224,7 +230,7 @@ class OlmoModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            OlmoDecoderLayer(config, quant_config)
+            OlmoDecoderLayer(config, cache_config, quant_config)
             for layer_idx in range(config.num_hidden_layers)
         ])
         self.norm = nn.LayerNorm(config.hidden_size,
@@ -271,10 +277,11 @@ class OlmoForCausalLM(nn.Module):
 
     def __init__(self,
                  config: OlmoConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.config = config
-        self.model = OlmoModel(config, quant_config)
+        self.model = OlmoModel(config, cache_config, quant_config)
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
         else:

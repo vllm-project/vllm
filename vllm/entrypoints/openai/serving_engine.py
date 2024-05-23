@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field
 from typing_extensions import Annotated
@@ -9,7 +9,8 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              CompletionRequest, ErrorResponse,
+                                              CompletionRequest,
+                                              EmbeddingRequest, ErrorResponse,
                                               LogProbs, ModelCard, ModelList,
                                               ModelPermission)
 from vllm.logger import init_logger
@@ -164,12 +165,14 @@ class OpenAIServing:
         raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
-        self,
-        request: Union[ChatCompletionRequest, CompletionRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-    ) -> Tuple[List[int], str]:
+            self,
+            request: Union[ChatCompletionRequest, CompletionRequest,
+                           EmbeddingRequest],
+            prompt: Optional[str] = None,
+            prompt_ids: Optional[List[int]] = None,
+            truncate_prompt_tokens: Optional[Annotated[int,
+                                                       Field(ge=1)]] = None,
+            add_special_tokens: bool = True) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -177,10 +180,19 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            tokenizer_kwargs = {} if truncate_prompt_tokens is None else {
-                "truncation": True,
-                "max_length": truncate_prompt_tokens,
+            # When using OpenAIServingChat for chat completions, the
+            # special tokens (e.g., BOS) have already been added by the
+            # chat template. Therefore, we do not need to add them again.
+            # Set add_special_tokens to False to avoid adding the BOS tokens
+            # again.
+            tokenizer_kwargs: Dict[str, Any] = {
+                "add_special_tokens": add_special_tokens
             }
+            if truncate_prompt_tokens is not None:
+                tokenizer_kwargs.update({
+                    "truncation": True,
+                    "max_length": truncate_prompt_tokens,
+                })
             input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
         elif truncate_prompt_tokens is not None:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
@@ -190,6 +202,16 @@ class OpenAIServing:
         input_text = prompt if prompt is not None else self.tokenizer.decode(
             prompt_ids)
         token_num = len(input_ids)
+
+        # Note: EmbeddingRequest doesn't have max_tokens
+        if isinstance(request, EmbeddingRequest):
+            if token_num > self.max_model_len:
+                raise ValueError(
+                    f"This model's maximum context length is "
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for embedding "
+                    f"generation. Please reduce the length of the input.", )
+            return input_ids, input_text
 
         if request.max_tokens is None:
             if token_num >= self.max_model_len:

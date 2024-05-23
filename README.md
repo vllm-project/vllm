@@ -14,6 +14,17 @@ Easy, fast, and cheap LLM serving for everyone
 
 </p>
 
+---
+
+**The Fourth vLLM Bay Area Meetup (June 11th 5:30pm-8pm PT)**
+
+We are thrilled to announce our fourth vLLM Meetup!
+The vLLM team will share recent updates and roadmap.
+We will also have vLLM collaborators from BentoML and Cloudflare coming up to the stage to discuss their experience in deploying LLMs with vLLM.
+Please register [here](https://lu.ma/agivllm) and join us!
+
+---
+
 *Latest News* 🔥
 - [2024/04] We hosted [the third vLLM meetup](https://robloxandvllmmeetup2024.splashthat.com/) with Roblox! Please find the meetup slides [here](https://docs.google.com/presentation/d/1A--47JAK4BJ39t954HyTkvtfwn0fkqtsL8NGFuslReM/edit?usp=sharing).
 - [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) in SF! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).
@@ -51,41 +62,14 @@ vLLM is flexible and easy to use with:
 - (Experimental) Prefix caching support
 - (Experimental) Multi-lora support
 
-vLLM seamlessly supports many Hugging Face models, including the following architectures:
+vLLM seamlessly supports most popular open-source models on HuggingFace, including:
+- Transformer-like LLMs (e.g., Llama)
+- Mixture-of-Expert LLMs (e.g., Mixtral)
+- Multi-modal LLMs (e.g., LLaVA)
 
-- Aquila & Aquila2 (`BAAI/AquilaChat2-7B`, `BAAI/AquilaChat2-34B`, `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc.)
-- Baichuan & Baichuan2 (`baichuan-inc/Baichuan2-13B-Chat`, `baichuan-inc/Baichuan-7B`, etc.)
-- BLOOM (`bigscience/bloom`, `bigscience/bloomz`, etc.)
-- ChatGLM (`THUDM/chatglm2-6b`, `THUDM/chatglm3-6b`, etc.)
-- Command-R (`CohereForAI/c4ai-command-r-v01`, etc.)
-- DBRX (`databricks/dbrx-base`, `databricks/dbrx-instruct` etc.)
-- DeciLM (`Deci/DeciLM-7B`, `Deci/DeciLM-7B-instruct`, etc.)
-- Falcon (`tiiuae/falcon-7b`, `tiiuae/falcon-40b`, `tiiuae/falcon-rw-7b`, etc.)
-- Gemma (`google/gemma-2b`, `google/gemma-7b`, etc.)
-- GPT-2 (`gpt2`, `gpt2-xl`, etc.)
-- GPT BigCode (`bigcode/starcoder`, `bigcode/gpt_bigcode-santacoder`, etc.)
-- GPT-J (`EleutherAI/gpt-j-6b`, `nomic-ai/gpt4all-j`, etc.)
-- GPT-NeoX (`EleutherAI/gpt-neox-20b`, `databricks/dolly-v2-12b`, `stabilityai/stablelm-tuned-alpha-7b`, etc.)
-- InternLM (`internlm/internlm-7b`, `internlm/internlm-chat-7b`, etc.)
-- InternLM2 (`internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc.)
-- Jais (`core42/jais-13b`, `core42/jais-13b-chat`, `core42/jais-30b-v3`, `core42/jais-30b-chat-v3`, etc.)
-- LLaMA, Llama 2, and Meta Llama 3 (`meta-llama/Meta-Llama-3-8B-Instruct`, `meta-llama/Meta-Llama-3-70B-Instruct`, `meta-llama/Llama-2-70b-hf`, `lmsys/vicuna-13b-v1.3`, `young-geng/koala`, `openlm-research/open_llama_13b`, etc.)
-- MiniCPM (`openbmb/MiniCPM-2B-sft-bf16`, `openbmb/MiniCPM-2B-dpo-bf16`, etc.)
-- Mistral (`mistralai/Mistral-7B-v0.1`, `mistralai/Mistral-7B-Instruct-v0.1`, etc.)
-- Mixtral (`mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc.)
-- MPT (`mosaicml/mpt-7b`, `mosaicml/mpt-30b`, etc.)
-- OLMo (`allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc.)
-- OPT (`facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc.)
-- Orion (`OrionStarAI/Orion-14B-Base`, `OrionStarAI/Orion-14B-Chat`, etc.)
-- Phi (`microsoft/phi-1_5`, `microsoft/phi-2`, etc.)
-- Phi-3 (`microsoft/Phi-3-mini-4k-instruct`, `microsoft/Phi-3-mini-128k-instruct`, etc.)
-- Qwen (`Qwen/Qwen-7B`, `Qwen/Qwen-7B-Chat`, etc.)
-- Qwen2 (`Qwen/Qwen1.5-7B`, `Qwen/Qwen1.5-7B-Chat`, etc.)
-- Qwen2MoE (`Qwen/Qwen1.5-MoE-A2.7B`, `Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.)
-- StableLM(`stabilityai/stablelm-3b-4e1t`, `stabilityai/stablelm-base-alpha-7b-v2`, etc.)
-- Starcoder2(`bigcode/starcoder2-3b`, `bigcode/starcoder2-7b`, `bigcode/starcoder2-15b`, etc.)
-- Xverse (`xverse/XVERSE-7B-Chat`, `xverse/XVERSE-13B-Chat`, `xverse/XVERSE-65B-Chat`, etc.)
-- Yi (`01-ai/Yi-6B`, `01-ai/Yi-34B`, etc.)
+Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
+
+## Getting Started
 
 Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
 
@@ -93,9 +77,7 @@ Install vLLM with pip or [from source](https://vllm.readthedocs.io/en/latest/get
 pip install vllm
 ```
 
-## Getting Started
-
-Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started.
+Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
 - [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
 - [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
 - [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
@@ -104,6 +86,31 @@ Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to get started
 
 We welcome and value any contributions and collaborations.
 Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+
+## Sponsors
+
+vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
+
+<!-- Note: Please sort them in alphabetical order. -->
+<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+
+- a16z
+- AMD
+- Anyscale
+- AWS
+- Crusoe Cloud
+- Databricks
+- DeepInfra
+- Lambda Lab
+- NVIDIA
+- Replicate
+- Roblox
+- RunPod
+- Trainy
+- UC Berkeley
+- UC San Diego
+
+We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
 
 ## Citation
 
