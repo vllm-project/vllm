@@ -48,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
+from vllm._C import ops
 
 
 class LlamaMLP(nn.Module):
@@ -429,6 +430,67 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                
+    def load_ammo_quantized_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        params_dict = dict(self.named_parameters())
+        #with open("/projects/a.txt", "r") as f:
+        #    j = json.load(f)
+        #    for k, v in j.items():
+        #        params_dict[k].data.copy_(v)
+        quant_shards = [
+            ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
+            ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
+        ]
+        quant_map = [
+            ("mlp.down_proj", "mlp.proj"),
+            ("self_attn.o_proj", "attention.dense"),
+            ("self_attn.qkv_proj", "attention.qkv"),
+        ]
+        for name, loaded_weight in weights:
+            #print(name)
+            name = name.replace('transformer', 'model')
+            name = name.replace('kv_cache_scaling_factor', 'qkv.output_scaling_factor')
+            loaded_weight = loaded_weight.to("cuda")
+            if loaded_weight.dtype == torch.int8:
+                loaded_weight[loaded_weight == -128] = 0
+                assert loaded_weight.is_contiguous
+                # ops.rocm_convert_fp8(loaded_weight,
+                #                  fp8_loaded,
+                #                  torch.tensor(1.0, dtype=torch.float32, device='cuda'))
+                loaded_weight = loaded_weight.view(torch.float8_e4m3fnuz)
+            #if "output_scaling_factor" in name:
+            #    print(f"{name} {loaded_weight}")
+            #if "kv_cache_scaling_factor" in name:
+            #    print(f"KVK: {name} {loaded_weight}")
+            #if "lm_head" in name:
+            #    print(f"LM {name}: {loaded_weight}")
+            for (param_name, weight_name, shard_id) in quant_shards:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                for (param_name, weight_name) in quant_map:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    if "activation_scaling_factor" in name or "weights_scaling_factor" in name:
+                        param.data.copy_(loaded_weight)
+                    elif "output_scaling_factor" in name:
+                        param.data.copy_(loaded_weight)
+                    else:
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
+                    break
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

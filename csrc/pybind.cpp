@@ -66,6 +66,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("moe_align_block_size", &moe_align_block_size,
           "Aligning the number of tokens to be processed by each expert such "
           "that it is divisible by the block size.");
+  ops.def("convert_fp8", &convert_fp8,
+                "Convert the key and value cache to fp8 data type");
+  
+  ops.def("fp8_gemm", &fp8_gemm, "fp8 GEMM");
+  ops.def("bf8_gemm", &bf8_gemm, "bf8 GEMM");
+
+  ops.def("fp8_gemm_16", &fp8_gemm_16, "fp8 GEMM");
+  ops.def("fp8_gemm_new", &fp8_gemm_new, "fp8 GEMM");
+  ops.def("fp8_gemm_16_new", &fp8_gemm_16_new, "fp8 GEMM");
 
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
@@ -77,8 +86,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 "Reshape the key and value tensors and cache them");
   cache_ops.def("reshape_and_cache_flash", &reshape_and_cache_flash,
                 "Reshape the key and value tensors and cache them");
-  cache_ops.def("convert_fp8", &convert_fp8,
-                "Convert the key and value cache to fp8 data type");
 
   // Cuda utils
   pybind11::module cuda_utils =

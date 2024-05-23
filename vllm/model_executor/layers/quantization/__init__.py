@@ -20,7 +20,7 @@ from vllm.utils import is_hip
 QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "aqlm": AQLMConfig,
     "awq": AWQConfig,
-    "fp8": Fp8Config,
+    "fp8": Fp8Config if not is_hip() else Fp8RocmConfig,
     "gptq": GPTQConfig,
     "squeezellm": SqueezeLLMConfig,
 }

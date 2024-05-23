@@ -234,6 +234,10 @@ class DefaultModelLoader(BaseModelLoader):
                                                model,
                                                "fall_back_to_pt_during_load",
                                                True)), )
+            if model_config.quantization_param_path is not None:
+                model.load_ammo_quantized_weights(
+                        safetensors_weights_iterator([model_config.model + model_config.quantization_param_path])
+                )
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:

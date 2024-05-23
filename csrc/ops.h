@@ -109,6 +109,51 @@ void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                               torch::Tensor& scale);
 
+void convert_fp8(torch::Tensor& src_data, torch::Tensor& dst_data, torch::Tensor& scale);
+
+torch::Tensor fp8_gemm(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  torch::Tensor& scaleD,
+  int algo_idx
+);
+
+torch::Tensor bf8_gemm(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  torch::Tensor& scaleD,
+  int algo_idx
+);
+
+torch::Tensor fp8_gemm_16(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  int algo_idx
+);
+
+torch::Tensor fp8_gemm_16_new(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  int algo_idx
+);
+
+torch::Tensor fp8_gemm_new(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  torch::Tensor& scaleC,
+  int algo_idx
+);
+
 void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
                           int block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
