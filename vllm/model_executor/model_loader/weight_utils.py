@@ -209,7 +209,6 @@ def download_weights_from_hf(
             revision=revision,
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )
-
     return hf_folder
 
 
