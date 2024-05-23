@@ -322,8 +322,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        decoder_only = \
-            seq_group.get_encoder_seq() is None
+        encoder_seq = seq_group.get_encoder_seq()
+        decoder_only = encoder_seq is None
 
         if (self.block_sliding_window is not None) and \
            (not decoder_only):
@@ -351,7 +351,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             self.block_tables[seq.seq_id] = block_table.copy()
 
         # Allocate encoder sequence
-        encoder_seq = seq_group.get_encoder_seq()
         if not decoder_only:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
