@@ -960,7 +960,7 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-                use_attn_sinks = False
+                use_attn_sinks = True
                 max_context_len = self.scheduler_config.max_model_len
                 seq_len = seq.get_len()
                 block_size = 16 # where do we get this in Scheduler?

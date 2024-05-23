@@ -80,10 +80,20 @@ class StreamingAttentionSink(nn.Module):
             device = positions.device
             block_size = key_cache.shape[-2]
 
-            original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
+            if hasattr(attn_metadata, 'seq_lens_list'):
+                seq_lens = attn_metadata.seq_lens_list
+            else:
+                seq_lens = attn_metadata.seq_lens_tensor.tolist()
+                attn_metadata.seq_lens_list = seq_lens
+            
+            if hasattr(attn_metadata, 'block_tables_clone'):
+                original_block_tables = attn_metadata.block_tables_clone
+            else:
+                original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
+                attn_metadata.block_tables_clone = original_block_tables
+
             block_tables_tensor = attn_metadata.decode_metadata.block_tables
             block_tables: List[List[int]] = []
-            seq_lens = attn_metadata.seq_lens_tensor.tolist()
 
             # cache phys_bnums because they take up 2/3 of compute time every decode
             if hasattr(attn_metadata, 'phys_bnums_list'):
@@ -96,7 +106,7 @@ class StreamingAttentionSink(nn.Module):
             original_keys: List[Tuple[torch.Tensor]] = []
             for i in range(batch_size):
                 # see XFormersMetadata class for seq_lens definition
-                num_past_tokens = seq_lens[i] - 1
+                num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
                 within_context_len = num_past_tokens < model_context_len
                 block_table = block_tables_tensor[i]
 
@@ -120,6 +130,10 @@ class StreamingAttentionSink(nn.Module):
                 
                 rem = num_past_tokens % block_size
                 rem_phys_bnum = block_table[end_logic_bnum]
+
+                if rem == 0:
+                    # clear out new block
+                    key_cache.index_fill_(0, rem_phys_bnum.to(torch.int64), 0)
                 
                 # shape: [len(phys_bnums), num_heads, head_size/x, block_size, x]
                 full_past_keys = torch.index_select(key_cache, 0, phys_bnums)

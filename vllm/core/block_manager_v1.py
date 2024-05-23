@@ -184,6 +184,7 @@ class UncachedBlockAllocator(BlockAllocatorBase):
         if not self.free_blocks:
             raise ValueError("Out of memory! No free blocks are available.")
         block = self.free_blocks.pop()
+        print("allocated block:", block)
         block.ref_count = 1
         return block
 
