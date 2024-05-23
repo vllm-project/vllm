@@ -13,12 +13,13 @@ import warnings
 from collections import defaultdict
 from functools import lru_cache, partial
 from platform import uname
-from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
+from typing import (AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
                     Union)
 
 import psutil
 import torch
+import torch.types
 from typing_extensions import ParamSpec
 
 import vllm.envs as envs
@@ -36,6 +37,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 P = ParamSpec('P')
+K = TypeVar("K")
 T = TypeVar("T")
 
 
@@ -172,7 +174,7 @@ def random_uuid() -> str:
 
 
 @lru_cache(maxsize=None)
-def get_vllm_instance_id():
+def get_vllm_instance_id() -> str:
     """
     If the environment variable VLLM_INSTANCE_ID is set, return it.
     Otherwise, return a random UUID.
@@ -311,7 +313,7 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst, chunk_size):
+def chunk_list(lst: List[T], chunk_size: int) -> List[List[T]]:
     """Yield successive chunk_size chunks from lst."""
     return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
 
@@ -322,7 +324,7 @@ def cdiv(a: int, b: int) -> int:
 
 
 def _generate_random_fp8(
-    tensor: torch.tensor,
+    tensor: torch.Tensor,
     low: float,
     high: float,
 ) -> None:
@@ -430,7 +432,7 @@ def create_kv_caches_with_random(
         key_caches.append(key_cache)
 
     value_cache_shape = (num_blocks, num_heads, head_size, block_size)
-    value_caches = []
+    value_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         value_cache = torch.empty(size=value_cache_shape,
                                   dtype=torch_dtype,
@@ -470,7 +472,7 @@ def is_pin_memory_available() -> bool:
 
 class CudaMemoryProfiler:
 
-    def __init__(self, device=None):
+    def __init__(self, device: Optional[torch.types.Device] = None):
         self.device = device
 
     def current_memory_usage(self) -> float:
@@ -543,13 +545,13 @@ def maybe_expand_dim(tensor: torch.Tensor,
     return tensor
 
 
-def merge_dicts(dict1: Dict[Any, List[Any]],
-                dict2: Dict[Any, List[Any]]) -> Dict[Any, List[Any]]:
+def merge_dicts(dict1: Dict[K, List[T]],
+                dict2: Dict[K, List[T]]) -> Dict[K, List[T]]:
     """Merge 2 dicts that have key -> List of items.
 
     When a key conflicts, the values in dict1 is prioritized.
     """
-    merged_dict = defaultdict(list)
+    merged_dict: Dict[K, List[T]] = defaultdict(list)
 
     for key, value in dict1.items():
         merged_dict[key].extend(value)
@@ -560,7 +562,7 @@ def merge_dicts(dict1: Dict[Any, List[Any]],
     return dict(merged_dict)
 
 
-def init_cached_hf_modules():
+def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
     """
@@ -568,7 +570,7 @@ def init_cached_hf_modules():
     init_hf_modules()
 
 
-def nccl_integrity_check(filepath):
+def nccl_integrity_check(filepath: str) -> int:
     """
     when the library is corrupted, we cannot catch
     the exception in python. it will crash the process.
@@ -618,7 +620,7 @@ def find_library(lib_name: str) -> str:
     return locs[0]
 
 
-def find_nccl_library():
+def find_nccl_library() -> str:
     so_file = envs.VLLM_NCCL_SO_PATH
     VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
 

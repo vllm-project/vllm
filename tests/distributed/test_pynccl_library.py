@@ -1,8 +1,9 @@
 import multiprocessing
 import tempfile
+from typing import Dict
 
 
-def target_fn(env, filepath):
+def target_fn(env: Dict[str, str], filepath: str):
     from vllm.utils import update_environment_variables
     update_environment_variables(env)
     from vllm.utils import nccl_integrity_check
