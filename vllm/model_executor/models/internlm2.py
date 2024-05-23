@@ -117,7 +117,8 @@ class InternLM2Attention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
