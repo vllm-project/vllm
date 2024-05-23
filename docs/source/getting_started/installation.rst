@@ -57,6 +57,10 @@ You can also build and install vLLM from source:
     $ pip install -e .  # This may take 5-10 minutes.
 
 .. tip::
+
+    Building from source requires quite a lot compilation. To accelerate the compilation, you can install `ccache <https://github.com/ccache/ccache>`_ via either `conda install ccache` or `apt install ccache` . As long as `which ccache` command can find the `ccache`` binary, it will be used automatically by the build system.
+
+.. tip::
     To avoid your system being overloaded, you can limit the number of compilation jobs
     to be run simultaneously, via the environment variable `MAX_JOBS`. For example:
 
