@@ -67,9 +67,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_cpu_blocks = num_cpu_blocks
 
         self.sliding_window = sliding_window
-        # block_sliding_window is the max number of blocks that need to be
+        # max_block_sliding_window is the max number of blocks that need to be
         # allocated
-        self.block_sliding_window = None
+        self.max_block_sliding_window = None
         if sliding_window is not None:
             # +1 here because // rounds down
             num_blocks = sliding_window // block_size + 1
@@ -77,7 +77,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             # and so the sequence stretches one more block at the beginning
             # For example, if sliding_window is 3 and block_size is 4,
             # we may need 2 blocks when the second block only holds 1 token.
-            self.block_sliding_window = num_blocks + 1
+            self.max_block_sliding_window = num_blocks + 1
 
         self.watermark = watermark
         assert watermark >= 0.0
@@ -105,9 +105,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        if self.block_sliding_window is not None:
+        if self.max_block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
-                                      self.block_sliding_window)
+                                      self.max_block_sliding_window)
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
@@ -133,7 +133,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
-            block_sliding_window=self.block_sliding_window,
+            max_block_sliding_window=self.max_block_sliding_window,
         )
 
         block_table.allocate(seq.get_token_ids())

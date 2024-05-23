@@ -20,9 +20,9 @@ class BlockTable:
         _blocks (Optional[List[Block]], optional): An optional list of existing
             blocks to initialize the BlockTable with. If not provided, an empty
             BlockTable is created.
-        block_sliding_window (Optional[int], optional): The number of blocks to
-            keep around for each sequance. If None, all blocks are kept
-            (eg., when sliding window is note used).
+        max_block_sliding_window (Optional[int], optional): The number of
+            blocks to keep around for each sequance. If None, all blocks
+            are kept (eg., when sliding window is not used).
             It should at least fit the sliding window size of the model.
 
     Attributes:
@@ -41,7 +41,7 @@ class BlockTable:
         block_size: int,
         block_allocator: DeviceAwareBlockAllocator,
         _blocks: Optional[List[Block]] = None,
-        block_sliding_window: Optional[int] = None,
+        max_block_sliding_window: Optional[int] = None,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
@@ -49,7 +49,7 @@ class BlockTable:
             _blocks = []
         self._blocks: List[Block] = _blocks
 
-        self._block_sliding_window = block_sliding_window
+        self._max_block_sliding_window = max_block_sliding_window
         # Use helper method instead of directly calculating, as blocks
         # may not be allocated.
         self._num_full_slots = len(self._get_all_token_ids())
@@ -123,11 +123,11 @@ class BlockTable:
         assert len(self._blocks) > 0
 
         # Drop blocks that are no longer needed due to sliding window
-        if self._block_sliding_window is not None:
+        if self._max_block_sliding_window is not None:
             null_block = self._allocator.allocate_or_get_null_block()
             assert num_computed_slots is not None
             end_block_idx = (num_computed_slots //
-                             self._block_size) - self._block_sliding_window
+                             self._block_size) - self._max_block_sliding_window
             for idx in range(0, end_block_idx):
                 b = self._blocks[idx]
                 if b is not null_block:
@@ -197,7 +197,7 @@ class BlockTable:
             block_size=self._block_size,
             block_allocator=self._allocator,
             _blocks=forked_blocks,
-            block_sliding_window=self._block_sliding_window,
+            max_block_sliding_window=self._max_block_sliding_window,
         )
 
     def free(self) -> None:
