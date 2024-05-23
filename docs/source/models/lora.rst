@@ -4,17 +4,9 @@ Using LoRA adapters
 ===================
 
 This document shows you how to use `LoRA adapters <https://arxiv.org/abs/2106.09685>`_ with vLLM on top of a base model.
-Adapters can be efficiently served on a per request basis with minimal overhead. First we download the adapter(s) and save
-them locally with
+Adapters can be efficiently served on a per request basis with minimal overhead.
 
-.. code-block:: python
-
-    from huggingface_hub import snapshot_download
-
-    sql_lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
-
-
-Then we instantiate the base model and pass in the ``enable_lora=True`` flag:
+First we instantiate the base model and pass in the ``enable_lora=True`` flag:
 
 .. code-block:: python
 
@@ -26,7 +18,7 @@ Then we instantiate the base model and pass in the ``enable_lora=True`` flag:
 
 We can now submit the prompts and call ``llm.generate`` with the ``lora_request`` parameter. The first parameter
 of ``LoRARequest`` is a human identifiable name, the second parameter is a globally unique ID for the adapter and
-the third parameter is the path to the LoRA adapter.
+the third parameter is the local path or huggingface repo id to the LoRA adapter.
 
 .. code-block:: python
 
@@ -44,7 +36,7 @@ the third parameter is the path to the LoRA adapter.
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest("sql_adapter", 1, sql_lora_path)
+        lora_request=LoRARequest("sql_adapter", 1, "yard1/llama-2-7b-sql-lora-test")
     )
 
 
@@ -61,7 +53,7 @@ LoRA adapted models can also be served with the Open-AI compatible vLLM server. 
     python -m vllm.entrypoints.openai.api_server \
         --model meta-llama/Llama-2-7b-hf \
         --enable-lora \
-        --lora-modules sql-lora=~/.cache/huggingface/hub/models--yard1--llama-2-7b-sql-lora-test/
+        --lora-modules sql-lora=yard1/llama-2-7b-sql-lora-test
 
 The server entrypoint accepts all other LoRA configuration parameters (``max_loras``, ``max_lora_rank``, ``max_cpu_loras``,
 etc.), which will apply to all forthcoming requests. Upon querying the ``/models`` endpoint, we should see our LoRA along
