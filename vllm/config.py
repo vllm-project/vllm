@@ -1092,6 +1092,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
 
 _ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
+
 def _get_and_verify_dtype(
     config: PretrainedConfig,
     dtype: Union[str, torch.dtype],
@@ -1144,6 +1145,7 @@ def _get_and_verify_dtype(
             logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
 
     return torch_dtype
+
 
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
