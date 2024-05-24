@@ -88,12 +88,11 @@ class MixtralMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
                                      params_dtype=self.params_dtype,
-                                     quant_config=None)
+                                     quant_config=quant_config)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
@@ -277,15 +276,6 @@ class MixtralAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.sliding_window = sliding_window
-
-        if isinstance(
-                quant_config,
-                Fp8Config) and not quant_config.is_checkpoint_fp8_serialized:
-            print_warning_once(
-                "For Mixtral FP8 quantization, we currently do not quantize "
-                "the attention layers until their FP8 performance is improved."
-            )
-            quant_config = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
