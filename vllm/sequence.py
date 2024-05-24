@@ -528,6 +528,9 @@ class SequenceGroup:
             seq for seq in self.seqs_dict.values() if seq.status == status
         ]
 
+    def is_encoder_decoder(self) -> bool:
+        return self.encoder_seq is not None
+
     def get_encoder_seq(self) -> Optional[Sequence]:
         return self.encoder_seq
 

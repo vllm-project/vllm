@@ -7,7 +7,9 @@ import pytest
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
 from vllm.core.block_manager_v1 import (BlockSpaceManagerV1,
-                                        UncachedBlockAllocator)
+                                        UncachedBlockAllocator,
+                                        str_not_impl_enc_dec_prefix_cache,
+                                        str_not_impl_enc_dec_swa)
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -124,6 +126,66 @@ def test_allocate_encoder_decoder():
         assert block_manager.can_allocate(seq_group) == AllocStatus.OK
         block_manager.allocate(seq_group)
     assert block_manager.can_allocate(seq_group) != AllocStatus.OK
+
+
+def test_allocate_encoder_decoder_fails_with_swa():
+    # SWA short for sliding window attention
+
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0,
+                                        sliding_window=5)  # swa
+
+    # Allocate same sequence group to all available gpu blocks.
+    _, _, seq_group = create_dummy_prompt_encoder_decoder(
+        "0",
+        decoder_prompt_length=block_size,
+        encoder_prompt_length=block_size)
+
+    # Assert that can_allocate() fails due to SWA
+    with pytest.raises(NotImplementedError) as exc_info:
+        block_manager.can_allocate(seq_group)
+
+    assert str(exc_info.value) == str_not_impl_enc_dec_swa
+
+    # Assert that allocate() fails due to SWA
+    with pytest.raises(NotImplementedError) as exc_info:
+        block_manager.allocate(seq_group)
+
+    assert str(exc_info.value) == str_not_impl_enc_dec_swa
+
+
+def test_allocate_encoder_decoder_fails_with_prefix_caching():
+    block_size = 4
+    num_cpu_blocks = 4
+    num_gpu_blocks = 4
+    block_manager = BlockSpaceManagerV1(block_size,
+                                        num_cpu_blocks,
+                                        num_gpu_blocks,
+                                        watermark=0,
+                                        enable_caching=True)  # Prefix cache
+
+    # Allocate same sequence group to all available gpu blocks.
+    _, _, seq_group = create_dummy_prompt_encoder_decoder(
+        "0",
+        decoder_prompt_length=block_size,
+        encoder_prompt_length=block_size)
+
+    # Assert that can_allocate() fails due to prefix caching
+    with pytest.raises(NotImplementedError) as exc_info:
+        block_manager.can_allocate(seq_group)
+
+    assert str(exc_info.value) == str_not_impl_enc_dec_prefix_cache
+
+    # Assert that allocate() fails due to prefix caching
+    with pytest.raises(NotImplementedError) as exc_info:
+        block_manager.allocate(seq_group)
+
+    assert str(exc_info.value) == str_not_impl_enc_dec_prefix_cache
 
 
 def test_append_slot_single_seq():
