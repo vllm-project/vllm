@@ -31,7 +31,7 @@ def get_all_num_logprobs(
     sequence.
     """
 
-    all_num_logprobs = []
+    all_num_logprobs: List[int] = []
     for seq_group_metadata in seq_group_metadata_list:
         num_logprobs = seq_group_metadata.sampling_params.logprobs
         if seq_group_metadata.sampling_params.logprobs is None:

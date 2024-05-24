@@ -174,7 +174,7 @@ def _apply_min_tokens_penalty(
         min_tokens = sampling_params.min_tokens
         token_ids_to_penalize = sampling_params.all_stop_token_ids
         if min_tokens > 0 and token_ids_to_penalize:
-            seqs_to_penalize = []
+            seqs_to_penalize: List[int] = []
             for j, seq_id in enumerate(seq_ids):
                 seq_data = seq_group.seq_data[seq_id]
                 if len(seq_data.output_token_ids) < min_tokens:
@@ -1008,14 +1008,14 @@ def _build_sampler_output(
             speculative decoding rejection sampling.
     """
 
-    sampler_output = []
+    sampler_output: List[CompletionSequenceGroupOutput] = []
     for (seq_group, sample_result, group_prompt_logprobs,
          group_sample_logprobs) in zip(sampling_metadata.seq_groups,
                                        sample_results, prompt_logprobs,
                                        sample_logprobs):
         seq_ids = seq_group.seq_ids
         next_token_ids, parent_ids = sample_result
-        seq_outputs = []
+        seq_outputs: List[SequenceOutput] = []
         for parent_id, next_token_id, logprobs in zip(parent_ids,
                                                       next_token_ids,
                                                       group_sample_logprobs):

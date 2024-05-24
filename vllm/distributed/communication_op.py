@@ -201,8 +201,8 @@ def _split_tensor_dict(
          by its metadata.
     2. A list of tensors.
     """
-    metadata_list = []
-    tensor_list = []
+    metadata_list: List[Tuple[str, Any]] = []
+    tensor_list: List[torch.Tensor] = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
             # Note: we cannot use `value.device` here,

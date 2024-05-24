@@ -386,7 +386,9 @@ def create_kv_caches_with_random_flash(
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
     scale = head_size**-0.5
-    key_caches, value_caches = [], []
+
+    kv_caches: Tuple[List[torch.Tensor], List[torch.Tensor]] = [], []
+    key_caches, value_caches = kv_caches
     for _ in range(num_layers):
         key_value_cache = torch.empty(size=key_value_cache_shape,
                                       dtype=torch_dtype,
@@ -417,7 +419,7 @@ def create_kv_caches_with_random(
     scale = head_size**-0.5
     x = 16 // torch.tensor([], dtype=torch_dtype).element_size()
     key_cache_shape = (num_blocks, num_heads, head_size // x, block_size, x)
-    key_caches = []
+    key_caches: List[torch.Tensor] = []
     for _ in range(num_layers):
         key_cache = torch.empty(size=key_cache_shape,
                                 dtype=torch_dtype,

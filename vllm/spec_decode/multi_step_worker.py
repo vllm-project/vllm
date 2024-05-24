@@ -70,7 +70,7 @@ class MultiStepWorker(Worker):
                                      sample_len)
 
         # Run model sample_len times.
-        model_outputs = []
+        model_outputs: List[SamplerOutput] = []
         for _ in range(sample_len):
             model_output = super().execute_model(
                 execute_model_req=copied_execute_model_req)
@@ -129,7 +129,7 @@ class MultiStepWorker(Worker):
 
         # Shallow-copy the list of SequenceGroupMetadata. This allows us to
         # append tokens and change is_prompt without external side-effects.
-        new_seq_group_metadata_list = []
+        new_seq_group_metadata_list: List[SequenceGroupMetadata] = []
 
         for old_seq_group_metadata in seq_group_metadata_list:
             # We must shallow-copy seq_group_metadata as is_prompt could change.
