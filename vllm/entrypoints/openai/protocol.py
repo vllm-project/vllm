@@ -498,7 +498,7 @@ class ChatCompletionLogProb(OpenAIBaseModel):
 class ChatCompletionLogProbsContent(OpenAIBaseModel):
     token: str
     logprob: float = -9999.0
-    bytes: Optional[List[int]]
+    bytes: Optional[List[int]] = None
     top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
 
 
