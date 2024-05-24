@@ -1,7 +1,7 @@
 from itertools import cycle
 
 import pytest
-from conftest import get_token_ids_from_llm_generator
+from .conftest import get_token_ids_from_llm_generator
 
 from vllm import SamplingParams
 
