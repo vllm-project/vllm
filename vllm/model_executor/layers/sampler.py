@@ -916,7 +916,7 @@ def _get_sampled_logprob_if_needed(
                                          parent_id, :num_logprobs].tolist()
                 # Top K is already sorted by rank, so we can use 1 ~
                 # num_logprobs + 1 for rank.
-                top_ranks = range(1, num_logprobs + 1)
+                top_ranks = range(1, num_logprobs)
                 sampled_logprobs_dict.update({
                     top_id: (top_prob, rank)
                     for top_id, top_prob, rank in zip(top_ids, top_probs,
