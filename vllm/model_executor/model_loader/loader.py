@@ -194,7 +194,7 @@ class DefaultModelLoader(BaseModelLoader):
             # there are both sharded safetensors files and a consolidated
             # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
-            # any safetensors files not found in the index.
+            # any files not found in the index.
             if not is_local:
                 download_safetensors_index_file_from_hf(
                     model_name_or_path, self.load_config.download_dir,
