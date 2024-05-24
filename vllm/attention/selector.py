@@ -37,7 +37,6 @@ def get_attn_backend(
         from vllm.attention.backends.blocksparse_attn import (
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
-
     """Determine which attention backend to use and only import
     the selected backend module.
     """

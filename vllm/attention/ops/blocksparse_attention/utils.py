@@ -34,11 +34,9 @@ def dense_to_crow_col(x: torch.Tensor):
     return crows.to(device), cols.to(device)
 
 
-def crow_col_to_dense(
-        crows: torch.Tensor,
-        cols: torch.Tensor,
-        dtype: torch.dtype = torch.float16
-        ):
+def crow_col_to_dense(crows: torch.Tensor,
+                      cols: torch.Tensor,
+                      dtype: torch.dtype = torch.float16):
     dim = crows.dim()
     if dim == 1:
         crows = crows[None]
@@ -61,10 +59,9 @@ def dense_to_ccol_row(x: torch.Tensor):
     return dense_to_crow_col(x)
 
 
-def ccol_row_to_dense(
-        ccol: torch.Tensor,
-        rows: torch.Tensor,
-        dtype: torch.dtype=torch.float16):
+def ccol_row_to_dense(ccol: torch.Tensor,
+                      rows: torch.Tensor,
+                      dtype: torch.dtype = torch.float16):
     return crow_col_to_dense(ccol, rows, dtype).permute(0, 2, 1).contiguous()
 
 
@@ -96,8 +93,8 @@ def _get_sparse_attn_mask_homo_head(
                              & ((q_pos - k_pos < local_blocks)
                                 | mask_vert_strided)).to(device).to(dtype))
         num_blocks_q = triton.cdiv(q_len, block_size)
-        block_mask_dense_output = (
-            dense_to_crow_col(block_mask_dense[-num_blocks_q:].contiguous()))
+        block_mask_dense_output = (dense_to_crow_col(
+            block_mask_dense[-num_blocks_q:].contiguous()))
     if return_dense:
         mask_dense = torch.kron(
             block_mask_dense,
@@ -125,11 +122,9 @@ def binary_mask_to_bias(mask_dense: torch.Tensor):
     return mask_dense
 
 
-def get_head_sliding_step(
-        n_heads: int,
-        vert_stride:int,
-        homo_head: bool = False
-        ):
+def get_head_sliding_step(n_heads: int,
+                          vert_stride: int,
+                          homo_head: bool = False):
     if homo_head:
         return 0
     return max(1, int(vert_stride / n_heads))

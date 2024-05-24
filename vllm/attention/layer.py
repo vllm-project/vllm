@@ -74,7 +74,8 @@ class Attention(nn.Module):
                                         is not None)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype, blocksparse_params)
+                             alibi_slopes, sliding_window, kv_cache_dtype,
+                             blocksparse_params)
 
     def forward(
         self,
