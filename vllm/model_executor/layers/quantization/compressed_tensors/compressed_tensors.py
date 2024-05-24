@@ -1,7 +1,6 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-
 from compressed_tensors.quantization.lifecycle.apply import (
     find_first_name_or_class_match)
 from compressed_tensors.quantization.quant_args import (QuantizationArgs,
