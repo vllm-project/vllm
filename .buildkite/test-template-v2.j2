@@ -50,7 +50,7 @@ steps:
       {% if step.no_gpu %}
       queue: cpu_queue
       {% else %}
-      queue: gpu_{step.num_gpus or default_num_gpu}_queue
+      queue: gpu_{{ step.num_gpus or default_num_gpu }}_queue
       {% endif %}
     soft_fail: {{ step.soft_fail or false }}
     {% if step.parallelism %}
@@ -63,7 +63,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 5
     plugins:
-      - docker#v5.11.0:
+      - docker#v5.2.0:
           image: "{{ docker_image }}"
           always-pull: true
           command: ["bash", "-c", "'cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}'"]
@@ -71,7 +71,7 @@ steps:
             - VLLM_USAGE_SOURCE=ci-test
           volumes:
             - /dev/shm:/dev/shm
-          {% if not step.no_gpu %}}
+          {% if not step.no_gpu %}
           runtime: nvidia
           devices:
             - /dev/nvidiactl

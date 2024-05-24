@@ -1,0 +1,975 @@
+
+
+
+
+steps:
+  - label: ":docker: build image"
+    commands: 
+      - "docker build --build-arg max_jobs=16 --tag public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT --target test --progress plain ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+  - wait
+
+  - group: "AMD Tests"
+    depends_on: ~
+    steps:
+    
+    
+      - label: "AMD: Regression Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s test_regression.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+      - label: "AMD: Basic Correctness Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py ; VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py ; VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py ; VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py ; VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+      - label: "AMD: Core Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s core"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+      - label: "AMD: Distributed Tests"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s distributed/test_pynccl_library.py ; TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py ; TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py ; TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py ; TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py ; TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py ; TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py ; TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py ; TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py ; pytest -v -s spec_decode/e2e/test_integration_dist.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+      - label: "AMD: Engine Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+      - label: "AMD: Entrypoints Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py ; pytest -v -s entrypoints/test_server_oot_registration.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+      - label: "AMD: Examples Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/examples ; pip install awscli tensorizer ; python3 offline_inference.py ; python3 offline_inference_with_prefix.py ; python3 llm_engine_example.py ; python3 llava_example.py ; python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: Llava Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; bash ../.buildkite/download-images.sh ; pytest -v -s models/test_llava.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+      - label: "AMD: Prefix Caching Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s prefix_caching"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+      - label: "AMD: LogitsProcessor Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s test_logits_processor.py"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+      - label: "AMD: Worker Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s worker"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+      - label: "AMD: Metrics Test"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/tests ; pytest -v -s metrics"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+    
+      - label: "AMD: Benchmarks"
+        agents:
+          queue: amd
+        command: bash .buildkite/run-amd-test.sh "cd /vllm-workspace/.buildkite ; pip install aiohttp ; bash run-benchmarks.sh"
+        env:
+          DOCKER_BUILDKIT: "1"
+    
+    
+    
+    
+
+  - label: "Neuron Test"
+    depends_on: ~
+    agents:
+      queue: neuron
+    command: bash .buildkite/run-neuron-test.sh
+    soft_fail: true
+
+  - label: "Intel Test"
+    depends_on: ~
+    agents:
+      queue: cpu_queue
+    command: bash .buildkite/run-cpu-test.sh
+
+  
+  - label: "Regression Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s test_regression.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "AsyncEngine Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s async_engine'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Basic Correctness Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_basic_correctness.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_basic_correctness.py && VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py && VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Core Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s core'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Distributed Comm Ops Test"
+    agents:
+      
+      queue: gpu_2_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s distributed/test_comm_ops.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=2
+          
+  
+  - label: "Distributed Tests"
+    agents:
+      
+      queue: gpu_2_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s distributed/test_pynccl_library.py && TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py && TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_basic_distributed_correctness.py && TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py && TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=ray pytest -v -s distributed/test_chunked_prefill_distributed.py && TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py && TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_basic_distributed_correctness.py && TEST_DIST_MODEL=facebook/opt-125m DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py && TEST_DIST_MODEL=meta-llama/Llama-2-7b-hf DISTRIBUTED_EXECUTOR_BACKEND=mp pytest -v -s distributed/test_chunked_prefill_distributed.py && pytest -v -s spec_decode/e2e/test_integration_dist.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=2
+          
+  
+  - label: "Distributed Tests (Multiple Groups)"
+    agents:
+      
+      queue: gpu_4_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s distributed/test_pynccl.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=4
+          
+  
+  - label: "Engine Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Entrypoints Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py && pytest -v -s entrypoints/test_server_oot_registration.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Examples Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/examples && pip install awscli tensorizer && python3 offline_inference.py && python3 offline_inference_with_prefix.py && python3 llm_engine_example.py && python3 llava_example.py && python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Kernels Test %N"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    parallelism: 4
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s kernels --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Models Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && bash ../.buildkite/download-images.sh && pytest -v -s models --ignore=models/test_llava.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Llava Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && bash ../.buildkite/download-images.sh && pytest -v -s models/test_llava.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Prefix Caching Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s prefix_caching'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Samplers Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s samplers'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "LogitsProcessor Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s test_logits_processor.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Worker Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s worker'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Speculative decoding tests"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s spec_decode'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "LoRA Test %N"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    parallelism: 4
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_long_context.py'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "LoRA Long Context (Distributed)"
+    agents:
+      
+      queue: gpu_4_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s lora/test_long_context.py::test_rotary_emb_replaced && pytest -v -s lora/test_long_context.py::test_batched_rope_kernel && pytest -v -s lora/test_long_context.py::test_self_consistency && pytest -v -s lora/test_long_context.py::test_quality && pytest -v -s lora/test_long_context.py::test_max_len'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=4
+          
+  
+  - label: "Tensorizer Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && apt-get install curl libsodium23 && pytest -v -s tensorizer_loader'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Metrics Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s metrics'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Quantization Test"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/tests && pytest -v -s quantization'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Benchmarks"
+    agents:
+      
+      queue: gpu_1_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/.buildkite && pip install aiohttp && bash run-benchmarks.sh'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+          runtime: nvidia
+          devices:
+            - /dev/nvidiactl
+            - /dev/nvidia0:/dev/nvidia0
+            - /dev/nvidia1:/dev/nvidia1
+          environment:
+            - NVIDIA_VISIBLE_DEVICES=1
+          
+  
+  - label: "Documentation Build"
+    agents:
+      
+      queue: cpu_queue
+      
+    soft_fail: false
+    
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 5
+        - exit_status: -10  # Agent was lost
+          limit: 5
+    plugins:
+      - docker#v5.11.0:
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo/vllm-test:$BUILDKITE_COMMIT"
+          always-pull: true
+          command: ["bash", "-c", "'cd /vllm-workspace/test_docs/docs && pip install -r requirements-docs.txt && SPHINXOPTS=\"-W\" make html'"]
+          environment:
+            - VLLM_USAGE_SOURCE=ci-test
+          volumes:
+            - /dev/shm:/dev/shm
+          
+  
