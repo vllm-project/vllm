@@ -133,7 +133,7 @@ class ModelConfig:
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
             max_model_len=max_model_len,
-            disable_sliding_window=self.disable_sliding_window
+            disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)

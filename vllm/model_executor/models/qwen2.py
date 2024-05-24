@@ -293,15 +293,17 @@ class Qwen2ForCausalLM(nn.Module):
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         del lora_config
-        # TODO (@robertgshaw2): can this be moved out of the model?
-        if (cache_config.sliding_window is not None and 
-            hasattr(config, "max_window_layers")):
+        # TODO (@robertgshaw2): see if this can be moved out
+        if (cache_config.sliding_window is not None
+                and hasattr(config, "max_window_layers")):
             raise ValueError(
                 "Sliding window for some but all layers is not "
-                "suppported. This model uses sliding window "
+                "supported. This model uses sliding window "
                 "but `max_window_layers` = %s is less than "
-                "`num_hidden_layers` = %s", 
-                config.max_window_layers, config.num_hidden_layers,
+                "`num_hidden_layers` = %s. Please open an issue "
+                "to discuss this feature.",
+                config.max_window_layers,
+                config.num_hidden_layers,
             )
 
         super().__init__()
