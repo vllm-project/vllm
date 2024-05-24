@@ -291,16 +291,18 @@ class OpenAIServingChat(OpenAIServing):
                     delta_text = output.text[len(previous_texts[i]):]
                     previous_texts[i] = output.text
                     previous_num_tokens[i] = len(output.token_ids)
-                    is_function_call = request.tool_choice and type(
-                        request.tool_choice
-                    ) is ChatCompletionNamedToolChoiceParam
-                    delta_message = DeltaMessage(
-                        content=delta_text
-                    ) if not is_function_call else DeltaMessage(tool_calls=[
-                        ToolCall(function=FunctionCall(
-                            name=request.tool_choice.function.name,
-                            arguments=delta_text))
-                    ])
+
+                    if request.tool_choice and type(
+                            request.tool_choice
+                    ) is ChatCompletionNamedToolChoiceParam:
+                        delta_message = DeltaMessage(tool_calls=[
+                            ToolCall(function=FunctionCall(
+                                name=request.tool_choice.function.name,
+                                arguments=delta_text))
+                        ])
+                    else:
+                        delta_message = DeltaMessage(content=delta_text)
+
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
 
