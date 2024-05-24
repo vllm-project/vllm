@@ -1,5 +1,6 @@
 import random
 from types import SimpleNamespace
+from typing import List
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,7 +8,8 @@ import torch
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
@@ -103,12 +105,12 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
             seq_group_metadata_list=seq_group_metadata_list,
             num_lookahead_slots=k))
 
-    seen_contexts = []
+    seen_contexts: List[List[int]] = []
 
     call_args_list = target_worker.execute_model.call_args_list
     assert len(call_args_list) == 1
     for _, kwargs in call_args_list:
-        seq_group_metadata_list = kwargs[
+        seq_group_metadata_list: List[SequenceGroupMetadata] = kwargs[
             "execute_model_req"].seq_group_metadata_list
 
         assert len(seq_group_metadata_list) == (k + 1) * batch_size
@@ -116,7 +118,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
             for seq_data in seq_group_metadata.seq_data.values():
                 seen_contexts.append(seq_data.get_token_ids())
 
-    expected_seen_contexts = []
+    expected_seen_contexts: List[List[int]] = []
 
     for prompt, prev_generated, draft_tokens in zip(
             prompts, prev_output_tokens, proposal_token_ids.tolist()):

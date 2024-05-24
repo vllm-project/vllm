@@ -157,14 +157,15 @@ def test_paged_attention(
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
-    block_tables = []
+    block_tables_lst: List[List[int]] = []
     for _ in range(num_seqs):
         block_table = [
             random.randint(0, NUM_BLOCKS - 1)
             for _ in range(max_num_blocks_per_seq)
         ]
-        block_tables.append(block_table)
-    block_tables = torch.tensor(block_tables, dtype=torch.int)
+        block_tables_lst.append(block_table)
+
+    block_tables = torch.tensor(block_tables_lst, dtype=torch.int)
 
     # Create the KV caches.
     key_caches, value_caches = kv_cache_factory(NUM_BLOCKS, block_size, 1,
@@ -283,7 +284,7 @@ def ref_multi_query_kv_attention(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     num_seqs = len(cu_seq_lens) - 1
-    ref_outputs = []
+    ref_outputs: List[torch.Tensor] = []
     for i in range(num_seqs):
         start_idx = cu_seq_lens[i]
         end_idx = cu_seq_lens[i + 1]
@@ -303,8 +304,8 @@ def ref_multi_query_kv_attention(
             attn_mask=attn_mask,
         )
         ref_outputs.append(ref_output)
-    ref_output = torch.cat(ref_outputs, dim=0)
-    return ref_output
+
+    return torch.cat(ref_outputs, dim=0)
 
 
 # TODO(woosuk): Add tests for USE_ALIBI=True.

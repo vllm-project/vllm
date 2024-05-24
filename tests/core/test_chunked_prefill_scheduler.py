@@ -530,7 +530,7 @@ def test_chunked_prefill_max_seqs():
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
     scheduler = Scheduler(scheduler_config, cache_config, None)
-    running = []
+    running: List[SequenceGroup] = []
 
     _, seq_group = create_dummy_prompt("1", prompt_length=65)
     scheduler.add_seq_group(seq_group)

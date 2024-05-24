@@ -1,5 +1,6 @@
 import random
 from unittest.mock import MagicMock
+from typing import List
 
 import pytest
 import torch
@@ -210,7 +211,7 @@ def test_same_output_for_multi_step():
 
     # Run single-step repeatedly.
     zero_kv_cache(worker.cache_engine)
-    single_step_output = []
+    single_step_output: List[SamplerOutput] = []
     continuations = [[1] for _ in prompts]
     set_random_seed(seed)
 

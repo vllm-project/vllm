@@ -1,5 +1,5 @@
 import time
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -47,7 +47,7 @@ def create_seq_group(
 
     prompt_token_ids = [0] * seq_prompt_len
 
-    seqs = []
+    seqs: List[Sequence] = []
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,

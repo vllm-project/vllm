@@ -1,6 +1,7 @@
 # imports for guided decoding tests
 import json
 import re
+from typing import List
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -321,7 +322,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
                                              max_tokens=5,
                                              temperature=0.0,
                                              stream=True)
-    chunks = []
+    chunks: List[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         chunks.append(chunk.choices[0].text)
@@ -368,7 +369,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
         temperature=0.0,
         stream=True,
     )
-    chunks = []
+    chunks: List[str] = []
     finish_reason_count = 0
     async for chunk in stream:
         delta = chunk.choices[0].delta

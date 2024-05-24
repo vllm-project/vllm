@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from typing import List
+from typing import List, Tuple
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -659,7 +659,7 @@ def test_schedule_swapped_simple():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
@@ -686,7 +686,7 @@ def test_schedule_swapped_max_token_budget():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
@@ -720,7 +720,7 @@ def test_schedule_swapped_max_seqs():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler._allocate_and_set_running(seq_group)
@@ -753,7 +753,7 @@ def test_schedule_swapped_max_loras():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = set()
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -782,7 +782,7 @@ def test_schedule_swapped_cannot_swap_in():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
@@ -809,7 +809,7 @@ def test_infeasible_swap():
     swapped = deque()
     policy = PolicyFactory.get_policy(policy_name="fcfs")
     curr_loras = None
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
@@ -840,7 +840,7 @@ def test_schedule_swapped_blocks_to_copy():
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    blocks_to_swap_out = []
+    blocks_to_swap_out: List[Tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
     swapped.append(seq_group)
 

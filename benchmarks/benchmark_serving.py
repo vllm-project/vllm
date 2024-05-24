@@ -197,11 +197,11 @@ def calculate_metrics(
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
 ) -> Tuple[BenchmarkMetrics, List[int]]:
-    actual_output_lens = []
+    actual_output_lens: List[int] = []
     total_input = 0
     completed = 0
-    tpots = []
-    ttfts = []
+    tpots: List[float] = []
+    ttfts: List[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = len(tokenizer(outputs[i].generated_text).input_ids)
@@ -246,7 +246,7 @@ async def benchmark(
     disable_tqdm: bool,
 ):
     if backend in ASYNC_REQUEST_FUNCS:
-        request_func = ASYNC_REQUEST_FUNCS.get(backend)
+        request_func = ASYNC_REQUEST_FUNCS[backend]
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -255,7 +255,7 @@ async def benchmark(
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
     benchmark_start_time = time.perf_counter()
-    tasks = []
+    tasks: List[asyncio.Task] = []
     async for request in get_request(input_requests, request_rate):
         prompt, prompt_len, output_len = request
         request_func_input = RequestFuncInput(
@@ -273,7 +273,7 @@ async def benchmark(
                              pbar=pbar)))
     outputs: List[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if not disable_tqdm:
+    if pbar is not None:
         pbar.close()
 
     benchmark_duration = time.perf_counter() - benchmark_start_time

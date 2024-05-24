@@ -71,7 +71,7 @@ class DummyLoRAManager:
         noop_lora_index: List[int] = None,
         rank=8,
     ):
-        base_loras = []
+        base_loras: List[LoRALayerWeights] = []
         noop_lora_index = set(noop_lora_index or [])
 
         for i, out_dim in enumerate(output_dims):

@@ -1,6 +1,6 @@
 import itertools
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -49,8 +49,8 @@ def _do_sample(
     sampling_params: SamplingParams,
     device: str,
 ):
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
@@ -212,7 +212,7 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
         batch_size = random.randint(1, 128)
 
         expected_penalization = []
-        sequence_metadata_list = []
+        sequence_metadata_list: List[SequenceGroupMetadata] = []
         # 20% chance to generate seq group metadata list with all prompts
         is_prompt = random.random() < 0.2
         while batch_size > 0:
@@ -232,8 +232,8 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
                 eos_token_id=eos_token_id,
                 stop_token_ids=stop_token_ids)
 
-            seq_data = {}
-            seq_group_penalization = []
+            seq_data: Dict[int, SequenceData] = {}
+            seq_group_penalization: List[bool] = []
             for _ in range(num_seqs):
                 num_input = random.randint(1, 100)
                 num_generated = 0 if is_prompt else random.randint(1, 100)
@@ -392,17 +392,16 @@ def test_sampler_min_tokens_penalty(seed: int, device: str):
     else:
         test_cases = [generate_test_case()]
 
-    def run_test_case(*,
-                      expected_penalization=None,
-                      seq_group_metadata_list=None):
+    def run_test_case(*, expected_penalization: List[bool],
+                      seq_group_metadata_list: List[SequenceGroupMetadata]):
         assert expected_penalization, \
             "Invalid test case, need expected_penalization"
         assert seq_group_metadata_list, \
             "Invalid test case, need seq_group_metadata_list"
 
         batch_size = 0
-        seq_lens = []
-        sampling_params_per_row = []
+        seq_lens: List[int] = []
+        sampling_params_per_row: List[SamplingParams] = []
         for sgm in seq_group_metadata_list:
             sampling_params = sgm.sampling_params
 
@@ -472,9 +471,9 @@ def test_sampler_mixed(seed: int, device: str):
     batch_size = random.randint(1, 256)
     input_tensor, fake_logits, sampler = _prepare_test(batch_size)
 
-    seq_group_metadata_list = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
     expected_tokens: List[Optional[List[int]]] = []
-    seq_lens = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         expected: Optional[List[int]] = None
         sampling_type = random.randint(0, 3)
@@ -588,8 +587,8 @@ def test_sampler_top_k_top_p(seed: int, device: str):
     warpers = generation_model._get_logits_warper(generation_config)
     assert len(warpers) == 2  # top_p and top_k
 
-    seq_group_metadata_list = []
-    seq_lens = []
+    seq_group_metadata_list: List[SequenceGroupMetadata] = []
+    seq_lens: List[int] = []
     for i in range(batch_size):
         seq_group_metadata_list.append(
             SequenceGroupMetadata(
