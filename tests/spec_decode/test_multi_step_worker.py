@@ -1,6 +1,6 @@
 import random
-from unittest.mock import MagicMock
 from typing import List
+from unittest.mock import MagicMock
 
 import pytest
 import torch

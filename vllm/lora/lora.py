@@ -1,4 +1,5 @@
-from typing import List, Optional, Sequence as GenericSequence
+from typing import List, Optional
+from typing import Sequence as GenericSequence
 
 import torch
 

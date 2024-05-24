@@ -5,7 +5,8 @@ from typing import List, Optional
 import nvtx
 import torch
 
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
+from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
+                                                         get_rope)
 
 
 def benchmark_rope_kernels_multi_lora(
