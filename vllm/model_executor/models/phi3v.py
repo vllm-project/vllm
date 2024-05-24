@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict
 
 import torch
 import torch.nn as nn
@@ -34,6 +34,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
 logger = logging.get_logger(__name__)
+
+_KEYS_TO_MODIFY_MAPPING = {
+    "model.vision_embed_tokens": "vision_embed_tokens",
+}
 
 CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      hidden_act="quick_gelu",
@@ -308,6 +312,12 @@ class Phi3ImageEmbedding(nn.Module):
         return hidden_states.squeeze(0)
 
 
+class Phi3VImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
 class Phi3VForCausalLM(VisionLanguageModelBase):
 
     def __init__(self,
@@ -329,7 +339,7 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
                 positions: torch.Tensor,
                 kv_caches: List[torch.Tensor],
                 attn_metadata: AttentionMetadata,
-                image_input: Optional[dict] = None):
+                image_input: Phi3VImagePixelInputs = None):
         if image_input is not None:
             inputs_embeds = self.vision_embed_tokens(
                 input_ids, image_input,
@@ -374,24 +384,17 @@ class Phi3VForCausalLM(VisionLanguageModelBase):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if "model.vision_embed_tokens" in name:
-                name = name.replace("model.vision_embed_tokens",
-                                    "vision_embed_tokens")
+            for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                # We only do sharding for language model
+                # and not vision model for now.
+                if "vision_embed_tokens" in name and self.vision_embed_tokens:
+                    continue
                 if weight_name not in name:
                     continue
-                if "vision_embed_tokens" in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                param = params_dict[name]
+                param = params_dict[name.replace(weight_name, param_name)]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
