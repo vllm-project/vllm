@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple, Type
 
 import torch
 
@@ -153,6 +153,32 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                 size_n, size_k)
 
 
+# marlin_24
+def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                        b_meta: torch.Tensor, b_scales: torch.Tensor,
+                        workspace: torch.Tensor, num_bits: int, size_m: int,
+                        size_n: int, size_k: int) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
+                                        workspace, num_bits, size_m, size_n,
+                                        size_k)
+
+
+# cutlass
+def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
+                         a_scales: torch.Tensor, b_scales: torch.Tensor,
+                         out_dtype: Type[torch.dtype]) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
@@ -189,14 +215,58 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
+    batch_dim_padding: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+    """
+    Quantize input tensor to FP8 and return quantized tensor and scale.
+
+    This function supports both static and dynamic quantization: If you
+    provide the scale, it will use static scaling and if you omit it,
+    the scale will be determined dynamically. The function also allows
+    optional padding of the output tensor for downstream kernels that
+    will benefit from padding.
+
+    Args:
+        input: The input tensor to be quantized to FP8
+        scale: Optional scaling factor for the FP8 quantization
+        batch_dim_padding: If specified, pad the first dimension
+            of the output to at least this value.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
+            scaling factor.
+    """
+    if batch_dim_padding:
+        shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
+        output = torch.empty(shape,
+                             device=input.device,
+                             dtype=torch.float8_e4m3fn)
+    else:
+        output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
         vllm_ops.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         vllm_ops.static_scaled_fp8_quant(output, input, scale)
     return output, scale
+
+
+# int8
+def static_scaled_int8_quant(input: torch.Tensor,
+                             scale: float) -> torch.Tensor:
+    """
+    Quantize the input tensor to int8 and return the quantized tensor.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Scaling factor for the int8 quantization.
+
+    Returns:
+        torch.Tensor: Output tensor in int8.
+    """
+    q = torch.empty_like(input, dtype=torch.int8)
+    vllm_ops.static_scaled_int8_quant(q, input, scale)
+    return q
 
 
 # moe
@@ -240,12 +310,15 @@ def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
-                block_mapping: Dict[int, int]) -> None:
+                block_mapping: torch.Tensor) -> None:
     vllm_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
-def convert_fp8(output: torch.Tensor, input: torch.Tensor) -> None:
-    vllm_cache_ops.convert_fp8(output, input)
+def convert_fp8(output: torch.Tensor,
+                input: torch.Tensor,
+                scale: float = 1.0,
+                kv_dtype: str = "fp8") -> None:
+    vllm_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
 #TODO: cuda_utils, custom_ar

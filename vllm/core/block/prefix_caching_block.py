@@ -1,7 +1,7 @@
 """Token blocks."""
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional
+from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -337,12 +337,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
+    def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockId, List[BlockId]]: A dictionary mapping source
-                block indices to lists of destination block indices.
+            List[Tuple[BlockId, BlockId]]: A list mapping source
+                block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()
 

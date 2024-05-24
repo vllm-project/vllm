@@ -1,6 +1,7 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -166,7 +167,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
@@ -242,13 +243,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return AllocStatus.LATER
 
     def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
+                num_lookahead_slots: int) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return False
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def get_num_free_gpu_blocks(self) -> int:

@@ -1,4 +1,4 @@
-from typing import Dict, FrozenSet, List, Optional
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
@@ -185,13 +185,13 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     def get_num_total_blocks(self, device: Device) -> int:
         return self._allocators[device].get_num_total_blocks()
 
-    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+    def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
             source to destination block IDs.
 
         Returns:
-            Dict[int, List[int]]: A dictionary mapping source block IDs to lists
-                of destination block IDs.
+            List[Tuple[int, int]]: A list mapping source block IDs to 
+                destination block IDs.
         """
         # CoW only supported on GPU
         device = Device.GPU

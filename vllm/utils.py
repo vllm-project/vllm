@@ -31,6 +31,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+    "fp8_e5m2": torch.uint8,
 }
 
 
@@ -282,6 +284,9 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 
 def get_open_port() -> int:
+    port = envs.VLLM_PORT
+    if port is not None:
+        return port
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -329,7 +334,7 @@ def _generate_random_fp8(
     from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor, tensor_tmp)
     del tensor_tmp
 
 

@@ -120,6 +120,13 @@ def get_quant_config(model_config: ModelConfig,
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
                               None)
+    if hf_quant_config is None:
+        compression_config = getattr(model_config.hf_config,
+                                     "compression_config", None)
+        if compression_config is not None:
+            hf_quant_config = compression_config.get("quantization_config",
+                                                     None)
+
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
     model_name_or_path = model_config.model
@@ -369,4 +376,11 @@ def initialize_dummy_weights(
     """
     for param in model.state_dict().values():
         if torch.is_floating_point(param):
-            param.data.uniform_(low, high)
+            if torch.finfo(param.data.dtype).bits < 16:
+                # uniform_ doesn't support < 16-bit datatypes (FP8)
+                dtype = param.data.dtype
+                tmp_param = param.data.to(torch.float16)
+                tmp_param = tmp_param.uniform_(low, high).to(dtype)
+                param.data.copy_(tmp_param)
+            else:
+                param.uniform_(low, high)
