@@ -161,9 +161,10 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
 
     assert completion.id is not None
     assert completion.choices is not None and len(completion.choices) == 1
-    assert completion.choices[0].text is not None and len(
-        completion.choices[0].text) >= 5
-    assert completion.choices[0].finish_reason == "length"
+
+    choice = completion.choices[0]
+    assert len(choice.text) >= 5
+    assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
 
@@ -174,8 +175,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
     )
-    assert completion.choices[0].text is not None and len(
-        completion.choices[0].text) >= 5
+    assert len(completion.choices[0].text) >= 5
 
 
 @pytest.mark.parametrize(
@@ -194,9 +194,7 @@ async def test_no_logprobs(server, client: openai.AsyncOpenAI,
         logprobs=None,
     )
     choice = completion.choices[0]
-    assert choice.logprobs is not None
-    assert choice.logprobs.token_logprobs is not None
-    assert choice.logprobs.top_logprobs is None
+    assert choice.logprobs is None
 
 
 @pytest.mark.parametrize(
@@ -218,12 +216,34 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     assert choice.logprobs is not None
     assert choice.logprobs.token_logprobs is not None
     assert choice.logprobs.top_logprobs is not None
-    assert len(choice.logprobs.top_logprobs) <= 1
+    assert len(choice.logprobs.top_logprobs[0]) <= 1
 
 
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
+)
+async def test_some_logprobs(server, client: openai.AsyncOpenAI,
+                             model_name: str):
+    # test using token IDs
+    completion = await client.completions.create(
+        model=MODEL_NAME,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+        logprobs=5,
+    )
+    choice = completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.token_logprobs is not None
+    assert choice.logprobs.top_logprobs is not None
+    assert len(choice.logprobs.top_logprobs[0]) <= 6
+
+
+@pytest.mark.parametrize(
+    # first test base model, then test loras
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
 )
 async def test_no_logprobs_chat(server, client: openai.AsyncOpenAI,
                                 model_name: str):
@@ -242,12 +262,11 @@ async def test_no_logprobs_chat(server, client: openai.AsyncOpenAI,
                                                            logprobs=False)
 
     choice = chat_completion.choices[0]
-    assert choice.logprobs is not None
-    assert choice.logprobs.content is not None
-    assert len(choice.logprobs.content[0].top_logprobs) == 0
+    assert choice.logprobs is None
 
 
 @pytest.mark.parametrize(
+    # just test 1 lora hereafter
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
@@ -278,6 +297,33 @@ async def test_zero_logprobs_chat(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+async def test_some_logprobs_chat(server, client: openai.AsyncOpenAI,
+                                  model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=5,
+                                                           temperature=0.0,
+                                                           logprobs=True,
+                                                           top_logprobs=5)
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.content is not None
+    assert len(choice.logprobs.content[0].top_logprobs) <= 6
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
 async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                    model_name: str):
     messages = [{
@@ -296,12 +342,13 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                                            top_logprobs=5)
     assert chat_completion.id is not None
     assert len(chat_completion.choices) == 1
-    assert chat_completion.choices[0].message is not None
-    assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.content is not None
-    assert len(
-        chat_completion.choices[0].logprobs.content[0].top_logprobs) <= 6
-    message = chat_completion.choices[0].message
+
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert chat_completion.usage == openai.types.CompletionUsage(
+        completion_tokens=10, prompt_tokens=37, total_tokens=47)
+
+    message = choice.message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
     messages.append({"role": "assistant", "content": message.content})
@@ -802,10 +849,8 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     # -9999.0 is the minimum logprob returned by OpenAI
-    assert all(
-        isinstance(logprob, float) and logprob >= -9999.0
-        for token_dict in top_logprobs
-        for token, logprob in token_dict.items())
+    for item in top_logprobs:
+        assert item.logprob >= -9999.0, f"Failed (top_logprobs={top_logprobs})"
 
 
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
