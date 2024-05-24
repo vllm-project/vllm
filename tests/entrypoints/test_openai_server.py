@@ -809,7 +809,7 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
         delta = chunk.choices[0].delta
         if delta.role:
             assert delta.role == "assistant"
-        assert delta.content == None or len(delta.content) == 0
+        assert delta.content is None or len(delta.content) == 0
         if delta.tool_calls:
             output.append(delta.tool_calls[0].function.arguments)
         if chunk.choices[0].finish_reason is not None:
