@@ -111,7 +111,8 @@ class BloomAttention(nn.Module):
                               self.head_dim,
                               scaling,
                               alibi_slopes=alibi_slopes,
-                              cache_config=cache_config)
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
