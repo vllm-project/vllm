@@ -70,6 +70,8 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   }
 }
 
+}  // namespace vllm
+
 void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
                               torch::Tensor& input,  // [..., hidden_size]
                               float scale) {
