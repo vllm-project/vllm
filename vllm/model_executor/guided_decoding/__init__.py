@@ -48,10 +48,9 @@ def _adapt_request_for_tool_use(request: Union[CompletionRequest,
     if type(request.tool_choice) == ChatCompletionNamedToolChoiceParam:
         tool_name = request.tool_choice.function.name
         tools = {tool.function.name: tool.function for tool in request.tools}
-        if not tool_name in tools:
+        if tool_name not in tools:
             raise ValueError(
-                f"Tool '{tool_name}' has not been passed in the `tools` parameter."
-            )
+                f"Tool '{tool_name}' has not been passed in `tools`.")
         tool = tools[tool_name]
         request.guided_json = tool.parameters
 
