@@ -217,9 +217,16 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
-            self.embeddings_weights = self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:self.base_layer.num_org_embeddings_per_partition+self.base_layer.num_added_embeddings_per_partition]
-            self.embeddings_slice = (self.base_layer.added_vocab_start_index-self.base_layer.org_vocab_size, self.base_layer.added_vocab_end_index-self.base_layer.org_vocab_size)
-            self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:].fill_(0)
+            self.embeddings_weights = self.base_layer.weight.data[
+                self.base_layer.num_org_embeddings_per_partition:self.
+                base_layer.num_org_embeddings_per_partition +
+                self.base_layer.num_added_embeddings_per_partition]
+            self.embeddings_slice = (self.base_layer.added_vocab_start_index -
+                                     self.base_layer.org_vocab_size,
+                                     self.base_layer.added_vocab_end_index -
+                                     self.base_layer.org_vocab_size)
+            self.base_layer.weight.data[
+                self.base_layer.num_org_embeddings_per_partition:].fill_(0)
         else:
             self.embeddings_slice = None
             self.embeddings_weights = None
@@ -1018,14 +1025,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
-    def __init__(
-        self,
-        base_layer: LogitsProcessor,
-        hidden_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        shared_to_full_mapping: List[int]
-    ) -> None:
+    def __init__(self, base_layer: LogitsProcessor, hidden_size: int,
+                 dtype: torch.dtype, device: torch.device,
+                 shared_to_full_mapping: List[int]) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.hidden_size = hidden_size
@@ -1094,7 +1096,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
-        self.shared_to_full_mapping_gpu = torch.tensor(self.shared_to_full_mapping, device=self.device, dtype=torch.long)
+        self.shared_to_full_mapping_gpu = torch.tensor(
+            self.shared_to_full_mapping, device=self.device, dtype=torch.long)
         # Lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]

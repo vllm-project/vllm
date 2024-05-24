@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple, List
 
 import torch
 import torch.nn.functional as F
@@ -18,27 +18,40 @@ def pad_vocab_size(vocab_size: int,
     return ((vocab_size + pad_to - 1) // pad_to) * pad_to
 
 
-def vocab_range_from_per_partition_vocab_size(per_partition_vocab_size: int,
-                                              rank: int, offset: int=0) -> Sequence[int]:
+def vocab_range_from_per_partition_vocab_size(
+        per_partition_vocab_size: int,
+        rank: int,
+        offset: int = 0) -> Sequence[int]:
     index_f = rank * per_partition_vocab_size
     index_l = index_f + per_partition_vocab_size
-    return index_f+offset, index_l+offset
+    return index_f + offset, index_l + offset
 
 
-def vocab_range_from_global_vocab_size(global_vocab_size: int, rank: int,
-                                       world_size: int , offset: int=0) -> Sequence[int]:
+def vocab_range_from_global_vocab_size(global_vocab_size: int,
+                                       rank: int,
+                                       world_size: int,
+                                       offset: int = 0) -> Sequence[int]:
     per_partition_vocab_size = divide(global_vocab_size, world_size)
     return vocab_range_from_per_partition_vocab_size(per_partition_vocab_size,
-                                                     rank, offset=offset)
+                                                     rank,
+                                                     offset=offset)
+
 
 @torch.jit.script
-def _get_masked_input_and_mask(input: torch.Tensor, org_vocab_start_index: int, org_vocab_end_index: int, added_vocab_start_index:int, added_vocab_end_index:int) -> Tuple[torch.Tensor, torch.Tensor]:
-    org_vocab_mask = (input >= org_vocab_start_index) & (input < org_vocab_end_index)
-    added_vocab_mask = (input >= added_vocab_start_index) & (input < added_vocab_end_index)
-    combined_offset = (org_vocab_start_index * org_vocab_mask) + (added_vocab_start_index * added_vocab_mask)
+def _get_masked_input_and_mask(
+        input: torch.Tensor, org_vocab_start_index: int,
+        org_vocab_end_index: int, added_vocab_start_index: int,
+        added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    org_vocab_mask = (input >= org_vocab_start_index) & (input <
+                                                         org_vocab_end_index)
+    added_vocab_mask = (input >= added_vocab_start_index) & (
+        input < added_vocab_end_index)
+    combined_offset = (org_vocab_start_index * org_vocab_mask) + (
+        added_vocab_start_index * added_vocab_mask)
     vocab_mask = org_vocab_mask | added_vocab_mask
     input = vocab_mask * (input - combined_offset)
     return input, vocab_mask
+
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -46,10 +59,12 @@ class VocabParallelEmbedding(torch.nn.Module):
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
     make sure it is divisible by the number of model parallel GPUs.
 
-    In order to support various loading methods, we ensure that LoRA-added embeddings
-    are always at the end of TP-sharded tensors. In other words, we shard base embeddings
-    and LoRA embeddings separately in the same tensor.
-    In this example, we will have the original vocab be a range from 0:1000, added vocab 1000:1016 and padding 1016:1024
+    In order to support various loading methods, we ensure that LoRA-added
+    embeddings are always at the end of TP-sharded tensors. In other words,
+    we shard base embeddings and LoRA embeddings separately, and place
+    them in the same tensor.
+    In this example, we will have the original vocab be a range from 0:1000,
+    added vocab 1000:1016 and padding 1016:1024.
     Therefore, the tensor format looks like the following:
     TP1, rank 0 (no sharding):
                             |< -----------BASE---------- >| < --------LORA-------- > | < ----PADDING---> |
@@ -71,7 +86,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
-    """
+    """  # noqa: E501
 
     def __init__(self,
                  num_embeddings: int,
@@ -92,7 +107,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.num_embeddings_padded = pad_vocab_size(num_embeddings,
                                                     self.padding_size)
 
-        # vocab_*_index -> refers to the entire vocab (orginal+lora+padding)
+        # vocab_*_index -> refers to the entire vocab (original+lora+padding)
         # org_*_index -> refers to base model index
         # added_*_index -> refers to lora-added index
         # Example:
@@ -108,17 +123,23 @@ class VocabParallelEmbedding(torch.nn.Module):
         #   vocab_start_index == 16512 vocab_end_index == 33024
         #   org_vocab_start_index == 16000 org_vocab_end_index == 32000
         #   added_vocab_start_index == 32512 added_vocab_end_index == 33024
-        self.vocab_start_index, self.vocab_end_index, self.org_vocab_start_index, self.org_vocab_end_index, self.added_vocab_start_index, self.added_vocab_end_index = self.get_indices(
-            self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, padding_size
-        )
+        (self.vocab_start_index, self.vocab_end_index,
+         self.org_vocab_start_index, self.org_vocab_end_index,
+         self.added_vocab_start_index,
+         self.added_vocab_end_index) = self.get_indices(
+             self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size,
+             padding_size)
         self.embedding_dim = embedding_dim
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         # Divide the weight matrix along the vocaburaly dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
-        self.num_embeddings_per_partition = divide(self.num_embeddings_padded, self.tp_size)
-        self.num_org_embeddings_per_partition = self.org_vocab_end_index-self.org_vocab_start_index
-        self.num_added_embeddings_per_partition = self.added_vocab_end_index-self.added_vocab_start_index
+        self.num_embeddings_per_partition = divide(self.num_embeddings_padded,
+                                                   self.tp_size)
+        self.num_org_embeddings_per_partition = (self.org_vocab_end_index -
+                                                 self.org_vocab_start_index)
+        self.num_added_embeddings_per_partition = (
+            self.added_vocab_end_index - self.added_vocab_start_index)
         self.weight = Parameter(
             torch.empty(self.num_embeddings_per_partition,
                         self.embedding_dim,
@@ -129,56 +150,67 @@ class VocabParallelEmbedding(torch.nn.Module):
         })
 
     @classmethod
-    def get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int, tp_size: int, padding_size: int):
+    def get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int,
+                    tp_size: int,
+                    padding_size: int) -> Tuple[int, int, int, int, int, int]:
         """Get start and end indices for vocab parallel embedding, following the
         layout outlined in the class docstring.
         
-        vocab_*_index -> refers to the entire vocab (orginal+lora+padding).
+        vocab_*_index -> refers to the entire vocab (original+lora+padding).
         org_*_index -> refers to base model index.
         added_*_index -> refers to lora-added index.
         """
         org_vocab_size_padded = pad_vocab_size(org_vocab_size, padding_size)
         num_added_embeddings = vocab_size - org_vocab_size
         org_vocab_start_index, org_vocab_end_index = (
-            vocab_range_from_global_vocab_size(
-                org_vocab_size_padded, tp_rank,
-                tp_size))
+            vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank,
+                                               tp_size))
         added_vocab_start_index, added_vocab_end_index = (
-            vocab_range_from_global_vocab_size(
-                num_added_embeddings, tp_rank,
-                tp_size, offset=org_vocab_size))
-        num_added_embeddings_in_shard = added_vocab_end_index - added_vocab_start_index
-        vocab_start_index, vocab_end_index = org_vocab_start_index, org_vocab_end_index+num_added_embeddings_in_shard
-        return vocab_start_index, vocab_end_index, org_vocab_start_index, org_vocab_end_index, added_vocab_start_index, added_vocab_end_index
+            vocab_range_from_global_vocab_size(num_added_embeddings,
+                                               tp_rank,
+                                               tp_size,
+                                               offset=org_vocab_size))
+        num_added_embeddings_in_shard = (added_vocab_end_index -
+                                         added_vocab_start_index)
+        vocab_start_index = org_vocab_start_index
+        vocab_end_index = org_vocab_end_index + num_added_embeddings_in_shard
+        return (vocab_start_index, vocab_end_index, org_vocab_start_index,
+                org_vocab_end_index, added_vocab_start_index,
+                added_vocab_end_index)
 
-    def get_sharded_to_full_mapping(self):
-        """Get a mapping that can be used to reindex the gathered logits for sampling.
+    def get_sharded_to_full_mapping(self) -> List[int]:
+        """Get a mapping that can be used to reindex the gathered
+        logits for sampling.
         
-        During sampling, we gather logits from all ranks. The relationship of index->token_id
-        will follow the same format as outlined in the class docstring. However, after the gather,
-        we want to reindex the final logits tensor to map index->token_id one-to-one. This mapping
-        allows us to do that.
+        During sampling, we gather logits from all ranks. The relationship
+        of index->token_id will follow the same format as outlined in the class
+        docstring. However, after the gather, we want to reindex the final
+        logits tensor to map index->token_id one-to-one (the index is always
+        equal the token_id it corresponds to). The indices returned by this
+        method allow us to do that.
         """
-        base_embeddings = []
-        added_embeddings = []
-        padding = []
+        base_embeddings: List[int] = []
+        added_embeddings: List[int] = []
+        padding: List[int] = []
         for tp_rank in range(self.tp_size):
-            vocab_start_index, vocab_end_index, _, _, added_vocab_start_index, added_vocab_end_index =  self.get_indices(
-                self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, self.padding_size
-            )
-            num_added_embeddings_in_shard = added_vocab_end_index-added_vocab_start_index
+            (vocab_start_index, vocab_end_index, _, _, added_vocab_start_index,
+             added_vocab_end_index) = self.get_indices(self.num_embeddings,
+                                                       self.org_vocab_size,
+                                                       tp_rank, self.tp_size,
+                                                       self.padding_size)
+            num_added_embeddings_in_shard = (added_vocab_end_index -
+                                             added_vocab_start_index)
             range_start = self.num_embeddings_per_partition * tp_rank
-            range_end = self.num_embeddings_per_partition * (tp_rank+1)
-            num_padding = (range_end-range_start) - (vocab_end_index-vocab_start_index)
+            range_end = self.num_embeddings_per_partition * (tp_rank + 1)
+            num_padding = (range_end - range_start) - (vocab_end_index -
+                                                       vocab_start_index)
             base_embeddings.extend(
-                range(range_start, range_end-num_added_embeddings_in_shard-num_padding)
-            )
+                range(range_start,
+                      range_end - num_added_embeddings_in_shard - num_padding))
             added_embeddings.extend(
-                range(range_end-num_added_embeddings_in_shard-num_padding, range_end-num_padding)
-            )
-            padding.extend(
-                range(range_end-num_padding, range_end)
-            )
+                range(range_end - num_added_embeddings_in_shard - num_padding,
+                      range_end - num_padding))
+            padding.extend(range(range_end - num_padding, range_end))
         ret = base_embeddings + added_embeddings + padding
         assert len(ret) == self.num_embeddings_padded
         return ret
@@ -194,8 +226,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = _get_masked_input_and_mask(
-                input_, self.org_vocab_start_index, self.org_vocab_end_index, self.added_vocab_start_index, self.added_vocab_end_index
-            )
+                input_, self.org_vocab_start_index, self.org_vocab_end_index,
+                self.added_vocab_start_index, self.added_vocab_end_index)
         else:
             masked_input = input_
             # Get the embeddings.

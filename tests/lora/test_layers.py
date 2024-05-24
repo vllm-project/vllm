@@ -427,7 +427,8 @@ def test_lm_head_logits_processor(dist_init, num_loras, device,
         logits_processor = LogitsProcessor(
             vocab_size + lora_config.lora_extra_vocab_size, vocab_size)
         lora_logits_processor = LogitsProcessorWithLoRA(
-            logits_processor, 1024, linear.weight.dtype, linear.weight.device, [])
+            logits_processor, 1024, linear.weight.dtype, linear.weight.device,
+            [])
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
 
         return linear, logits_processor, lora_logits_processor
