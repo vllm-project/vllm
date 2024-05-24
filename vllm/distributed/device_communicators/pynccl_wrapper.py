@@ -195,7 +195,7 @@ class NCCLLibrary:
         self.lib = NCCLLibrary.path_to_library_cache[so_file]
 
         if so_file not in NCCLLibrary.path_to_dict_mapping:
-            _funcs = {}
+            _funcs: Dict[str, Any] = {}
             for func in NCCLLibrary.exported_functions:
                 f = getattr(self.lib, func.name)
                 f.restype = func.restype

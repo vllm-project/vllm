@@ -25,12 +25,12 @@ model_and_vl_config = [
 ]
 
 
-def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
+def as_dict(vision_language_config: VisionLanguageConfig) -> Dict[str, str]:
     """Flatten vision language config to pure args.
 
     Compatible with what llm entrypoint expects.
     """
-    result = {}
+    result: Dict[str, str] = {}
     for field in fields(vision_language_config):
         value = getattr(vision_language_config, field.name)
         if isinstance(value, Enum):

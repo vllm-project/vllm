@@ -296,8 +296,8 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
     nvmlInit()
     start_time = time.time()
     while True:
-        output = {}
-        output_raw = {}
+        output: Dict[int, str] = {}
+        output_raw: Dict[int, float] = {}
         for device in devices:
             dev_handle = nvmlDeviceGetHandleByIndex(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)

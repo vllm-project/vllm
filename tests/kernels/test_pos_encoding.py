@@ -1,5 +1,5 @@
 from itertools import accumulate, product
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import pytest
 import torch
@@ -126,7 +126,7 @@ def test_batched_rotary_embedding(
                                       query,
                                       key,
                                       offsets=torch.zeros(batch_size * seq_len,
-                                                          dtype=int,
+                                                          dtype=torch.int,
                                                           device=device))
     # Compare the results.
     assert torch.allclose(out_query,
@@ -226,7 +226,7 @@ def test_rope_module_cache():
         HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,
         ROPE_SCALINGS, DTYPES
     ]
-    rope_setting_id_map = {}
+    rope_setting_id_map: Dict[str, int] = {}
     for setting in product(*settings):
         head_size, rotary_dim, max_position, base, \
             is_neox_stype, rope_scaling, dtype = setting

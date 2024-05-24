@@ -195,13 +195,13 @@ TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
 
 def _split_tensor_dict(
     tensor_dict: Dict[Any, Union[torch.Tensor, Any]]
-) -> Tuple[List[Tuple[str, Any]], List[torch.Tensor]]:
+) -> Tuple[List[Tuple[str, TensorMetadata]], List[torch.Tensor]]:
     """Split the tensor dictionary into two parts:
     1. A list of (key, value) pairs. If the value is a tensor, it is replaced
          by its metadata.
     2. A list of tensors.
     """
-    metadata_list: List[Tuple[str, Any]] = []
+    metadata_list: List[Tuple[str, TensorMetadata]] = []
     tensor_list: List[torch.Tensor] = []
     for key, value in tensor_dict.items():
         if isinstance(value, torch.Tensor):
@@ -241,7 +241,6 @@ def broadcast_tensor_dict(
 
     rank = torch.distributed.get_rank()
     if rank == src:
-        metadata_list: List[Tuple[Any, Any]] = []
         assert isinstance(
             tensor_dict,
             dict), (f"Expecting a dictionary, got {type(tensor_dict)}")
@@ -274,7 +273,7 @@ def broadcast_tensor_dict(
             async_handle.wait()
 
     else:
-        recv_metadata_list = [None]
+        recv_metadata_list: List[Any] = [None]
         torch.distributed.broadcast_object_list(recv_metadata_list,
                                                 src=src,
                                                 group=metadata_group)

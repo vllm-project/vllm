@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Dict, List, Optional, TypedDict
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +24,15 @@ def main(dtype: str):
         run_grid(bs, method=method, dtype=dtype)
 
 
+class BenchmarkConfig(TypedDict):
+    BLOCK_SIZE_M: int
+    BLOCK_SIZE_N: int
+    BLOCK_SIZE_K: int
+    GROUP_SIZE_M: int
+    num_warps: int
+    num_stages: int
+
+
 def run_grid(bs, method, dtype: str):
     d_model = 4096
     num_total_experts = 8
@@ -35,7 +45,7 @@ def run_grid(bs, method, dtype: str):
     num_warmup_trials = 1
     num_trials = 1
 
-    configs = []
+    configs: List[BenchmarkConfig] = []
 
     for block_size_n in [32, 64, 128, 256]:
         for block_size_m in [16, 32, 64, 128, 256]:
@@ -106,12 +116,12 @@ def run_grid(bs, method, dtype: str):
     print("best_time_us", best_time_us)
     print("best_config", best_config)
 
-    # holds Dict[str, Dict[str, int]]
+    # holds Dict[str, BenchmarkConfig]
     filename = get_config_file_name(num_total_experts,
                                     model_intermediate_size // tp_size,
                                     "float8" if dtype == "float8" else None)
     print(f"writing config to file {filename}")
-    existing_content = {}
+    existing_content: Dict[str, Optional[BenchmarkConfig]] = {}
     if os.path.exists(filename):
         with open(filename, "r") as f:
             existing_content = json.load(f)

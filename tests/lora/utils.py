@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 
@@ -9,7 +9,7 @@ class DummyLoRAManager:
 
     def __init__(self):
         super().__init__()
-        self._loras = {}
+        self._loras: Dict[str, LoRALayerWeights] = {}
 
     def set_module_lora(self, module_name: str, lora: LoRALayerWeights):
         self._loras[module_name] = lora

@@ -61,13 +61,13 @@ def split_tensor_along_last_dim(
 # code partly borrowed from
 # https://github.com/turboderp/exllamav2/blob/1c67f97f3d2a968605a9c31ab791a05c85bb7879/exllamav2/compat.py#L10
 # License: MIT
-def _can_actually_p2p(idx_a, idx_b):
+def _can_actually_p2p(idx_a: int, idx_b: int) -> bool:
     dev_i = f"cuda:{idx_a}"
     dev_j = f"cuda:{idx_b}"
     a = torch.randn(5, device=dev_i) + 123.0
     b = a.to(dev_j)
     c = b.to(dev_i)
-    return torch.all(a == c).cpu().item()
+    return bool(torch.all(a == c).cpu().item())
 
 
 # why do we need this cache?
@@ -116,7 +116,7 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache for in %s", path)
-        cache = {}
+        cache: Dict[str, bool] = {}
         for _i in range(num_dev):
             for _j in range(num_dev):
                 # on some platforms, P2P support might be buggy and we need
