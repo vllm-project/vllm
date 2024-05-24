@@ -126,7 +126,7 @@ def test_batched_rotary_embedding(
                                       query,
                                       key,
                                       offsets=torch.zeros(batch_size * seq_len,
-                                                          dtype=torch.int,
+                                                          dtype=torch.long,
                                                           device=device))
     # Compare the results.
     assert torch.allclose(out_query,
