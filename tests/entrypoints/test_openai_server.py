@@ -204,6 +204,33 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+async def test_zero_logprobs_chat(server, client: openai.AsyncOpenAI,
+                                  model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=5,
+                                                           temperature=0.0,
+                                                           logprobs=True,
+                                                           top_logprobs=0)
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.content is not None
+    assert choice.logprobs.content[0].top_logprobs is None
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
 async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                    model_name: str):
     messages = [{
@@ -221,12 +248,12 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert chat_completion.id is not None
-    assert chat_completion.choices is not None and len(
-        chat_completion.choices) == 1
+    assert len(chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
     assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
+    assert chat_completion.choices[0].logprobs.content is not None
+    assert len(
+        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
@@ -723,7 +750,10 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
         top_logprobs=5,
         extra_body=dict(guided_choice=TEST_CHOICE,
                         guided_decoding_backend=guided_decoding_backend))
-    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
+
+    assert chat_completion.choices[0].logprobs is not None
+    assert chat_completion.choices[0].logprobs.content is not None
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     # -9999.0 is the minimum logprob returned by OpenAI
     assert all(
@@ -745,6 +775,8 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
             response_format={"type": "json_object"})
 
         content = resp.choices[0].message.content
+        assert content is not None
+
         loaded = json.loads(content)
         assert loaded == {"result": 2}, loaded
 

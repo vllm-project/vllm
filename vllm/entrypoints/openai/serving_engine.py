@@ -10,6 +10,8 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionLogProb,
                                               ChatCompletionLogProbs,
                                               ChatCompletionRequest,
@@ -116,8 +118,10 @@ class OpenAIServing:
                 out_top_logprobs.append(None)
             else:
                 token_logprob = step_top_logprobs[token_id].logprob
-                assert len(step_top_logprobs) == num_output_top_logprobs, \
-                    "Failed to set SamplingParams.logprob"
+                assert len(step_top_logprobs) <= num_output_top_logprobs + 1, (
+                    f"Failed to set SamplingParams.logprob. Expected at most: "
+                    f"{num_output_top_logprobs + 1}; received length: "
+                    f"{len(step_top_logprobs)}")
 
                 token = step_top_logprobs[token_id].decoded_token
                 assert token is not None

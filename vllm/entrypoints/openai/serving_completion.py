@@ -6,6 +6,8 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionRequest,
                                               CompletionResponse,
