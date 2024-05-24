@@ -442,7 +442,8 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs.content.append(
                     ChatCompletionLogProbsContent(
                         token=step_top_logprobs[token_id].decoded_token,
-                        logprob=max(step_top_logprobs[token_id].logprob, -9999.0),
+                        logprob=max(step_top_logprobs[token_id].logprob,
+                                    -9999.0),
                         bytes=list(
                             step_top_logprobs[token_id].decoded_token.encode(
                                 "utf-8", errors="replace")),
