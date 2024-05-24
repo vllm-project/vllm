@@ -621,6 +621,9 @@ def test_sampler_top_k_top_p(seed: int, device: str):
 
     with patch("vllm.model_executor.layers.sampler._sample", mock_sample):
         sampler(logits=fake_logits, sampling_metadata=sampling_metadata)
+
+    assert sample_probs is not None
+
     hf_probs = warpers(torch.zeros_like(fake_logits), fake_logits.clone())
     hf_probs = torch.softmax(hf_probs, dim=-1, dtype=torch.float)
     assert torch.allclose(hf_probs, sample_probs, atol=1e-5)

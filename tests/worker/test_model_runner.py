@@ -159,8 +159,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = list(range(context_len))
-        seq_data = SequenceData(seq_data)
+        seq_data = SequenceData(list(range(context_len)))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)

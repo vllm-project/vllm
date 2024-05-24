@@ -1,5 +1,7 @@
 import time
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
@@ -35,7 +37,7 @@ def create_dummy_prompt(
 
 def create_seq_group(
         seq_prompt_len: int = 1024,
-        seq_output_lens: Iterable[int] = (128, ),
+        seq_output_lens: GenericSequence[int] = (128, ),
         request_id: str = '0',
         seq_id_start: int = 0,
         sampling_params: Optional[SamplingParams] = None) -> SequenceGroup:

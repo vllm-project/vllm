@@ -81,4 +81,6 @@ def test_invalid_env():
     os.environ["VLLM_ATTENTION_BACKEND"] = "INVALID"
     with pytest.raises(ValueError):
         which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
-    os.environ["VLLM_ATTENTION_BACKEND"] = name_backup
+
+    if name_backup is not None:
+        os.environ["VLLM_ATTENTION_BACKEND"] = name_backup

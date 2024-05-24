@@ -11,7 +11,7 @@ from .allclose_default import get_default_atol, get_default_rtol
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HEAD_SIZES = [64, 80, 96, 112, 128, 256]
-ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
+ROTARY_DIMS = (None, 32)  # None means rotary dim == head size
 NUM_HEADS = [7, 17]  # Arbitrary values for testing
 BATCH_SIZES = [1, 5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
@@ -213,19 +213,15 @@ def test_batched_rotary_embedding_multi_lora(
 def test_rope_module_cache():
     MAX_POSITIONS = [123, 1234]
     BASES = [10000, 1000000]
-    ROPE_SCALINGS = [
-        None, {
-            "type": "linear",
-            "factor": (1, )
-        }, {
-            "type": "dynamic",
-            "factor": 1
-        }
-    ]
-    settings = [
-        HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,
-        ROPE_SCALINGS, DTYPES
-    ]
+    ROPE_SCALINGS = (None, {
+        "type": "linear",
+        "factor": (1, )
+    }, {
+        "type": "dynamic",
+        "factor": 1
+    })
+    settings = (HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,
+                ROPE_SCALINGS, DTYPES)
     rope_setting_id_map: Dict[str, int] = {}
     for setting in product(*settings):
         head_size, rotary_dim, max_position, base, \

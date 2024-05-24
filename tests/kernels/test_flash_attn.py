@@ -70,7 +70,7 @@ def ref_paged_attn(
 @pytest.mark.parametrize("dtype", DTYPES)
 @torch.inference_mode
 def test_flash_attn_with_paged_kv(
-    kv_lens: List[Tuple[int, int]],
+    kv_lens: List[int],
     num_heads: Tuple[int, int],
     head_size: int,
     dtype: torch.dtype,

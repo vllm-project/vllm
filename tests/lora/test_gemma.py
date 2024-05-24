@@ -6,7 +6,7 @@ from vllm.lora.request import LoRARequest
 MODEL_PATH = "google/gemma-7b"
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> str:
+def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     prompts = [
         "Quote: Imagination is",
         "Quote: Be yourself;",

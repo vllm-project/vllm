@@ -1,6 +1,6 @@
 import random
 from types import SimpleNamespace
-from typing import List
+from typing import Dict, List
 from unittest.mock import MagicMock
 
 import pytest
@@ -8,8 +8,7 @@ import torch
 
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
@@ -110,7 +109,7 @@ def test_correctly_calls_target_model(k: int, batch_size: int):
     call_args_list = target_worker.execute_model.call_args_list
     assert len(call_args_list) == 1
     for _, kwargs in call_args_list:
-        seq_group_metadata_list: List[SequenceGroupMetadata] = kwargs[
+        seq_group_metadata_list = kwargs[
             "execute_model_req"].seq_group_metadata_list
 
         assert len(seq_group_metadata_list) == (k + 1) * batch_size
@@ -312,8 +311,14 @@ def test_correctly_formats_output(k: int, batch_size: int):
         next(iter(seq_group_metadata.seq_data.keys()))
         for seq_group_metadata in seq_group_metadata_list
     ]
-    actual_output_by_seq = {seq_id: [] for seq_id in seq_ids}
-    expected_output_by_seq = {seq_id: [] for seq_id in seq_ids}
+    actual_output_by_seq: Dict[int, List[SequenceOutput]] = {
+        seq_id: []
+        for seq_id in seq_ids
+    }
+    expected_output_by_seq: Dict[int, List[SequenceOutput]] = {
+        seq_id: []
+        for seq_id in seq_ids
+    }
 
     for step in output:
         for seq_group in step:
