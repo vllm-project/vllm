@@ -37,7 +37,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 if k in layer:
                     layer.replace(k, llama_mapping.get(k, k))
 
-                    
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
 
@@ -135,7 +134,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         layer_quant_details: Dict[str, Any] = self.layer_quant_details.get(
             layer_type_name, None)
-          
+
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer}.")

@@ -58,4 +58,5 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
                                           int8_traits.max).to(torch.int8)
     ops_out = torch.empty_like(x, dtype=torch.int8)
     ops.static_scaled_int8_quant(ops_out, x, scale)
-    assert torch.allclose(torch_out, ops_out, atol=1)  # big atol to account for rounding errors
+    assert torch.allclose(torch_out, ops_out,
+                          atol=1)  # big atol to account for rounding errors
