@@ -227,6 +227,9 @@ class ModelConfig:
                 f"({pipeline_parallel_size}).")
 
     def get_hf_config_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
         # addition to sliding window size. We check if that field is present
         # and if it's False, return None.
