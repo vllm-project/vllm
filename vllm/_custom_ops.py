@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, Union
 
 import torch
 
@@ -252,9 +252,10 @@ def scaled_fp8_quant(
 
 
 # int8
-def scaled_int8_quant(input: torch.Tensor,
-                      scale: Optional[float] = None
-) -> Tuple[torch.Tensor, torch.Tensor | float] :
+def scaled_int8_quant(
+    input: torch.Tensor,
+    scale: Optional[float] = None
+) -> Tuple[torch.Tensor, Union[torch.Tensor, float]]:
     """
     Quantize the input tensor to int8 and return the quantized tensor and scale.
 
@@ -277,6 +278,7 @@ def scaled_int8_quant(input: torch.Tensor,
                                dtype=torch.float32)
     vllm_ops.dynamic_scaled_int8_quant(q, input, input_scales)
     return q, input_scales
+
 
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
