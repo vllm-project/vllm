@@ -1,7 +1,8 @@
 import argparse
 import dataclasses
+import json
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -49,6 +50,7 @@ class EngineArgs:
     disable_log_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
+    rope_scaling: Optional[dict] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -63,6 +65,7 @@ class EngineArgs:
     max_lora_rank: int = 16
     fully_sharded_loras: bool = False
     lora_extra_vocab_size: int = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
     lora_dtype = 'auto'
     max_cpu_loras: Optional[int] = None
     device: str = 'auto'
@@ -188,12 +191,11 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
-            'data type. FP8_E5M2 (without scaling) is only supported on cuda '
-            'version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
-            'supported for common inference criteria.')
+            'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
+            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
         parser.add_argument(
             '--quantization-param-path',
             type=nullable_str,
@@ -329,6 +331,11 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
+        parser.add_argument('--rope-scaling',
+                            default=None,
+                            type=json.loads,
+                            help='RoPE scaling configuration in JSON format. '
+                            'For example, {"type":"dynamic","factor":2.0}')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -340,9 +347,9 @@ class EngineArgs:
                             help='Maximum context length covered by CUDA '
                             'graphs. When a sequence has context length '
                             'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq_len-to-capture instead'
+                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
                             ')')
-        parser.add_argument('--max-seq_len-to-capture',
+        parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
                             help='Maximum sequence length covered by CUDA '
@@ -397,6 +404,17 @@ class EngineArgs:
             choices=['auto', 'float16', 'bfloat16', 'float32'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
+        parser.add_argument(
+            '--long-lora-scaling-factors',
+            type=nullable_str,
+            default=EngineArgs.long_lora_scaling_factors,
+            help=('Specify multiple scaling factors (which can '
+                  'be different from base model scaling factor '
+                  '- see eg. Long LoRA) to allow for multiple '
+                  'LoRA adapters trained with those scaling '
+                  'factors to be used at the same time. If not '
+                  'specified, only adapters trained with the '
+                  'base model scaling factor are allowed.'))
         parser.add_argument(
             '--max-cpu-loras',
             type=int,
@@ -536,11 +554,12 @@ class EngineArgs:
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.dtype, self.seed, self.revision,
-            self.code_revision, self.tokenizer_revision, self.max_model_len,
-            self.quantization, self.quantization_param_path,
-            self.enforce_eager, self.max_context_len_to_capture,
-            self.max_seq_len_to_capture, self.max_logprobs,
-            self.skip_tokenizer_init, self.served_model_name)
+            self.code_revision, self.rope_scaling, self.tokenizer_revision,
+            self.max_model_len, self.quantization,
+            self.quantization_param_path, self.enforce_eager,
+            self.max_context_len_to_capture, self.max_seq_len_to_capture,
+            self.max_logprobs, self.skip_tokenizer_init,
+            self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -593,6 +612,7 @@ class EngineArgs:
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
             lora_extra_vocab_size=self.lora_extra_vocab_size,
+            long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
