@@ -6,9 +6,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.attention.ops.blocksparse_attention.interface import (
-    LocalStridedBlockSparseAttn, get_sparse_attn_mask)
+    LocalStridedBlockSparseAttn)
 from vllm.utils import get_max_shared_memory_bytes, is_hip
-# from vllm.distributed import get_tensor_model_parallel_rank
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -327,90 +326,6 @@ def test_paged_attention(
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
-
-
-def ref_single_query_cached_kv_attention(
-    output: torch.Tensor,
-    query: torch.Tensor,
-    num_queries_per_kv: int,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    scale: float,
-    alibi_slopes: Optional[torch.Tensor],
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 1,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
-) -> None:
-    num_query_heads = query.shape[1]
-    num_kv_heads = value_cache.shape[1]
-    head_size = value_cache.shape[2]
-    block_size = value_cache.shape[3]
-    num_seqs = query.shape[0]
-
-    block_tables = block_tables.cpu().tolist()
-    seq_lens = seq_lens.cpu().tolist()
-    for i in range(num_seqs):
-        q = query[i].unsqueeze(0)
-        block_table = block_tables[i]
-        seq_len = int(seq_lens[i])
-
-        keys = []
-        values = []
-        for j in range(seq_len):
-            block_number = int(block_table[j // block_size])
-            block_offset = j % block_size
-
-            k = key_cache[block_number, :, :, block_offset, :]
-            k = k.reshape(num_kv_heads, head_size)
-            keys.append(k)
-
-            v = value_cache[block_number, :, :, block_offset]
-            values.append(v)
-        keys = torch.stack(keys, dim=0)
-        values = torch.stack(values, dim=0)
-        if num_queries_per_kv > 1:
-            # Handle MQA and GQA
-            keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
-            values = torch.repeat_interleave(values, num_queries_per_kv, dim=1)
-
-        alibi_bias = None
-        if alibi_slopes is not None:
-            # Create the ALiBi bias used in the paged attention kernel.
-            position_ids = torch.arange(seq_len).int()
-            alibi_bias = (position_ids - seq_len + 1).float()
-            alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
-                1, 1, -1)
-
-        if blocksparse_vert_stride >= 1:
-            bsize = blocksparse_block_size
-            hsliding = blocksparse_head_sliding_step
-            vert = blocksparse_vert_stride
-            locals = blocksparse_local_blocks
-            qb = (seq_len - 1) // bsize
-            attn_mask = q.new_zeros((num_query_heads, 1, seq_len)) - torch.inf
-            for h in range(num_query_heads):
-                if hsliding >= 0:  # slide with q heads
-                    bs_offset = (tp_rank * num_query_heads + h) * hsliding + 1
-                else:  # slide with kv heads
-                    bs_offset = (tp_rank * num_kv_heads +
-                                 h // num_queries_per_kv) * (-hsliding) + 1
-                for kb in range(qb + 1):
-                    kj = kb * bsize
-                    if (qb - kb) < locals or \
-                        (kb + bs_offset) % vert == 0:
-                        attn_mask[h, 0, kj:min(kj + bsize, seq_len)] = 0
-            if alibi_bias is not None:
-                attn_mask += alibi_bias
-        else:
-            attn_mask = alibi_bias
-
-        out = ref_masked_attention(q, keys, values, scale, attn_mask=attn_mask)
-        out = out.view(num_query_heads, head_size)
-        output[i].copy_(out, non_blocking=True)
 
 
 def ref_multi_query_kv_attention(
