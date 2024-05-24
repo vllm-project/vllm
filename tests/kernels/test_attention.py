@@ -16,8 +16,7 @@ from .allclose_default import get_default_atol, get_default_rtol
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-# MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-MAX_SEQ_LEN = 8192
+MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
 
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
@@ -39,18 +38,17 @@ HEAD_SIZES = [64]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
+
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 BLOCKSPARSE_LOCAL_BLOCKS = [16]
-BLOCKSPARSE_VERT_STRIDES = [8]
-# BLOCKSPARSE_VERT_STRIDES = [1, 4]
+BLOCKSPARSE_VERT_STRIDES = [0, 8]
 
 BLOCKSPARSE_BLOCK_SIZES = [64]
-# BLOCKSPARSE_HEADS_SLIDINGS = [0, 1, -1]
-BLOCKSPARSE_HEADS_SLIDINGS = [1]
+BLOCKSPARSE_HEADS_SLIDINGS = [0, 1, -1]
 
 
 def ref_masked_attention(
@@ -63,7 +61,6 @@ def ref_masked_attention(
     attn_weights = scale * torch.einsum("qhd,khd->hqk", query, key).float()
     if attn_mask is not None:
         attn_weights = attn_weights + attn_mask.float()
-        print(f'>>> {attn_mask.shape=}, {attn_weights.shape=}, {attn_weights=}')
     attn_weights = torch.softmax(attn_weights, dim=-1).to(value.dtype)
     out = torch.einsum("hqk,khd->qhd", attn_weights, value)
     return out
@@ -91,15 +88,11 @@ def ref_single_query_cached_kv_attention(
     block_size = value_cache.shape[3]
     num_seqs = query.shape[0]
 
-    print(f'>>>> ref_single_query_cached_kv_attention: {query.shape=}, {key_cache.shape=}')
-    # exit()
-
     block_tables = block_tables.cpu().tolist()
     seq_lens = seq_lens.cpu().tolist()
     for i in range(num_seqs):
         q = query[i].unsqueeze(0)
         block_table = block_tables[i]
-        print(f'>>> {i=}, {q.shape}')
         seq_len = int(seq_lens[i])
 
         keys = []
@@ -129,38 +122,25 @@ def ref_single_query_cached_kv_attention(
             alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
                 1, 1, -1)
 
-        if blocksparse_vert_stride > 1:
+        if blocksparse_vert_stride >= 1:
             bsize = blocksparse_block_size
             hsliding = blocksparse_head_sliding_step
             vert = blocksparse_vert_stride
             locals = blocksparse_local_blocks
-            # n_blocks = (seq_len + bsize - 1) // bsize
-            qb = seq_len // bsize
+            qb = (seq_len - 1) // bsize
             attn_mask = q.new_zeros((num_query_heads, 1, seq_len)) - torch.inf
-            # block_tril = torch.triu(q.new_zeros((bsize, bsize)) - torch.inf, diagonal=1)
             for h in range(num_query_heads):
-                if hsliding > 0: # slide with q heads
-                    sliding_h = tp_rank * num_query_heads + h
+                if hsliding >=0: # slide with q heads
+                    bs_offset = (tp_rank * num_query_heads + h) * hsliding + 1
                 else: # slide with kv heads
-                    sliding_h = tp_rank * num_kv_heads + h // num_queries_per_kv
-                    hsliding = -hsliding
-                # for qb in range(n_blocks):
-                # qi = qb * bsize
-                # print(f'.. {qb=}, {h=}, {bsize=}, {hsliding=}, {vert=}, {locals=}')
+                    bs_offset = (tp_rank * num_kv_heads + h // num_queries_per_kv) * (-hsliding) + 1
                 for kb in range(qb + 1):
                     kj = kb * bsize
-                    if (qb - kb) <= locals or \
-                        (kb + sliding_h * hsliding + 1) % vert == 0:
-                        attn_mask[h, 0, kj:kj + bsize] = 0
-                        # print(f'  .. {kb=}, {kj=}')
-                # if locals > 0:
-                #     qe = min(qi + bsize, seq_len)
-                #     ql  = qe - qi
-                #     attn_mask[h, 0, qi:qe] = block_tril[:ql, :ql]
+                    if (qb - kb) < locals or \
+                        (kb + bs_offset) % vert == 0:
+                        attn_mask[h, 0, kj:min(kj + bsize, seq_len)] = 0
             if alibi_bias is not None:
-                print(f'>>>> Allibi {attn_mask.shape=}, {alibi_bias.shape=}')
                 attn_mask += alibi_bias
-            # print(f'...> {attn_mask.shape=}')
         else:
             attn_mask = alibi_bias
 
@@ -202,10 +182,6 @@ def test_paged_attention(
     blocksparse_block_size: int,
     blocksparse_head_sliding_step: int,
 ) -> None:
-    # blocksparse_local_blocks = 4
-    # blocksparse_vert_stride = 4
-    # blocksparse_block_size = 64
-    # blocksparse_head_sliding_step = 1
     random.seed(seed)
     torch.random.manual_seed(seed)
     if torch.cuda.is_available():
@@ -358,7 +334,6 @@ def test_paged_attention(
     # so we use a relaxed tolerance for the test.
     atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8":
-        print('... !! FP8')
         atol, rtol = 1e-2, 1e-5
 
     print(f'>>> {(output - ref_output).abs().max()=}')
