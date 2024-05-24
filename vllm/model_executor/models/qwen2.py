@@ -47,6 +47,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
+from .lora_base import LoRASupportedModelBase
+
 
 class Qwen2MLP(nn.Module):
 
@@ -271,7 +273,7 @@ class Qwen2Model(nn.Module):
         return hidden_states
 
 
-class Qwen2ForCausalLM(nn.Module):
+class Qwen2ForCausalLM(LoRASupportedModelBase):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -301,9 +303,8 @@ class Qwen2ForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        del lora_config
-        super().__init__()
-        self.config = config
+        super().__init__(config, lora_config)
+
         self.quant_config = quant_config
         self.model = Qwen2Model(config, cache_config, quant_config)
 

@@ -1,6 +1,7 @@
 from typing import List, Optional
 
 import torch
+import torch.types
 
 from vllm.utils import is_pin_memory_available
 
@@ -63,7 +64,7 @@ class LoRALayerWeights:
             output_dim: int,
             rank: int,
             dtype: torch.dtype,
-            device: torch.device,
+            device: torch.types.Device,
             embeddings_tensor_dim: Optional[int] = None) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros([input_dim, rank],

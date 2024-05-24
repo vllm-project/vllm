@@ -49,6 +49,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
+from .lora_base import LoRASupportedModelBase
+
 
 class LlamaMLP(nn.Module):
 
@@ -297,7 +299,7 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class LlamaForCausalLM(LoRASupportedModelBase):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -328,8 +330,8 @@ class LlamaForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__()
-        self.config = config
+        super().__init__(config, lora_config)
+
         self.model = LlamaModel(config,
                                 cache_config,
                                 quant_config,

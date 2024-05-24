@@ -26,6 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
+from vllm.model_executor.models.lora_base import LoRASupportedModelBase
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 
 logger = init_logger(__name__)
@@ -61,7 +62,9 @@ def _get_model_initialization_kwargs(
 ) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs = {}
-    if hasattr(model_class, "supported_lora_modules"):
+
+    if issubclass(model_class, LoRASupportedModelBase):
+        # lora_config=None is used to disable LoRA
         extra_kwargs["lora_config"] = lora_config
     elif lora_config:
         raise ValueError(
@@ -69,13 +72,15 @@ def _get_model_initialization_kwargs(
             "but LoRA is enabled. Support for this model may "
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
-    elif issubclass(model_class, VisionLanguageModelBase):
+
+    if issubclass(model_class, VisionLanguageModelBase):
         if vision_language_config is None:
             raise ValueError("Provide `image_input_type` and other vision "
                              "related configurations through LLM entrypoint "
                              "or engine arguments.")
 
         extra_kwargs["vision_language_config"] = vision_language_config
+
     return extra_kwargs
 
 

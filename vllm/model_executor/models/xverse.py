@@ -270,7 +270,7 @@ class XverseModel(nn.Module):
         return hidden_states
 
 
-class XverseForCausalLM(nn.Module):
+class XverseForCausalLM(LoRASupportedModelBase):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

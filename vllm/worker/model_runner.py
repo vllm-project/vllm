@@ -18,6 +18,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.lora_base import LoRASupportedModelBase
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (MultiModalData, SamplerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -147,14 +148,10 @@ class ModelRunner:
                     self.model_memory_usage / float(2**30))
 
         if self.lora_config:
-            assert hasattr(self.model, "supported_lora_modules"
-                           ) and self.model.supported_lora_modules, (
-                               "Model does not support LoRA")
-            assert hasattr(
+            assert isinstance(
                 self.model,
-                "embedding_modules"), "Model does not have embedding_modules"
-            assert hasattr(self.model, "embedding_padding_modules"
-                           ), "Model does not have embedding_padding_modules"
+                LoRASupportedModelBase), "Model does not support LoRA"
+
             self.lora_manager = LRUCacheWorkerLoRAManager(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,

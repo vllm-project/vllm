@@ -39,7 +39,7 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PhiConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
@@ -58,6 +58,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+
+from .lora_base import LoRASupportedModelBase
 
 
 class PhiAttention(nn.Module):
@@ -229,7 +231,7 @@ class PhiModel(nn.Module):
         return hidden_states
 
 
-class PhiForCausalLM(nn.Module):
+class PhiForCausalLM(LoRASupportedModelBase):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -250,14 +252,13 @@ class PhiForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PhiConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        del lora_config  # Unused.
-        super().__init__()
-        self.config = config
+        super().__init__(config, lora_config)
+
         self.quant_config = quant_config
 
         self.model = PhiModel(config, cache_config, quant_config)
