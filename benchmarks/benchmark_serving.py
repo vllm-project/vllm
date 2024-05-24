@@ -255,10 +255,9 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    print("{s:{c}^{n}}".format(s=' Serving Benchmark ', n=50, c='-'))
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len = input_requests[0]
-    test_request_func_input = RequestFuncInput(
+    test_input = RequestFuncInput(
         model=model_id,
         prompt=test_prompt,
         api_url=api_url,
@@ -267,8 +266,7 @@ async def benchmark(
         best_of=best_of,
         use_beam_search=use_beam_search,
     )
-    test_output = await request_func(request_func_input=test_request_func_input
-                                     )
+    test_output = await request_func(request_func_input=test_input)
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
