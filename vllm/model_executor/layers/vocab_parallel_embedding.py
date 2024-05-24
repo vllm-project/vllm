@@ -39,18 +39,20 @@ def vocab_range_from_global_vocab_size(global_vocab_size: int,
 
 @torch.jit.script
 def _get_masked_input_and_mask(
-        input: torch.Tensor, org_vocab_start_index: int,
+        input_: torch.Tensor, org_vocab_start_index: int,
         org_vocab_end_index: int, added_vocab_start_index: int,
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    org_vocab_mask = (input >= org_vocab_start_index) & (input <
-                                                         org_vocab_end_index)
-    added_vocab_mask = (input >= added_vocab_start_index) & (
-        input < added_vocab_end_index)
+    # torch.jit.script will fuse all of the pointwise ops below
+    # into a single kernel, making it very fast
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
+                                                          org_vocab_end_index)
+    added_vocab_mask = (input_ >= added_vocab_start_index) & (
+        input_ < added_vocab_end_index)
     combined_offset = (org_vocab_start_index * org_vocab_mask) + (
         added_vocab_start_index * added_vocab_mask)
     vocab_mask = org_vocab_mask | added_vocab_mask
-    input = vocab_mask * (input - combined_offset)
-    return input, vocab_mask
+    input_ = vocab_mask * (input_ - combined_offset)
+    return input_, vocab_mask
 
 
 class VocabParallelEmbedding(torch.nn.Module):
