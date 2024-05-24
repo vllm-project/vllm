@@ -67,11 +67,6 @@ class Phi3ImageEmbedding(nn.Module):
 
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(config, 'n_embd') else config.hidden_size
-        if hasattr(config, 'embd_pdrop') or hasattr(config, 'embed_pdrop'):
-            embd_drop = config.embd_pdrop if hasattr(config, 'embd_pdrop') else config.embed_pdrop
-            self.drop = nn.Dropout(embd_drop)
-        else:
-            self.drop = None
 
         self.wte = wte
 
@@ -99,8 +94,8 @@ class Phi3ImageEmbedding(nn.Module):
         if self.with_learnable_separator:
             assert self.use_hd_transform, 'learnable separator is only for hd transform'
             # 1024 * 4, merge spatial to channel dimension
-            self.glb_GN = nn.Parameter(torch.zeros([1, 1, self.image_dim_out * 4]))
-            self.sub_GN = nn.Parameter(torch.zeros([1, 1, 1, self.image_dim_out * 4]))
+            self.glb_GN = nn.Parameter(torch.empty([1, 1, self.image_dim_out * 4]))
+            self.sub_GN = nn.Parameter(torch.empty([1, 1, 1, self.image_dim_out * 4]))
             logger.info(f'learnable separator enabled for hd transform, hd_transform_order = {self.hd_transform_order}')
 
         projection_cls = config.embd_layer.get('projection_cls', 'linear')
@@ -211,9 +206,7 @@ class Phi3ImageEmbedding(nn.Module):
 
                 output_imgs = []
                 output_len = []
-                # training is tensor, inference is list
-                if isinstance(img_sizes, torch.Tensor):
-                    img_sizes = img_sizes.view(-1, 2)
+
                 for _bs in range(bs):
                     h, w = img_sizes
                     h = h // 336 
