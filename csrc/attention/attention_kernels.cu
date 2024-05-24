@@ -201,15 +201,14 @@ __device__ void paged_attention_kernel(
   const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
 
   // blocksparse specific vars
-  int bs_block_offset = 0;
-  const int num_blocksparse_blocks = DIVIDE_ROUND_UP(seq_len, blocksparse_block_size);
+  int bs_block_offset;
+  int q_bs_block_id;
   if constexpr (IS_BLOCK_SPARSE) {
-    int bs_block_offset;
-    if (blocksparse_head_sliding_step > 0)
+    // const int num_blocksparse_blocks = DIVIDE_ROUND_UP(seq_len, blocksparse_block_size);
+    q_bs_block_id = (seq_len - 1) / blocksparse_block_size;
+    if (blocksparse_head_sliding_step >= 0)
       // sliding on q heads
       bs_block_offset = (tp_rank * num_heads + head_idx) * blocksparse_head_sliding_step + 1;
-    else if (blocksparse_head_sliding_step == 0)
-      bs_block_offset = 0;
     else
       // sliding on kv heads
       bs_block_offset = (tp_rank * num_kv_heads + kv_head_idx) * (-blocksparse_head_sliding_step) + 1;
@@ -221,9 +220,9 @@ __device__ void paged_attention_kernel(
     // (e.g., kv_block_stride).
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
-      const int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      const bool is_remote = ((block_seq_id + bs_block_offset) % blocksparse_vert_stride == 0);
-      const bool is_local = (block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks);
+      const int k_bs_block_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      const bool is_remote = ((k_bs_block_id + bs_block_offset) % blocksparse_vert_stride == 0);
+      const bool is_local = (k_bs_block_id > q_bs_block_id - blocksparse_local_blocks);
       if (!is_remote && !is_local) {
         for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
           const int physical_block_offset = (thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
@@ -363,9 +362,9 @@ __device__ void paged_attention_kernel(
     // (e.g., kv_block_stride).
     // For blocksparse attention: skip computation on blocks that are not attended
     if constexpr (IS_BLOCK_SPARSE) {
-      int block_seq_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
-      if (!((block_seq_id + bs_block_offset) % blocksparse_vert_stride == 0) &&
-          !((block_seq_id >= num_blocksparse_blocks - blocksparse_local_blocks))) {
+      int v_bs_block_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
+      if (!((v_bs_block_id + bs_block_offset) % blocksparse_vert_stride == 0) &&
+          !((v_bs_block_id > q_bs_block_id - blocksparse_local_blocks))) {
         continue;
       }
     }
