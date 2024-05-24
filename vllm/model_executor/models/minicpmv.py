@@ -16,6 +16,9 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
+from vllm.config import CacheConfig, LoRAConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.sampler import Sampler
@@ -195,11 +198,16 @@ class MiniCPMV(nn.Module):
 
     def __init__(self,
                  config,
-                 linear_method: Optional["LinearMethodBase"] = None):
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None,
+                 ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.llm = MiniCPMForCausalLM(config, linear_method)
+        self.llm = MiniCPMForCausalLM(config,
+                                      cache_config=cache_config,
+                                      quant_config=quant_config,
+                                      lora_config=lora_config)
         self.vpm = self.init_vision_module()
         self.vpm.to(dtype=torch.bfloat16)
         self.vision_dim = self.vpm.embed_dim
