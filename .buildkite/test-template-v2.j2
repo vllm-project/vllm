@@ -40,7 +40,7 @@ steps:
     command: bash .buildkite/run-neuron-test.sh
     soft_fail: true
 
-  - label: "Intel Test"
+  - label: "Intel CPU Test"
     depends_on: ~
     agents:
       queue: cpu_queue
