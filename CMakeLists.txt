@@ -82,14 +82,8 @@ find_library(torch_python_LIBRARY torch_python PATHS
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
-if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
-    NOT VLLM_TARGET_DEVICE STREQUAL "rocm")
-    if (VLLM_TARGET_DEVICE STREQUAL "cpu")
-        include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
-    else()
-        message(FATAL_ERROR "Unsupported vLLM target device: ${VLLM_TARGET_DEVICE}")
-    endif()
-endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
 
 #
 # Set up GPU language and check the torch version and warn if it isn't
@@ -275,7 +269,6 @@ endif()
 # cmake -G Ninja -DVLLM_PYTHON_EXECUTABLE=`which python3` -DCMAKE_LIBRARY_OUTPUT_DIRECTORY=../vllm ..
 # cmake --build . --target default
 #
-add_custom_target(default)
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")

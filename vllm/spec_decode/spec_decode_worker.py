@@ -220,9 +220,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                             num_cpu_blocks=num_cpu_blocks)
 
-        if not draft_num_gpu_blocks:
+        if draft_num_gpu_blocks is None:
             draft_num_gpu_blocks = num_gpu_blocks
-        if not draft_num_cpu_blocks:
+        if draft_num_cpu_blocks is None:
             draft_num_cpu_blocks = num_cpu_blocks
 
         self.proposer_worker.initialize_cache(
