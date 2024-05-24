@@ -1,22 +1,20 @@
-import os
-
-from PIL import Image
 import requests
+from PIL import Image
 from transformers import AutoProcessor
 
 from vllm import LLM
 from vllm.sequence import MultiModalData
 
 
-# os.environ["VLLM_CPU_KVCACHE_SPACE"] = "10"
-
 def run_phi3v():
     model_path = "/data/LLM-model/Phi-3-vision-128k-instruct"
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(model_path,
+                                              trust_remote_code=True)
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        max_model_len=8192,
+        dtype='bfloat16',
+        max_model_len=4096,
         image_input_type="pixel_values",
         image_token_id=-1,
         image_input_shape="1008, 1344",
@@ -27,14 +25,17 @@ def run_phi3v():
     image = Image.open(requests.get(url, stream=True).raw)
     user_prompt = '<|user|>\n'
     assistant_prompt = '<|assistant|>\n'
-    prompt_suffix = "<|end|>\n"
+    suffix = "<|end|>\n"
 
     # single-image prompt
-    prompt = f"{user_prompt}<|image_1|>\nWhat is shown in this image?{prompt_suffix}{assistant_prompt}"
+    prompt = "What is shown in this image?"
+    prompt = f"{user_prompt}<|image_1|>\n{prompt}{suffix}{assistant_prompt}"
     inputs = processor(prompt, image, return_tensors="pt")
-    multi_modal_data = MultiModalData(type=MultiModalData.Type.IMAGE, data=inputs["pixel_values"])
+    multi_modal_data = MultiModalData(type=MultiModalData.Type.IMAGE,
+                                      data=inputs["pixel_values"])
 
-    outputs = llm.generate(prompt_token_ids=inputs["input_ids"].tolist(), multi_modal_data=multi_modal_data)
+    outputs = llm.generate(prompt_token_ids=inputs["input_ids"].tolist(),
+                           multi_modal_data=multi_modal_data)
     # outputs = llm.generate(prompt)
     for o in outputs:
         generated_text = o.outputs[0].text
