@@ -733,6 +733,76 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
         for token in top_logprobs)
 
 
+@pytest.mark.parametrize("guided_decoding_backend",
+                         ["outlines", "lm-format-enforcer"])
+async def test_named_tool_use(server, client: openai.AsyncOpenAI,
+                              guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        })
+    message = chat_completion.choices[0].message
+    assert message.content is not None
+    json1 = json.loads(message.content)
+    jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
+
+    messages.append({"role": "assistant", "content": message.content})
+    messages.append({
+        "role":
+        "user",
+        "content":
+        "Give me another one with a different name and age"
+    })
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_tokens=1000,
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": TEST_SCHEMA
+            }
+        }],
+        tool_choice={
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name"
+            }
+        })
+    message = chat_completion.choices[0].message
+    assert message.content is not None
+    json2 = json.loads(message.content)
+    jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
+    assert json1["name"] != json2["name"]
+    assert json1["age"] != json2["age"]
+
+
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(

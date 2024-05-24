@@ -100,17 +100,21 @@ class ResponseFormat(OpenAIBaseModel):
     # type must be "json_object" or "text"
     type: Literal["text", "json_object"]
 
+
 class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
     parameters: Optional[Dict[str, Any]] = None
 
+
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
 
+
 class ChatCompletionNamedFunction(OpenAIBaseModel):
     name: str
+
 
 class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     function: ChatCompletionNamedFunction
@@ -264,6 +268,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "guided_regex" in data and data["guided_regex"] is not None,
             "guided_choice" in data and data["guided_choice"] is not None
         ])
+        if guide_count > 1 and "tool_choice" in data and data[
+                "tool_choice"] != "none":
+            raise ValueError(
+                "You can only either use guided decoding or tools, not both.")
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
@@ -507,10 +515,12 @@ class FunctionCall(OpenAIBaseModel):
     name: str
     arguments: str
 
+
 class ToolCall(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-tool-{random_uuid()}")
     type: Literal["function"] = "function"
     function: FunctionCall
+
 
 class ChatMessage(OpenAIBaseModel):
     role: str
