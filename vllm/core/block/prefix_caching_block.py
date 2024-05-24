@@ -228,6 +228,10 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                  block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
+        # if we comes from promote_to_immutable_block, it means that
+        # block.content_hash is never None.
+        # However we need to release the same content block, so that
+        # physical block could get reused.
         if block.block_id != block_id or block.content_hash is None:
             refcount = self._refcounter.get(block_id)
             # We have fork case where block would get more than one ref,
