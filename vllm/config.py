@@ -1090,7 +1090,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE = []
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
 def _get_and_verify_dtype(
     config: PretrainedConfig,
@@ -1108,6 +1108,7 @@ def _get_and_verify_dtype(
             if config_dtype == torch.float32:
                 # Following the common practice, we use float16 for float32
                 # models.
+                logger.info("Casting torch.float32 to torch.float16.")
                 torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
@@ -1132,12 +1133,14 @@ def _get_and_verify_dtype(
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
             # Upcasting to float32 is allowed.
+            logger.info("Upcasting %s to %s.", config_dtype, torch_dtype)
             pass
         elif config_dtype == torch.float32:
             # Downcasting from float32 to float16 or bfloat16 is allowed.
+            logger.info("Downcasting %s to %s.", config_dtype, torch_dtype)
             pass
         else:
-            # Casting between float16 and bfloat16 is allowed with warning.
+            # Casting between float16 and bfloat16 is allowed with a warning.
             logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
 
     return torch_dtype
