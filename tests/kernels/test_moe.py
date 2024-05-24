@@ -6,14 +6,14 @@ Run `pytest tests/kernels/test_moe.py`.
 import pytest
 import torch
 import numpy
+from typing import List
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe import fused_moe, fused_marlin_moe
 from vllm.model_executor.models.mixtral import MixtralMoE
 
-"""
 def torch_moe(a, w1, w2, score, topk):
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
@@ -24,12 +24,12 @@ def torch_moe(a, w1, w2, score, topk):
     topk_ids = topk_ids.view(-1)
     for i in range(w1.shape[0]):
         mask = topk_ids == i
+        # print(mask)
         if mask.sum():
             out[mask] = SiluAndMul()(
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
-
 
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [2048, 256, 1024])
@@ -59,8 +59,8 @@ def test_fused_moe(
                          [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_mixtral_moe(dtype: torch.dtype):
-    "Make sure our Mixtral MoE implementation agrees with the one from
-    huggingface."
+    "Make sure our Mixtral MoE implementation agrees with the one from"
+    "huggingface."
 
     # Instantiate our and huggingface's MoE blocks
     config = MixtralConfig()
@@ -101,8 +101,6 @@ def test_mixtral_moe(dtype: torch.dtype):
                           vllm_states,
                           rtol=mixtral_moe_tol[dtype],
                           atol=mixtral_moe_tol[dtype])
-
-"""
 
 def get_marlin_perms():
     perm = []
@@ -161,6 +159,8 @@ def marlin_weights(q_w, size_k, size_n, num_bits, perm):
     q_w = q_w.cpu().numpy().astype(numpy.uint32)
     q_packed = numpy.zeros((q_w.shape[0], q_w.shape[1] // pack_factor),
                            dtype=numpy.uint32)
+
+    print("PACKED:", q_w.shape, ">>", q_packed.shape)
 
     for i in range(pack_factor):
         q_packed |= q_w[:, i::pack_factor] << num_bits * i
@@ -236,6 +236,7 @@ def marlin_quantize(
     num_bits: int,
     group_size: int,
 ):
+    print("START:", w.size(), num_bits, group_size)
     perm, scale_perm, scale_perm_single = get_marlin_perms()
 
     print("SHAPE:", w.shape)
@@ -249,6 +250,7 @@ def marlin_quantize(
 
     # Quantize
     w_ref, q_w, s = quantize_weights(w, num_bits, group_size)
+    print("interm:", w_ref.size(), q_w.size(), s.size())
 
     #TODO experts
     # Reformat to marlin
@@ -268,35 +270,79 @@ def marlin_quantize(
 
 import vllm._moe_C as moe_kernels
 
+def stack_and_dev(tensors: List[torch.Tensor]):
+    dev = tensors[0].device
+    return torch.stack(tensors, dim=0).to(dev)
+
 def test_fused_marlin_moe():
-    m = 16
-    n = 128
-    k = 128
-    e = 1
+    m = 256
+    n = 512
+    k = 512
+    e = 8
+    topk = 2
     dtype = torch.float16
     moe_block_size = 16
+    e_m = 8
 
     a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
-    w1 = torch.randn((2 * n, k), device='cuda', dtype=dtype) / 10
-    w2 = torch.randn((k, n), device='cuda', dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
+    w_m = torch.randn((e_m, k, n), device='cuda', dtype=dtype) / 10
 
     a_2d = a.view(-1, a.shape[-1])
 
-    w_ref, qweight, scales = marlin_quantize(w1, 4, -1)
-    qweight = qweight.unsqueeze(0)
-    scales = scales.unsqueeze(0)
+    w_refs = []
+    qweights = []
+    scaless = []
 
+    for i in range(w_m.shape[0]):
+        w_ref, qweight, scales = marlin_quantize(w_m[i], 4, -1)
+        w_refs.append(w_ref)
+        qweights.append(qweight)
+        scaless.append(scales)
+
+    w_ref = stack_and_dev(w_refs)
+    qweight = stack_and_dev(qweights)
+    scales = stack_and_dev(scaless)
+
+    print("w_ref size:", w_ref.size())
+    print("qweight size:", qweight.size())
     print("scales size:", scales.size())
 
     # Allocate marlin workspace
     max_workspace_size = (n // 64) * 16
     workspace = torch.zeros(max_workspace_size,
                             dtype=torch.int,
+                            device="cuda",
                             requires_grad=False)
+    shuffles = torch.range(0, m - 1, dtype=torch.int)
     sorted_ids = torch.full([m + (moe_block_size - 1)], m, dtype=torch.int).cuda()
+    sorted_ids[:m] = shuffles
 
-    # score = torch.randn((m, e), device='cuda', dtype=dtype)
-    moe_kernels.marlin_gemm_moe(a_2d, qweight, sorted_ids, scales, workspace, m, n, k)
-    # triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
-    # torch_output = torch_moe(a, w1, w2, score, topk)
-    # assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)
+    score = torch.randn((m, e), device='cuda', dtype=dtype)
+    marlin_output = moe_kernels.marlin_gemm_moe(a, qweight, sorted_ids, scales, workspace, m, n, k)
+    torch_output = torch_moe(a, w1, w2, score, topk)
+    # assert torch.allclose(marlin_output, torch_output, atol=1e-2, rtol=0)
+
+@pytest.mark.parametrize("m", [512]) #, 222, 33, 1])
+@pytest.mark.parametrize("n", [2048]) #, 256, 1024])
+@pytest.mark.parametrize("k", [128]) #, 511, 1024])
+@pytest.mark.parametrize("e", [8]) #, 64])
+@pytest.mark.parametrize("topk", [2]) #, 6])
+@pytest.mark.parametrize("dtype", [torch.float16]) #, torch.bfloat16])
+def test_fused_marlin_moe_2(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+):
+    a = torch.randn((m, k), device='cuda', dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device='cuda', dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device='cuda', dtype=dtype) / 10
+
+    score = torch.randn((m, e), device='cuda', dtype=dtype)
+    triton_output = fused_marlin_moe(a, w1, w2, score, topk, renormalize=False)
+    torch_output = torch_moe(a, w1, w2, score, topk)
+    assert torch.allclose(triton_output, torch_output, atol=1e-2, rtol=0)

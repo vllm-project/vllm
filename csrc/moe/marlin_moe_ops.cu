@@ -1014,23 +1014,21 @@ MarlinMoE(const int4* __restrict__ A,       // fp16 input matrix of shape mxk
 #pragma unroll
     for (int i = 0; i < ceildiv(16 * thread_m_blocks, threads / (2 * thread_n_blocks)); i++) {
       if (c_gl_wr < c_gl_wr_end) {
-        if (c_gl_wr / c_gl_stride < prob_m) {
-          int row = sh_sorted[c_gl_wr / c_gl_stride];
-          int off = row * c_gl_stride + c_gl_wr % c_gl_stride;
-          __half* ctrg = reinterpret_cast<__half*>(&C[off]);
-          // HERE we read from sh, how is the access different?
-          __half* csrc = reinterpret_cast<__half*>(&sh[c_sh_rd]); 
-          // printf("c offset: %d at row %d from %d (%d %d)\n", off, row, c_gl_wr / c_gl_stride, threadIdx.x, blockIdx.x);
-          for (int j = 0; j < 8; ++j) {
-            // printf("csrc %f\n", __half2float(csrc[j]));
-            // printf("ctrg %f\n", __half2float(ctrg[j]));
-            // printf("csrc %f, ctrg %f\n", __half2float(csrc[j]), __half2float(ctrg[j]));
-            __half old = ctrg[j];
-            ctrg[j] = __float2half(__half2float(old) + __half2float(csrc[j]));
-          }
-          c_gl_wr += c_gl_wr_delta;
-          c_sh_rd += c_sh_rd_delta;
+        int row = sh_sorted[c_gl_wr / c_gl_stride];
+        int off = row * c_gl_stride + c_gl_wr % c_gl_stride;
+        __half* ctrg = reinterpret_cast<__half*>(&C[off]);
+        // HERE we read from sh, how is the access different?
+        __half* csrc = reinterpret_cast<__half*>(&sh[c_sh_rd]); 
+        // printf("c offset: %d at row %d from %d (%d %d)\n", off, row, c_gl_wr / c_gl_stride, threadIdx.x, blockIdx.x);
+        for (int j = 0; j < 8; ++j) {
+          // printf("csrc %f\n", __half2float(csrc[j]));
+          // printf("ctrg %f\n", __half2float(ctrg[j]));
+          // printf("csrc %f, ctrg %f\n", __half2float(csrc[j]), __half2float(ctrg[j]));
+          __half old = ctrg[j];
+          ctrg[j] = __float2half(__half2float(old) + __half2float(csrc[j]));
         }
+        c_gl_wr += c_gl_wr_delta;
+        c_sh_rd += c_sh_rd_delta;
       }
     }
   };
@@ -1395,10 +1393,10 @@ void marlin_mm_moe_f16i4(const void* A, const void* B, void* C, void* sorted_ids
   for (int expert_idx = 0; expert_idx < num_experts; ++expert_idx) {
     // printf("init ptrs for expert %d and gs %d\n", expert_idx, group_size);
     const int4* A_ptr     = (const int4*)A;
-    const int4* B_ptr     = (const int4*)B;// + (prob_n * prob_k / 32) * expert_idx;
+    const int4* B_ptr     = (const int4*)B + (prob_n * prob_k / 32) * expert_idx;
     int4*       C_ptr     = (int4*)C;
     int*        sorted_ids_ptr  = (int*)sorted_ids;// + moe_block_size * expert_idx;
-    const int4* s_ptr     = (const int4*)s;// + (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) * prob_n / 8) * expert_idx;
+    const int4* s_ptr     = (const int4*)s + (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) * prob_n / 8) * expert_idx;
     // const int*  g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     // const int*  perm_ptr  = (const int*)perm;
     int4*       red_tmp_ptr = (int4*)red_tmp;
