@@ -3,13 +3,11 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import _custom_ops as ops
 from vllm.utils import get_max_shared_memory_bytes, is_hip
-# from vllm.distributed import get_tensor_model_parallel_rank
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -17,7 +15,6 @@ FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
 MAX_SEQ_LEN = get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
-
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
@@ -34,21 +31,13 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 HEAD_SIZES = [64, 80, 96, 112, 128, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
-HEAD_SIZES = [64]
-
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
-
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-BLOCKSPARSE_LOCAL_BLOCKS = [16]
-BLOCKSPARSE_VERT_STRIDES = [0, 8]
-
-BLOCKSPARSE_BLOCK_SIZES = [64]
-BLOCKSPARSE_HEADS_SLIDINGS = [0, 1, -1]
 
 
 def ref_masked_attention(
@@ -76,11 +65,6 @@ def ref_single_query_cached_kv_attention(
     seq_lens: torch.Tensor,
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 1,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
 ) -> None:
     num_query_heads = query.shape[1]
     num_kv_heads = value_cache.shape[1]
@@ -122,30 +106,7 @@ def ref_single_query_cached_kv_attention(
             alibi_bias = alibi_slopes.view(-1, 1, 1) * alibi_bias.view(
                 1, 1, -1)
 
-        if blocksparse_vert_stride >= 1:
-            bsize = blocksparse_block_size
-            hsliding = blocksparse_head_sliding_step
-            vert = blocksparse_vert_stride
-            locals = blocksparse_local_blocks
-            qb = (seq_len - 1) // bsize
-            attn_mask = q.new_zeros((num_query_heads, 1, seq_len)) - torch.inf
-            for h in range(num_query_heads):
-                if hsliding >=0: # slide with q heads
-                    bs_offset = (tp_rank * num_query_heads + h) * hsliding + 1
-                else: # slide with kv heads
-                    bs_offset = (tp_rank * num_kv_heads + h // num_queries_per_kv) * (-hsliding) + 1
-                for kb in range(qb + 1):
-                    kj = kb * bsize
-                    if (qb - kb) < locals or \
-                        (kb + bs_offset) % vert == 0:
-                        attn_mask[h, 0, kj:min(kj + bsize, seq_len)] = 0
-            if alibi_bias is not None:
-                attn_mask += alibi_bias
-        else:
-            attn_mask = alibi_bias
-
-        out = ref_masked_attention(q, keys, values, scale,
-                                   attn_mask=attn_mask)
+        out = ref_masked_attention(q, keys, values, scale, alibi_bias)
         out = out.view(num_query_heads, head_size)
         output[i].copy_(out, non_blocking=True)
 
@@ -160,11 +121,6 @@ def ref_single_query_cached_kv_attention(
 @pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("blocksparse_local_blocks", BLOCKSPARSE_LOCAL_BLOCKS)
-@pytest.mark.parametrize("blocksparse_vert_stride", BLOCKSPARSE_VERT_STRIDES)
-@pytest.mark.parametrize("blocksparse_block_size", BLOCKSPARSE_BLOCK_SIZES)
-@pytest.mark.parametrize("blocksparse_head_sliding_step",
-                         BLOCKSPARSE_HEADS_SLIDINGS)
 def test_paged_attention(
     kv_cache_factory,
     version: str,
@@ -177,10 +133,6 @@ def test_paged_attention(
     kv_cache_dtype: str,
     seed: int,
     device: str,
-    blocksparse_local_blocks: int,
-    blocksparse_vert_stride: int,
-    blocksparse_block_size: int,
-    blocksparse_head_sliding_step: int,
 ) -> None:
     random.seed(seed)
     torch.random.manual_seed(seed)
@@ -223,7 +175,6 @@ def test_paged_attention(
 
     # Using default kv_scale
     kv_scale = 1.0
-    tp_rank = 0
 
     # Call the paged attention kernel.
     output = torch.empty_like(query)
@@ -242,12 +193,7 @@ def test_paged_attention(
             alibi_slopes,
             kv_cache_dtype,
             kv_scale,
-            tp_rank,
-            blocksparse_local_blocks,
-            blocksparse_vert_stride,
-            blocksparse_block_size,
-            blocksparse_head_sliding_step,
-            )
+        )
     elif version == "v2":
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
@@ -278,11 +224,6 @@ def test_paged_attention(
             alibi_slopes,
             kv_cache_dtype,
             kv_scale,
-            tp_rank,
-            blocksparse_local_blocks,
-            blocksparse_vert_stride,
-            blocksparse_block_size,
-            blocksparse_head_sliding_step,
         )
     else:
         raise AssertionError(f"Unknown version: {version}")
@@ -317,11 +258,6 @@ def test_paged_attention(
         seq_lens,
         scale,
         alibi_slopes,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
     )
 
     # NOTE(woosuk): Due to the kernel-level differences in the two
@@ -335,8 +271,6 @@ def test_paged_attention(
     atol, rtol = 1e-3, 1e-5
     if kv_cache_dtype == "fp8":
         atol, rtol = 1e-2, 1e-5
-
-    print(f'>>> {(output - ref_output).abs().max()=}')
     assert torch.allclose(output, ref_output, atol=atol, rtol=rtol)
 
 
