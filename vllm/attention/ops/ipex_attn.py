@@ -75,8 +75,8 @@ class PagedAttention:
         ).view(num_kv_heads,
                1).repeat_interleave(query.size(1) // num_kv_heads).flatten()
         ipex_modules.PagedAttention.single_query_cached_kv_attention(
-            output, query, key_cache, value_cache, head_mapping, scale,
-            block_tables, context_lens, block_size, max_context_len,
+            output, query.contiguous(), key_cache, value_cache, head_mapping,
+            scale, block_tables, context_lens, block_size, max_context_len,
             alibi_slopes)
 
         return output
