@@ -276,11 +276,14 @@ class OpenAIServingChat(OpenAIServing):
                     top_logprobs = output.logprobs[
                         previous_num_tokens[i]:] if output.logprobs else None
 
-                    if request.logprobs:
+                    if request.logprobs and request.top_logprobs is not None:
+                        assert top_logprobs is not None, (
+                            "top_logprobs must be provided when logprobs "
+                            "is requested")
                         logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
-                            num_output_top_logprobs=request.logprobs,
+                            num_output_top_logprobs=request.top_logprobs,
                             initial_text_offset=len(previous_texts[i]),
                         )
                     else:
@@ -363,11 +366,14 @@ class OpenAIServingChat(OpenAIServing):
             token_ids = output.token_ids
             top_logprobs = output.logprobs
 
-            if request.logprobs:
+            if request.logprobs and request.top_logprobs is not None:
+                assert top_logprobs is not None, (
+                    "top_logprobs must be provided when logprobs "
+                    "is requested")
                 logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
-                    num_output_top_logprobs=request.logprobs,
+                    num_output_top_logprobs=request.top_logprobs,
                 )
             else:
                 logprobs = None

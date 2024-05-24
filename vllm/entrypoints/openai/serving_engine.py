@@ -92,14 +92,11 @@ class OpenAIServing:
     def _create_completion_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: int,
         initial_text_offset: int = 0,
     ) -> CompletionLogProbs:
         """Create logprobs for OpenAI Completion API."""
-        if top_logprobs is None:
-            top_logprobs = []
-
         _assert_not_none = self._assert_not_none
 
         out_text_offset: List[int] = []
@@ -155,7 +152,7 @@ class OpenAIServing:
     def _create_chat_logprobs(
         self,
         token_ids: GenericSequence[int],
-        top_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: int,
         initial_text_offset: int = 0,
     ) -> ChatCompletionLogProbs:

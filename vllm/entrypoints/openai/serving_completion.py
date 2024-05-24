@@ -233,6 +233,9 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
+                        assert top_logprobs is not None, (
+                            "top_logprobs must be provided when logprobs "
+                            "is requested")
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
