@@ -1,3 +1,4 @@
+import torch
 import triton
 import triton.language as tl
 
@@ -98,6 +99,7 @@ def sgmv_shrink_multi_lora_rank(
                           mask=rank_range < rank)
 
 
+@torch.inference_mode()
 def sgmv_shrink(x, weights, out, w_start, ranks, w_locs, indices, repeats,
                 max_rank):
     # Check constraints.
@@ -274,6 +276,7 @@ def sgmv_expand_multi_lora_rank(
             tl.store(o_ptrs, out, mask=offs_oh < H)
 
 
+@torch.inference_mode()
 def sgmv_expand(buffer,
                 weights,
                 out,
