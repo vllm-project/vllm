@@ -1122,14 +1122,6 @@ def _get_and_verify_dtype(
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
 
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                            f"Supported dtypes are {rocm_supported_dtypes}")
-
     # Verify the dtype.
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
@@ -1198,8 +1190,8 @@ def _get_and_verify_max_len(
         logger.warning(
             "The model's config.json does not contain any of the following "
             "keys to determine the original maximum length of the model: "
-            "%d. Assuming the model's maximum length is %d.",
-            possible_keys, default_max_len)
+            "%d. Assuming the model's maximum length is %d.", possible_keys,
+            default_max_len)
         derived_max_model_len = default_max_len
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
@@ -1223,10 +1215,9 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
     elif max_model_len > derived_max_model_len:
-        # Some models might have a separate key for specifying
-        # model_max_length that will be bigger than derived_max_model_len.
-        # We compare user input with model_max_length and allow this
-        # override when it's smaller.
+        # Some models might have a separate key for specifying model_max_length
+        # that will be bigger than derived_max_model_len. We compare user input
+        # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
         if (model_max_length is not None
                 and max_model_len <= model_max_length):
@@ -1240,13 +1231,12 @@ def _get_and_verify_max_len(
             pass
         else:
             raise ValueError(
-                f"User-specified max_model_len ({max_model_len}) is "
-                "greater than the derived max_model_len "
-                f"({max_len_key}={derived_max_model_len} or "
-                f"model_max_length={model_max_length} in model's "
-                "config.json). This may lead to incorrect model outputs "
-                "or CUDA errors. Make sure the value is correct and "
-                "within the model context size.")
+                f"User-specified max_model_len ({max_model_len}) is greater "
+                "than the derived max_model_len "
+                f"({max_len_key}={derived_max_model_len} or model_max_length="
+                f"{model_max_length} in model's config.json). This may lead "
+                "to incorrect model outputs or CUDA errors. Make sure the "
+                "value is correct and within the model context size.")
     return int(max_model_len)
 
 
