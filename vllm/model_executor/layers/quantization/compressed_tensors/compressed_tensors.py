@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 
 import torch
+
 from compressed_tensors.quantization.lifecycle.apply import (
     find_first_name_or_class_match)
 from compressed_tensors.quantization.quant_args import (QuantizationArgs,
@@ -36,6 +37,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 if k in layer:
                     layer.replace(k, llama_mapping.get(k, k))
 
+                    
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
 
@@ -61,8 +63,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "CompressedTensorsConfig":
-
-        config = config["compression_config"]["quantization_config"]
 
         layer_quant_details: Dict[str, Any] = dict()
         ignore: List[str] = config.get("ignore", None)
@@ -135,6 +135,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         layer_quant_details: Dict[str, Any] = self.layer_quant_details.get(
             layer_type_name, None)
+          
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer}.")
@@ -157,6 +158,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         Use the CompressedTensorsScheme associated with each layer to create 
         the necessary parameters for the layer. See LinearMethodBase for param
         details
+
         """
         weight_loader = extra_weight_attrs.get("weight_loader")
 
@@ -179,6 +181,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         Use the output of create_weights and the CompressedTensorsScheme 
         associated with the layer to apply the forward pass with the 
         layer input.  See LinearMethodBase for param details
+
         """
 
         if bias is not None:

@@ -5,6 +5,7 @@
 #include "../../dispatch_utils.h"
 #include "../../reduction_utils.cuh"
 
+
 static inline __device__ int8_t float_to_int8_rn(float x) {
 #ifdef USE_ROCM
   static const float i8_min =
@@ -38,6 +39,7 @@ __global__ void static_scaled_int8_quant_kernel(
         float_to_int8_rn(((float)input[token_idx * hidden_size + i]) / scale);
   }
 }
+
 
 template <typename scalar_t, typename scale_type>
 __global__ void dynamic_scaled_int8_quant_kernel(
@@ -74,7 +76,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
   }
 }
 
-} // namespace vllm
+
 
 void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
                               torch::Tensor& input,  // [..., hidden_size]
@@ -95,6 +97,7 @@ void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
       });
 }
 
+
 void dynamic_scaled_int8_quant(
   torch::Tensor& out,   // [..., hidden_size]
   torch::Tensor& input, // [..., hidden_size]
@@ -114,3 +117,4 @@ void dynamic_scaled_int8_quant(
       hidden_size);
   });
 }
+
