@@ -1225,8 +1225,7 @@ def _get_and_verify_max_len(
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
-        if (model_max_length is not None
-                and max_model_len <= model_max_length):
+        if model_max_length is not None and max_model_len <= model_max_length:
             if disable_sliding_window:
                 # TODO(robertgshaw): Find a model that has model_max_length
                 # with sliding window to see if this case should be allowed.
