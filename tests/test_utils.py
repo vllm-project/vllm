@@ -1,9 +1,26 @@
 import asyncio
-from typing import AsyncIterator, Tuple
+import sys
+from typing import (TYPE_CHECKING, Any, AsyncIterator, Awaitable, Protocol,
+                    Tuple, TypeVar)
 
 import pytest
 
 from vllm.utils import merge_async_iterators
+
+if sys.version_info < (3, 10):
+    if TYPE_CHECKING:
+        _AwaitableT = TypeVar("_AwaitableT", bound=Awaitable[Any])
+        _AwaitableT_co = TypeVar("_AwaitableT_co",
+                                 bound=Awaitable[Any],
+                                 covariant=True)
+
+        class _SupportsSynchronousAnext(Protocol[_AwaitableT_co]):
+
+            def __anext__(self) -> _AwaitableT_co:
+                ...
+
+    def anext(i: _SupportsSynchronousAnext[_AwaitableT], /) -> _AwaitableT:
+        return i.__anext__()
 
 
 @pytest.mark.asyncio
