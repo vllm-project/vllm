@@ -315,6 +315,23 @@ class ModelRunner:
                                     and self.sliding_window is None
                                     and is_prompt)
 
+                curr_sliding_window_blocks = None
+                # TODO(sang): This is a hack to make sliding window work with
+                # paged attn. We can remove it if we make paged attn kernel
+                # to properly handle slinding window attn.
+                if (self.sliding_window is not None and not is_prompt):
+                    curr_sliding_window_blocks = sliding_window_blocks
+                    if self.scheduler_config.use_v2_block_manager:
+                        # number of elements in last block
+                        suff_len = seq_len % self.block_size
+                        seq_len = min(seq_len,
+                                      block_aligned_sliding_window + suff_len)
+                        if suff_len > 0:
+                            curr_sliding_window_blocks += 1
+                    else:
+                        seq_len = min(seq_len, self.sliding_window)
+                    context_len = seq_len - 1
+
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
                 # NOTE: This only works for oooooooxxx style attention.
@@ -335,14 +352,8 @@ class ModelRunner:
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
-                        if self.sliding_window is not None:
-                            # chunked prefill doesn't support sliding window.
-                            assert (not self.scheduler_config.
-                                    chunked_prefill_enabled)
-                            sliding_window_blocks = (self.sliding_window //
-                                                     self.block_size)
-                            block_table = block_table[-sliding_window_blocks:]
-
+                        if curr_sliding_window_blocks is not None:
+                            block_table = block_table[-curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
                             paged_kv_indptr.append(paged_kv_indptr[-1] +
@@ -359,13 +370,6 @@ class ModelRunner:
                     # Prefill without chunked prefill or memory profiling.
                     block_table = []
                 block_tables.append(block_table)
-
-                # TODO(sang): This is a hack to make sliding window work with
-                # paged attn. We can remove it if we make paged attn kernel
-                # to properly handle slinding window attn.
-                if (self.sliding_window is not None and not is_prompt):
-                    seq_len = min(seq_len, self.sliding_window)
-                    context_len = seq_len - 1
 
                 seq_lens.append(seq_len)
                 context_lens.append(context_len)
@@ -423,9 +427,10 @@ class ModelRunner:
                 start_idx = 0
                 if self.sliding_window is not None:
                     if is_prompt:
-                        assert context_len == 0, (
+                        assert self.scheduler_config.use_v2_block_manager \
+                            or context_len == 0, (
                             "Prefix caching is currently not supported with "
-                            "sliding window attention")
+                            "sliding window attention in V1 block manager")
                     # It is an optimization. When it is decoding, it is always
                     # 0. When prefill, we use it to not write slots to kv cache
                     # to save memory.
