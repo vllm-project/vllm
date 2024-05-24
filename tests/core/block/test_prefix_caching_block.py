@@ -410,6 +410,123 @@ class TestPrefixCachingBlockAllocator:
 
         assert (len(res) == zero_point_blocks)
 
+    # Test case that assume those prompted block after first immutable would
+    # be freed into hashless allocator, while first immutable block get ref
+    # increased.
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [3])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(10)))
+    def test_alloc_promotion(num_blocks: int, block_size: int, seed: int):
+        random.seed(seed)
+
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        token_ids = list(range(block_size))
+
+        block = allocator.allocate_immutable(prev_block=None,
+                                             token_ids=token_ids)
+
+        assert allocator._refcounter.get(block.block_id) == 1
+        m = allocator.allocate_mutable(prev_block=None)
+
+        block_id = m.block_id
+        for i in range(block_size):
+            m.append_token_ids([i])
+        # After block get promoted to immutable from mutable, if there is
+        # already same content hash block, then it shall be released into
+        # hashless_allocator
+        # And first immutable block's ref get increased by 1
+        assert m.block_id == block.block_id
+        assert block_id in allocator._hashless_allocator._free_block_indices
+        assert allocator._refcounter.get(block.block_id) == 2
+
+    # Test case when eviction and allocation are mixed,
+    # make sure they work as expected
+    @staticmethod
+    @pytest.mark.parametrize("num_blocks", [3])
+    @pytest.mark.parametrize("block_size", [16])
+    @pytest.mark.parametrize("seed", list(range(10)))
+    def test_eviction_alloc_mixed(num_blocks: int, block_size: int, seed: int):
+        random.seed(seed)
+
+        all_blocks_list = [i for i in range(num_blocks)]
+        zero_ref = {i: 0 for i in range(num_blocks)}
+        allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
+                                                block_size=block_size)
+        token_ids = list(range(num_blocks * block_size))
+
+        # now we have num_blocks free blocks in hashless allocator
+        # with internal tracking list _blocks _cached_blocks and evictor
+        # empty and block's ref shall be 0
+        assert list(allocator._hashless_allocator._free_block_indices
+                    ) == all_blocks_list
+        assert len(allocator._blocks.keys()) == 0
+        assert len(allocator._cached_blocks.values()) == 0
+        assert len(allocator.evictor.free_table.keys()) == 0
+        assert allocator._refcounter._refcounts == zero_ref
+
+        # Allocate immutable chains with only one block residuled in
+        new_block = []
+        for i in range(num_blocks):
+            block = allocator.allocate_immutable(
+                prev_block=None,
+                token_ids=token_ids[block_size * i:block_size * (i + 1)])
+            new_block.append(block)
+
+        # Free all blocks, and now all blocks shall be in the evictor
+        # there shall be no tracking data left in _blocks
+        # all blocks shall be tracked in _cached_blocks
+        # all blocks' ref shall be zero
+        for block in new_block:
+            allocator.free(block)
+
+        assert len(allocator._blocks.keys()) == 0
+        assert len(allocator._hashless_allocator._free_block_indices) == 0
+        assert list(allocator._cached_blocks.values()) == all_blocks_list
+        assert list(allocator.evictor.free_table.keys()) == all_blocks_list
+        assert allocator._refcounter._refcounts == zero_ref
+
+        # Allocate a mutable block, and the first block shall be evicted
+        # and set its content hash into None, ref to 1
+        mutable = allocator.allocate_mutable(prev_block=None)
+
+        assert mutable.block_id == 0
+        assert mutable.content_hash is None
+        assert 0 in allocator._blocks
+        assert allocator._refcounter.get(0) == 1
+        assert 0 not in allocator._cached_blocks
+        assert 0 not in allocator.evictor
+
+        # Since this mutable block has no hash yet, it shall be released into
+        # hashless allocator
+        allocator.free(mutable)
+
+        assert len(allocator._blocks.keys()) == 0
+        assert allocator._refcounter._refcounts == zero_ref
+        assert 0 not in allocator._cached_blocks
+        assert 0 not in allocator.evictor
+        assert 0 in allocator._hashless_allocator._free_block_indices
+
+        # when allocate immutable with first block_size tokens, we
+        # shall get free block from hashless allocator, thus no block left
+        # in hashless
+        block = allocator.allocate_immutable(prev_block=None,
+                                             token_ids=token_ids[:block_size])
+
+        assert block.block_id == 0
+        assert len(allocator._hashless_allocator._free_block_indices) == 0
+        assert 0 in allocator._blocks
+        assert 0 in allocator._cached_blocks.values()
+        assert allocator._refcounter.get(0) == 1
+        assert 0 not in allocator.evictor
+
+        # allocate mutable block again, it shall be popped from evictor
+        mutable = allocator.allocate_mutable(prev_block=None)
+        assert len(allocator._hashless_allocator._free_block_indices) == 0
+        assert mutable.block_id not in allocator.evictor.free_table
+        assert allocator._refcounter.get(mutable.block_id) == 1
+
     # Test case where two last accessed times are equal
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1024])
