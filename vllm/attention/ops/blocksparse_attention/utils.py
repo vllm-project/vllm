@@ -2,32 +2,26 @@
 # These function are not optimized and very inefficient.
 # Avoid calling them too frequent or use a cache mechanism.
 
-import warnings
 from functools import lru_cache
 
 import torch
 import triton
-
-warnings.filterwarnings('ignore',
-                        '.*Sparse CSR tensor support is in beta state.*')
+from scipy import sparse
 
 
-def dense_to_crow_col(x):
+def dense_to_crow_col(x: torch.Tensor):
     """Turning a 2D/3D torch tensor (x) to CSR rows/cols indexing.
-    param:
-    TODO:
-        1. improve efficiency, is it faster if done in CPU, or 
-            customize a cuda kernel for it?
     NOTE: col_indices padded -1
     """
+    device = x.device
     pad = -1
     dim = x.dim()
     assert x.dim() in (2, 3)
     if x.dim() == 2:
         x = x[None]
-    x = [xi.to_sparse_csr() for xi in x]
-    crows = torch.vstack([xi.crow_indices() for xi in x])
-    cols = [xi.col_indices() for xi in x]
+    x = [sparse.csr_matrix(xi.bool().cpu().numpy()) for xi in x]
+    crows = torch.vstack([torch.from_numpy(xi.indptr) for xi in x])
+    cols = [torch.from_numpy(xi.indices) for xi in x]
     max_cols = max(len(xi) for xi in cols)
     cols = [
         torch.cat([xi, pad + xi.new_zeros(max_cols - xi.shape[0])])
@@ -37,10 +31,14 @@ def dense_to_crow_col(x):
     if dim == 2:
         crows = crows[0]
         cols = cols[0]
-    return crows, cols
+    return crows.to(device), cols.to(device)
 
 
-def crow_col_to_dense(crows, cols, dtype=torch.float16):
+def crow_col_to_dense(
+        crows: torch.Tensor,
+        cols: torch.Tensor,
+        dtype: torch.dtype = torch.float16
+        ):
     dim = crows.dim()
     if dim == 1:
         crows = crows[None]
@@ -57,25 +55,28 @@ def crow_col_to_dense(crows, cols, dtype=torch.float16):
     return x.to(device)
 
 
-def dense_to_ccol_row(x):
+def dense_to_ccol_row(x: torch.Tensor):
     """Similar, but to CSC format"""
     x = x.transpose(-2, -1)
     return dense_to_crow_col(x)
 
 
-def ccol_row_to_dense(ccol, rows, dtype=torch.float16):
+def ccol_row_to_dense(
+        ccol: torch.Tensor,
+        rows: torch.Tensor,
+        dtype: torch.dtype=torch.float16):
     return crow_col_to_dense(ccol, rows, dtype).permute(0, 2, 1).contiguous()
 
 
 def _get_sparse_attn_mask_homo_head(
-    q_len,
-    max_seqlen,
-    dtype,
-    device,
-    block_size=128,
-    local_blocks=4,
-    vert_stride=4,
-    return_dense=False,
+    q_len: int,
+    max_seqlen: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    block_size: int = 128,
+    local_blocks: int = 4,
+    vert_stride: int = 4,
+    return_dense: bool = False,
 ):
     """
     :return: a tuple of 3:
@@ -96,7 +97,7 @@ def _get_sparse_attn_mask_homo_head(
                                 | mask_vert_strided)).to(device).to(dtype))
         num_blocks_q = triton.cdiv(q_len, block_size)
         block_mask_dense_output = (
-            block_mask_dense[-num_blocks_q:].contiguous().to_sparse_csr())
+            dense_to_crow_col(block_mask_dense[-num_blocks_q:].contiguous()))
     if return_dense:
         mask_dense = torch.kron(
             block_mask_dense,
@@ -106,31 +107,29 @@ def _get_sparse_attn_mask_homo_head(
             max_seqlen, max_seqlen)).type_as(mask_dense)[-q_len:]
         mask_dense = mask_dense[-q_len:, :max_seqlen] * causal_mask
         return (
-            (
-                block_mask_dense_output.crow_indices(),
-                block_mask_dense_output.col_indices(),
-            ),
+            block_mask_dense_output,
             block_mask_dense,
             mask_dense,
         )
     else:
         return (
-            (
-                block_mask_dense_output.crow_indices(),
-                block_mask_dense_output.col_indices(),
-            ),
+            block_mask_dense_output,
             block_mask_dense,
             None,
         )
 
 
-def binary_mask_to_bias(mask_dense):
+def binary_mask_to_bias(mask_dense: torch.Tensor):
     mask_dense = 1 - mask_dense
     mask_dense.masked_fill_(mask_dense.bool(), -torch.inf)
     return mask_dense
 
 
-def get_head_sliding_step(n_heads, vert_stride, homo_head=False):
+def get_head_sliding_step(
+        n_heads: int,
+        vert_stride:int,
+        homo_head: bool = False
+        ):
     if homo_head:
         return 0
     return max(1, int(vert_stride / n_heads))
@@ -138,17 +137,17 @@ def get_head_sliding_step(n_heads, vert_stride, homo_head=False):
 
 @lru_cache
 def get_sparse_attn_mask(
-    n_heads,
-    q_len,
-    max_seqlen,
-    dtype,
-    device,
-    block_size=128,
-    local_blocks=4,
-    vert_stride=4,
-    homo_head=True,
-    return_dense=False,
-    dense_mask_type="binary",
+    n_heads: int,
+    q_len: int,
+    max_seqlen: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    block_size: int = 64,
+    local_blocks: int = 4,
+    vert_stride: int = 4,
+    homo_head: bool = True,
+    return_dense: bool = False,
+    dense_mask_type: str = "binary",
 ):
     """
     :param dense_mask_type: "binary" (0 for skip token, 1 for others)
