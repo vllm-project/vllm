@@ -45,11 +45,11 @@ def paged_attention_v1(
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
-    tp_rank: int,
-    blocksparse_local_blocks: int,
-    blocksparse_vert_stride: int,
-    blocksparse_block_size: int,
-    blocksparse_head_sliding_step: int,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
 ) -> None:
     vllm_ops.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
@@ -75,11 +75,11 @@ def paged_attention_v2(
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
-    tp_rank: int,
-    blocksparse_local_blocks: int,
-    blocksparse_vert_stride: int,
-    blocksparse_block_size: int,
-    blocksparse_head_sliding_step: int,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
 ) -> None:
     vllm_ops.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
