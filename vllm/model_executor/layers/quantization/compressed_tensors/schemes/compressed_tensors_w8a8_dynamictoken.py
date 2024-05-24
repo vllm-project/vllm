@@ -13,9 +13,6 @@ __all__ = ["CompressedTensorsW8A8DynamicToken"]
 
 class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
 
-    def __init__(self, fake_quant: bool):
-        self.fake_quant = fake_quant
-
     def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
         if isinstance(shard_id, int):
             return shard_id
@@ -55,12 +52,10 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
                                              dtype=torch.float32),
                                  requires_grad=False)
 
-        if not self.fake_quant:
-            params_dtype = torch.int8
         weight = Parameter(torch.empty(sum(output_partition_sizes),
                                        input_size_per_partition,
                                        device="cuda",
-                                       dtype=params_dtype),
+                                       dtype=torch.int8),
                            requires_grad=False)
 
         layer.register_parameter("weight", weight)
@@ -111,15 +106,5 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
             cutlass_gemm_dq)
 
         x_q, input_scales = self._quantize_activation(x)
-        if self.fake_quant:
-            logical_widths = weight.logical_widths
-            w_scales = [
-                weight_scale[sum(logical_widths[:i])].item()
-                for i in range(len(logical_widths))
-            ]
-            w_scales = torch.FloatTensor(w_scales, device=torch.device("cpu"))
-            w_q = self._quantize_weights(weight, w_scales, logical_widths)
-            return cutlass_gemm_dq(x_q, w_q, x.dtype, weight_scale,
-                                   input_scales)
         return cutlass_gemm_dq(x_q, weight, x.dtype, weight_scale,
                                input_scales)

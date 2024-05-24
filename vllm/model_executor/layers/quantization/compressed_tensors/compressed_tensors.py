@@ -11,8 +11,8 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme,
-    CompressedTensorsW8A8DynamicToken, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsScheme, CompressedTensorsW8A8DynamicToken,
+    CompressedTensorsW8A8StaticTensor)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -113,12 +113,10 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _get_schema(self, weight_quant: BaseModel,
                     input_quant: BaseModel) -> "CompressedTensorsScheme":
         if self._is_static_tensor_w8a8(weight_quant, input_quant):
-            return CompressedTensorsW8A8StaticTensor(
-                fake_quant=self.fake_quant)
+            return CompressedTensorsW8A8StaticTensor()
 
         elif self._is_dynamic_token_w8a8(weight_quant, input_quant):
-            return CompressedTensorsW8A8DynamicToken(
-                fake_quant=self.fake_quant)
+            return CompressedTensorsW8A8DynamicToken()
 
         raise NotImplementedError("Scheme not supported.")
 
@@ -127,7 +125,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         # TODO: update/map layer_name for llama models before
         # using find_first_name_or_class_match?
         layer_type_name = find_first_name_or_class_match(
-            name=layer_name,
+            name="",
             module=layer,
             targets=self.layer_quant_details.keys(),
             check_contains=True)

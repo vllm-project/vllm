@@ -108,36 +108,12 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
-<<<<<<< HEAD
-=======
-        # Lazy import so we don't fail on cutlass imports on non-CUDA
-        # machines.
-        from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
-            cutlass_gemm_dq)
-
->>>>>>> d8155e1e (fix shape for cutlass issues)
         weight = layer.weight
         weight_scale = layer.weight_scale
         act_scale = layer.input_scale
 
         # Input quantize
-<<<<<<< HEAD
         x_q = custom_ops.static_scaled_int8_quant(x, act_scale[0].item())
 
         return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), act_scale,
                                                weight_scale, x.dtype)
-=======
-        x_q = self._quantize_activation(x, act_scale[0].item())
-
-        if self.fake_quant:
-            logical_widths = weight.logical_widths
-            w_scales = [
-                weight_scale[sum(logical_widths[:i])].item()
-                for i in range(len(logical_widths))
-            ]
-            w_scales = torch.FloatTensor(w_scales, device=torch.device("cpu"))
-            w_q = self._quantize_weights(weight, w_scales, logical_widths)
-            # GEMM and dq
-            return cutlass_gemm_dq(x_q, w_q, x.dtype, weight_scale, act_scale)
-        return cutlass_gemm_dq(x_q, weight, x.dtype, weight_scale, act_scale)
->>>>>>> d8155e1e (fix shape for cutlass issues)
