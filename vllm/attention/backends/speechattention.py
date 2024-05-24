@@ -67,4 +67,25 @@ class FastSpeech2ConformerAttention(nn.Module):
         output, _ = self.attention(query=x, key=x, value=x, pos_emb=pos_emb)
         return output
 
+import torch
+
+# Example usage of the FastSpeech2ConformerAttention class
+n_head = 8  # Number of attention heads
+n_feat = 512  # Feature dimension
+dropout_rate = 0.1  # Dropout rate
+
+# Initialize the FastSpeech2ConformerAttention layer
+attention_layer = FastSpeech2ConformerAttention(n_head, n_feat, dropout_rate)
+
+# Create some dummy input data
+batch_size = 4  # Number of sequences in a batch
+sequence_length = 20  # Length of each sequence
+input_tensor = torch.rand(batch_size, sequence_length, n_feat)  # Input tensor
+pos_emb = torch.rand(sequence_length, n_feat)  # Positional embeddings
+
+# Forward pass through the attention layer
+output = attention_layer(input_tensor, pos_emb)
+
+print(output.shape)  # Should print torch.Size([4, 20, 512])
+
 # Example usage
