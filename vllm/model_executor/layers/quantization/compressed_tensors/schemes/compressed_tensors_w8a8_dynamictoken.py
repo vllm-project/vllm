@@ -3,7 +3,7 @@ from typing import Callable, List, Tuple, Union
 import torch
 from torch.nn import Parameter
 
-from vllm._C import ops
+from vllm import _custom_ops as custom_ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.utils import set_weight_attrs
@@ -39,16 +39,23 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
                        params_dtype: torch.dtype, weight_loader: Callable,
                        **kwargs):
 
+        # When the scales have a single value, it is required that they be
+        # on the CPU for performance and CUDA Graphs compatibility. Please
+        # refer to the comment in
+        # CompressedTensorsW8A8StaticTensor::create_weights for further
+        # information.
         is_tensor_partitioned = len(output_partition_sizes) != 1
-        dim = sum(output_partition_sizes) if is_tensor_partitioned else 1
+        weight_scale_dim = sum(
+            output_partition_sizes) if is_tensor_partitioned else 1
+        weight_scale_device = "cpu" if weight_scale_dim == 1 else "cuda"
 
         weight_zero_point = Parameter(torch.empty(1,
                                                   device="cuda",
                                                   dtype=torch.int8),
                                       requires_grad=False)
 
-        weight_scale = Parameter(torch.empty(dim,
-                                             device="cuda",
+        weight_scale = Parameter(torch.empty(weight_scale_dim,
+                                             device=weight_scale_device,
                                              dtype=torch.float32),
                                  requires_grad=False)
 
@@ -74,37 +81,10 @@ class CompressedTensorsW8A8DynamicToken(CompressedTensorsScheme):
         layer.register_parameter("weight_zero_point", weight_zero_point)
         set_weight_attrs(weight_zero_point, {"weight_loader": weight_loader})
 
-    def _quantize_weights(self,
-                          x: torch.Tensor,
-                          scales: torch.Tensor,
-                          logical_widths: List[int],
-                          split_dim: int = 0) -> torch.Tensor:
-
-        x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-        x_q_split = x_q.split(logical_widths, dim=split_dim)
-        x_split = x.split(logical_widths, dim=split_dim)
-
-        for q, dq, scale in zip(x_q_split, x_split, scales):
-            ops.quant_per_tensor(q, dq, scale.item())
-
-        return x_q
-
-    # Determine per token input scales on the fly
-    def _quantize_activation(self, x: torch.Tensor):
-        x_q = torch.empty_like(x, dtype=torch.int8)
-        input_scales = torch.empty((x.numel() // x.shape[-1], 1),
-                                   dtype=x.dtype,
-                                   device=x.device)
-        ops.dynamic_scaled_int8_quant(x_q, x, input_scales)
-        return x_q, input_scales
-
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor):
         weight = layer.weight
         weight_scale = layer.weight_scale
 
-        from vllm.model_executor.layers.quantization.compressed_tensors.cutlass_gemm import (  # noqa: E501
-            cutlass_gemm_dq)
-
-        x_q, input_scales = self._quantize_activation(x)
-        return cutlass_gemm_dq(x_q, weight, x.dtype, weight_scale,
-                               input_scales)
+        x_q, input_scales = custom_ops.scaled_int8_quant(x)
+        return custom_ops.cutlass_scaled_mm_dq(x_q, weight.t(), input_scales,
+                                               weight_scale, x.dtype)

@@ -252,22 +252,31 @@ def scaled_fp8_quant(
 
 
 # int8
-def static_scaled_int8_quant(input: torch.Tensor,
-                             scale: float) -> torch.Tensor:
+def scaled_int8_quant(input: torch.Tensor,
+                      scale: Optional[float] = None
+) -> Tuple[torch.Tensor, torch.Tensor | float] :
     """
-    Quantize the input tensor to int8 and return the quantized tensor.
+    Quantize the input tensor to int8 and return the quantized tensor and scale.
 
     Args:
         input: The input tensor to be quantized to int8.
-        scale: Scaling factor for the int8 quantization.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
 
     Returns:
-        torch.Tensor: Output tensor in int8.
+      Tuple[Torch.Tensor, Torch.Tensor | float] : Output int8 tensor and scales.
     """
     q = torch.empty_like(input, dtype=torch.int8)
-    vllm_ops.static_scaled_int8_quant(q, input, scale)
-    return q
+    if scale is not None:
+        # Static-per-tensor quantization.
+        vllm_ops.static_scaled_int8_quant(q, input, scale)
+        return q, scale
 
+    # Dynamic-per-token quantization.
+    input_scales = torch.empty((input.numel() // input.shape[-1], 1),
+                               dtype=torch.float32)
+    vllm_ops.dynamic_scaled_int8_quant(q, input, input_scales)
+    return q, input_scales
 
 # moe
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
