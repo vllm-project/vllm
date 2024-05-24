@@ -65,7 +65,7 @@ message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 #
 
 #
-# _C extension
+# _C_cpu extension
 #
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
@@ -76,7 +76,7 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pybind.cpp")
 
 define_gpu_extension_target(
-    _C
+    _C_cpu
     DESTINATION vllm
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
@@ -86,5 +86,5 @@ define_gpu_extension_target(
 
 add_custom_target(default)
 message(STATUS "Enabling C extension.")
-add_dependencies(default _C)
+add_dependencies(default _C_cpu)
 

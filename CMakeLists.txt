@@ -89,7 +89,6 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND
     else()
         message(FATAL_ERROR "Unsupported vLLM target device: ${VLLM_TARGET_DEVICE}")
     endif()
-    return()
 endif()
 
 #

@@ -384,6 +384,7 @@ ext_modules = []
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm._moe_cpu__C"))
 
 if not _is_neuron():
     ext_modules.append(CMakeExtension(name="vllm._C"))
