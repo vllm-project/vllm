@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          open_stream,
                                                          serialize_vllm_model)
 
-from ..utils import ServerRunner
+from ..utils import RemoteOpenAIServer
 
 # yapf conflicts with isort for this docstring
 
@@ -208,7 +208,7 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
         json.dumps(model_loader_extra_config),
     ]
 
-    server = ServerRunner(openai_args)
+    server = RemoteOpenAIServer(openai_args)
     print("Server ready.")
 
     client = server.get_client()
