@@ -192,7 +192,7 @@ class DefaultModelLoader(BaseModelLoader):
         if use_safetensors:
             # For models like Mistral-7B-Instruct-v0.3
             # there are both sharded safetensors files and a consolidated
-            # safetensors file. Using both in the weight_loader breaks.
+            # safetensors file. Using both breaks.
             # Here, we download the `model.safetensors.index.json` and filter
             # any safetensors files not found in the index.
             if not is_local:
