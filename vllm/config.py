@@ -131,7 +131,10 @@ class ModelConfig:
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(
-            self.hf_text_config, self.disable_sliding_window, max_model_len)
+            hf_config=self.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=self.disable_sliding_window
+            sliding_window_len=self.get_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         if not self.skip_tokenizer_init:
@@ -1144,8 +1147,9 @@ def _get_and_verify_dtype(
 
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
-    disable_sliding_window: bool,
     max_model_len: Optional[int],
+    disable_sliding_window: bool,
+    sliding_window_len: Optional[int],
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1176,11 +1180,10 @@ def _get_and_verify_max_len(
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
-    max_len = self.get_hf_config_sliding_window()
-    if disable_sliding_window and max_len is not None:
+    if disable_sliding_window and sliding_window_len is not None:
         max_len_key = "sliding_window" \
-            if max_len < derived_max_model_len else max_len_key
-        derived_max_model_len = min(derived_max_model_len, max_len)
+            if sliding_window_len < derived_max_model_len else max_len_key
+        derived_max_model_len = min(derived_max_model_len, sliding_window_len)
 
     # If none of the keys were found in the config, use a default and
     # log a warning.
