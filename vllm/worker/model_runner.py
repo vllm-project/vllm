@@ -353,7 +353,8 @@ class ModelRunner:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
                         if curr_sliding_window_blocks is not None:
-                            block_table = block_table[-curr_sliding_window_blocks:]
+                            block_table = block_table[
+                                -curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
                             paged_kv_indptr.append(paged_kv_indptr[-1] +

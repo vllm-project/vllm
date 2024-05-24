@@ -2,9 +2,10 @@ import random
 from typing import List
 
 import pytest
-from .conftest import get_text_from_llm_generator
 
 from vllm import LLM, SamplingParams
+
+from .conftest import get_text_from_llm_generator
 
 # relatively small model with 4k sliding window
 MODEL = "bigcode/starcoder2-3b"
