@@ -1,17 +1,23 @@
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Tuple, TypeVar, Union
 
 from pydantic import Field
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from vllm.entrypoints.openai.protocol import (ChatCompletionLogProb,
+                                              ChatCompletionLogProbs,
+                                              ChatCompletionRequest,
+                                              ChatCompletionTopLogprob,
+                                              CompletionLogProbs,
                                               CompletionRequest,
                                               EmbeddingRequest, ErrorResponse,
-                                              LogProbs, ModelCard, ModelList,
+                                              ModelCard, ModelList,
                                               ModelPermission)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -19,6 +25,8 @@ from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -75,49 +83,104 @@ class OpenAIServing:
         model_cards.extend(lora_cards)
         return ModelList(data=model_cards)
 
-    def _create_logprobs(
+    def _assert_not_none(self, v: Optional[T]) -> T:
+        assert v is not None
+        return v
+
+    def _create_completion_logprobs(
         self,
-        token_ids: List[int],
-        top_logprobs: List[Optional[Dict[int, Logprob]]],
-        num_output_top_logprobs: Optional[int] = None,
+        token_ids: GenericSequence[int],
+        top_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]],
+        num_output_top_logprobs: int,
         initial_text_offset: int = 0,
-    ) -> LogProbs:
-        """Create OpenAI-style logprobs."""
-        logprobs = LogProbs()
+    ) -> CompletionLogProbs:
+        """Create logprobs for OpenAI Completion API."""
+        if top_logprobs is None:
+            top_logprobs = []
+
+        _assert_not_none = self._assert_not_none
+
+        out_text_offset: List[int] = []
+        out_token_logprobs: List[Optional[float]] = []
+        out_tokens: List[str] = []
+        out_top_logprobs: List[Optional[Dict[str, float]]] = []
+
         last_token_len = 0
-        if num_output_top_logprobs:
-            logprobs.top_logprobs = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = self.tokenizer.decode(token_id)
-                logprobs.tokens.append(token)
-                logprobs.token_logprobs.append(None)
-                assert logprobs.top_logprobs is not None
-                logprobs.top_logprobs.append(None)
+                out_tokens.append(token)
+                out_token_logprobs.append(None)
+                out_top_logprobs.append(None)
             else:
                 token_logprob = step_top_logprobs[token_id].logprob
+                assert len(step_top_logprobs) == num_output_top_logprobs, \
+                    "Failed to set SamplingParams.logprob"
+
                 token = step_top_logprobs[token_id].decoded_token
-                logprobs.tokens.append(token)
-                logprobs.token_logprobs.append(token_logprob)
+                assert token is not None
 
-                if num_output_top_logprobs:
-                    assert logprobs.top_logprobs is not None
-                    logprobs.top_logprobs.append({
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        p.decoded_token: max(p.logprob, -9999.0)
-                        for i, p in step_top_logprobs.items()
-                    } if step_top_logprobs else None)
+                out_tokens.append(token)
+                out_token_logprobs.append(token_logprob)
+                out_top_logprobs.append({
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    _assert_not_none(p.decoded_token): max(p.logprob, -9999.0)
+                    for p in step_top_logprobs.values()
+                })
 
-            if len(logprobs.text_offset) == 0:
-                logprobs.text_offset.append(initial_text_offset)
+            if len(out_text_offset) == 0:
+                out_text_offset.append(initial_text_offset)
             else:
-                logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                            last_token_len)
+                out_text_offset.append(out_text_offset[-1] + last_token_len)
+
             last_token_len = len(token)
-        return logprobs
+
+        return CompletionLogProbs(
+            text_offset=out_text_offset,
+            token_logprobs=out_token_logprobs,
+            tokens=out_tokens,
+            top_logprobs=out_top_logprobs,
+        )
+
+    def _token_to_int_array(self, token: str) -> List[int]:
+        return list(token.encode("utf-8"))
+
+    def _create_chat_logprobs(
+        self,
+        token_ids: GenericSequence[int],
+        top_logprobs: Optional[GenericSequence[Optional[Dict[int, Logprob]]]],
+        num_output_top_logprobs: int,
+        initial_text_offset: int = 0,
+    ) -> ChatCompletionLogProbs:
+        """Create logprobs for OpenAI Chat Completion API."""
+        completion_output = self._create_completion_logprobs(
+            token_ids,
+            top_logprobs,
+            num_output_top_logprobs,
+            initial_text_offset=initial_text_offset)
+
+        _token_to_int_array = self._token_to_int_array
+
+        return ChatCompletionLogProbs(content=[
+            ChatCompletionLogProb(
+                token=token,
+                bytes=_token_to_int_array(token),
+                logprob=logprob,
+                top_logprobs=[] if top_logprobs is None else [
+                    ChatCompletionTopLogprob(
+                        token=top_token,
+                        bytes=_token_to_int_array(token),
+                        logprob=top_logprob,
+                    ) for top_token, top_logprob in top_logprobs.items()
+                ]) for logprob, token, top_logprobs in zip(
+                    completion_output.token_logprobs,
+                    completion_output.tokens,
+                    completion_output.top_logprobs,
+                )
+        ])
 
     def create_error_response(
             self,

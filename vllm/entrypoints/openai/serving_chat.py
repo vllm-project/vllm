@@ -277,7 +277,7 @@ class OpenAIServingChat(OpenAIServing):
                         previous_num_tokens[i]:] if output.logprobs else None
 
                     if request.logprobs:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_chat_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
                             num_output_top_logprobs=request.logprobs,
@@ -364,7 +364,7 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs = output.logprobs
 
             if request.logprobs:
-                logprobs = self._create_logprobs(
+                logprobs = self._create_chat_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
                     num_output_top_logprobs=request.logprobs,

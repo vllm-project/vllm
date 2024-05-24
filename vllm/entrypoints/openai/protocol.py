@@ -416,17 +416,18 @@ class EmbeddingRequest(BaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
-class LogProbs(OpenAIBaseModel):
+class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
-    top_logprobs: Optional[List[Optional[Dict[str, float]]]] = None
+    top_logprobs: List[Optional[Dict[str,
+                                     float]]] = Field(default_factory=list)
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[CompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = Field(
         default=None,
@@ -449,7 +450,7 @@ class CompletionResponse(OpenAIBaseModel):
 class CompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[CompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = Field(
         default=None,
@@ -489,10 +490,24 @@ class ChatMessage(OpenAIBaseModel):
     content: str
 
 
+class ChatCompletionTopLogprob(OpenAIBaseModel):
+    token: str
+    bytes: Optional[List[int]] = None
+    logprob: Optional[float]
+
+
+class ChatCompletionLogProb(ChatCompletionTopLogprob):
+    top_logprobs: List[ChatCompletionTopLogprob] = Field(default_factory=list)
+
+
+class ChatCompletionLogProbs(OpenAIBaseModel):
+    content: Optional[List[ChatCompletionLogProb]] = None
+
+
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 
@@ -514,7 +529,7 @@ class DeltaMessage(OpenAIBaseModel):
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
 

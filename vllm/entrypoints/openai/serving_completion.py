@@ -6,12 +6,13 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
+from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
+                                              CompletionRequest,
                                               CompletionResponse,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              LogProbs, UsageInfo)
+                                              UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -25,7 +26,7 @@ logger = init_logger(__name__)
 TypeTokenIDs = List[int]
 TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
+    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
 
 
 def parse_prompt_format(prompt) -> Tuple[bool, list]:
@@ -230,7 +231,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
                             num_output_top_logprobs=request.logprobs,
@@ -312,7 +313,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert top_logprobs is not None, (
                         "top_logprobs must be provided when logprobs "
                         "is requested")
-                    logprobs = self._create_logprobs(
+                    logprobs = self._create_completion_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,
                         num_output_top_logprobs=request.logprobs,
