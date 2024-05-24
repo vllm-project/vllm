@@ -15,7 +15,7 @@ from openai import BadRequestError
 
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from ..utils import VLLM_PATH, ServerRunner
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
@@ -88,7 +88,7 @@ def ray_ctx():
 
 @pytest.fixture(scope="module")
 def server(zephyr_lora_files, ray_ctx):
-    return ServerRunner([
+    return RemoteOpenAIServer([
         "--model",
         MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
@@ -117,7 +117,7 @@ def server(zephyr_lora_files, ray_ctx):
 
 @pytest.fixture(scope="module")
 def embedding_server(ray_ctx):
-    return ServerRunner([
+    return RemoteOpenAIServer([
         "--model",
         EMBEDDING_MODEL_NAME,
         # use half precision for speed and memory savings in CI environment
