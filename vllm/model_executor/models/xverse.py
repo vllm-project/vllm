@@ -45,6 +45,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
+from .lora_base import LoRASupportedModelBase
+
 
 class XverseMLP(nn.Module):
 
@@ -303,10 +305,10 @@ class XverseForCausalLM(LoRASupportedModelBase):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        lora_config=None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
-        super().__init__()
-        self.config = config
+        super().__init__(config, lora_config)
+
         self.quant_config = quant_config
         self.model = XverseModel(config, cache_config, quant_config)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)

@@ -65,7 +65,7 @@ from .lora_base import LoRASupportedModelBase
 class PhiAttention(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
@@ -133,7 +133,7 @@ class PhiAttention(nn.Module):
 class PhiMLP(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
@@ -162,7 +162,7 @@ class PhiMLP(nn.Module):
 class PhiLayer(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
@@ -194,7 +194,7 @@ class PhiLayer(nn.Module):
 class PhiModel(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
