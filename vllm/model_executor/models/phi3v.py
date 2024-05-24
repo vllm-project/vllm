@@ -188,8 +188,7 @@ class Phi3ImageEmbedding(nn.Module):
             with torch.no_grad():
                 g_values = abs(input_ids[positions[:, 0], positions[:, 1]])
 
-            if self.use_hd_transform and img_sizes is not None and len(
-                    img_sizes):
+            if self.use_hd_transform and img_sizes:
                 hd_transform = True
                 # img_embeds: (num_images, max_num_crops, 3, H, W)
                 # img_sizes: (num_images, 2).view(1, -1)
@@ -220,10 +219,10 @@ class Phi3ImageEmbedding(nn.Module):
                     global_img_feature = img_features[_bs, :1]
 
                     # 1 x 12 x 12 x 4096
-                    glb_img = global_img_feature.reshape(1, H, H, C).reshape(
-                        1, H // 2, 2, H // 2, 2,
-                        C).permute(0, 1, 3, 2, 4,
-                                   5).reshape(1, H // 2, H // 2, 4 * C)
+                    glb_img = global_img_feature \
+                        .reshape(1, H // 2, 2, H // 2, 2,C) \
+                        .permute(0, 1, 3, 2, 4, 5) \
+                        .reshape(1, H // 2, H // 2, 4 * C)
                     temp_glb_GN = self.sub_GN.repeat(1, H // 2, 1, 1)
 
                     # 1 x 156 x 4096
@@ -236,11 +235,11 @@ class Phi3ImageEmbedding(nn.Module):
                     # get rid of padding sub_img
                     sub_img = sub_img[:B_]
 
-                    sub_img = sub_img.reshape(B_, H, H, C).reshape(
-                        B_, H // 2, 2, H // 2, 2,
-                        C).permute(0, 1, 3, 2, 4, 5).reshape(B_, -1, 4 * C)
-                    sub_img = sub_img.reshape(1, h, w, 12, 12, -1).permute(
-                        0, 1, 3, 2, 4, 5).reshape(1, h * 12, w * 12, 4 * C)
+                    sub_img = sub_img.reshape(B_, H // 2, 2, H // 2, 2, C) \
+                        .permute(0, 1, 3, 2, 4, 5).reshape(B_, -1, 4 * C)
+                    sub_img = sub_img.reshape(1, h, w, 12, 12, -1) \
+                        .permute(0, 1, 3, 2, 4, 5) \
+                        .reshape(1, h * 12, w * 12, 4 * C)
                     temp_sub_GN = self.sub_GN.repeat(1, h * 12, 1, 1)
                     sub_img = torch.cat([sub_img, temp_sub_GN],
                                         dim=2).reshape(1, -1, 4 * C)
@@ -288,27 +287,23 @@ class Phi3ImageEmbedding(nn.Module):
 
         hidden_states = self.wte(input_ids)
 
-        if select:
-            if hd_transform:
-                idx = 0
-                for i, cnt in enumerate(num_img_tokens):
-                    hidden_states[positions[idx, 0],
-                                  positions[idx, 1]:positions[idx, 1] +
-                                  cnt] = (img_set_tensor[i].to(
-                                      hidden_states.dtype).to(
-                                          hidden_states.device))
-                    idx += cnt
-            else:
-                idx = 0
-                for i, g in enumerate(selected_g_values):
-                    cnt = self.num_img_tokens
-                    hidden_states[positions[idx, 0],
-                                  positions[idx, 1]:positions[idx, 1] +
-                                  cnt] = (
-                                      img_set_tensor[i * cnt:(i + 1) * cnt].to(
-                                          hidden_states.dtype).to(
-                                              hidden_states.device))
-                    idx += cnt
+        if select and hd_transform:
+            idx = 0
+            for i, cnt in enumerate(num_img_tokens):
+                hidden_states[positions[idx, 0],
+                              positions[idx, 1]:positions[idx, 1] +
+                              cnt] = (img_set_tensor[i].to(
+                                  hidden_states.device, hidden_states.dtype))
+                idx += cnt
+        elif select:
+            idx = 0
+            for i, g in enumerate(selected_g_values):
+                cnt = self.num_img_tokens
+                hidden_states[positions[idx, 0],
+                              positions[idx, 1]:positions[idx, 1] +
+                              cnt] = (img_set_tensor[i * cnt:(i + 1) * cnt].to(
+                                  hidden_states.device, hidden_states.dtype))
+                idx += cnt
 
         return hidden_states.squeeze(0)
 
