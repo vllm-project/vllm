@@ -1,6 +1,7 @@
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
-from .sequence import Logprob, Sequence
+if TYPE_CHECKING:
+    from .sequence import Logprob, Sequence
 
 
 class SequenceController:
@@ -10,7 +11,7 @@ class SequenceController:
     steps. It is to be used together with LogitsProcessor.
     """
 
-    def scheduled(self, seq: Sequence):
+    def scheduled(self, seq: 'Sequence'):
         """
         Called whenever the current sequence is scheduled to be run
         in the next step.
@@ -24,8 +25,8 @@ class SequenceController:
         """
         pass
 
-    def sampled(self, seq: Sequence, token_id: int,
-                logprobs: Dict[int, Logprob]) -> Tuple[int, List[int], bool]:
+    def sampled(self, seq: 'Sequence', token_id: int,
+                logprobs: Dict[int, 'Logprob']) -> Tuple[int, List[int], bool]:
         """
         Informs the controller a given token has been sampled.
         Returns the number of tokens to backtrack, the tokens to append,
@@ -35,7 +36,7 @@ class SequenceController:
             return 0, [], True
         return 0, [token_id], False
 
-    def free(self, seq: Sequence):
+    def free(self, seq: 'Sequence'):
         """
         Called when the sequence is stopped, and deallocated.
         .scheduled() will not be called again for this sequence.
