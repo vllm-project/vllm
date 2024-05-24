@@ -166,7 +166,6 @@ class MixtralAttention(nn.Module):
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
         quant_config: Optional[QuantizationConfig] = None,
-        sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
     ) -> None:
         super().__init__()

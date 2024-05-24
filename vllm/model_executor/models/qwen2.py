@@ -86,10 +86,8 @@ class Qwen2Attention(nn.Module):
                  num_kv_heads: int,
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
-                 use_sliding_window: bool = False,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None,
                  rope_scaling: Optional[Tuple] = None) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -112,7 +110,6 @@ class Qwen2Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.sliding_window = sliding_window if use_sliding_window else None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -140,7 +137,6 @@ class Qwen2Attention(nn.Module):
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
-                              sliding_window=self.sliding_window,
                               cache_config=cache_config,
                               quant_config=quant_config)
 
@@ -173,7 +169,7 @@ class Qwen2DecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        use_sliding_window = (config.use_sliding_window
+        use_sliding_window = (cache_config.sliding_window is not None
                               and layer_idx < config.max_window_layers)
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
