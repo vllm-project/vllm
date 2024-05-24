@@ -223,6 +223,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         loaded_weight = loaded_weight[self.org_vocab_start_index:self.
                                       org_vocab_end_index]
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+        param[loaded_weight.shape[0]:].data.fill_(0)
 
     def forward(self, input_):
         if self.tp_size > 1:
