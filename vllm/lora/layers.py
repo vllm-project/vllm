@@ -215,19 +215,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             lora_config: LoRAConfig,
             model_config: Optional[PretrainedConfig] = None) -> None:
 
-        lora_vocab_start_idx = self.base_layer.org_vocab_size
-        weights_idx = None
-        if self.base_layer.vocab_end_index > lora_vocab_start_idx:
+        if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
-            weights_idx = max(
-                lora_vocab_start_idx - self.base_layer.vocab_start_index, 0)
-            self.embeddings_slice = (self.base_layer.vocab_start_index -
-                                     self.base_layer.org_vocab_size +
-                                     weights_idx,
-                                     self.base_layer.vocab_end_index -
-                                     self.base_layer.org_vocab_size)
-            self.embeddings_weights = self.base_layer.weight.data[weights_idx:]
-            self.embeddings_weights.fill_(0)
+            self.embeddings_weights = self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:self.base_layer.num_org_embeddings_per_partition+self.base_layer.num_added_embeddings_per_partition]
+            self.embeddings_slice = (self.base_layer.added_vocab_start_index, self.base_layer.added_vocab_end_index)
+            self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:].fill_(0)
         else:
             self.embeddings_slice = None
             self.embeddings_weights = None
@@ -1032,12 +1024,16 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         hidden_size: int,
         dtype: torch.dtype,
         device: torch.device,
+        shared_to_full_mapping: List[int]
     ) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.hidden_size = hidden_size
         self.dtype = dtype
         self.device = device
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.shared_to_full_mapping = shared_to_full_mapping
 
     @property
     def logits_as_input(self):
@@ -1098,6 +1094,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
+        self.shared_to_full_mapping_gpu = torch.tensor(self.shared_to_full_mapping, device=self.device, dtype=torch.long)
         # Lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
@@ -1153,6 +1150,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         logits = tensor_model_parallel_gather(logits)
         if logits is None:
             return None
+
+        if self.tp_size > 1 and self.org_vocab_size != self.vocab_size:
+            logits = logits[:, self.shared_to_full_mapping_gpu]
 
         lora_logits = torch.empty(
             self.embeddings_tensors.shape[0] + 1,

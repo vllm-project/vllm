@@ -1,4 +1,4 @@
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -19,18 +19,26 @@ def pad_vocab_size(vocab_size: int,
 
 
 def vocab_range_from_per_partition_vocab_size(per_partition_vocab_size: int,
-                                              rank: int) -> Sequence[int]:
+                                              rank: int, offset: int=0) -> Sequence[int]:
     index_f = rank * per_partition_vocab_size
     index_l = index_f + per_partition_vocab_size
-    return index_f, index_l
+    return index_f+offset, index_l+offset
 
 
 def vocab_range_from_global_vocab_size(global_vocab_size: int, rank: int,
-                                       world_size: int) -> Sequence[int]:
+                                       world_size: int , offset: int=0) -> Sequence[int]:
     per_partition_vocab_size = divide(global_vocab_size, world_size)
     return vocab_range_from_per_partition_vocab_size(per_partition_vocab_size,
-                                                     rank)
+                                                     rank, offset=offset)
 
+@torch.jit.script
+def _get_masked_input_and_mask(input: torch.Tensor, org_vocab_start_index: int, org_vocab_end_index: int, added_vocab_start_index:int, added_vocab_end_index:int) -> Tuple[torch.Tensor, torch.Tensor]:
+    org_vocab_mask = (input >= org_vocab_start_index) & (input < org_vocab_end_index)
+    added_vocab_mask = (input >= added_vocab_start_index) & (input < added_vocab_end_index)
+    combined_offset = (org_vocab_start_index * org_vocab_mask) + (added_vocab_start_index * added_vocab_mask)
+    vocab_mask = org_vocab_mask | added_vocab_mask
+    input = vocab_mask * (input - combined_offset)
+    return input, vocab_mask
 
 class VocabParallelEmbedding(torch.nn.Module):
     """Embedding parallelized in the vocabulary dimension.
@@ -55,21 +63,26 @@ class VocabParallelEmbedding(torch.nn.Module):
         super().__init__()
 
         # Keep the input dimensions.
+        tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.num_embeddings = num_embeddings
+        self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
+        self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size,
+                                                    self.padding_size)
         self.num_embeddings_padded = pad_vocab_size(num_embeddings,
-                                                    padding_size)
+                                                    self.padding_size)
+        self.vocab_start_index, self.vocab_end_index, self.org_vocab_start_index, self.org_vocab_end_index, self.added_vocab_start_index, self.added_vocab_end_index = self.get_indices(
+            self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, padding_size
+        )
         self.embedding_dim = embedding_dim
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
-        self.tp_size = get_tensor_model_parallel_world_size()
         # Divide the weight matrix along the vocaburaly dimension.
-        self.vocab_start_index, self.vocab_end_index = (
-            vocab_range_from_global_vocab_size(
-                self.num_embeddings_padded, get_tensor_model_parallel_rank(),
-                self.tp_size))
-        self.num_embeddings_per_partition = (self.vocab_end_index -
-                                             self.vocab_start_index)
+        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
+        self.num_embeddings_per_partition = divide(self.num_embeddings_padded, self.tp_size)
+        self.num_org_embeddings_per_partition = self.org_vocab_end_index-self.org_vocab_start_index
+        self.num_added_embeddings_per_partition = self.added_vocab_end_index-self.added_vocab_start_index
         self.weight = Parameter(
             torch.empty(self.num_embeddings_per_partition,
                         self.embedding_dim,
@@ -79,28 +92,67 @@ class VocabParallelEmbedding(torch.nn.Module):
             "weight_loader": self.weight_loader
         })
 
+    @classmethod
+    def get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int, tp_size: int, padding_size: int):
+        org_vocab_size_padded = pad_vocab_size(org_vocab_size, padding_size)
+        num_added_embeddings = vocab_size - org_vocab_size
+        org_vocab_start_index, org_vocab_end_index = (
+            vocab_range_from_global_vocab_size(
+                org_vocab_size_padded, tp_rank,
+                tp_size))
+        added_vocab_start_index, added_vocab_end_index = (
+            vocab_range_from_global_vocab_size(
+                num_added_embeddings, tp_rank,
+                tp_size, offset=org_vocab_size))
+        num_added_embeddings_in_shard = added_vocab_end_index - added_vocab_start_index
+        vocab_start_index, vocab_end_index = org_vocab_start_index, org_vocab_end_index+num_added_embeddings_in_shard
+        return vocab_start_index, vocab_end_index, org_vocab_start_index, org_vocab_end_index, added_vocab_start_index, added_vocab_end_index
+
+    def get_sharded_to_full_mapping(self):
+        base_embeddings = []
+        added_embeddings = []
+        padding = []
+        for tp_rank in range(self.tp_size):
+            vocab_start_index, vocab_end_index, org_vocab_start_index, org_vocab_end_index, added_vocab_start_index, added_vocab_end_index =  self.get_indices(
+                self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, self.padding_size
+            )
+            num_added_embeddings_in_shard = added_vocab_end_index-added_vocab_start_index
+            range_start = self.num_embeddings_per_partition * tp_rank
+            range_end = self.num_embeddings_per_partition * (tp_rank+1)
+            num_padding = (range_end-range_start) - (vocab_end_index-vocab_start_index)
+            base_embeddings.extend(
+                range(range_start, range_end-num_added_embeddings_in_shard-num_padding)
+            )
+            added_embeddings.extend(
+                range(range_end-num_added_embeddings_in_shard-num_padding, range_end-num_padding)
+            )
+            padding.extend(
+                range(range_end-num_padding, range_end)
+            )
+        ret = base_embeddings + added_embeddings + padding
+        assert len(ret) == self.num_embeddings_padded
+        return ret
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         parallel_dim = param.parallel_dim
         assert loaded_weight.shape[parallel_dim] == self.org_vocab_size
-        loaded_weight = loaded_weight[self.vocab_start_index:self.
-                                      vocab_end_index]
+        loaded_weight = loaded_weight[self.org_vocab_start_index:self.
+                                      org_vocab_end_index]
         param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
 
     def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            input_mask = ((input_ < self.vocab_start_index) |
-                          (input_ >= self.vocab_end_index))
-            # Mask the input.
-            masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            masked_input, input_mask = _get_masked_input_and_mask(
+                input_, self.org_vocab_start_index, self.org_vocab_end_index, self.added_vocab_start_index, self.added_vocab_end_index
+            )
         else:
             masked_input = input_
             # Get the embeddings.
         output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
         if self.tp_size > 1:
-            output_parallel[input_mask, :] = 0.0
+            output_parallel.mul_(input_mask.unsqueeze(1))
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
