@@ -218,7 +218,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         if self.base_layer.num_added_embeddings_per_partition > 0:
             # We can start adding lora weights
             self.embeddings_weights = self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:self.base_layer.num_org_embeddings_per_partition+self.base_layer.num_added_embeddings_per_partition]
-            self.embeddings_slice = (self.base_layer.added_vocab_start_index, self.base_layer.added_vocab_end_index)
+            self.embeddings_slice = (self.base_layer.added_vocab_start_index-self.base_layer.org_vocab_size, self.base_layer.added_vocab_end_index-self.base_layer.org_vocab_size)
             self.base_layer.weight.data[self.base_layer.num_org_embeddings_per_partition:].fill_(0)
         else:
             self.embeddings_slice = None

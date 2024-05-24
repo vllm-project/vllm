@@ -46,6 +46,25 @@ class VocabParallelEmbedding(torch.nn.Module):
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
     make sure it is divisible by the number of model parallel GPUs.
 
+    In order to support various loading methods, we ensure that LoRA-added embeddings
+    are always at the end of TP-sharded tensors. In other words, we shard base embeddings
+    and LoRA embeddings separately in the same tensor.
+    In this example, we will have the original vocab be a range from 0:1000, added vocab 1000:1016 and padding 1016:1024
+    Therefore, the tensor format looks like the following:
+    TP1, rank 0 (no sharding):
+                            |< -----------BASE---------- >| < --------LORA-------- > | < ----PADDING---> |
+    corresponding token_id: |  0  |  1  |  2  | ... | 999 | 1000 | 1001 | ... | 1015 |  -1  | ... |  -1  |
+                     index: |  0  |  1  |  2  | ... | 999 | 1000 | 1001 | ... | 1015 | 1016 | ... | 1024 |
+
+    TP2, rank 0:
+                            |< -----------BASE---------- >| < --------LORA-------- > | < ----PADDING---> |
+    corresponding token_id: |  0  |  1  |  2  | ... | 499 | 1000 | 1001 | ... | 1007 |  -1  | ... |  -1  |
+                     index: |  0  |  1  |  2  | ... | 499 | 500  | 501  | ... | 507  | 508  | ... | 512  |
+    TP2, rank 1:
+                            |< -----------BASE---------- >| < --------LORA-------- > | < ----PADDING---> |
+    corresponding token_id: | 500 | 501 | 502 | ... | 999 | 1008 | 1009 | ... | 1015 |  -1  | ... |  -1  |
+                     index: |  0  |  1  |  2  | ... | 499 | 500  | 501  | ... | 507  | 508  | ... | 512  |
+
     Args:
         num_embeddings: vocabulary size.
         embedding_dim: size of hidden state.
@@ -72,6 +91,23 @@ class VocabParallelEmbedding(torch.nn.Module):
                                                     self.padding_size)
         self.num_embeddings_padded = pad_vocab_size(num_embeddings,
                                                     self.padding_size)
+
+        # vocab_*_index -> refers to the entire vocab (orginal+lora+padding)
+        # org_*_index -> refers to base model index
+        # added_*_index -> refers to lora-added index
+        # Example:
+        # num_embeddings == 33024
+        # org_vocab_size == 32000
+        # no padding
+        # TP 2
+        # for rank 0:
+        #   vocab_start_index == 0 vocab_end_index == 16512
+        #   org_vocab_start_index == 0 org_vocab_end_index == 16000
+        #   added_vocab_start_index == 32000 added_vocab_end_index == 32512
+        # for rank 1:
+        #   vocab_start_index == 16512 vocab_end_index == 33024
+        #   org_vocab_start_index == 16000 org_vocab_end_index == 32000
+        #   added_vocab_start_index == 32512 added_vocab_end_index == 33024
         self.vocab_start_index, self.vocab_end_index, self.org_vocab_start_index, self.org_vocab_end_index, self.added_vocab_start_index, self.added_vocab_end_index = self.get_indices(
             self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, padding_size
         )
@@ -94,6 +130,13 @@ class VocabParallelEmbedding(torch.nn.Module):
 
     @classmethod
     def get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int, tp_size: int, padding_size: int):
+        """Get start and end indices for vocab parallel embedding, following the
+        layout outlined in the class docstring.
+        
+        vocab_*_index -> refers to the entire vocab (orginal+lora+padding).
+        org_*_index -> refers to base model index.
+        added_*_index -> refers to lora-added index.
+        """
         org_vocab_size_padded = pad_vocab_size(org_vocab_size, padding_size)
         num_added_embeddings = vocab_size - org_vocab_size
         org_vocab_start_index, org_vocab_end_index = (
@@ -109,11 +152,18 @@ class VocabParallelEmbedding(torch.nn.Module):
         return vocab_start_index, vocab_end_index, org_vocab_start_index, org_vocab_end_index, added_vocab_start_index, added_vocab_end_index
 
     def get_sharded_to_full_mapping(self):
+        """Get a mapping that can be used to reindex the gathered logits for sampling.
+        
+        During sampling, we gather logits from all ranks. The relationship of index->token_id
+        will follow the same format as outlined in the class docstring. However, after the gather,
+        we want to reindex the final logits tensor to map index->token_id one-to-one. This mapping
+        allows us to do that.
+        """
         base_embeddings = []
         added_embeddings = []
         padding = []
         for tp_rank in range(self.tp_size):
-            vocab_start_index, vocab_end_index, org_vocab_start_index, org_vocab_end_index, added_vocab_start_index, added_vocab_end_index =  self.get_indices(
+            vocab_start_index, vocab_end_index, _, _, added_vocab_start_index, added_vocab_end_index =  self.get_indices(
                 self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size, self.padding_size
             )
             num_added_embeddings_in_shard = added_vocab_end_index-added_vocab_start_index
