@@ -157,8 +157,10 @@ def create_random_inputs(
 
     low, high = input_range
 
-    random_inputs: Tuple[List[torch.Tensor], List[int], List[int]] = [], [], []
-    inputs, index_mapping, prompt_mapping = random_inputs
+    inputs: List[torch.Tensor] = []
+    index_mapping: List[int] = []
+    prompt_mapping: List[int] = []
+
     for _ in range(num_inputs):
         if input_type == torch.int:
             inputs.append(
