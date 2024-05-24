@@ -131,8 +131,8 @@ def test_reshape_and_cache(
     torch.set_default_device(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
-    slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long)
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long)
 
     qkv = torch.randn(num_tokens, 3, num_heads, head_size, dtype=dtype)
     _, key, value = qkv.unbind(dim=1)
@@ -224,8 +224,10 @@ def test_reshape_and_cache_flash(
 
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
-    slot_mapping = random.sample(range(num_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping, dtype=torch.long, device=device)
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping_lst,
+                                dtype=torch.long,
+                                device=device)
 
     qkv = torch.randn(num_tokens,
                       3,

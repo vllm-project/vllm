@@ -65,7 +65,7 @@ def test_scheduler_abort_seq_group():
 
     # Add multiple seq groups to scheduler.
     num_seq_group = 4
-    request_ids: Set[int] = set()
+    request_ids: Set[str] = set()
     for i in range(num_seq_group):
         _, seq_group = create_dummy_prompt(str(i), block_size)
         scheduler.add_seq_group(seq_group)

@@ -479,7 +479,7 @@ def test_sampler_mixed(seed: int, device: str):
         sampling_type = random.randint(0, 3)
         if sampling_type == 0:
             sampling_params = SamplingParams(temperature=0)
-            expected = [torch.argmax(fake_logits[i], dim=-1).item()]
+            expected = [int(torch.argmax(fake_logits[i], dim=-1).item())]
         elif sampling_type in (1, 2):
             n = random.randint(1, 10)
             sampling_params = SamplingParams(
@@ -535,15 +535,18 @@ def test_sampler_mixed(seed: int, device: str):
                 ]
                 continue
 
+            expected_tokens_item = expected_tokens[i]
+            assert expected_tokens_item is not None
+
             for n, nth_output in enumerate(sequence_output.samples):
                 if (metadata.sampling_params.temperature == 0
                         or metadata.sampling_params.seed is not None):
                     # Ensure exact matches for greedy or random with seed
-                    assert nth_output.output_token == expected_tokens[i][n]
+                    assert nth_output.output_token == expected_tokens_item[n]
                 else:
                     # For non-seeded random check that one of the high-logit
                     # tokens were chosen
-                    assert nth_output.output_token in expected_tokens[i]
+                    assert nth_output.output_token in expected_tokens_item
 
     # Test batch
     test_sampling()

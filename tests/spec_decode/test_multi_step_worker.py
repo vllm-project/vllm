@@ -240,8 +240,8 @@ def test_same_output_for_multi_step():
                                                 Logprob]]] = [[]
                                                               for _ in prompts]
 
-    multi_step_output_token_ids = [[] for _ in prompts]
-    single_step_output_token_ids = [[] for _ in prompts]
+    multi_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
+    single_step_output_token_ids: List[List[int]] = [[] for _ in prompts]
     for i, _ in enumerate(prompts):
         for multi_step, single_step in zip(multi_step_output,
                                            single_step_output):

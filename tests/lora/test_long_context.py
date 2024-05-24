@@ -212,8 +212,7 @@ def test_self_consistency(lora_llm, long_context_infos):
     permutation = np.random.default_rng(seed=42).permutation(num_loras)
 
     # Create results in random order of permutation
-    batched_prompts: List[Tuple[str, SamplingParams,
-                                Optional[LoRARequest]]] = []
+    batched_prompts = []
     for i in permutation:
         lora_id, info = list(long_context_infos.items())[i]
         context_len = info["context_length"]
