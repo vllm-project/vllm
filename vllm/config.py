@@ -37,8 +37,8 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
-            It is also used as the content for `model_name` tag in metrics
-            output when `served_model_name` is not specified.
+            It is also used as the content for `model_name` tag in metrics 
+            output when `served_model_name` is not specified. 
         tokenizer: Name or path of the huggingface tokenizer to use.
         tokenizer_mode: Tokenizer mode. "auto" will use the fast tokenizer if
             available, and "slow" will always use the slow tokenizer.
@@ -85,8 +85,8 @@ class ModelConfig:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
-            matches the model name exposed via the APIs. If multiple model
-            names provided, the first name will be used. If not specified,
+            matches the model name exposed via the APIs. If multiple model 
+            names provided, the first name will be used. If not specified, 
             the model name will be the same as `model`.
     """
 
