@@ -117,11 +117,11 @@ class OpenAIServing:
                 out_token_logprobs.append(None)
                 out_top_logprobs.append(None)
             else:
+                # There can be up to logprobs+1 elements in the response
                 token_logprob = step_top_logprobs[token_id].logprob
                 assert len(step_top_logprobs) <= num_output_top_logprobs + 1, (
-                    f"Failed to set SamplingParams.logprob. Expected at most: "
-                    f"{num_output_top_logprobs + 1}; received length: "
-                    f"{len(step_top_logprobs)}")
+                    f"Expected at most {num_output_top_logprobs + 1} logprobs, "
+                    f"but received {len(step_top_logprobs)} logprobs")
 
                 token = step_top_logprobs[token_id].decoded_token
                 assert token is not None
