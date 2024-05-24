@@ -747,6 +747,9 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
         f"Give an example JSON for an employee profile that "
         f"fits this schema: {TEST_SCHEMA}"
     }]
+
+    # non-streaming
+
     chat_completion = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
@@ -766,8 +769,8 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
             }
         })
     message = chat_completion.choices[0].message
-    assert message.content is not None
-    json1 = json.loads(message.content)
+    assert len(message.content) == 0
+    json1 = json.loads(message.tool_calls[0].function.arguments)
     jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
 
     messages.append({"role": "assistant", "content": message.content})
@@ -777,7 +780,10 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
         "content":
         "Give me another one with a different name and age"
     })
-    chat_completion = await client.chat.completions.create(
+
+    # streaming
+
+    stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
         max_tokens=1000,
@@ -794,10 +800,23 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
             "function": {
                 "name": "dummy_function_name"
             }
-        })
-    message = chat_completion.choices[0].message
-    assert message.content is not None
-    json2 = json.loads(message.content)
+        },
+        stream=True)
+
+    output = []
+    finish_reason_count = 0
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.role:
+            assert delta.role == "assistant"
+        assert delta.content == None or len(delta.content) == 0
+        if delta.tool_calls:
+            output.append(delta.tool_calls[0].function.arguments)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
+    json2 = json.loads("".join(output))
     jsonschema.validate(instance=json2, schema=TEST_SCHEMA)
     assert json1["name"] != json2["name"]
     assert json1["age"] != json2["age"]
