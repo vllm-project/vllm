@@ -288,7 +288,6 @@ class LLM:
         self._validate_and_add_requests(
             inputs=inputs,
             params=sampling_params,
-            use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
 
@@ -428,7 +427,6 @@ class LLM:
         self._validate_and_add_requests(
             inputs=inputs,
             params=pooling_params,
-            use_tqdm=use_tqdm,
             lora_request=lora_request,
         )
 
@@ -495,7 +493,6 @@ class LLM:
         inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
         params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
                       Sequence[PoolingParams]],
-        use_tqdm: bool,
         lora_request: Optional[LoRARequest],
     ) -> None:
         if isinstance(inputs, (str, dict)):
