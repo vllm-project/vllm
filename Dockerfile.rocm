@@ -47,6 +47,7 @@ FROM scratch AS export_hipblaslt_1
 ARG COMMON_WORKDIR
 COPY --from=build_hipblaslt ${COMMON_WORKDIR}/hipBLASLt/build/release/*.deb /
 FROM scratch AS export_hipblaslt_0
+FROM export_hipblaslt_${BUILD_HIPBLASLT} AS export_hipblaslt
 
 # -----------------------
 # RCCL build stages
@@ -55,19 +56,19 @@ ARG RCCL_BRANCH="eeea3b6"
 RUN git clone https://github.com/ROCm/rccl \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
-    && ./install.sh --amdgpu_targets ${PYTORCH_ROCM_ARCH} \
-    && cd build/release \
-    && make package
+    && ./install.sh -p --amdgpu_targets ${PYTORCH_ROCM_ARCH}
 FROM scratch AS export_rccl_1
 ARG COMMON_WORKDIR
 COPY --from=build_rccl ${COMMON_WORKDIR}/rccl/build/release/*.deb /
 FROM scratch AS export_rccl_0
+FROM export_rccl_${BUILD_RCCL} AS export_rccl
 
 # -----------------------
 # flash attn build stages
 FROM base AS build_flash_attn
 ARG FA_BRANCH="ae7928c"
-RUN git clone https://github.com/ROCm/flash-attention.git \
+ARG FA_REPO="https://github.com/ROCm/flash-attention.git"
+RUN git clone ${FA_REPO} \
     && cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
@@ -76,6 +77,7 @@ FROM scratch AS export_flash_attn_1
 ARG COMMON_WORKDIR
 COPY --from=build_flash_attn ${COMMON_WORKDIR}/flash-attention/dist/*.whl /
 FROM scratch AS export_flash_attn_0
+FROM export_flash_attn_${BUILD_FA} AS export_flash_attn
 
 # -----------------------
 # CuPy build stages
@@ -93,12 +95,14 @@ FROM build_cupy AS export_cupy_1
 ARG COMMON_WORKDIR
 COPY --from=build_cupy ${COMMON_WORKDIR}/cupy/dist/*.whl /
 FROM scratch AS export_cupy_0
+FROM export_cupy_${BUILD_CUPY} AS export_cupy
 
 # -----------------------
 # Triton build stages
 FROM base AS build_triton
 ARG TRITON_BRANCH="main"
-RUN git clone https://github.com/OpenAI/triton.git \
+ARG TRITON_REPO="https://github.com/OpenAI/triton.git"
+RUN git clone ${TRITON_REPO} \
     && cd triton \
     && git checkout ${TRITON_BRANCH} \
     && cd python \
@@ -107,6 +111,7 @@ FROM scratch AS export_triton_1
 ARG COMMON_WORKDIR
 COPY --from=build_triton ${COMMON_WORKDIR}/triton/python/dist/*.whl /
 FROM scratch AS export_triton_0
+FROM export_triton_${BUILD_TRITON} AS export_triton
 
 # -----------------------
 # vLLM (and gradlib) build stages
@@ -129,14 +134,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/requirements*.txt /
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/patch_xformers.rocm.sh /
 
 # -----------------------
-# Aliases to ensure we only use enabled components
-FROM export_hipblaslt_${BUILD_HIPBLASLT} AS export_hipblaslt
-FROM export_rccl_${BUILD_RCCL} AS export_rccl
-FROM export_flash_attn_${BUILD_FA} AS export_flash_attn
-FROM export_cupy_${BUILD_CUPY} AS export_cupy
-FROM export_triton_${BUILD_TRITON} AS export_triton
-
-# -----------------------
 # Final vLLM image
 FROM base AS final
 ARG BASE_IMAGE
@@ -145,7 +142,7 @@ ARG BUILD_FA
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
+RUN if [ "$BASE_IMAGE" = *"py_3.9"* ]; then \
     rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
 
 RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
@@ -187,10 +184,12 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip install -U -r requirements-rocm.txt \
     && if [ "$BUILD_FA" = "1" ]; then \
             bash patch_xformers.rocm.sh; fi \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
-            patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch; fi \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" ]; then \
-            cp rocm_patch/libamdhip64.so.6 /opt/rocm-6.1.0/lib/libamdhip64.so.6; fi \
+    && case "$BASE_IMAGE" in \
+           *"rocm6.0"*|*"rocm-rel-6.0"*) \
+               patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
+           *"rocm6.1"*|*"rocm-rel-6.1"*) \
+               cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
+           *) ;; esac \
     && pip install *.whl
 
 # Update Ray to latest version + set environment variable to ensure it works on TP > 1
