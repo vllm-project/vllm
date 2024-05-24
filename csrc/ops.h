@@ -96,6 +96,9 @@ int cutlass_scaled_mm_dq(torch::Tensor& out, torch::Tensor const& a,
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor& input,
                               float scale);
 
+void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor& input,
+                               torch::Tensor& scales);
+
 void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
                      torch::Tensor lookup_table);
 
@@ -116,12 +119,6 @@ void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
                           int block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
-
-void dynamic_scaled_int8_quant(
-  torch::Tensor& out,
-  torch::Tensor& input,
-  torch::Tensor& scales);
-
 
 #ifndef USE_ROCM
 using fptr_t = uint64_t;

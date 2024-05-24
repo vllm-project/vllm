@@ -102,8 +102,8 @@ void dynamic_scaled_int8_quant(
   torch::Tensor& out,   // [..., hidden_size]
   torch::Tensor& input, // [..., hidden_size]
   torch::Tensor& scales) {
-  assert(input.is_contiguous());
-  assert(out.is_contiguous());
+  TORCH_CHECK(input.is_contiguous());
+  TORCH_CHECK(out.is_contiguous());
   int hidden_size = input.size(-1);
   int num_tokens = input.numel() / hidden_size;
   dim3 grid(num_tokens);
