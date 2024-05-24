@@ -1155,6 +1155,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             return None
 
         if self.tp_size > 1 and self.org_vocab_size != self.vocab_size:
+            # Reindex full logits tensor to ensure 1:1 mapping between
+            # index and token_id
             logits = logits[:, self.shared_to_full_mapping_gpu]
 
         lora_logits = torch.empty(
