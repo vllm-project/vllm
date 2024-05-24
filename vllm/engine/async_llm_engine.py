@@ -234,6 +234,14 @@ class _AsyncLLMEngine(LLMEngine):
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
 
+        if not request_outputs:
+            # Stop the execute model loop in parallel workers until there are
+            # more requests to process. This avoids waiting indefinitely in
+            # torch.distributed ops which may otherwise timeout, and unblocks
+            # the RPC thread in the workers so that they can process any other
+            # queued control plane messages, such as add/remove lora adapters.
+            await self.model_executor.stop_remote_worker_execution_loop_async()
+
         return request_outputs
 
     async def encode_request_async(
@@ -348,27 +356,31 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
+        distributed_executor_backend = (
+            engine_config.parallel_config.distributed_executor_backend)
 
         if engine_config.device_config.device_type == "neuron":
             from vllm.executor.neuron_executor import NeuronExecutorAsync
             executor_class = NeuronExecutorAsync
         elif engine_config.device_config.device_type == "cpu":
-            assert not engine_config.parallel_config.worker_use_ray, (
-                "Ray is not supported with the CPU backend.")
+            assert distributed_executor_backend is None, (
+                "Distributed execution is not supported with the CPU backend.")
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
-        elif engine_config.parallel_config.worker_use_ray:
+        elif distributed_executor_backend == "ray":
             initialize_ray_cluster(engine_config.parallel_config)
             from vllm.executor.ray_gpu_executor import RayGPUExecutorAsync
             executor_class = RayGPUExecutorAsync
+        elif distributed_executor_backend == "mp":
+            from vllm.executor.multiproc_gpu_executor import (
+                MultiprocessingGPUExecutorAsync)
+            executor_class = MultiprocessingGPUExecutorAsync
         else:
-            assert engine_config.parallel_config.world_size == 1, (
-                "Ray is required if parallel_config.world_size > 1.")
             from vllm.executor.gpu_executor import GPUExecutorAsync
             executor_class = GPUExecutorAsync
         # Create the async LLM engine.
         engine = cls(
-            engine_config.parallel_config.worker_use_ray,
+            distributed_executor_backend == "ray",
             engine_args.engine_use_ray,
             **engine_config.to_dict(),
             executor_class=executor_class,
@@ -683,7 +695,7 @@ class AsyncLLMEngine:
             multi_modal_data: Multi modal data per request.
 
         Yields:
-            The output `EmbeddingRequestOutput` objects from the LLMEngine 
+            The output `EmbeddingRequestOutput` objects from the LLMEngine
             for the request.
 
         Details:

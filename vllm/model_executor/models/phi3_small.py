@@ -215,8 +215,9 @@ class Phi3SmallSelfAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads_per_partion,
-            blocksparse_params=bs_params,
             cache_config=cache_config,
+            quant_config=quant_config,
+            blocksparse_params=bs_params,
         )
 
     def forward(

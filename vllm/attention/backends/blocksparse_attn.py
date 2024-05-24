@@ -198,11 +198,11 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
-        kv_cache_dtype: str = "auto",
     ) -> None:
         assert blocksparse_params is not None
         assert alibi_slopes is None, ValueError(
