@@ -94,8 +94,10 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI):
         chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
     assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
+    assert chat_completion.choices[0].logprobs.content[
+        0].top_logprobs is not None
+    assert len(
+        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"

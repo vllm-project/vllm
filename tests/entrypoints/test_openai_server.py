@@ -225,8 +225,10 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
         chat_completion.choices) == 1
     assert chat_completion.choices[0].message is not None
     assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.top_logprobs is not None
-    assert len(chat_completion.choices[0].logprobs.top_logprobs[0]) == 5
+    assert chat_completion.choices[0].logprobs.content[
+        0].top_logprobs is not None
+    assert len(
+        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
@@ -723,13 +725,12 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
         top_logprobs=5,
         extra_body=dict(guided_choice=TEST_CHOICE,
                         guided_decoding_backend=guided_decoding_backend))
-    top_logprobs = chat_completion.choices[0].logprobs.top_logprobs
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     # -9999.0 is the minimum logprob returned by OpenAI
     assert all(
-        isinstance(logprob, float) and logprob >= -9999.0
-        for token_dict in top_logprobs
-        for token, logprob in token_dict.items())
+        isinstance(token.logprob, float) and token.logprob >= -9999.0
+        for token in top_logprobs)
 
 
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
