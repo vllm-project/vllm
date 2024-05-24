@@ -88,11 +88,12 @@ class MixtralMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
+        # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(self.hidden_size,
                                      self.num_total_experts,
                                      bias=False,
                                      params_dtype=self.params_dtype,
-                                     quant_config=quant_config)
+                                     quant_config=None)
 
         if self.use_fp8 and self.quant_config.is_checkpoint_fp8_serialized:
             params_dtype = torch.float8_e4m3fn
