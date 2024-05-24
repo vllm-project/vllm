@@ -52,7 +52,7 @@ def _get_masked_input_and_mask(
         added_vocab_start_index * added_vocab_mask)
     vocab_mask = org_vocab_mask | added_vocab_mask
     input_ = vocab_mask * (input_ - combined_offset)
-    return input_, vocab_mask
+    return input_, ~vocab_mask
 
 
 class VocabParallelEmbedding(torch.nn.Module):
@@ -236,7 +236,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         output_parallel = F.embedding(masked_input, self.weight)
         # Mask the output embedding.
         if self.tp_size > 1:
-            output_parallel.mul_(input_mask.unsqueeze(1))
+            output_parallel.masked_fill_(input_mask.unsqueeze(1), 0)
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
