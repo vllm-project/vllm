@@ -11,7 +11,7 @@ from vllm.outputs import (CompletionOutput, EmbeddingOutput,
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 __all__ = [
     "LLM",
