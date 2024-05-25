@@ -89,6 +89,9 @@ async def async_request_tgi(
                     output.latency = most_recent_timestamp - st
                     output.success = True
                     output.generated_text = data["generated_text"]
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
@@ -276,6 +279,9 @@ async def async_request_openai_completions(
                     output.generated_text = generated_text
                     output.success = True
                     output.latency = latency
+                else:
+                    output.error = response.reason or ""
+                    output.success = False
         except Exception:
             output.success = False
             exc_info = sys.exc_info()
