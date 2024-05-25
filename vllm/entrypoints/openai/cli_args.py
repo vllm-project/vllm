@@ -22,10 +22,8 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
-def make_arg_parser(parser=None):
-    if parser is None:
-        parser = argparse.ArgumentParser(
-            description="vLLM OpenAI-Compatible RESTful API server.")
+def make_arg_parser(
+        parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default=None, help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument(

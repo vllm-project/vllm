@@ -178,6 +178,9 @@ def run_server(args):
                 ssl_certfile=args.ssl_certfile,
                 ssl_ca_certs=args.ssl_ca_certs,
                 ssl_cert_reqs=args.ssl_cert_reqs)
+    
+def complete(args):
+    return
 
 
 if __name__ == "__main__":
