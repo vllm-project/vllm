@@ -421,8 +421,15 @@ void paged_attention_v1(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens,
                         int block_size, int max_seq_len,
                         const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale) {
+                        const std::string& kv_cache_dtype, float kv_scale,
+                        const int tp_rank,
+                        const int blocksparse_local_blocks,
+                        const int blocksparse_vert_stride,
+                        const int blocksparse_block_size,
+                        const int blocksparse_head_sliding_step
+    ) {
   TORCH_CHECK(kv_scale == 1.0f);
+  TORCH_CHECK(blocksparse_vert_stride <= 1, "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v1_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v1_impl)
@@ -734,8 +741,15 @@ void paged_attention_v2(torch::Tensor& out, torch::Tensor& exp_sums,
                         torch::Tensor& seq_lens, int block_size,
                         int max_seq_len,
                         const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale) {
+                        const std::string& kv_cache_dtype, float kv_scale,
+                        const int tp_rank,
+                        const int blocksparse_local_blocks,
+                        const int blocksparse_vert_stride,
+                        const int blocksparse_block_size,
+                        const int blocksparse_head_sliding_step
+    ) {
   TORCH_CHECK(kv_scale == 1.0f);
+  TORCH_CHECK(blocksparse_vert_stride <= 1, "CPU backend does not support blocksparse attention yet.");
   VLLM_DISPATCH_FLOATING_TYPES(query.scalar_type(), "paged_attention_v2_impl",
                                [&] {
                                  CPU_KERNEL_GUARD_IN(paged_attention_v2_impl)
