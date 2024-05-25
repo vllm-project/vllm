@@ -346,6 +346,12 @@ class ModelRunner:
                     assert computed_block_nums is not None
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
+
+                    # need to think what to set it to when we have both sliding
+                    # window and prefix caching...
+                    assert self.sliding_window is None
+                    sliding_context_len = context_len
+
                     if self.attn_backend.get_name() == "flash-attn":
                         # NOTE(woosuk): For flash-attn, the block table should
                         # include the entries for the incoming prefill tokens.
