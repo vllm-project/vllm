@@ -424,11 +424,12 @@ class LLMEngine:
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        eos_token_id = None
+
         if self.tokenizer:
             eos_token_id = self.tokenizer.get_lora_tokenizer(
                 lora_request).eos_token_id
         else:
+            eos_token_id = None
             logger.warning("Use None for EOS token id because tokenizer is "
                            "not initialized")
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,

@@ -6,7 +6,8 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.inputs import (PromptInputs, PromptStrictInputs,
+from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
+                         TextTokensPrompt, TokensPrompt,
                          parse_and_batch_prompt)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -467,24 +468,21 @@ class LLM:
         for i in range(num_requests):
             if prompts is not None:
                 if prompt_token_ids is not None:
-                    inputs.append({
-                        "prompt": prompts[i],
-                        "prompt_token_ids": prompt_token_ids[i],
-                        "multi_modal_data": multi_modal_data,
-                    })
+                    item = TextTokensPrompt(
+                        prompt=prompts[i],
+                        prompt_token_ids=prompt_token_ids[i])
                 else:
-                    inputs.append({
-                        "prompt": prompts[i],
-                        "multi_modal_data": multi_modal_data,
-                    })
+                    item = TextPrompt(prompt=prompts[i])
             else:
                 if prompt_token_ids is not None:
-                    inputs.append({
-                        "prompt_token_ids": prompt_token_ids[i],
-                        "multi_modal_data": multi_modal_data,
-                    })
+                    item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
                 else:
                     raise AssertionError
+
+            if multi_modal_data is not None:
+                item["multi_modal_data"] = multi_modal_data
+
+            inputs.append(item)
 
         return inputs
 
