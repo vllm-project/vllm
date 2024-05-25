@@ -178,10 +178,15 @@ class OpenAIServingChat(OpenAIServing):
                 add_special_tokens=False,
             )
 
-            result_generator = self.engine.generate(prompt_text,
-                                                    sampling_params,
-                                                    request_id, prompt_ids,
-                                                    lora_request)
+            result_generator = self.engine.generate(
+                {
+                    "prompt": prompt_text,
+                    "prompt_token_ids": prompt_ids
+                },
+                sampling_params,
+                request_id,
+                lora_request,
+            )
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

@@ -63,11 +63,16 @@ class OpenAIServingEmbedding(OpenAIServing):
                 ))
 
             for i, (prompt_ids, prompt_text) in enumerate(prompts):
-                generators.append(
-                    self.engine.encode(prompt_text,
-                                       pooling_params,
-                                       f"{request_id}-{i}",
-                                       prompt_token_ids=prompt_ids))
+                generator = self.engine.encode(
+                    {
+                        "prompt": prompt_text,
+                        "prompt_token_ids": prompt_ids
+                    },
+                    pooling_params,
+                    f"{request_id}-{i}",
+                )
+
+                generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

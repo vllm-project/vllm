@@ -73,6 +73,7 @@ Documentation
    :caption: Offline Inference
 
    offline_inference/llm
+   offline_inference/llm_inputs
    offline_inference/sampling_params
 
 .. toctree::
