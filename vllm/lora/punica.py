@@ -42,11 +42,11 @@ def bgmv(
       scale: Scaling factor.
     """
     try:
-        import vllm._punica_C as punica_kernels
+        torch.ops._punica_C.dispatch_bgmv
     except ImportError as e:
         _raise_import_error(e)
 
-    punica_kernels.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
 def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
@@ -76,10 +76,10 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       y_slice_size: Size of the y column slice.
     """
     try:
-        import vllm._punica_C as punica_kernels
+        torch.ops._punica_C.dispatch_bgmv
     except ImportError as e:
         _raise_import_error(e)
-    punica_kernels.dispatch_bgmv_low_level(
+    torch.ops._punica_C.dispatch_bgmv_low_level(
         y,
         x,
         w_t_all,
@@ -123,7 +123,7 @@ def add_lora(y: torch.Tensor,
       buffer: Optional. Shape: `[B, R]`. Temporary buffer.
     """
     try:
-        import vllm._punica_C as punica_kernels
+        torch.ops._punica_C.dispatch_bgmv
     except ImportError as e:
         _raise_import_error(e)
 
@@ -135,8 +135,8 @@ def add_lora(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
-    punica_kernels.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
+    torch.ops._punica_C.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
+    torch.ops._punica_C.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
                                  scale)
 
 
@@ -177,7 +177,7 @@ def add_lora_slice(y: torch.Tensor,
       y_slice_size: Size of the y column slice.
     """
     try:
-        import vllm._punica_C as punica_kernels
+        torch.ops._punica_C.dispatch_bgmv
     except ImportError as e:
         _raise_import_error(e)
 
@@ -189,7 +189,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    punica_kernels.dispatch_bgmv_low_level(
+    torch.ops._punica_C.dispatch_bgmv_low_level(
         buffer,
         x,
         wa_t_all,
@@ -200,7 +200,7 @@ def add_lora_slice(y: torch.Tensor,
         buffer.size(1),
         0,
     )
-    punica_kernels.dispatch_bgmv_low_level(
+    torch.ops._punica_C.dispatch_bgmv_low_level(
         y,
         buffer,
         wb_t_all,
