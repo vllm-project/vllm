@@ -21,10 +21,10 @@ from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import numpy as np
+import torch
 from outlines.fsm.fsm import CFGFSM, FSM, RegexFSM
 from outlines.fsm.json_schema import build_regex_from_schema
 from pydantic import BaseModel
-from torch import Tensor, from_numpy, full_like, int64
 from transformers import PreTrainedTokenizerBase
 
 
@@ -33,14 +33,15 @@ class BaseLogitsProcessor:
     def __init__(self):
         # Child class should use initialize in their init.
         self.fsm: FSM
-        self.mask: Optional[Tensor] = None
-        self.allowed_tokens_cache: Dict[int, Tensor] = {}
+        self.mask: Optional[torch.Tensor] = None
+        self.allowed_tokens_cache: Dict[tuple, torch.Tensor] = {}
 
     def init_state(self):
         """Initialize the FSM states"""
         self.fsm_state: DefaultDict[int, int] = defaultdict(int)
 
-    def __call__(self, input_ids: List[int], scores: Tensor) -> Tensor:
+    def __call__(self, input_ids: List[int],
+                 scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
 
@@ -53,27 +54,33 @@ class BaseLogitsProcessor:
                 self.fsm_state[last_seq_id], last_token)
 
         state = self.fsm_state[seq_id]
+        allowed_tokens = self.fsm.allowed_token_ids(state)
+        allowed_tokens_key = tuple(allowed_tokens)
 
         # Retrieve allowed tokens from cache using the current state
-        if state not in self.allowed_tokens_cache:
+        if allowed_tokens_key not in self.allowed_tokens_cache:
             # Cache miss, calculate allowed tokens and cache them
-            allowed_tokens = self.fsm.allowed_token_ids(state)
             np_allowed_tokens = np.array(allowed_tokens, dtype=np.int32)
-            allowed_tokens_tensor = from_numpy(np_allowed_tokens)
+            allowed_tokens_tensor = torch.from_numpy(
+                np_allowed_tokens).pin_memory()
 
             if allowed_tokens_tensor.device != scores.device:
                 allowed_tokens_tensor = allowed_tokens_tensor.to(
-                    scores.device, dtype=int64, non_blocking=True)
+                    scores.device, dtype=torch.int64, non_blocking=True)
             else:
-                allowed_tokens_tensor = allowed_tokens_tensor.to(int64)
+                allowed_tokens_tensor = allowed_tokens_tensor.to(torch.int64)
 
-            self.allowed_tokens_cache[state] = allowed_tokens_tensor
+            self.allowed_tokens_cache[
+                allowed_tokens_key] = allowed_tokens_tensor
 
         else:
-            allowed_tokens_tensor = self.allowed_tokens_cache[state]
+            allowed_tokens_tensor = self.allowed_tokens_cache[
+                allowed_tokens_key]
 
         if self.mask is None:
-            self.mask = full_like(scores, -math.inf)
+            self.mask = torch.full((scores.shape[-1], ),
+                                   -math.inf,
+                                   device=scores.device)
         else:
             self.mask.fill_(-math.inf)
 
@@ -99,6 +106,8 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         fsm = RegexFSM(regex_string, tokenizer)
         self.fsm = fsm
+        self.mask: Optional[torch.Tensor] = None
+        self.allowed_tokens_cache: Dict[tuple, torch.Tensor] = {}
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
@@ -155,6 +164,8 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
         tokenizer = _adapt_tokenizer(tokenizer)
         fsm = CFGFSM(cfg, tokenizer)
         self.fsm = fsm
+        self.mask: Optional[torch.Tensor] = None
+        self.allowed_tokens_cache: Dict[tuple, torch.Tensor] = {}
 
     def init_state(self):
         """Initialize state with a CFGFSM copy."""
