@@ -285,7 +285,7 @@ def _greedy_sample(
         same as the length of selected_seq_groups. If the corresponding
         seq_group has do_sample=False, tuple contains ([], [])
     """
-    samples = samples.tolist()
+    samples_lst = samples.tolist()
     sample_idx = 0
     results: SampleResultType = []
     for seq_group in selected_seq_groups:
@@ -298,7 +298,7 @@ def _greedy_sample(
         assert num_parent_seqs == 1, (
             "Greedy sampling should have only one seq.")
         parent_ids = list(range(num_parent_seqs))
-        next_token_ids = [samples[sample_idx]]
+        next_token_ids = [samples_lst[sample_idx]]
         results.append((next_token_ids, parent_ids))
         sample_idx += num_parent_seqs
     return results
@@ -394,7 +394,7 @@ def _beam_search_sample(
             next_token_ids = next_token_ids.tolist()
         else:
             # Generation phase.
-            cumulative_logprobs: List[int] = [
+            cumulative_logprobs: List[float] = [
                 seq_group.seq_data[seq_id].cumulative_logprob
                 for seq_id in seq_ids
             ]

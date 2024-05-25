@@ -72,27 +72,27 @@ def ref_single_query_cached_kv_attention(
     block_size = value_cache.shape[3]
     num_seqs = query.shape[0]
 
-    block_tables = block_tables.cpu().tolist()
-    seq_lens = seq_lens.cpu().tolist()
+    block_tables_lst = block_tables.cpu().tolist()
+    seq_lens_lst = seq_lens.cpu().tolist()
     for i in range(num_seqs):
         q = query[i].unsqueeze(0)
-        block_table = block_tables[i]
-        seq_len = int(seq_lens[i])
+        block_table = block_tables_lst[i]
+        seq_len = int(seq_lens_lst[i])
 
-        keys = []
-        values = []
+        keys_lst: List[torch.Tensor] = []
+        values_lst: List[torch.Tensor] = []
         for j in range(seq_len):
             block_number = int(block_table[j // block_size])
             block_offset = j % block_size
 
             k = key_cache[block_number, :, :, block_offset, :]
             k = k.reshape(num_kv_heads, head_size)
-            keys.append(k)
+            keys_lst.append(k)
 
             v = value_cache[block_number, :, :, block_offset]
-            values.append(v)
-        keys = torch.stack(keys, dim=0)
-        values = torch.stack(values, dim=0)
+            values_lst.append(v)
+        keys = torch.stack(keys_lst, dim=0)
+        values = torch.stack(values_lst, dim=0)
         if num_queries_per_kv > 1:
             # Handle MQA and GQA
             keys = torch.repeat_interleave(keys, num_queries_per_kv, dim=1)
