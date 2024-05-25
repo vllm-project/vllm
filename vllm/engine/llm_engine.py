@@ -418,15 +418,15 @@ class LLMEngine:
 
     def _get_eos_token_id(
             self, lora_request: Optional[LoRARequest]) -> Optional[int]:
-        if self.tokenizer:
-            return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
-        else:
+        if self.tokenizer is None:
             if self._eos_warn_count == 0:
                 logger.warning("Using None for EOS token id because tokenizer "
                                "is not initialized")
 
             self._eos_warn_count += 1
             return None
+
+        return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
     def _add_processed_request(
         self,
