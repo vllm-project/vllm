@@ -115,13 +115,15 @@ class OpenAIServing:
                 out_top_logprobs.append(None)
             else:
                 # There can be up to logprobs+1 elements in the response
-                token_logprob = step_top_logprobs[token_id].logprob
                 assert len(step_top_logprobs) <= num_output_top_logprobs + 1, (
                     f"Expected at most {num_output_top_logprobs + 1} logprobs, "
                     f"but received {len(step_top_logprobs)} logprobs")
 
                 token = step_top_logprobs[token_id].decoded_token
                 assert token is not None
+
+                token_logprob = step_top_logprobs[token_id].logprob
+                token_logprob = max(token_logprob, -9999.0)
 
                 out_tokens.append(token)
                 out_token_logprobs.append(token_logprob)
