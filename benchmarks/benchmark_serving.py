@@ -217,6 +217,11 @@ def calculate_metrics(
         else:
             actual_output_lens.append(0)
 
+    if completed == 0:
+        warnings.warn(
+            "All requests failed. This is likely due to a misconfiguration "
+            "on the benchmark arguments.",
+            stacklevel=2)
     metrics = BenchmarkMetrics(
         completed=completed,
         total_input=total_input,
@@ -228,9 +233,9 @@ def calculate_metrics(
         1000,  # ttfts is empty if streaming is not supported by backend
         median_ttft_ms=np.median(ttfts or 0) * 1000,
         p99_ttft_ms=np.percentile(ttfts or 0, 99) * 1000,
-        mean_tpot_ms=np.mean(tpots) * 1000,
-        median_tpot_ms=np.median(tpots) * 1000,
-        p99_tpot_ms=np.percentile(tpots, 99) * 1000,
+        mean_tpot_ms=np.mean(tpots or 0) * 1000,
+        median_tpot_ms=np.median(tpots or 0) * 1000,
+        p99_tpot_ms=np.percentile(tpots or 0, 99) * 1000,
     )
 
     return metrics, actual_output_lens
@@ -252,6 +257,24 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
+    print("Starting initial single prompt test run...")
+    test_prompt, test_prompt_len, test_output_len = input_requests[0]
+    test_input = RequestFuncInput(
+        model=model_id,
+        prompt=test_prompt,
+        api_url=api_url,
+        prompt_len=test_prompt_len,
+        output_len=test_output_len,
+        best_of=best_of,
+        use_beam_search=use_beam_search,
+    )
+    test_output = await request_func(request_func_input=test_input)
+    if not test_output.success:
+        raise ValueError(
+            "Initial test run failed - Please make sure benchmark arguments "
+            f"are correctly specified. Error: {test_output.error}")
+    else:
+        print("Initial test run completed. Starting main benchmark run...")
     print(f"Traffic request rate: {request_rate}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
