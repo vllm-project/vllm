@@ -349,7 +349,8 @@ class ModelRunner:
 
                     # need to think what to set it to when we have both sliding
                     # window and prefix caching...
-                    assert self.sliding_window is None
+                    assert self.sliding_window is None, \
+                        "prefix caching is not supported with sliding window"
                     sliding_context_len = context_len
 
                     if self.attn_backend.get_name() == "flash-attn":
