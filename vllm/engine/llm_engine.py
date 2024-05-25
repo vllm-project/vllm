@@ -207,11 +207,11 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
-            tokenizer = self._init_tokenizer()
+            self.tokenizer = tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(tokenizer)
         else:
-            self.detokenizer = None
             self.tokenizer = None
+            self.detokenizer = None
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -376,7 +376,9 @@ class LLMEngine:
     MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
                                    "skip_tokenizer_init is True")
 
-    def get_tokenizer_group(self, fail_msg: str = MISSING_TOKENIZER_GROUP_MSG):
+    def get_tokenizer_group(
+            self,
+            fail_msg: str = MISSING_TOKENIZER_GROUP_MSG) -> BaseTokenizerGroup:
         if self.tokenizer is None:
             raise ValueError(fail_msg)
 
@@ -400,10 +402,9 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-        self.tokenizer = get_tokenizer_group(
-            self.parallel_config.tokenizer_pool_config, **init_kwargs)
 
-        return self.tokenizer
+        return get_tokenizer_group(self.parallel_config.tokenizer_pool_config,
+                                   **init_kwargs)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
