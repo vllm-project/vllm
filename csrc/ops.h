@@ -2,23 +2,24 @@
 
 #include <torch/extension.h>
 
-void paged_attention_v1(torch::Tensor& out, torch::Tensor& query,
-                        torch::Tensor& key_cache, torch::Tensor& value_cache,
-                        int num_kv_heads, float scale,
-                        torch::Tensor& block_tables, torch::Tensor& seq_lens,
-                        int block_size, int max_seq_len,
-                        const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale);
+void paged_attention_v1(
+    torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int num_kv_heads, float scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int block_size,
+    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
+    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step);
 
-void paged_attention_v2(torch::Tensor& out, torch::Tensor& exp_sums,
-                        torch::Tensor& max_logits, torch::Tensor& tmp_out,
-                        torch::Tensor& query, torch::Tensor& key_cache,
-                        torch::Tensor& value_cache, int num_kv_heads,
-                        float scale, torch::Tensor& block_tables,
-                        torch::Tensor& seq_lens, int block_size,
-                        int max_seq_len,
-                        const c10::optional<torch::Tensor>& alibi_slopes,
-                        const std::string& kv_cache_dtype, float kv_scale);
+void paged_attention_v2(
+    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
+    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
+    torch::Tensor& value_cache, int num_kv_heads, float scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int block_size,
+    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
+    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+    const int blocksparse_block_size, const int blocksparse_head_sliding_step);
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               float epsilon);
