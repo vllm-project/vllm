@@ -51,14 +51,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
-  ops.def("fused_add_rms_norm(Tensor input, Tensor residual, Tensor weight, "
-          "float epsilon) -> ()");
+  ops.def("fused_add_rms_norm(Tensor input, Tensor residual, Tensor weight, float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def("rotary_embedding(Tensor positions, Tensor query, Tensor key, int "
-          "head_size, Tensor cos_sin_cache, bool is_neox) -> ()");
+  ops.def("rotary_embedding(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCUDA, &rotary_embedding);
 
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key
