@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from vllm._C import ops
+from vllm import _custom_ops as ops
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,

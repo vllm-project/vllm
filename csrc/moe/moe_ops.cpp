@@ -2,7 +2,9 @@
 
 #include <torch/extension.h>
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("topk_softmax", &topk_softmax,
-        "Apply topk softmax to the gating outputs.");
+#define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
+
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+  // Apply topk softmax to the gating outputs.
+  m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 }

@@ -2,12 +2,9 @@
 
 #include "punica_ops.h"
 
-//====== pybind ======
+#define TORCH_LIBRARY_EXPAND(NAME, M) TORCH_LIBRARY(NAME, M)
 
-#define DEFINE_pybind(name) m.def(#name, &name, #name);
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("dispatch_bgmv", &dispatch_bgmv, "dispatch_bgmv");
-  m.def("dispatch_bgmv_low_level", &dispatch_bgmv_low_level,
-        "dispatch_bgmv_low_level");
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+  m.impl("dispatch_bgmv", torch::kCUDA, &dispatch_bgmv);
+  m.impl("dispatch_bgmv_low_level", torch::kCUDA, &dispatch_bgmv_low_level);
 }

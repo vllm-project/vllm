@@ -4,37 +4,37 @@
 
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int block_size,
-    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
-    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step);
+    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
+    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
+    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step);
 
 void paged_attention_v2(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int block_size,
-    int max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, float kv_scale, const int tp_rank,
-    const int blocksparse_local_blocks, const int blocksparse_vert_stride,
-    const int blocksparse_block_size, const int blocksparse_head_sliding_step);
+    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
+    int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
+    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
+    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step);
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              float epsilon);
+              double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, float epsilon);
+                        torch::Tensor& weight, double epsilon);
 
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                      torch::Tensor& key, int head_size,
+                      torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
 
 void batched_rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
-                              torch::Tensor& key, int head_size,
+                              torch::Tensor& key, int64_t head_size,
                               torch::Tensor& cos_sin_cache, bool is_neox,
-                              int rot_dim,
+                              int64_t rot_dim,
                               torch::Tensor& cos_sin_cache_offsets);
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -60,12 +60,12 @@ torch::Tensor aqlm_dequant(const torch::Tensor& codes,
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int split_k_iters);
+                       int64_t split_k_iters);
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int split_k_iters, int thx,
-                             int thy);
+                             torch::Tensor _zeros, int64_t split_k_iters, int64_t thx,
+                             int64_t thy);
 
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
@@ -88,9 +88,9 @@ torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
 
-int cutlass_scaled_mm_dq(torch::Tensor& out, torch::Tensor const& a,
-                         torch::Tensor const& b, torch::Tensor const& a_scales,
-                         torch::Tensor const& b_scales);
+void cutlass_scaled_mm_dq(torch::Tensor& out, torch::Tensor const& a,
+                          torch::Tensor const& b, torch::Tensor const& a_scales,
+                          torch::Tensor const& b_scales);
 
 #endif
 
@@ -106,9 +106,9 @@ void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int bit);
+                        bool use_exllama, int64_t bit);
 
-void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int bit);
+void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
 void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                              torch::Tensor& scale);
@@ -116,8 +116,8 @@ void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
 void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                               torch::Tensor& scale);
 
-void moe_align_block_size(torch::Tensor topk_ids, int num_experts,
-                          int block_size, torch::Tensor sorted_token_ids,
+void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
+                          int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
 
