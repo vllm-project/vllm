@@ -318,7 +318,7 @@ class ModelRunner:
                 # These are seq_len/context_len capped to the sliding window.
                 # They are passed to decode kernel.
                 # We still need original seq_len/context_len to compute slot
-                # mapping below.
+                # mapping (and input position) below.
                 curr_sliding_window_blocks = None
                 sliding_seq_len = seq_len
                 sliding_context_len = context_len
