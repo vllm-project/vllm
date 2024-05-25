@@ -331,8 +331,8 @@ class ModelRunner:
                     if self.scheduler_config.use_v2_block_manager:
                         # number of elements in last block
                         suff_len = seq_len % self.block_size
-                        sliding_seq_len = min(seq_len,
-                                      block_aligned_sliding_window + suff_len)
+                        sliding_seq_len = min(
+                            seq_len, block_aligned_sliding_window + suff_len)
                         if suff_len > 0:
                             curr_sliding_window_blocks += 1
                     else:
