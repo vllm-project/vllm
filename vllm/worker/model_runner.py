@@ -315,7 +315,14 @@ class ModelRunner:
                                     and self.sliding_window is None
                                     and is_prompt)
 
+                # These are seq_len/context_len capped to the sliding window.
+                # They are passed to decode kernel.
+                # We still need original seq_len/context_len to compute slot
+                # mapping below.
                 curr_sliding_window_blocks = None
+                sliding_seq_len = seq_len
+                sliding_context_len = context_len
+
                 # TODO(sang): This is a hack to make sliding window work with
                 # paged attn. We can remove it if we make paged attn kernel
                 # to properly handle slinding window attn.
@@ -324,13 +331,13 @@ class ModelRunner:
                     if self.scheduler_config.use_v2_block_manager:
                         # number of elements in last block
                         suff_len = seq_len % self.block_size
-                        seq_len = min(seq_len,
+                        sliding_seq_len = min(seq_len,
                                       block_aligned_sliding_window + suff_len)
                         if suff_len > 0:
                             curr_sliding_window_blocks += 1
                     else:
-                        seq_len = min(seq_len, self.sliding_window)
-                    context_len = seq_len - 1
+                        sliding_seq_len = min(seq_len, self.sliding_window)
+                    sliding_context_len = sliding_seq_len - 1
 
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
@@ -372,9 +379,9 @@ class ModelRunner:
                     block_table = []
                 block_tables.append(block_table)
 
-                seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
+                seq_lens.append(sliding_seq_len)
+                context_lens.append(sliding_context_len)
+                query_len = sliding_seq_len - sliding_context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
@@ -391,16 +398,15 @@ class ModelRunner:
                         "seq_len: {}, context_len: {}, query_len: {}".format(
                             seq_len, context_len, query_len))
                     num_decode_tokens += query_len
-                    decode_seq_lens.append(seq_len)
+                    decode_seq_lens.append(sliding_seq_len)
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
 
-                lora_index_mapping += [lora_id] * (seq_len - context_len)
+                lora_index_mapping += [lora_id] * query_len
                 lora_prompt_mapping.extend(
                     [lora_id] *
-                    (seq_len -
-                     context_len if seq_group_metadata.sampling_params
+                    (query_len if seq_group_metadata.sampling_params
                      and seq_group_metadata.sampling_params.prompt_logprobs
                      else 1))
 
