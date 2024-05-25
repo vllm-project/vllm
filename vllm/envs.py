@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
@@ -177,6 +178,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
     "VLLM_LOGGING_CONFIG_PATH":
     lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+
+    # this is used for configuring the default logging level
+    "VLLM_LOGGING_LEVEL":
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
