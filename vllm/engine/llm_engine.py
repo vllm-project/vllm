@@ -207,8 +207,8 @@ class LLMEngine:
         self.log_stats = log_stats
 
         if not self.model_config.skip_tokenizer_init:
-            self.tokenizer = tokenizer = self._init_tokenizer()
-            self.detokenizer = Detokenizer(tokenizer)
+            self.tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
         else:
             self.tokenizer = None
             self.detokenizer = None
