@@ -15,7 +15,7 @@ def main():
         usage="vllm serve <model_tag> [options]")
     make_arg_parser(serve_parser)
     # Override the `--model` optional argument, make it positional.
-    serve_parser.add_argument("model", type=str, help="The model tag to serve")
+    serve_parser.add_argument("model-tag", type=str, help="The model tag to serve")
     serve_parser.set_defaults(func=run_server)
 
     args = parser.parse_args()

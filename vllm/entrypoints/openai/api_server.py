@@ -156,7 +156,7 @@ def run_server(args):
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
-        served_model_names = [args.model]
+        served_model_names = [args.model_tag]
 
     global engine_args, engine, openai_serving_chat, openai_serving_completion
     engine_args = AsyncEngineArgs.from_cli_args(args)
