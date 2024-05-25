@@ -63,7 +63,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
   // Cache ops
-  pybind11::module cache_ops = m.impl_submodule("cache_ops", "vLLM cache ops");
+  pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
   cache_ops.def("swap_blocks", &swap_blocks,
                 "Swap in (out) the cache blocks from src to dst");
   cache_ops.def("copy_blocks", &copy_blocks,
