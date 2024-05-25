@@ -29,7 +29,14 @@ def get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: Optional[str],
     block_size: int,
+    is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
+
+    if is_blocksparse:
+        logger.info("Using BlocksparseFlashAttention backend.")
+        from vllm.attention.backends.blocksparse_attn import (
+            BlocksparseFlashAttentionBackend)
+        return BlocksparseFlashAttentionBackend
     """Determine which attention backend to use and only import
     the selected backend module.
     """

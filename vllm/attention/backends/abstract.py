@@ -111,6 +111,7 @@ class AttentionImpl(ABC, Generic[T]):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         raise NotImplementedError
 

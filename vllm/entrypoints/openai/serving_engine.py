@@ -100,6 +100,7 @@ class OpenAIServing:
                 token_logprob = step_top_logprobs[token_id].logprob
                 token = step_top_logprobs[token_id].decoded_token
                 logprobs.tokens.append(token)
+                token_logprob = max(token_logprob, -9999.0)
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
