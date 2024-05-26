@@ -10,11 +10,9 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearMethodBase,
                                                RowParallelLinear)
-from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -31,6 +29,7 @@ _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
+
 
 #Copied from https://github.com/huggingface/transformers/blob/main/src/transformers/models/idefics2/modeling_idefics2.py/#L748
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -52,14 +51,9 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 class Idefics2MLP(nn.Module):
 
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        output_size: int,
-        hidden_act: str,
-        quant_config: QuantizationConfig
-    ):
+    def __init__(self, hidden_size: int, intermediate_size: int,
+                 output_size: int, hidden_act: str,
+                 quant_config: QuantizationConfig):
         super().__init__()
         self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
@@ -70,10 +64,12 @@ class Idefics2MLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
-
 class Idefics2PerceiverAttention(nn.Module):
 
-    def __init__(self, config, quant_config, layer_idx: Optional[int] = None) -> None:
+    def __init__(self,
+                 config,
+                 quant_config,
+                 layer_idx: Optional[int] = None) -> None:
         """Perceiver Cross-Attention Module --> 
                     let long-form inputs be `context`,
          resampled embeddings be `latents`"""
@@ -88,23 +84,25 @@ class Idefics2PerceiverAttention(nn.Module):
         self.attention_dropout = config.perceiver_config.attention_dropout
 
         self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                self.num_heads * self.head_dim,
-                                bias=False,
-                                quant_config=quant_config)
+                                           self.num_heads * self.head_dim,
+                                           bias=False,
+                                           quant_config=quant_config)
         self.k_proj = ColumnParallelLinear(self.hidden_size,
-                                self.num_key_value_heads * self.head_dim,
-                                bias=False,
-                                quant_config=quant_config)
+                                           self.num_key_value_heads *
+                                           self.head_dim,
+                                           bias=False,
+                                           quant_config=quant_config)
         self.v_proj = ColumnParallelLinear(self.hidden_size,
-                                self.num_key_value_heads * self.head_dim,
-                                bias=False,
-                                quant_config=quant_config)
-        self.o_proj = RowParallelLinear( 
+                                           self.num_key_value_heads *
+                                           self.head_dim,
+                                           bias=False,
+                                           quant_config=quant_config)
+        self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.hidden_size,
-            bias=False, 
-            quant_config=quant_config, 
-        ) 
+            bias=False,
+            quant_config=quant_config,
+        )
         self.is_causal = False
 
     def forward(
@@ -230,8 +228,7 @@ class Idefics2PerceiverLayer(nn.Module):
             intermediate_size=config.text_config.hidden_size * 4,
             output_size=config.text_config.hidden_size,
             hidden_act=config.perceiver_config.hidden_act,
-            quant_config=quant_config
-        )
+            quant_config=quant_config)
 
     def forward(
         self,
@@ -299,8 +296,10 @@ class Idefics2PerceiverResampler(nn.Module):
             torch.ones(self.n_latents, self.hidden_size))
 
         # Create Transformer Blocks
-        self.layers = nn.ModuleList(
-            [Idefics2PerceiverLayer(config, quant_config, idx) for idx in range(self.depth)])
+        self.layers = nn.ModuleList([
+            Idefics2PerceiverLayer(config, quant_config, idx)
+            for idx in range(self.depth)
+        ])
         self.norm = RMSNorm(self.hidden_size, eps=self.rms_norm_eps)
 
         self._use_flash_attention_2 =\
@@ -353,9 +352,9 @@ class Idefics2Connector(nn.Module):
             intermediate_size=config.text_config.intermediate_size,
             output_size=config.text_config.hidden_size,
             hidden_act=config.text_config.hidden_act,
-            quant_config=quant_config
-        )
-        self.perceiver_resampler = Idefics2PerceiverResampler(config, quant_config)
+            quant_config=quant_config)
+        self.perceiver_resampler = Idefics2PerceiverResampler(
+            config, quant_config)
         self.quant_config = quant_config
 
     def forward(self, image_hidden_states, attention_mask):
@@ -370,7 +369,7 @@ class Idefics2Model(nn.Module):
     def __init__(self,
                  config: "Idefics2Config",
                  vision_language_config: VisionLanguageConfig,
-                 quant_config: QuantizationConfig, 
+                 quant_config: QuantizationConfig,
                  linear_method: Optional["LinearMethodBase"] = None) -> None:
         super().__init__()
         self.config = config
@@ -381,7 +380,8 @@ class Idefics2Model(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        ## Currently using transformers's implementation so is not tensor parallelized
+        # Currently using transformers's implementation so
+        # tensor is not parallelized
         self.vision_model = SiglipVisionModel(config.vision_config)
         self.connector = Idefics2Connector(config, quant_config)
         ##Mistral Language Decoder
@@ -484,9 +484,10 @@ class Idefics2Model(nn.Module):
 class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
     _tied_weights_keys = ["lm_head.weight"]
 
-    _skip_list = ['model.connector.modality_projection.gate_proj.weight', 
-                  'model.connector.modality_projection.up_proj.weight']
-
+    _skip_list = [
+        'model.connector.modality_projection.gate_proj.weight',
+        'model.connector.modality_projection.up_proj.weight'
+    ]
 
     def __init__(self,
                  config: "Idefics2Config",
@@ -511,7 +512,7 @@ class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
         self.lm_head = ParallelLMHead(
             config.text_config.vocab_size,
             config.text_config.hidden_size,
-            org_num_embeddings= config.text_config.vocab_size)
+            org_num_embeddings=config.text_config.vocab_size)
         self.vocab_size = config.text_config.vocab_size
 
         self.unpadded_vocab_size = config.text_config.vocab_size
@@ -556,8 +557,10 @@ class Idefics2ForConditionalGeneration(VisionLanguageModelBase):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        _skip_list = ['model.connector.modality_projection.gate_proj.weight', 
-                      'model.connector.modality_projection.up_proj.weight']
+        _skip_list = [
+            'model.connector.modality_projection.gate_proj.weight',
+            'model.connector.modality_projection.up_proj.weight'
+        ]
 
         params_dict = dict(self.named_parameters())
 
