@@ -2,11 +2,16 @@
 ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
 
 ARG COMMON_WORKDIR=/app
+
+# The following ARGs should be "0" or "1". If "1", the respective component will be built and installed on top of the base image
 ARG BUILD_HIPBLASLT="1"
 ARG BUILD_RCCL="1"
 ARG BUILD_FA="1"
 ARG BUILD_CUPY="0"
 ARG BUILD_TRITON="1"
+# This ARG should also be "0" or "1". If "1", the vLLM development directory is obtained via git clone.
+# If "0", it is copied in from the local working directory.
+ARG REMOTE_VLLM="0"
 
 # -----------------------
 # vLLM base image
@@ -114,11 +119,21 @@ FROM scratch AS export_triton_0
 FROM export_triton_${BUILD_TRITON} AS export_triton
 
 # -----------------------
+# vLLM (and gradlib) fetch stages
+FROM base AS fetch_vllm_0
+ONBUILD COPY ./ vllm/
+FROM base AS fetch_vllm_1
+ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
+ARG VLLM_BRANCH="main"
+ONBUILD RUN git clone ${VLLM_REPO} \
+	    && cd vllm \
+	    && git checkout ${VLLM_BRANCH}
+FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
+
+# -----------------------
 # vLLM (and gradlib) build stages
-FROM base AS build_vllm
+FROM fetch_vllm AS build_vllm
 ARG COMMON_WORKDIR
-# To consider: Obtain vLLM via git clone
-COPY ./ ${COMMON_WORKDIR}/vllm
 # Build vLLM
 RUN cd vllm \
     && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist
@@ -136,14 +151,15 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/patch_xformers.rocm.sh /
 # -----------------------
 # Final vLLM image
 FROM base AS final
-ARG BASE_IMAGE
 ARG BUILD_FA
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
-# Manually removed it so that later steps of numpy upgrade can continue
-RUN if [ "$BASE_IMAGE" = *"py_3.9"* ]; then \
-    rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/; fi
+# Manually remove it so that later steps of numpy upgrade can continue
+RUN case "$(which python3)" in \
+        *"/opt/conda/envs/py_3.9"*) \
+            rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
+        *) ;; esac
 
 RUN --mount=type=bind,from=export_hipblaslt,src=/,target=/install \
     if ls /install/*.deb; then \
@@ -184,10 +200,10 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip install -U -r requirements-rocm.txt \
     && if [ "$BUILD_FA" = "1" ]; then \
             bash patch_xformers.rocm.sh; fi \
-    && case "$BASE_IMAGE" in \
-           *"rocm6.0"*|*"rocm-rel-6.0"*) \
+    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+           *"rocm-6.0"*) \
                patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h rocm_patch/rocm_bf16.patch;; \
-           *"rocm6.1"*|*"rocm-rel-6.1"*) \
+           *"rocm-6.1"*) \
                cp rocm_patch/libamdhip64.so.6 /opt/rocm/lib/libamdhip64.so.6;; \
            *) ;; esac \
     && pip install *.whl
@@ -200,3 +216,4 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV HIP_FORCE_DEV_KERNARG=1
 
 CMD ["/bin/bash"]
+
