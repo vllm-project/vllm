@@ -8,18 +8,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Attention ops
   // Compute the attention between an input query and the cached keys/values
   // using PagedAttention.
-  ops.def("paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, "
-          "Tensor value_cache, int num_kv_heads, float scale, Tensor "
-          "block_tables, Tensor seq_lens, int block_size, int max_seq_len, "
-          "Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> ()");
+  ops.def(
+      "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, "
+      "Tensor value_cache, int num_kv_heads, float scale, Tensor "
+      "block_tables, Tensor seq_lens, int block_size, int max_seq_len, "
+      "Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> ()");
   ops.impl("paged_attention_v1", torch::kCPU, &paged_attention_v1);
 
   // PagedAttention V2.
-  ops.def("paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits,"
-          "Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache,"
-          "int num_kv_heads, float scale, Tensor block_tables, Tensor seq_lens,"
-          "int block_size, int max_seq_len, Tensor? alibi_slopes, "
-          "str kv_cache_dtype, float kv_scale) -> ()");
+  ops.def(
+      "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits,"
+      "Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache,"
+      "int num_kv_heads, float scale, Tensor block_tables, Tensor seq_lens,"
+      "int block_size, int max_seq_len, Tensor? alibi_slopes, "
+      "str kv_cache_dtype, float kv_scale) -> ()");
   ops.impl("paged_attention_v2", torch::kCPU, &paged_attention_v2);
 
   // Activation ops
@@ -46,22 +48,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  ops.def("rms_norm(Tensor out, Tensor input, Tensor weight, float epsilon) -> ()");
+  ops.def(
+      "rms_norm(Tensor out, Tensor input, Tensor weight, float epsilon) -> ()");
   ops.impl("rms_norm", torch::kCPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
-  ops.def("fused_add_rms_norm(Tensor input, Tensor residual, Tensor weight, float epsilon) -> ()");
+  ops.def(
+      "fused_add_rms_norm(Tensor input, Tensor residual, Tensor weight, float "
+      "epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCPU, &fused_add_rms_norm);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
-  ops.def("rotary_embedding(Tensor positions, Tensor query, Tensor key, int head_size, Tensor cos_sin_cache, bool is_neox) -> ()");
+  ops.def(
+      "rotary_embedding(Tensor positions, Tensor query, Tensor key, int "
+      "head_size, Tensor cos_sin_cache, bool is_neox) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 }
 
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
-{
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
   cache_ops.def("swap_blocks", &swap_blocks,

@@ -46,7 +46,8 @@ def bgmv(
     except ImportError as e:
         _raise_import_error(e)
 
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
+                                      scale)
 
 
 def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
@@ -135,9 +136,10 @@ def add_lora(y: torch.Tensor,
         buffer = torch.zeros((x.size(0), r),
                              dtype=torch.float32,
                              device=x.device)
-    torch.ops._punica_C.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
+    torch.ops._punica_C.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx,
+                                      1.0)
     torch.ops._punica_C.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
-                                 scale)
+                                      scale)
 
 
 def add_lora_slice(y: torch.Tensor,

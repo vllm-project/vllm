@@ -52,7 +52,7 @@ def paged_attention_v1(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    vllm_ops.paged_attention_v1(
+    torch.ops._C.paged_attention_v1(
         out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         kv_scale, tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
@@ -82,7 +82,7 @@ def paged_attention_v2(
     blocksparse_block_size: int = 64,
     blocksparse_head_sliding_step: int = 0,
 ) -> None:
-    vllm_ops.paged_attention_v2(
+    torch.ops._C.paged_attention_v2(
         out, exp_sum, max_logits, tmp_out, query, key_cache, value_cache,
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, kv_scale, tp_rank,
@@ -99,8 +99,8 @@ def rotary_embedding(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
 ) -> None:
-    torch.ops._C.rotary_embedding(positions, query, key, head_size, cos_sin_cache,
-                                  is_neox)
+    torch.ops._C.rotary_embedding(positions, query, key, head_size,
+                                  cos_sin_cache, is_neox)
 
 
 def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
@@ -109,8 +109,8 @@ def batched_rotary_embedding(positions: torch.Tensor, query: torch.Tensor,
                              rot_dim: int,
                              cos_sin_cache_offsets: torch.Tensor) -> None:
     torch.ops._C.batched_rotary_embedding(positions, query, key, head_size,
-                                      cos_sin_cache, is_neox, rot_dim,
-                                      cos_sin_cache_offsets)
+                                          cos_sin_cache, is_neox, rot_dim,
+                                          cos_sin_cache_offsets)
 
 
 # layer norm ops
@@ -129,8 +129,8 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def awq_dequantize(qweight: torch.Tensor, scales: torch.Tensor,
                    zeros: torch.Tensor, split_k_iters: int, thx: int,
                    thy: int) -> torch.Tensor:
-    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx,
-                                   thy)
+    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters,
+                                       thx, thy)
 
 
 def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
@@ -144,7 +144,7 @@ def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
     return torch.ops._C.gptq_gemm(a, b_q_weight, b_gptq_qzeros, b_gptq_scales,
-                              b_g_idx, use_exllama, bit)
+                                  b_g_idx, use_exllama, bit)
 
 
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
@@ -163,7 +163,7 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                 b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
                 size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
-                                size_n, size_k)
+                                    size_n, size_k)
 
 
 # marlin_24
@@ -172,8 +172,8 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         workspace: torch.Tensor, num_bits: int, size_m: int,
                         size_n: int, size_k: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
-                                        workspace, num_bits, size_m, size_n,
-                                        size_k)
+                                            workspace, num_bits, size_m,
+                                            size_n, size_k)
 
 
 # cutlass
@@ -198,12 +198,13 @@ def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebook_partition_sizes: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
     return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
-                              codebook_partition_sizes, bias)
+                                  codebook_partition_sizes, bias)
 
 
 def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
                  codebook_partition_sizes: torch.Tensor) -> torch.Tensor:
-    return torch.ops._C.aqlm_dequant(codes, codebooks, codebook_partition_sizes)
+    return torch.ops._C.aqlm_dequant(codes, codebooks,
+                                     codebook_partition_sizes)
 
 
 # gptq_marlin
@@ -211,7 +212,7 @@ def gptq_marlin_repack(b_q_weight: torch.Tensor, perm: torch.Tensor,
                        size_k: int, size_n: int,
                        num_bits: int) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n,
-                                       num_bits)
+                                           num_bits)
 
 
 def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -220,8 +221,8 @@ def gptq_marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                      num_bits: int, size_m: int, size_n: int, size_k: int,
                      is_k_full: bool) -> torch.Tensor:
     return torch.ops._C.gptq_marlin_gemm(a, b_q_weight, b_scales, g_idx, perm,
-                                     workspace, num_bits, size_m, size_n,
-                                     size_k, is_k_full)
+                                         workspace, num_bits, size_m, size_n,
+                                         size_k, is_k_full)
 
 
 # fp8
@@ -300,8 +301,8 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
     torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
-                                  sorted_token_ids, experts_ids,
-                                  num_tokens_post_pad)
+                                      sorted_token_ids, experts_ids,
+                                      num_tokens_post_pad)
 
 
 def reshape_and_cache(
