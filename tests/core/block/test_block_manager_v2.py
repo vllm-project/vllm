@@ -1,8 +1,8 @@
 import pytest
 
 from vllm.core.block_manager_v2 import (BlockSpaceManagerV2,
-                                        str_not_impl_enc_dec_prefix_cache,
-                                        str_not_impl_enc_dec_swa)
+                                        STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                                        STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
 from vllm.utils import chunk_list
@@ -163,7 +163,7 @@ def test_can_allocate_encoder_decoder_fails_with_swa(block_size: int,
     # 2. can_allocate() fails with NotImplementedError due to combination of
     #    encoder/decoder and sliding window attention
     if isinstance(exc_info.value, NotImplementedError):
-        assert str(exc_info.value) == str_not_impl_enc_dec_swa
+        assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_SWA
     elif isinstance(exc_info.value, AssertionError):
         assert str(exc_info.value) == "Sliding window not yet supported"
 
@@ -201,7 +201,7 @@ def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
     # due to combination of encoder/decoder and prefix cache
     with pytest.raises(NotImplementedError) as exc_info:
         block_manager.can_allocate(seq_group)
-    assert str(exc_info.value) == str_not_impl_enc_dec_prefix_cache
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE
 
 
 @pytest.mark.parametrize("block_size", [1, 8])

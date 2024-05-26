@@ -13,11 +13,11 @@ from vllm.utils import Device
 Exception strings for non-implemented encoder/decoder scenarios
 '''
 
-str_not_impl_enc_dec_swa = \
+STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
                     "is not currently supported."
 
-str_not_impl_enc_dec_prefix_cache = \
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
                     "is not currently supported."
 
@@ -106,10 +106,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         is_encoder_decoder = seq_group.is_encoder_decoder()
         if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
 
         if self.block_sliding_window is not None and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_swa)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
@@ -181,10 +181,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         if (self.block_sliding_window is not None) and \
            is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_swa)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
         if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
 
         if is_encoder_decoder:
             block_table = self._allocate_sequence(encoder_seq)

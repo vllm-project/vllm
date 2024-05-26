@@ -19,11 +19,11 @@ logger = init_logger(__name__)
 Exception strings for non-implemented encoder/decoder scenarios
 '''
 
-str_not_impl_enc_dec_swa = \
+STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
                     "is not currently supported."
 
-str_not_impl_enc_dec_prefix_cache = \
+STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
                     "is not currently supported."
 
@@ -272,9 +272,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         self.cross_block_tables: Dict[str, BlockTable] = {}
 
     def _get_seq_num_required_blocks(self, seq: Sequence) -> int:
-        if seq is None:
-            return 0
-        return len(seq.logical_token_blocks)
+        return 0 if seq is None \
+            else len(seq.logical_token_blocks)
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -282,7 +281,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         is_encoder_decoder = seq_group.is_encoder_decoder()
         if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
 
         self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
@@ -293,7 +292,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if self.block_sliding_window is not None:
             if is_encoder_decoder:
-                raise NotImplementedError(str_not_impl_enc_dec_swa)
+                raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
@@ -340,10 +339,10 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         if (self.block_sliding_window is not None) and \
            is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_swa)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
         if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
+            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
 
         # Allocate decoder sequences
         #
