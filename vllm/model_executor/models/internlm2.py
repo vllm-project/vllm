@@ -243,6 +243,7 @@ class InternLM2Model(nn.Module):
 
 class InternLM2ForCausalLM(nn.Module):
     packed_modules_mapping = {
+        "wqkv": ["wqkv"],
         "gate_up_proj": [
             "w1",
             "w3",
