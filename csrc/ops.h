@@ -10,8 +10,9 @@ void paged_attention_v1(
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
-    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step);
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
 
 void paged_attention_v2(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -20,8 +21,9 @@ void paged_attention_v2(
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
-    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step);
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
@@ -66,8 +68,8 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters, int64_t thx,
-                             int64_t thy);
+                             torch::Tensor _zeros, int64_t split_k_iters,
+                             int64_t thx, int64_t thy);
 
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,

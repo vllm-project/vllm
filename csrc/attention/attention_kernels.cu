@@ -808,7 +808,7 @@ void paged_attention_v1(
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
-        value_cache,   // [num_blocks, num_heads, head_size, block_size]
+        value_cache,       // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads,  // [num_heads]
     double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
@@ -816,8 +816,9 @@ void paged_attention_v1(
     int64_t block_size, int64_t max_seq_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
-    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
 
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
@@ -972,7 +973,7 @@ void paged_attention_v2(
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
     torch::Tensor&
-        value_cache,   // [num_blocks, num_heads, head_size, block_size]
+        value_cache,       // [num_blocks, num_heads, head_size, block_size]
     int64_t num_kv_heads,  // [num_heads]
     double scale,
     torch::Tensor& block_tables,  // [num_seqs, max_num_blocks_per_seq]
@@ -980,8 +981,9 @@ void paged_attention_v2(
     int64_t block_size, int64_t max_seq_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks, const int64_t blocksparse_vert_stride,
-    const int64_t blocksparse_block_size, const int64_t blocksparse_head_sliding_step) {
+    const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_V2_LAUNCHER_BLOCK_SIZE)

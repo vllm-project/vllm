@@ -435,8 +435,8 @@ __global__ void __launch_bounds__(64)
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters, int64_t thx,
-                             int64_t thy) {
+                             torch::Tensor _zeros, int64_t split_k_iters,
+                             int64_t thx, int64_t thy) {
   int in_c = _kernel.size(0);
   int qout_c = _kernel.size(1);
   int out_c = qout_c * 8;
