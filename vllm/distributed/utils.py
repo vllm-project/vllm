@@ -4,7 +4,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import json
 import os
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.distributed as dist
@@ -134,3 +134,12 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cache = json.load(f)
     _gpu_p2p_access_cache = cache
     return _gpu_p2p_access_cache[f"{i}->{j}"]
+
+
+def get_pp_indices(num_hidden_layers: int, pp_rank: int,
+                   pp_size: int) -> Tuple[int, int]:
+    layers_per_partition = divide(num_hidden_layers, pp_size)
+    start_layer = pp_rank * layers_per_partition
+    end_layer = start_layer + layers_per_partition
+
+    return (start_layer, end_layer)

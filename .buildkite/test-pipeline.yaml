@@ -55,6 +55,12 @@ steps:
   commands:
   - pytest -v -s distributed/test_pynccl.py
 
+- label: Pipeline Parallelism Test
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  commands:
+  - EAGER_MODE=1 CHUNKED_PREFILL=1 pytest -v -s distributed/test_pipeline_parallel.py
+
 - label: Engine Test
   mirror_hardwares: [amd]
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py

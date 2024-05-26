@@ -55,7 +55,7 @@ def test_chunked_prefill_recompute(
         max_num_seqs=max_num_seqs,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+    assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
 
@@ -92,10 +92,10 @@ def test_preemption(
         disable_log_stats=False,
     )
     vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+    assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
     total_preemption = (
-        vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
+        vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -150,10 +150,10 @@ def test_swap(
     )
     vllm_outputs = vllm_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
-    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+    assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
     total_preemption = (
-        vllm_model.model.llm_engine.scheduler.num_cumulative_preemption)
+        vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
     del vllm_model
 
     for i in range(len(example_prompts)):
@@ -218,7 +218,7 @@ def test_swap_infeasible(
         example_prompts,
         sampling_params=sampling_params,
     )
-    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+    assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
     # Verify the request is ignored and not hang.
@@ -255,7 +255,7 @@ def test_preemption_infeasible(
         sampling_params=sampling_params,
     )
 
-    assert (vllm_model.model.llm_engine.scheduler.artificial_preempt_cnt <
+    assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt <
             ARTIFICIAL_PREEMPTION_MAX_CNT)
     del vllm_model
     # Verify the request is ignored and not hang.

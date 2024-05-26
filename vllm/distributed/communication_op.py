@@ -4,14 +4,21 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed
 from torch.distributed import ProcessGroup
 
-from .parallel_state import (get_cpu_world_group, get_pp_pynccl_communicator,
+# yapf: disable
+from .parallel_state import (get_cpu_world_group,
+                             get_pipeline_model_parallel_group,
+                             get_pipeline_model_parallel_next_rank,
+                             get_pipeline_model_parallel_prev_rank,
+                             get_pp_pynccl_communicator,
                              get_tensor_model_parallel_group,
-                             get_tensor_model_parallel_rank,
                              get_tensor_model_parallel_world_size,
                              get_tp_ca_communicator,
                              get_tp_pynccl_communicator)
+
+# yapf: enable
 
 
 @dataclass
@@ -146,7 +153,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
         # Convert negative dim to positive.
         dim += input_.dim()
     # Allocate output tensor.
-    if get_tensor_model_parallel_rank() == dst:
+    if torch.distributed.get_rank() == dst:
         gather_list = [torch.empty_like(input_) for _ in range(world_size)]
     else:
         gather_list = None
@@ -155,7 +162,7 @@ def tensor_model_parallel_gather(input_: torch.Tensor,
                              gather_list,
                              dst=dst,
                              group=get_tensor_model_parallel_group())
-    if get_tensor_model_parallel_rank() == dst:
+    if torch.distributed.get_rank() == dst:
         output_tensor = torch.cat(gather_list, dim=dim)
     else:
         output_tensor = None
@@ -315,3 +322,33 @@ def broadcast_tensor_dict(
         for async_handle in async_handles:
             async_handle.wait()
     return tensor_dict
+
+
+def send_next_rank(tensors: List[torch.Tensor]) -> None:
+    """Send the tensors to the next pipeline model parallel rank."""
+    combined_tensor = torch.cat(tensors, dim=0)
+    torch.cat(tensors, dim=0)
+    pynccl_comm = get_pp_pynccl_communicator()
+    if (pynccl_comm is not None and not pynccl_comm.disabled):
+        pynccl_comm.send(combined_tensor)
+    else:
+        torch.distributed.send(combined_tensor,
+                               get_pipeline_model_parallel_next_rank(),
+                               get_pipeline_model_parallel_group())
+
+
+def recv_prev_rank(num_tensors: int, sizes: torch.Size, dtype: torch.dtype,
+                   device: torch.device) -> List[torch.Tensor]:
+    """Receive tensors from the previous pipeline model parallel rank."""
+    sizes = list(sizes)
+    combined_tensor = torch.empty([sizes[0] * num_tensors] + sizes[1:],
+                                  dtype=dtype,
+                                  device=device)
+    pynccl_comm = get_pp_pynccl_communicator()
+    if (pynccl_comm is not None and not pynccl_comm.disabled):
+        pynccl_comm.recv(combined_tensor)
+    else:
+        torch.distributed.recv(combined_tensor,
+                               get_pipeline_model_parallel_prev_rank(),
+                               get_pipeline_model_parallel_group())
+    return torch.chunk(combined_tensor, num_tensors, dim=0)
