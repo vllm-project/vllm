@@ -280,7 +280,7 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = self._create_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
-                            num_output_top_logprobs=request.logprobs,
+                            num_output_top_logprobs=request.top_logprobs,
                             initial_text_offset=len(previous_texts[i]),
                         )
                     else:
