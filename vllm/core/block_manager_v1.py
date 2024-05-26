@@ -8,7 +8,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
-from vllm.core.block.utils import check_no_caching_or_swa_for_blckmgr_encdec
+from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
@@ -269,7 +269,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
@@ -321,7 +321,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
     def allocate(self, seq_group: SequenceGroup) -> None:
         is_encoder_decoder = seq_group.is_encoder_decoder()
-        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         # Allocate decoder sequences
         #

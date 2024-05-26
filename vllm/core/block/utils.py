@@ -14,7 +14,7 @@ STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
                     "is not currently supported."
 
 
-def check_no_caching_or_swa_for_blckmgr_encdec(
+def check_no_caching_or_swa_for_blockmgr_encdec(
         block_mgr, seq_group: SequenceGroup) -> None:
     '''
     Enforce that prefix caching & sliding-window attention (SWA)

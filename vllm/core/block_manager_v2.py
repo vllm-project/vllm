@@ -5,7 +5,7 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.core.block.utils import check_no_caching_or_swa_for_blckmgr_encdec
+from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -93,7 +93,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
@@ -161,7 +161,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 not in self.cross_block_tables), \
                 "block table already exists"
 
-        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         if seq_group.is_encoder_decoder():
             block_table = self._allocate_sequence(seq_group.get_encoder_seq())
