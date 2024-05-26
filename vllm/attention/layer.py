@@ -1,5 +1,5 @@
 """Attention layer."""
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -33,6 +33,7 @@ class Attention(nn.Module):
         sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         if cache_config is not None:
@@ -69,10 +70,12 @@ class Attention(nn.Module):
         dtype = torch.get_default_dtype()
         attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
                                         sliding_window, dtype, kv_cache_dtype,
-                                        block_size)
+                                        block_size, blocksparse_params
+                                        is not None)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
-                             alibi_slopes, sliding_window, kv_cache_dtype)
+                             alibi_slopes, sliding_window, kv_cache_dtype,
+                             blocksparse_params)
 
     def forward(
         self,
@@ -90,4 +93,5 @@ class Attention(nn.Module):
         s += f", num_heads={self.impl.num_heads}"  # type: ignore
         s += f", num_kv_heads={self.impl.num_kv_heads}"  # type: ignore
         s += f", scale={self.impl.scale}"  # type: ignore
+        s += f", backend={self.impl.__class__.__name__}"
         return s
