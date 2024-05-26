@@ -213,8 +213,6 @@ class LLMEngine:
             self.tokenizer = None
             self.detokenizer = None
 
-        self._eos_warn_count = 0
-
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -419,11 +417,8 @@ class LLMEngine:
     def _get_eos_token_id(
             self, lora_request: Optional[LoRARequest]) -> Optional[int]:
         if self.tokenizer is None:
-            if self._eos_warn_count == 0:
-                logger.warning("Using None for EOS token id because tokenizer "
-                               "is not initialized")
-
-            self._eos_warn_count += 1
+            logger.warning("Using None for EOS token id because tokenizer "
+                           "is not initialized")
             return None
 
         return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
