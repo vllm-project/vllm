@@ -42,7 +42,7 @@ def bgmv(
       scale: Scaling factor.
     """
     try:
-        torch.ops._punica_C.dispatch_bgmv
+        import vllm._punica_C as punica_kernels
     except ImportError as e:
         _raise_import_error(e)
 
@@ -76,7 +76,7 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
       y_slice_size: Size of the y column slice.
     """
     try:
-        torch.ops._punica_C.dispatch_bgmv
+        import vllm._punica_C as punica_kernels
     except ImportError as e:
         _raise_import_error(e)
     torch.ops._punica_C.dispatch_bgmv_low_level(
@@ -123,7 +123,7 @@ def add_lora(y: torch.Tensor,
       buffer: Optional. Shape: `[B, R]`. Temporary buffer.
     """
     try:
-        torch.ops._punica_C.dispatch_bgmv
+        import vllm._punica_C as punica_kernels
     except ImportError as e:
         _raise_import_error(e)
 
@@ -177,7 +177,7 @@ def add_lora_slice(y: torch.Tensor,
       y_slice_size: Size of the y column slice.
     """
     try:
-        torch.ops._punica_C.dispatch_bgmv
+        import vllm._punica_C as punica_kernels
     except ImportError as e:
         _raise_import_error(e)
 

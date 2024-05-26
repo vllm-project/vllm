@@ -350,6 +350,8 @@ def fused_topk(
                                         dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
     else:
+        import vllm._moe_C as moe_kernels
+
         topk_weights = torch.empty(M,
                                    topk,
                                    dtype=torch.float32,
