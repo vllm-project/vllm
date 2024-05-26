@@ -145,14 +145,11 @@ def create_seq_group_encoder_decoder(
         block_size=16,
     )
 
-    seq_group = SequenceGroup(request_id=request_id,
-                              seqs=seqs,
-                              sampling_params=sampling_params,
-                              arrival_time=time.time(),
-                              encoder_seq=encoder_seq)
-
-    return seq_group
-
+    return SequenceGroup(request_id=request_id,
+                         seqs=seqs,
+                         sampling_params=sampling_params,
+                         arrival_time=time.time(),
+                         encoder_seq=encoder_seq)
 
 def round_up_to_next_block(seq_len: int, block_size: int) -> int:
     return (seq_len + block_size - 1) // block_size
