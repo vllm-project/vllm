@@ -1,8 +1,8 @@
 import pytest
 
-from vllm.core.block_manager_v2 import (BlockSpaceManagerV2,
-                                        STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-                                        STR_NOT_IMPL_ENC_DEC_SWA)
+from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                                   STR_NOT_IMPL_ENC_DEC_SWA)
+from vllm.core.block_manager_v2 import BlockSpaceManagerV2
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
 from vllm.utils import chunk_list

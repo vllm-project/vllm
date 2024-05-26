@@ -8,6 +8,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
+from vllm.core.block.utils import check_no_caching_or_swa_for_blckmgr_encdec
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
@@ -15,17 +16,6 @@ from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 logger = init_logger(__name__)
-'''
-Exception strings for non-implemented encoder/decoder scenarios
-'''
-
-STR_NOT_IMPL_ENC_DEC_SWA = \
-    "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
-
-STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
-    "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
 
 
 class BlockAllocatorBase(ABC):
@@ -279,9 +269,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        is_encoder_decoder = seq_group.is_encoder_decoder()
-        if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
+        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
 
         self_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_seqs(status=SequenceStatus.WAITING)[0])
@@ -291,8 +279,6 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                               cross_num_required_blocks
 
         if self.block_sliding_window is not None:
-            if is_encoder_decoder:
-                raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
 
             num_required_blocks = min(num_required_blocks,
                                       self.block_sliding_window)
@@ -334,15 +320,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        encoder_seq = seq_group.get_encoder_seq()
         is_encoder_decoder = seq_group.is_encoder_decoder()
-
-        if (self.block_sliding_window is not None) and \
-           is_encoder_decoder:
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_SWA)
-
-        if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE)
+        check_no_caching_or_swa_for_blckmgr_encdec(self, seq_group)
 
         # Allocate decoder sequences
         #
@@ -362,8 +341,8 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         if is_encoder_decoder:
             # A SequenceGroup has only a single encoder sequence (at most),
             # thus allocate with a ref count of 1
-            block_table = self._allocate_sequence(encoder_seq, 1,
-                                                  is_encoder_decoder)
+            block_table = self._allocate_sequence(seq_group.get_encoder_seq(),
+                                                  1, is_encoder_decoder)
             # Assign the cross-attention block table for the SequenceGroup.
             self.cross_block_tables[seq_group.request_id] = block_table
 
@@ -542,8 +521,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
             return AllocStatus.LATER
 
     def _swap_block_table(
-            self, block_table: BlockTable,
-            src_allocator: BlockAllocatorBase,
+            self, block_table: BlockTable, src_allocator: BlockAllocatorBase,
             dest_allocator: BlockAllocatorBase,
             mapping: Dict[PhysicalTokenBlock,
                           PhysicalTokenBlock]) -> BlockTable:
