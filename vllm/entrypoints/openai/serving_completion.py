@@ -148,8 +148,15 @@ class OpenAIServingCompletion(OpenAIServing):
                 final_res_batch[i] = res
 
             final_res_batch_checked: List[RequestOutput] = []
-            for final_res in final_res_batch:
+            for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
+
+                # The output should contain the input text
+                # We did not pass it into vLLM engine to avoid being redundant
+                # with the inputs token IDs
+                if final_res.prompt is None:
+                    final_res.prompt = prompts[i]["prompt"]
+
                 final_res_batch_checked.append(final_res)
 
             response = self.request_output_to_completion_response(
