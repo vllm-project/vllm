@@ -1,5 +1,6 @@
 """Block manager utils."""
 from vllm.sequence import SequenceGroup
+
 '''
 Exception strings for non-implemented block manager encoder/decoder scenarios
 '''
