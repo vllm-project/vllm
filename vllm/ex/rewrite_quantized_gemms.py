@@ -18,7 +18,8 @@ from typing import List, Tuple, Any, Dict, Optional, Callable, Mapping, Set, Typ
 
 from vllm.logger import init_logger
 from vllm import _custom_ops as custom_ops
-from vllm._C import ops as vllm_ops
+#from vllm._C import ops as vllm_ops
+#import vllm._C as vllm_ops
 
 import traceback
 
@@ -54,14 +55,6 @@ def fake_cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales):
 #torch._dynamo.allow_in_graph(vllm_ops.static_scaled_int8_quant)
 #torch._dynamo.allow_in_graph(vllm_ops.cutlass_scaled_mm_dq)
 
-
-def _quantize_single(x: torch.Tensor, scale: float) -> torch.Tensor:
-    x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-    vllm_ops.static_scaled_int8_quant(x_q, x, scale)
-    #fake_static_scaled_int8_quant(x_q, x, scale)
-    return x_q
-
-
 def _cutlass_scaled_mm_dq(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -76,7 +69,7 @@ def _cutlass_scaled_mm_dq(
     out.resize_((m, n))
     out = out.to(out_dtype)
 
-    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
+    torch.ops._C.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
     #fake_cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
 
     return out
@@ -86,14 +79,30 @@ def pattern3(x, w, w_scale, xtype):
     f_x = x.to(torch.float32)
     f_w = w.to(torch.float32) * w_scale
     f_out = torch.nn.functional.linear(f_x, f_w.transpose(1, 0))
-    return f_out.to(xtype)#, x_scale
+    return f_out.to(xtype)
 
 
-def replacement(x, w, x_scale, w_scale, x_type):
-    x_q = _quantize_single(x, x_scale[0].item())
-    return _cutlass_scaled_mm_dq(x_q, w, x_scale, w_scale, x_type)
+class replacement_class(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')  # temp hack
+
+    def forward(self, x, w, w_scale, x_type):
+        x_q = custom_ops.cutlass_quantize_single(x, self.x_scale[0].item())
+        return _cutlass_scaled_mm_dq(x_q, w, self.x_scale, w_scale, x_type)
 
 
+def llama_mlp_pattern(l_x_, weight, weight_1):
+    gate_up = torch._C._nn.linear(l_x_, weight, None);
+    getitem = gate_up[(Ellipsis, slice(None, 11008, None))]
+    getitem_1 = gate_up[(Ellipsis, slice(11008, None, None))];
+    silu = torch.nn.functional.silu(getitem);
+    input_parallel = silu * getitem_1;
+    x_1 = torch._C._nn.linear(input_parallel, weight_1, None);
+    return x_1
+
+
+# TODO: try to register things differently?
 def rewrite_quantized_gemms(
     mod: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor]
@@ -101,28 +110,29 @@ def rewrite_quantized_gemms(
 #    return mod
     pattern_graph = symbolic_trace(pattern3).graph
 
-    x = torch.empty((16,16), dtype=torch.float16)
-    x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')
+    #x = torch.empty((16,16), dtype=torch.float16)
+    #x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')
 
-    w = torch.empty((x.size(0),16), dtype=torch.int8, device='cuda')
-    w_scale = torch.empty((w.size(1),), dtype=torch.float32, device='cuda')
+    #w = torch.empty((x.size(0),16), dtype=torch.int8, device='cuda')
+    #w_scale = torch.empty((w.size(1),), dtype=torch.float32, device='cuda')
 
-    x_type = torch.float16
+    #x_type = torch.float16
 
-    m, n, k = 512, 512, 512
+    #m, n, k = 512, 512, 512
 
-    x = torch.empty((m, k), device="cuda", dtype=torch.float16)
-    x_scale = torch.empty((m, 1), device="cuda", dtype=torch.float32)
+    #x = torch.empty((m, k), device="cuda", dtype=torch.float16)
+    #x_scale = torch.empty((m, 1), device="cuda", dtype=torch.float32)
 
-    w = torch.empty((n, k), device="cuda", dtype=torch.int8).transpose(1, 0)
-    w_scale = torch.empty((1, n), device="cuda", dtype=torch.float32)
+    #w = torch.empty((n, k), device="cuda", dtype=torch.int8).transpose(1, 0)
+    #w_scale = torch.empty((1, n), device="cuda", dtype=torch.float32)
 
-    replace_graph = symbolic_trace(replacement, {'x':x, 'w': w, 'x_scale':x_scale, 'w_scale':w_scale, 'x_type': x_type}).graph  # provide sample inputs?
+#    replace_graph = symbolic_trace(replacement, {'x':x, 'w': w, 'x_scale':x_scale, 'w_scale':w_scale, 'x_type': x_type}).graph  # provide sample inputs?
 
     # See https://github.com/pytorch/pytorch/issues/93002
     # https://github.com/pytorch/pytorch/issues/120124
     #with torch._C.DisableTorchFunction():
-    #replace_graph = symbolic_trace(replacement).graph
+    replacement = replacement_class()
+    replace_graph = symbolic_trace(replacement).graph
 
     rep_matches = replace_pattern(mod, pattern_graph, replacement)
     print(f"root MATCHES {rep_matches}")
@@ -130,9 +140,12 @@ def rewrite_quantized_gemms(
     if len(rep_matches) > 0:
         logger.debug(f"Rewritten module {mod}:\n{graph_print_tabular(mod.graph)}")
 
-#    matcher = SubgraphMatcher(pattern_graph) #, match_placeholder=True)
-#    matches = matcher.match(mod.graph)
-#    print(f"MATCHES {matches}")
+    llama_mod = symbolic_trace(llama_mlp_pattern)
+    print(f"llama mod {llama_mod}")
+    llama_mlp_pattern_graph = llama_mod.graph
+    matcher = SubgraphMatcher(llama_mlp_pattern_graph, ignore_literals=True)
+    matches = matcher.match(mod.graph)
+    print(f"LLAMA MATCHES {matches}")
 
 #    for name, subm in mod.named_modules():
 #        matches = matcher.match(subm.graph)
