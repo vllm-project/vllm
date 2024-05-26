@@ -1,10 +1,5 @@
 """Block manager utils."""
-from typing import Union
-
-from vllm.core.block_manager_v1 import BlockSpaceManagerV1
-from vllm.core.block_manager_v2 import BlockSpaceManagerV2
 from vllm.sequence import SequenceGroup
-
 '''
 Exception strings for non-implemented block manager encoder/decoder scenarios
 '''
@@ -17,10 +12,9 @@ STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
                     "is not currently supported."
 
+
 def check_no_caching_or_swa_for_blckmgr_encdec(
-        block_mgr: Union[BlockSpaceManagerV1, 
-                         BlockSpaceManagerV2], 
-        seq_group: SequenceGroup) -> None:
+        block_mgr, seq_group: SequenceGroup) -> None:
     '''
     Enforce that prefix caching & sliding-window attention (SWA)
     are currently unsupported *specifically* for encoder/decoder models.
