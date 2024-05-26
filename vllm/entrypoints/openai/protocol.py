@@ -193,8 +193,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_sampling_params(self) -> SamplingParams:
         # We now allow logprobs being true without top_logrobs.
-        # if self.logprobs and not self.top_logprobs:
-        #     raise ValueError("Top logprobs must be set when logprobs is.")
 
         logits_processors = None
         if self.logit_bias:
