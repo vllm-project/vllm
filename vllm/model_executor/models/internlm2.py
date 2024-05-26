@@ -6,7 +6,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -242,13 +242,31 @@ class InternLM2Model(nn.Module):
 
 
 class InternLM2ForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "gate_up_proj": [
+            "w1",
+            "w3",
+        ]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "wqkv",
+        "wo",
+        "gate_up_proj",
+        "w2",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ) -> None:
+        del lora_config  # Unused.
         super().__init__()
         self.config = config
         self.quant_config = quant_config
