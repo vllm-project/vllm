@@ -200,15 +200,30 @@ if __name__ == "__main__":
         # When using single vLLM without engine_use_ray
         model_config = asyncio.run(engine.get_model_config())
 
-    openai_serving_chat = OpenAIServingChat(engine, model_config,
+    log_requests = not args.disable_log_requests
+    max_log_len = args.max_log_len
+
+    openai_serving_chat = OpenAIServingChat(engine,
+                                            model_config,
                                             served_model_names,
                                             args.response_role,
                                             args.lora_modules,
-                                            args.chat_template)
+                                            args.chat_template,
+                                            log_requests=log_requests,
+                                            max_log_len=max_log_len)
     openai_serving_completion = OpenAIServingCompletion(
-        engine, model_config, served_model_names, args.lora_modules)
-    openai_serving_embedding = OpenAIServingEmbedding(engine, model_config,
-                                                      served_model_names)
+        engine,
+        model_config,
+        served_model_names,
+        args.lora_modules,
+        log_requests=log_requests,
+        max_log_len=max_log_len)
+    openai_serving_embedding = OpenAIServingEmbedding(
+        engine,
+        model_config,
+        served_model_names,
+        log_requests=log_requests,
+        max_log_len=max_log_len)
     app.root_path = args.root_path
     uvicorn.run(app,
                 host=args.host,

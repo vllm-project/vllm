@@ -678,12 +678,6 @@ class AsyncEngineArgs(EngineArgs):
         parser.add_argument('--disable-log-requests',
                             action='store_true',
                             help='Disable logging requests.')
-        parser.add_argument('--max-log-len',
-                            type=int,
-                            default=None,
-                            help='Max number of prompt characters or prompt '
-                            'ID numbers being printed in log.'
-                            '\n\nDefault: Unlimited')
         return parser
 
 

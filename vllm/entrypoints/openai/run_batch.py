@@ -46,6 +46,14 @@ def parse_args():
                         "`request.add_generation_prompt=true`.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
+
+    parser.add_argument('--max-log-len',
+                        type=int,
+                        default=None,
+                        help='Max number of prompt characters or prompt '
+                        'ID numbers being printed in log.'
+                        '\n\nDefault: Unlimited')
+
     return parser.parse_args()
 
 
@@ -106,11 +114,18 @@ async def main(args):
     # When using single vLLM without engine_use_ray
     model_config = await engine.get_model_config()
 
+    log_requests = not args.disable_log_requests
+    max_log_len = args.max_log_len
+
     openai_serving_chat = OpenAIServingChat(
         engine,
         model_config,
         served_model_names,
         args.response_role,
+        lora_modules=None,
+        chat_template=None,
+        log_requests=log_requests,
+        max_log_len=max_log_len,
     )
 
     # Submit all requests in the file to the engine "concurrently".

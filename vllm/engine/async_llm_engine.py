@@ -135,7 +135,10 @@ class RequestTracker:
             logger.info("Finished request %s.", request_id)
         self.abort_request(request_id)
 
-    def add_request(self, request_id: str,
+    def add_request(self,
+                    request_id: str,
+                    *,
+                    verbose: bool = False,
                     **engine_add_request_kwargs) -> AsyncStream:
         """Add a request to be sent to the engine on the next background
         loop iteration."""
@@ -149,6 +152,9 @@ class RequestTracker:
         }))
 
         self.new_requests_event.set()
+
+        if verbose:
+            logger.info("Added request %s.", request_id)
 
         return stream
 
@@ -317,8 +323,6 @@ class AsyncLLMEngine:
             async frontend will be executed in a separate process as the
             model workers.
         log_requests: Whether to log the requests.
-        max_log_len: Maximum number of prompt characters or prompt ID numbers
-            being printed in log.
         start_engine_loop: If True, the background task to run the engine
             will be automatically started in the generate call.
         *args: Arguments for :class:`LLMEngine`.
@@ -332,13 +336,11 @@ class AsyncLLMEngine:
                  engine_use_ray: bool,
                  *args,
                  log_requests: bool = True,
-                 max_log_len: Optional[int] = None,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
         self.worker_use_ray = worker_use_ray
         self.engine_use_ray = engine_use_ray
         self.log_requests = log_requests
-        self.max_log_len = max_log_len
         self.engine = self._init_engine(*args, **kwargs)
 
         self.background_loop: Optional[asyncio.Future] = None
@@ -392,7 +394,6 @@ class AsyncLLMEngine:
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
-            max_log_len=engine_args.max_log_len,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
         )
@@ -537,27 +538,6 @@ class AsyncLLMEngine:
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> AsyncStream:
-        if self.log_requests:
-            if isinstance(inputs, str):
-                shortened_prompt = inputs
-                shortened_token_ids = None
-            else:
-                shortened_prompt = inputs.get("prompt")
-                shortened_token_ids = inputs.get("prompt_token_ids")
-
-            max_log_len = self.max_log_len
-            if max_log_len is not None:
-                if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:max_log_len]
-                if shortened_token_ids is not None:
-                    shortened_token_ids = shortened_token_ids[:max_log_len]
-
-            logger.info(
-                "Received request %s: prompt: %r, "
-                "params: %s, prompt_token_ids: %s, "
-                "lora_request: %s.", request_id, shortened_prompt, params,
-                shortened_token_ids, lora_request)
-
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -585,6 +565,7 @@ class AsyncLLMEngine:
 
         stream = self._request_tracker.add_request(
             request_id,
+            verbose=self.log_requests,
             inputs=processed_inputs,
             params=params,
             arrival_time=arrival_time,

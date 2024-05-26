@@ -20,12 +20,21 @@ TypeTokenIDs = List[int]
 
 class OpenAIServingEmbedding(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
-                 served_model_names: List[str]):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        *,
+        log_requests: bool,
+        max_log_len: Optional[int],
+    ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=None)
+                         lora_modules=None,
+                         log_requests=log_requests,
+                         max_log_len=max_log_len)
         self._check_embedding_mode(model_config.embedding_mode)
 
     async def create_embedding(self, request: EmbeddingRequest,
@@ -62,14 +71,18 @@ class OpenAIServingEmbedding(OpenAIServing):
                     request.input,
                 ))
 
-            for i, (prompt_ids, prompt_text) in enumerate(prompts):
+            for i, prompt_inputs in enumerate(prompts):
+                request_id_item = f"{request_id}-{i}"
+
+                self._log_inputs(request_id_item,
+                                 prompt_inputs,
+                                 pooling_params,
+                                 lora_request=None)
+
                 generator = self.engine.encode(
-                    {
-                        "prompt": prompt_text,
-                        "prompt_token_ids": prompt_ids
-                    },
+                    {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     pooling_params,
-                    f"{request_id}-{i}",
+                    request_id_item,
                 )
 
                 generators.append(generator)

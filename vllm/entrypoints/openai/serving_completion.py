@@ -30,13 +30,22 @@ TypeCreateLogProbsFn = Callable[
 
 class OpenAIServingCompletion(OpenAIServing):
 
-    def __init__(self, engine: AsyncLLMEngine, model_config: ModelConfig,
-                 served_model_names: List[str],
-                 lora_modules: Optional[List[LoRAModulePath]]):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        lora_modules: Optional[List[LoRAModulePath]],
+        *,
+        log_requests: bool,
+        max_log_len: Optional[int],
+    ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         log_requests=log_requests,
+                         max_log_len=max_log_len)
 
     async def create_completion(self, request: CompletionRequest,
                                 raw_request: Request):
@@ -88,14 +97,18 @@ class OpenAIServingCompletion(OpenAIServing):
                     truncate_prompt_tokens,
                 ))
 
-            for i, (prompt_ids, prompt_text) in enumerate(prompts):
+            for i, prompt_inputs in enumerate(prompts):
+                request_id_item = f"{request_id}-{i}"
+
+                self._log_inputs(request_id_item,
+                                 prompt_inputs,
+                                 sampling_params,
+                                 lora_request=lora_request)
+
                 generator = self.engine.generate(
-                    {
-                        "prompt": prompt_text,
-                        "prompt_token_ids": prompt_ids
-                    },
+                    {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                     sampling_params,
-                    f"{request_id}-{i}",
+                    request_id_item,
                     lora_request=lora_request,
                 )
 

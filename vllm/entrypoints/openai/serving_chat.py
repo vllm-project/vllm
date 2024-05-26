@@ -39,17 +39,24 @@ class ChatMessageParseResult:
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine: AsyncLLMEngine,
-                 model_config: ModelConfig,
-                 served_model_names: List[str],
-                 response_role: str,
-                 lora_modules: Optional[List[LoRAModulePath]] = None,
-                 chat_template: Optional[str] = None):
+    def __init__(
+        self,
+        engine: AsyncLLMEngine,
+        model_config: ModelConfig,
+        served_model_names: List[str],
+        response_role: str,
+        lora_modules: Optional[List[LoRAModulePath]],
+        chat_template: Optional[str],
+        *,
+        log_requests: bool,
+        max_log_len: Optional[int],
+    ):
         super().__init__(engine=engine,
                          model_config=model_config,
                          served_model_names=served_model_names,
-                         lora_modules=lora_modules)
+                         lora_modules=lora_modules,
+                         log_requests=log_requests,
+                         max_log_len=max_log_len)
 
         self.response_role = response_role
         self._load_chat_template(chat_template)
@@ -171,18 +178,20 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params.logits_processors.append(
                     guided_decode_logits_processor)
 
-            prompt_ids, prompt_text = self._tokenize_prompt_input(
+            prompt_inputs = self._tokenize_prompt_input(
                 request,
                 prompt,
                 truncate_prompt_tokens=sampling_params.truncate_prompt_tokens,
                 add_special_tokens=False,
             )
 
+            self._log_inputs(request_id,
+                             prompt_inputs,
+                             sampling_params,
+                             lora_request=lora_request)
+
             result_generator = self.engine.generate(
-                {
-                    "prompt": prompt_text,
-                    "prompt_token_ids": prompt_ids
-                },
+                {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
                 sampling_params,
                 request_id,
                 lora_request,
