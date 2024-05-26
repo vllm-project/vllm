@@ -357,23 +357,19 @@ class OpenAIServing:
         params: Union[SamplingParams, PoolingParams],
         lora_request: Optional[LoRARequest],
     ) -> None:
-        if self.log_requests:
-            if isinstance(inputs, str):
-                shortened_prompt = inputs
-                shortened_token_ids = None
-            else:
-                shortened_prompt = inputs.get("prompt")
-                shortened_token_ids = inputs.get("prompt_token_ids")
+        if not self.log_requests:
+            return
 
-            max_log_len = self.max_log_len
-            if max_log_len is not None:
-                if shortened_prompt is not None:
-                    shortened_prompt = shortened_prompt[:max_log_len]
-                if shortened_token_ids is not None:
-                    shortened_token_ids = shortened_token_ids[:max_log_len]
+        shortened_prompt = inputs["prompt"]
+        shortened_token_ids = inputs["prompt_token_ids"]
 
-            logger.info(
-                "Received request %s: prompt: %r, "
-                "params: %s, prompt_token_ids: %s, "
-                "lora_request: %s.", request_id, shortened_prompt, params,
-                shortened_token_ids, lora_request)
+        max_log_len = self.max_log_len
+        if max_log_len is not None:
+            shortened_prompt = shortened_prompt[:max_log_len]
+            shortened_token_ids = shortened_token_ids[:max_log_len]
+
+        logger.info(
+            "Received request %s: prompt: %r, "
+            "params: %s, prompt_token_ids: %s, "
+            "lora_request: %s.", request_id, shortened_prompt, params,
+            shortened_token_ids, lora_request)
