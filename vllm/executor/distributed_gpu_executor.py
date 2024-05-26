@@ -138,10 +138,10 @@ class DistributedGPUExecutor(GPUExecutor):
         """Runs the given method on all workers.
 
         Args:
-            async_run_tensor_parallel_workers_only: If True the method will be run only
-                in the remote workers, not the driver worker. It will also be
-                run asynchronously and return a list of futures rather than
-                blocking on the results.
+            async_run_tensor_parallel_workers_only: If True the method will be
+                run only in the remote TP workers, not the driver worker.
+                It will also be run asynchronously and return a list of futures
+                rather than blocking on the results.
         """
         raise NotImplementedError
 

@@ -247,7 +247,9 @@ class Worker(WorkerBase):
             # and it stops the loop when the driver broadcasts an empty input.
             # Send an empty input to notify all other workers to stop their
             # execution loop.
-            broadcast_tensor_dict({}, src=src_rank, group=tp_group,
+            broadcast_tensor_dict({},
+                                  src=src_rank,
+                                  group=tp_group,
                                   metadata_group=cpu_tp_group)
             return []
 

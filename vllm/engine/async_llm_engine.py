@@ -238,7 +238,7 @@ class _AsyncLLMEngine(LLMEngine):
         self.do_log_stats(scheduler_outputs, output)
 
         return request_outputs
-    
+
     async def stop_remote_worker_execution_loop_async(self) -> None:
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
@@ -513,13 +513,15 @@ class AsyncLLMEngine:
         while True:
             if not any(has_requests_in_progress):
                 logger.debug("Waiting for new requests...")
-                # Stop the execute model loop in parallel workers until there are
-                # more requests to process. This avoids waiting indefinitely in
-                # torch.distributed ops which may otherwise timeout, and unblocks
-                # the RPC thread in the workers so that they can process any other
-                # queued control plane messages, such as add/remove lora adapters.
+                # Stop the execute model loop in parallel workers until there
+                # are more requests to process. This avoids waiting
+                # indefinitely in torch.distributed ops which may otherwise
+                # timeout, and unblocks the RPC thread in the workers so that
+                # they can process any other queued control plane messages,
+                # such as add/remove lora adapters.
                 if self.engine_use_ray:
-                    await self.engine.stop_remote_worker_execution_loop_async.remote()  # type: ignore
+                    await (self.engine.stop_remote_worker_execution_loop_async.
+                           remote())  # type: ignore
                 else:
                     await self.engine.stop_remote_worker_execution_loop_async()
                 await self._request_tracker.wait_for_new_requests()
@@ -541,12 +543,16 @@ class AsyncLLMEngine:
                     result = task.result()
                     virtual_engine = requests_in_progress.index(task)
                     if self.engine_use_ray:
-                        has_unfinished_requests = \
-                            await self.engine.\
-                                  has_unfinished_requests_for_virtual_engine.remote(virtual_engine) # type: ignore
+                        has_unfinished_requests = (
+                            await (self.engine.
+                                   has_unfinished_requests_for_virtual_engine.
+                                   remote(  # type: ignore
+                                       virtual_engine)))
                     else:
-                        has_unfinished_requests = \
-                            self.engine.has_unfinished_requests_for_virtual_engine(virtual_engine)
+                        has_unfinished_requests = (
+                            self.engine.
+                            has_unfinished_requests_for_virtual_engine(
+                                virtual_engine))
                     if result or has_unfinished_requests:
                         requests_in_progress[
                             virtual_engine] = asyncio.create_task(

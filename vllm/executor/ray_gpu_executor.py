@@ -215,10 +215,11 @@ class RayGPUExecutor(DistributedGPUExecutor):
         """Runs the given method on all workers. Can be used in the following
         ways:
 
-        - async_run_tensor_parallel_workers_only: If True the method will be run only
-          in the remote workers, not the driver worker. It will also be
-          run asynchronously and return a list of futures rather than blocking
-          on the results.
+        Args:
+        - async_run_tensor_parallel_workers_only: If True the method will be
+          run only in the remote TP workers, not the driver worker.
+          It will also be run asynchronously and return a list of futures
+          rather than blocking on the results.
         - args/kwargs: All workers share the same args/kwargs
         - all_args/all_kwargs: args/kwargs for each worker are specified
           individually
@@ -228,7 +229,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
             raise NotImplementedError(
                 "max_concurrent_workers is not supported yet.")
 
-        count = len(self.workers) if not async_run_tensor_parallel_workers_only \
+        count = len(self.workers) if not \
+            async_run_tensor_parallel_workers_only \
             else len(self.tp_parallel_workers)
         all_worker_args = repeat(args, count) if all_args is None \
             else islice(all_args, 1, None)
@@ -246,16 +248,17 @@ class RayGPUExecutor(DistributedGPUExecutor):
             if async_run_tensor_parallel_workers_only:
                 ray_worker_outputs = [
                     worker.execute_method.remote(method, *worker_args,
-                                                **worker_kwargs)
+                                                 **worker_kwargs)
                     for (worker, worker_args, worker_kwargs
-                        ) in zip(self.tp_parallel_workers, all_worker_args, all_worker_kwargs)
+                         ) in zip(self.tp_parallel_workers, all_worker_args,
+                                  all_worker_kwargs)
                 ]
             else:
                 ray_worker_outputs = [
                     worker.execute_method.remote(method, *worker_args,
-                                                **worker_kwargs)
-                    for (worker, worker_args, worker_kwargs
-                        ) in zip(self.workers, all_worker_args, all_worker_kwargs)
+                                                 **worker_kwargs)
+                    for (worker, worker_args, worker_kwargs) in zip(
+                        self.workers, all_worker_args, all_worker_kwargs)
                 ]
 
         if async_run_tensor_parallel_workers_only:
