@@ -56,8 +56,6 @@ _GENERATION_MODELS = {
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
-
-    # Added
     "Idefics2ForConditionalGeneration":
     ("idefics2", "Idefics2ForConditionalGeneration")
 }
