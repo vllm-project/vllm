@@ -10,23 +10,21 @@ remove_docker_container() { docker rm -f cpu-test || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
-# Run the image and launch offline inference
+# Run the image
 docker run -itd -v ~/.cache/huggingface:/root/.cache/huggingface --network host --env VLLM_CPU_KVCACHE_SPACE=4 --name cpu-test cpu-test
 
 # offline inference
 docker exec cpu-test bash -c "python3 vllm/examples/offline_inference.py"
 
-# async engine test
+# async engine test, not passing due to distributed inference support missing
 #docker exec cpu-test bash -c "cd tests; pytest -v -s async_engine"
 
 # Run basic model test
 docker exec cpu-test bash -c "cd vllm/tests;
   pip install pytest Pillow
-  rm -f __init__.py
   bash ../.buildkite/download-images.sh
-  pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py --ignore=models/test_marlin.py \
-    --ignore=models/test_big_models.py --ignore=models/test_aqlm.py --ignore=models/test_fp8.py --ignore=models/test_gptq_marlin.py \
-    --ignore=models/test_gptq_marlin_24.py --ignore=models/test_embedding.py"
+  pytest -v -s models --ignore=models/test_llava.py --ignore=models/test_mistral.py \
+    --ignore=models/test_big_models.py --ignore=models/test_embedding.py"
 
 # Run big model test
 #docker exec cpu-test bash -c "cd tests;
