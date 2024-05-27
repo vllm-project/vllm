@@ -23,6 +23,7 @@ EMBEDDING_MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 # technically this needs Mistral-7B-v0.1 as base, but we're not testing
 # generation quality here
 LORA_NAME = "typeof/zephyr-7b-beta-lora"
+SPECIAL_TOKENS_MODEL_NAME = "microsoft/Phi-3-small-8k-instruct"
 
 TEST_SCHEMA = {
     "type": "object",
@@ -102,6 +103,27 @@ def server(zephyr_lora_files):
         "2",
         "--max-num-seqs",
         "128",
+    ])
+    ray.get(server_runner.ready.remote())
+    yield server_runner
+    ray.shutdown()
+
+
+@pytest.fixture(scope="module")
+def server2():
+    ray.init()
+    server_runner = ServerRunner.remote([
+        "--model",
+        SPECIAL_TOKENS_MODEL_NAME,
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "4096",
+        "--enforce-eager",
+        "--max-num-seqs",
+        "128",
+        "--trust-remote-code",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
@@ -844,6 +866,42 @@ number: "1" | "2"
     # remove spaces for comparison b/c we removed them in the grammar
     ground_truth = "SELECT col_1 from table_1 where col_1 = 1".replace(" ", "")
 
+    assert content.strip() == ground_truth
+
+
+async def test_guided_grammar_special_tokens(server2,
+                                             client: openai.AsyncOpenAI):
+    simple_sql_grammar = """
+start: select_statement
+
+select_statement: "SELECT" column "from" table "where" condition
+
+column: "col_1" | "col_2"
+table: "table_1" | "table_2"
+condition: column "=" number
+
+number: "1" | "2"
+"""
+
+    completion = await client.completions.create(
+        model=SPECIAL_TOKENS_MODEL_NAME,
+        prompt=("Generate a sql state that select col_1 from "
+                "table_1 where it is equals to 1"),
+        temperature=1.0,
+        max_tokens=500,
+        extra_body=dict(guided_grammar=simple_sql_grammar))
+
+    content = completion.choices[0].text
+
+    # use Lark to parse the output, and make sure it's a valid parse tree
+    from lark import Lark
+    parser = Lark(simple_sql_grammar)
+    parser.parse(content)
+
+    # remove spaces for comparison b/c we removed them in the grammar
+    ground_truth = "SELECT col_2 from table_2 where col_2 = 1".replace(" ", "")
+    import pdb
+    pdb.set_trace()
     assert content.strip() == ground_truth
 
 
