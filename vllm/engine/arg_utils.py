@@ -41,6 +41,7 @@ class EngineArgs:
     max_parallel_loading_workers: Optional[int] = None
     block_size: int = 16
     enable_prefix_caching: bool = False
+    disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
     gpu_memory_utilization: float = 0.90
@@ -267,6 +268,10 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching.')
+        parser.add_argument('--disable-sliding-window',
+                            action='store_true',
+                            help='Disables sliding window, '
+                            'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2.')
@@ -558,8 +563,8 @@ class EngineArgs:
             self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
             self.max_context_len_to_capture, self.max_seq_len_to_capture,
-            self.max_logprobs, self.skip_tokenizer_init,
-            self.served_model_name)
+            self.max_logprobs, self.disable_sliding_window,
+            self.skip_tokenizer_init, self.served_model_name)
         cache_config = CacheConfig(self.block_size,
                                    self.gpu_memory_utilization,
                                    self.swap_space, self.kv_cache_dtype,
@@ -645,7 +650,8 @@ class EngineArgs:
         if (model_config.get_sliding_window() is not None
                 and scheduler_config.chunked_prefill_enabled):
             raise ValueError(
-                "Chunked prefill is not supported with sliding window.")
+                "Chunked prefill is not supported with sliding window. "
+                "Set --disable-sliding-window to disable sliding window.")
 
         return EngineConfig(model_config=model_config,
                             cache_config=cache_config,
