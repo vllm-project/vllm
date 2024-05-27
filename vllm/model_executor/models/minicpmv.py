@@ -1,3 +1,26 @@
+# coding=utf-8
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# Copyright 2023 The vLLM team.
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Inference-only MiniCPM-V-2 model compatible with HuggingFace weights."""
 import math
 from functools import partial
 from typing import Iterable, List, Optional, Tuple
@@ -27,8 +50,6 @@ from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
-# from .configuration_minicpm import MiniCPMVConfig
-# from .resampler import Resampler
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -502,7 +523,7 @@ class MiniCPMV(nn.Module):
                                               dtype=input_ids.dtype)
         return image_bound, input_ids
 
-    def get_vllm_embedding(self, data, im_start_token_id, im_end_token_id,
+    def get_embedding(self, data, im_start_token_id, im_end_token_id,
                            unk_token_id):
         if 'vision_hidden_states' not in data:
             pixel_values = data['pixel_values']
@@ -545,7 +566,7 @@ class MiniCPMV(nn.Module):
         attn_metadata: AttentionMetadata,
         image_input: Optional[torch.Tensor] = None,
     ):
-        vllm_embeddings, vision_hidden_states = self.get_vllm_embedding(
+        vllm_embeddings, vision_hidden_states = self.get_embedding(
             {
                 'pixel_values': image_input,
                 'input_ids': input_ids
