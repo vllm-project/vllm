@@ -66,3 +66,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.def("reshape_and_cache", &reshape_and_cache);
   cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
 }
+
+// TODO: get rid of this?
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
