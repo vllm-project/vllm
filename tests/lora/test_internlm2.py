@@ -51,7 +51,8 @@ def test_internlm2_lora(internlm2_lora_files):
                    trust_remote_code=True,
                    max_model_len=1024,
                    enable_lora=True,
-                   max_loras=2)
+                   max_loras=2,
+                   enforce_eager=True)
 
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
