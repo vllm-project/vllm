@@ -1,6 +1,6 @@
 import time
-from collections import defaultdict
 import warnings
+from collections import defaultdict
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
 
 import numpy as np
