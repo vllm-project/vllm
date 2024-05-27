@@ -229,11 +229,12 @@ class MiniCPMV(nn.Module):
                                       quant_config=quant_config,
                                       lora_config=lora_config)
         self.vpm = self.init_vision_module()
-        self.vpm.to(dtype=torch.bfloat16)
+        param_dtype = torch.get_default_dtype()
+        self.vpm.to(dtype=param_dtype)
         self.vision_dim = self.vpm.embed_dim
         self.embed_dim = self.llm.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
-        self.resampler.to(device="cuda", dtype=torch.bfloat16)
+        self.resampler.to(device="cuda", dtype=param_dtype)
         self.sampler = Sampler()
 
     def init_vision_module(self):
