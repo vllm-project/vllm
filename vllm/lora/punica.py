@@ -1,9 +1,11 @@
 # Based on code from https://github.com/punica-ai/punica
 
 from typing import Optional
+
 import torch
-from vllm.lora.ops.sgmv_expand import sgmv_expand
-from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+
+# from vllm.lora.ops.sgmv_expand import sgmv_expand
+# from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
 
 def _raise_import_error(e):
