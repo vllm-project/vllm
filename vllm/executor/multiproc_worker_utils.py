@@ -12,6 +12,7 @@ from multiprocessing.process import BaseProcess
 from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
                     TypeVar, Union)
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -26,9 +27,7 @@ RESET = '\033[0;0m'
 
 JOIN_TIMEOUT_S = 2
 
-# Use dedicated multiprocess context for workers.
-# Both spawn and fork work
-mp_method = os.getenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
 mp = multiprocessing.get_context(mp_method)
 
 

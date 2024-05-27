@@ -1,10 +1,11 @@
-# This script build the ROCm docker image and run the API server inside the container.
-# It serves a sanity check for compilation and basic model usage.
+# This script runs test inside the corresponding ROCm docker container.
 set -ex
 
 # Print ROCm version
+echo "--- ROCm info"
 rocminfo
 
+echo "--- Resetting GPUs"
 
 echo "reset" > /opt/amdgpu/etc/gpu_state
 
@@ -16,37 +17,29 @@ while true; do
         fi
 done
 
+echo "--- Building container"
+sha=$(git rev-parse --short HEAD)
+image_name=rocm_${sha}
+container_name=rocm_${sha}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)
+docker build \
+        -t ${image_name} \
+        -f Dockerfile.rocm \
+        --progress plain \
+        .
 
-
-# Try building the docker image
-docker build -t rocm -f Dockerfile.rocm .
-
-# Setup cleanup
-remove_docker_container() { docker rm -f rocm || true; }
-trap remove_docker_container EXIT
-remove_docker_container
-
-# Run the image
-export HIP_VISIBLE_DEVICES=1
-docker run --device /dev/kfd --device /dev/dri --network host -e HIP_VISIBLE_DEVICES --name rocm rocm python3 -m vllm.entrypoints.api_server &
-
-# Wait for the server to start
-wait_for_server_to_start() {
-    timeout=300
-    counter=0
-
-    while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000/health)" != "200" ]; do
-        sleep 1
-        counter=$((counter + 1))
-        if [ $counter -ge $timeout ]; then
-            echo "Timeout after $timeout seconds"
-            break
-        fi
-    done
+remove_docker_container() {
+   docker rm -f ${container_name} || docker image rm -f ${image_name} || true
 }
-wait_for_server_to_start
+trap remove_docker_container EXIT
 
-# Test a simple prompt
-curl -X POST -H "Content-Type: application/json" \
-    localhost:8000/generate \
-    -d '{"prompt": "San Francisco is a"}'
+echo "--- Running container"
+
+docker run \
+        --device /dev/kfd --device /dev/dri \
+        --network host \
+        --rm \
+        -e HF_TOKEN \
+        --name ${container_name} \
+        ${image_name} \
+        /bin/bash -c "${@}"
+

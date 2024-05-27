@@ -35,7 +35,7 @@ def sample_json_schema():
                             "type": "string"
                         },
                         "duration": {
-                            "type": "string"
+                            "type": "number"
                         },
                         "position": {
                             "type": "string"

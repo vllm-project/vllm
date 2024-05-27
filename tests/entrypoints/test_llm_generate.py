@@ -13,7 +13,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 @pytest.fixture(scope="module")
 def llm():
-    return LLM(model=MODEL_NAME, max_model_len=1024)
+    return LLM(model=MODEL_NAME, max_model_len=2048)
 
 
 @pytest.mark.skip_global_cleanup
@@ -59,7 +59,7 @@ def test_guided_regex(sample_regex, llm):
     outputs = llm.generate(
         prompts=[
             f"Give an example IPv4 address with this regex: {sample_regex}"
-        ],
+        ] * 2,
         sampling_params=sampling_params,
         use_tqdm=True,
     )
@@ -79,7 +79,7 @@ def test_guided_regex(sample_regex, llm):
 def test_guided_json_completion(sample_json_schema, llm):
     sampling_params = SamplingParams(
         temperature=1.0,
-        max_tokens=200,
+        max_tokens=1000,
         guided_options=dict(guided_json=sample_json_schema))
     outputs = llm.generate(
         prompts=[
@@ -91,7 +91,7 @@ def test_guided_json_completion(sample_json_schema, llm):
     )
 
     assert outputs is not None
-    print(outputs)
+    
     for output in outputs:
         assert output is not None
         assert isinstance(output, RequestOutput)

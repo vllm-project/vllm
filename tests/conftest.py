@@ -1,20 +1,22 @@
 import contextlib
 import gc
 import os
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 import torch
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoProcessor,
-                          LlavaForConditionalGeneration)
+from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
+                          LlavaConfig, LlavaForConditionalGeneration)
 
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
+from vllm.logger import init_logger
 from vllm.sequence import MultiModalData
-from vllm.transformers_utils.tokenizer import get_tokenizer
+
+logger = init_logger(__name__)
 
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
@@ -130,9 +132,11 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
 }
 
-_VISION_LANGUAGE_MODELS = {
-    "llava-hf/llava-1.5-7b-hf": LlavaForConditionalGeneration,
-}
+AutoModelForCausalLM.register(LlavaConfig, LlavaForConditionalGeneration)
+
+_EMBEDDING_MODELS = [
+    "intfloat/e5-mistral-7b-instruct",
+]
 
 
 class HfRunner:
@@ -140,32 +144,44 @@ class HfRunner:
     def __init__(
         self,
         model_name: str,
-        tokenizer_name: Optional[str] = None,
         dtype: str = "half",
     ) -> None:
         assert dtype in _STR_DTYPE_TO_TORCH_DTYPE
         torch_dtype = _STR_DTYPE_TO_TORCH_DTYPE[dtype]
+
         self.model_name = model_name
-        if model_name not in _VISION_LANGUAGE_MODELS:
+
+        if model_name in _EMBEDDING_MODELS:
+            # Lazy init required for AMD CI
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(
+                model_name,
+                device="cpu",
+            ).to(dtype=torch_dtype).cuda()
+        else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
             ).cuda()
-            self.processor = None
-        else:
-            self.model = _VISION_LANGUAGE_MODELS[model_name].from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            ).cuda()
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
+
+        try:
             self.processor = AutoProcessor.from_pretrained(
                 model_name,
                 torch_dtype=torch_dtype,
+                trust_remote_code=True,
             )
-        if tokenizer_name is None:
-            tokenizer_name = model_name
-        self.tokenizer = get_tokenizer(tokenizer_name, trust_remote_code=True)
+        except Exception:
+            logger.warning(
+                "Unable to auto-load processor from HuggingFace for "
+                "model %s. Using tokenizer instead.", model_name)
+            self.processor = self.tokenizer
 
     def generate(
         self,
@@ -177,19 +193,19 @@ class HfRunner:
         if images:
             assert len(prompts) == len(images)
         for i, prompt in enumerate(prompts):
-            if self.model_name not in _VISION_LANGUAGE_MODELS:
-                input_ids = self.tokenizer(prompt,
-                                           return_tensors="pt").input_ids
-                inputs = {"input_ids": input_ids.cuda()}
-            else:
-                image = images[i] if images else None
-                inputs = self.processor(text=prompt,
-                                        images=image,
-                                        return_tensors="pt")
-                inputs = {
-                    key: value.cuda() if value is not None else None
-                    for key, value in inputs.items()
-                }
+            processor_kwargs: Dict[str, Any] = {
+                "text": prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
+
+            inputs = self.processor(**processor_kwargs)
+            inputs = {
+                key: value.cuda() if value is not None else None
+                for key, value in inputs.items()
+            }
+
             output_ids = self.model.generate(
                 **inputs,
                 use_cache=True,
@@ -273,6 +289,71 @@ class HfRunner:
             all_logprobs.append(seq_logprobs)
         return all_logprobs
 
+    def generate_greedy_logprobs_limit(
+        self,
+        prompts: List[str],
+        max_tokens: int,
+        num_logprobs: int,
+    ) -> List[Tuple[List[int], str]]:
+        all_logprobs = []
+        all_output_ids = []
+        all_output_strs = []
+
+        for prompt in prompts:
+            input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids
+            output = self.model.generate(
+                input_ids.cuda(),
+                use_cache=True,
+                do_sample=False,
+                max_new_tokens=max_tokens,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+            )
+
+            seq_logprobs = []
+            for _, hidden_states in enumerate(output.hidden_states):
+                last_hidden_states = hidden_states[-1][0]
+                logits = torch.matmul(
+                    last_hidden_states,
+                    self.model.get_output_embeddings().weight.t(),
+                )
+                if getattr(self.model.get_output_embeddings(), "bias",
+                           None) is not None:
+                    logits += self.model.get_output_embeddings(
+                    ).bias.unsqueeze(0)
+                logprobs = torch.nn.functional.log_softmax(logits,
+                                                           dim=-1,
+                                                           dtype=torch.float32)
+                seq_logprobs.append(logprobs)
+
+            # convert to dict
+            seq_logprobs_lst = []
+            for tok_idx, tok_logprobs in enumerate(seq_logprobs):
+                # drop prompt logprobs
+                if tok_idx == 0:
+                    tok_logprobs = tok_logprobs[-1, :].reshape(1, -1)
+                topk = tok_logprobs.topk(num_logprobs)
+
+                tok_logprobs_dct = {}
+                for token_id, logprob in zip(topk.indices[0], topk.values[0]):
+                    tok_logprobs_dct[token_id.item()] = logprob.item()
+
+                seq_logprobs_lst.append(tok_logprobs_dct)
+
+            all_logprobs.append(seq_logprobs_lst)
+            seq_ids = output.sequences[0]
+            output_len = seq_ids.shape[0] - input_ids.shape[1]
+            output_ids = seq_ids[-output_len:]
+            all_output_ids.append(output_ids.tolist())
+            all_output_strs.append(self.tokenizer.decode(output_ids))
+
+        outputs = zip(all_output_ids, all_output_strs, all_logprobs)
+        return [(output_ids, output_str, output_logprobs)
+                for output_ids, output_str, output_logprobs in outputs]
+
+    def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
+        return self.model.encode(prompts)
+
     def __del__(self):
         del self.model
         cleanup()
@@ -297,6 +378,7 @@ class VllmRunner:
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
+        swap_space=4,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -304,7 +386,7 @@ class VllmRunner:
             tokenizer=tokenizer_name,
             trust_remote_code=True,
             dtype=dtype,
-            swap_space=0,
+            swap_space=swap_space,
             disable_log_stats=disable_log_stats,
             tensor_parallel_size=tensor_parallel_size,
             max_model_len=max_model_len,
@@ -397,6 +479,14 @@ class VllmRunner:
         outputs = self.generate(prompts, beam_search_params)
         return outputs
 
+    def encode(self, prompts: List[str]) -> List[List[float]]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
+        return outputs
+
     def __del__(self):
         del self.model
         cleanup()
@@ -415,3 +505,19 @@ def get_tokenizer_pool_config(tokenizer_group_type):
                                    pool_type="ray",
                                    extra_config={})
     raise ValueError(f"Unknown tokenizer_group_type: {tokenizer_group_type}")
+
+
+@pytest.fixture()
+def temporary_enable_log_propagate():
+    import logging
+    logger = logging.getLogger("vllm")
+    logger.propagate = True
+    yield
+    logger.propagate = False
+
+
+@pytest.fixture()
+def caplog_vllm(temporary_enable_log_propagate, caplog):
+    # To capture vllm log, we should enable propagate=True temporarily
+    # because caplog depends on logs propagated to the root logger.
+    yield caplog
