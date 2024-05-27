@@ -171,7 +171,7 @@ def phi2_lora_files():
 
 
 @pytest.fixture(scope="session")
-def phi2_lora_files():
+def internlm2_lora_files():
     return snapshot_download(repo_id="isotr0py/InternLM2-1_8B-test-sql-lora")
 
 

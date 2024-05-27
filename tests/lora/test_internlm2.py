@@ -3,7 +3,7 @@ from vllm.lora.request import LoRARequest
 
 MODEL_PATH = "internlm/internlm2-1_8b"
 
-PROMPT_TEMPLATE = "[user] question: {sql_prompt}\n\n context: {context}\n\n [/user] [assistant]"  # noqa: E501
+PROMPT_TEMPLATE = "[user] question: {sql_prompt}\n\n context: {context}\n\n [/user] [assistant] "  # noqa: E501
 
 
 def do_sample(llm, lora_path: str, lora_id: int) -> str:
@@ -48,13 +48,14 @@ def test_internlm2_lora(internlm2_lora_files):
     # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
     # Otherwise, the lora-test will fail due to CUDA OOM.
     llm = vllm.LLM(MODEL_PATH,
+                   trust_remote_code=True,
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=2)
 
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
-        "SELECT trip.id FROM trip JOIN station ON trip.start_station_id = station.id WHERE station.dock_count = (SELECT MAX(dock_count) FROM station);",  # noqa: E501
+        "SELECT trip.id FROM trip JOIN station ON trip.start_station_id = station.id WHERE station.dock_count = (SELECT MAX(station.dock_count) FROM station);",  # noqa: E501
         "SELECT COUNT(*) FROM marine_species WHERE location = 'Southern Ocean';",  # noqa: E501
     ]
 
