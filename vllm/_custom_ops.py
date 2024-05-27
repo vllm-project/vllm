@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Type
 
 import torch
 
@@ -62,17 +62,23 @@ def paged_attention_v1(
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
 ) -> None:
     if query.device.type == "cuda":
-        vllm_ops.paged_attention_v1(out, query, key_cache, value_cache,
-                                    num_kv_heads, scale, block_tables,
-                                    seq_lens, block_size, max_seq_len,
-                                    alibi_slopes, kv_cache_dtype, kv_scale)
+        paged_attention_impl = vllm_ops.paged_attention_v1
     elif query.device.type == "cpu":
-        vllm_cpu_ops.paged_attention_v1(out, query, key_cache, value_cache,
-                                        num_kv_heads, scale, block_tables,
-                                        seq_lens, block_size, max_seq_len,
-                                        alibi_slopes, kv_cache_dtype, kv_scale)
+        paged_attention_impl = vllm_cpu_ops.paged_attention_v1
+
+    paged_attention_impl(out, query, key_cache, value_cache, num_kv_heads,
+                         scale, block_tables, seq_lens, block_size,
+                         max_seq_len, alibi_slopes, kv_cache_dtype, kv_scale,
+                         tp_rank, blocksparse_local_blocks,
+                         blocksparse_vert_stride, blocksparse_block_size,
+                         blocksparse_head_sliding_step)
 
 
 def paged_attention_v2(
@@ -92,19 +98,23 @@ def paged_attention_v2(
     alibi_slopes: Optional[torch.Tensor],
     kv_cache_dtype: str,
     kv_scale: float,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0,
 ) -> None:
     if query.device.type == "cuda":
-        vllm_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out, query,
-                                    key_cache, value_cache, num_kv_heads,
-                                    scale, block_tables, seq_lens, block_size,
-                                    max_seq_len, alibi_slopes, kv_cache_dtype,
-                                    kv_scale)
+        paged_attention_impl = vllm_ops.paged_attention_v2
     elif query.device.type == "cpu":
-        vllm_cpu_ops.paged_attention_v2(out, exp_sum, max_logits, tmp_out,
-                                        query, key_cache, value_cache,
-                                        num_kv_heads, scale, block_tables,
-                                        seq_lens, block_size, max_seq_len,
-                                        alibi_slopes, kv_cache_dtype, kv_scale)
+        paged_attention_impl = vllm_cpu_ops.paged_attention_v2
+
+    paged_attention_impl(out, exp_sum, max_logits, tmp_out, query, key_cache,
+                         value_cache, num_kv_heads, scale, block_tables,
+                         seq_lens, block_size, max_seq_len, alibi_slopes,
+                         kv_cache_dtype, kv_scale, tp_rank,
+                         blocksparse_local_blocks, blocksparse_vert_stride,
+                         blocksparse_block_size, blocksparse_head_sliding_step)
 
 
 # pos encoding ops
@@ -193,6 +203,32 @@ def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                 size_n, size_k)
 
 
+# marlin_24
+def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
+                        b_meta: torch.Tensor, b_scales: torch.Tensor,
+                        workspace: torch.Tensor, num_bits: int, size_m: int,
+                        size_n: int, size_k: int) -> torch.Tensor:
+    return vllm_ops.gptq_marlin_24_gemm(a, b_q_weight, b_meta, b_scales,
+                                        workspace, num_bits, size_m, size_n,
+                                        size_k)
+
+
+# cutlass
+def cutlass_scaled_mm_dq(a: torch.Tensor, b: torch.Tensor,
+                         a_scales: torch.Tensor, b_scales: torch.Tensor,
+                         out_dtype: Type[torch.dtype]) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    vllm_ops.cutlass_scaled_mm_dq(out, a, b, a_scales, b_scales)
+
+    return out
+
+
 # aqlm
 def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
               codebooks: torch.Tensor, scales: torch.Tensor,
@@ -263,6 +299,24 @@ def scaled_fp8_quant(
     else:
         vllm_ops.static_scaled_fp8_quant(output, input, scale)
     return output, scale
+
+
+# int8
+def static_scaled_int8_quant(input: torch.Tensor,
+                             scale: float) -> torch.Tensor:
+    """
+    Quantize the input tensor to int8 and return the quantized tensor.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Scaling factor for the int8 quantization.
+
+    Returns:
+        torch.Tensor: Output tensor in int8.
+    """
+    q = torch.empty_like(input, dtype=torch.int8)
+    vllm_ops.static_scaled_int8_quant(q, input, scale)
+    return q
 
 
 # moe

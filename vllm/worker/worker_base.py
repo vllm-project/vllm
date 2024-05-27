@@ -1,7 +1,7 @@
 import importlib
 import os
 from abc import ABC, abstractmethod
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -48,8 +48,9 @@ class WorkerBase(ABC):
 
     @abstractmethod
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
         raise NotImplementedError
@@ -121,7 +122,7 @@ class WorkerWrapperBase:
     def init_worker(self, *args, **kwargs):
         """
         Actual initialization of the worker class, and set up
-       function tracing if required.
+        function tracing if required.
         Arguments are passed to the worker class constructor.
         """
         enable_trace_function_call_for_thread()

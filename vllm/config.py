@@ -1,19 +1,16 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
-                                                     get_quantization_config)
+from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.transformers_utils.config import get_config, get_hf_text_config
 from vllm.utils import get_cpu_memory, is_cpu, is_hip, is_neuron
-
-GPTQMarlinConfig = get_quantization_config("gptq_marlin")
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -48,6 +45,9 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
+        rope_scaling: Dictionary containing the scaling configuration for the
+            RoPE embeddings. When using this flag, don't update
+            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -87,6 +87,7 @@ class ModelConfig:
         seed: int,
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
+        rope_scaling: Optional[dict] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -105,6 +106,7 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
+        self.rope_scaling = rope_scaling
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
@@ -119,7 +121,7 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision)
+                                    code_revision, rope_scaling)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
@@ -155,37 +157,15 @@ class ModelConfig:
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
-            # compat: autogptq >=0.8.0 use checkpoint_format: str
-            # compat: autogptq <=0.7.1 is_marlin_format: bool
-            is_format_marlin = (quant_cfg.get("checkpoint_format") == "marlin"
-                                or quant_cfg.get("is_marlin_format", False))
 
-            # Check which LinearMethod the GPTQ model should use.
-            if quant_method == "gptq":
-                # If serialized in Marlin format, use MarlinLinearMethod.
-                # TODO (@robertgshaw): migrate under GPTQMarlinLinearMethod.
-                if is_format_marlin:
-                    logger.info("The model is serialized in Marlin format. "
-                                "Using Marlin kernel.")
-                    quant_method = "marlin"
-                    if self.quantization == "gptq":
-                        self.quantization = quant_method
-
-                # If convertible to Marlin format, use GPTQMarlinLinearMethod
-                # unless the user explicitly specified GPTQLinearMethod.
-                elif GPTQMarlinConfig.is_marlin_compatible(quant_cfg):
-                    if self.quantization == "gptq":
-                        logger.warning(
-                            "The model is convertible to Marlin format, but "
-                            "you specified quantization=gptq. Use "
-                            "quantization=marlin for faster inference.")
-                    else:
-                        logger.info(
-                            "The model is convertible to Marlin format. "
-                            "Using Marlin kernel.")
-                        quant_method = "gptq_marlin"
-                        if self.quantization == "marlin":
-                            self.quantization = quant_method
+            # Detect which checkpoint is it
+            for name, method in QUANTIZATION_METHODS.items():
+                quantization_override = method.override_quantization_method(
+                    quant_cfg, self.quantization)
+                if quantization_override:
+                    quant_method = quantization_override
+                    self.quantization = quantization_override
+                    break
 
             # Verify quantization configurations.
             if self.quantization is None:
@@ -207,7 +187,8 @@ class ModelConfig:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
                     f"supported in ROCm.")
-            if (self.quantization not in ["marlin", "gptq_marlin"]):
+            if (self.quantization
+                    not in ["marlin", "gptq_marlin_24", "gptq_marlin"]):
                 logger.warning(
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
@@ -374,14 +355,12 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8":
+        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop without scaling "
-                "factors. FP8_E5M2 (without scaling) is only supported on "
-                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
-                "is instead supported for common inference criteria.")
+                "Meanwhile, it may cause accuracy drop without a proper "
+                "scaling factor")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -463,6 +442,7 @@ class LoadFormat(str, enum.Enum):
     NPCACHE = "npcache"
     DUMMY = "dummy"
     TENSORIZER = "tensorizer"
+    SHARDED_STATE = "sharded_state"
 
 
 @dataclass
@@ -521,9 +501,7 @@ class ParallelConfig:
     Args:
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Whether to use Ray for model workers. Will be set to
-            True if either pipeline_parallel_size or tensor_parallel_size is
-            greater than 1.
+        worker_use_ray: Deprecated, use distributed_executor_backend instead.
         max_parallel_loading_workers: Maximum number of multiple batches
             when load model sequentially. To avoid RAM OOM when using tensor
             parallel and large models.
@@ -533,22 +511,28 @@ class ParallelConfig:
             If None, will use synchronous tokenization.
         ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+        placement_group: ray distributed model workers placement group.
+        distributed_executor_backend: Backend to use for distributed model
+            workers, either "ray" or "mp" (multiprocessing). If either
+            pipeline_parallel_size or tensor_parallel_size is greater than 1,
+            will default to "ray" if Ray is installed or "mp" otherwise.
     """
 
     def __init__(
         self,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
-        worker_use_ray: bool,
+        worker_use_ray: Optional[bool] = None,
         max_parallel_loading_workers: Optional[int] = None,
         disable_custom_all_reduce: bool = False,
         tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
         ray_workers_use_nsight: bool = False,
         placement_group: Optional["PlacementGroup"] = None,
+        distributed_executor_backend: Optional[str] = None,
     ) -> None:
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
-        self.worker_use_ray = worker_use_ray
+        self.distributed_executor_backend = distributed_executor_backend
         self.max_parallel_loading_workers = max_parallel_loading_workers
         self.disable_custom_all_reduce = disable_custom_all_reduce
         self.tokenizer_pool_config = tokenizer_pool_config
@@ -556,14 +540,29 @@ class ParallelConfig:
         self.placement_group = placement_group
 
         self.world_size = pipeline_parallel_size * self.tensor_parallel_size
-        if self.world_size > 1:
-            self.worker_use_ray = True
+        if worker_use_ray:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            elif self.distributed_executor_backend != "ray":
+                raise ValueError(f"worker-use-ray can't be used with "
+                                 f"distributed executor backend "
+                                 f"'{self.distributed_executor_backend}'.")
+
+        if self.distributed_executor_backend is None and self.world_size > 1:
+            from vllm.executor import ray_utils
+            ray_found = ray_utils.ray is not None
+            self.distributed_executor_backend = "ray" if ray_found else "mp"
+
         self._verify_args()
 
     def _verify_args(self) -> None:
         if self.pipeline_parallel_size > 1:
             raise NotImplementedError(
                 "Pipeline parallelism is not supported yet.")
+        if self.distributed_executor_backend not in ("ray", "mp", None):
+            raise ValueError(
+                "Unrecognized distributed executor backend. Supported values "
+                "are 'ray' or 'mp'.")
         if not self.disable_custom_all_reduce and self.world_size > 1:
             if is_hip():
                 self.disable_custom_all_reduce = True
@@ -575,7 +574,8 @@ class ParallelConfig:
                 logger.info(
                     "Disabled the custom all-reduce kernel because it is not "
                     "supported with pipeline parallelism.")
-        if self.ray_workers_use_nsight and not self.worker_use_ray:
+        if self.ray_workers_use_nsight and (
+                not self.distributed_executor_backend == "ray"):
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
 
@@ -890,7 +890,8 @@ class SpeculativeConfig:
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
             tensor_parallel_size=target_parallel_config.tensor_parallel_size,
-            worker_use_ray=target_parallel_config.worker_use_ray,
+            distributed_executor_backend=target_parallel_config.
+            distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.
             max_parallel_loading_workers,
             disable_custom_all_reduce=target_parallel_config.
@@ -976,6 +977,7 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
@@ -1068,7 +1070,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
 
 def _get_and_verify_dtype(
@@ -1099,14 +1101,6 @@ def _get_and_verify_dtype(
         torch_dtype = dtype
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
-
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
 
     # Verify the dtype.
     if torch_dtype != config_dtype:
