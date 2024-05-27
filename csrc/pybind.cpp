@@ -11,7 +11,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
-    //ops.def("paged_attention_v1", &paged_attention_v1);
+  // ops.def("paged_attention_v1", &paged_attention_v1);
   def(ops, "paged_attention_v1", &paged_attention_v1, {0});
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
@@ -42,10 +42,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
-  def(ops, "rms_norm",  &rms_norm, {0});
-  //ops.def("rms_norm",  &rms_norm);
-  // ops.def(torch::schema("rms_norm(Tensor out, Tensor input, Tensor weight,
-  // float epsilon) -> ()"), c10::AliasAnalysisKind::CONSERVATIVE);
+  def(ops, "rms_norm", &rms_norm, {0});
+  // ops.def("rms_norm",  &rms_norm);
+  //  ops.def(torch::schema("rms_norm(Tensor out, Tensor input, Tensor weight,
+  //  float epsilon) -> ()"), c10::AliasAnalysisKind::CONSERVATIVE);
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
@@ -140,7 +140,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops
   // Swap in (out) the cache blocks from src to dst.
-  def(cache_ops, "swap_blocks", &swap_blocks, {0,1});
+  def(cache_ops, "swap_blocks", &swap_blocks, {0, 1});
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
   // Copy the cache blocks from src to dst.
@@ -148,12 +148,14 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("copy_blocks", torch::kCUDA, &copy_blocks);
 
   // Reshape the key and value tensors and cache them.
-  def(cache_ops, "reshape_and_cache", &reshape_and_cache, {2, 3}); // 4?
+  def(cache_ops, "reshape_and_cache", &reshape_and_cache, {2, 3});  // 4?
   cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
 
   // Reshape the key and value tensors and cache them.
-  def(cache_ops, "reshape_and_cache_flash", &reshape_and_cache_flash, {2, 3}); // 4?
-  cache_ops.impl("reshape_and_cache_flash", torch::kCUDA, &reshape_and_cache_flash);
+  def(cache_ops, "reshape_and_cache_flash", &reshape_and_cache_flash,
+      {2, 3});  // 4?
+  cache_ops.impl("reshape_and_cache_flash", torch::kCUDA,
+                 &reshape_and_cache_flash);
 
   // Convert the key and value cache to fp8 data type.
   def(cache_ops, "convert_fp8", &convert_fp8, {0});
@@ -170,7 +172,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   // Gets the maximum shared memory per block device attribute.
   cuda_utils.def("get_max_shared_memory_per_block_device_attribute",
                  &get_max_shared_memory_per_block_device_attribute);
-  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute", torch::kCUDA,
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
+                  torch::kCUDA,
                   &get_max_shared_memory_per_block_device_attribute);
 }
 

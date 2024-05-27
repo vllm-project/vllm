@@ -33,9 +33,9 @@ void def(torch::Library& lib, std::string const& name, FnType* fn,
         }
         new_alias_info.setIsWrite(true);
 
-        new_args.emplace_back(
-            arg.name(), arg.type(), arg.real_type(), arg.N(),
-            arg.default_value(), arg.kwarg_only(), new_alias_info);
+        new_args.emplace_back(arg.name(), arg.type(), arg.real_type(), arg.N(),
+                              arg.default_value(), arg.kwarg_only(),
+                              new_alias_info);
       }
     }
 
