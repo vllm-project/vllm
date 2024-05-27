@@ -387,6 +387,12 @@ class FalconForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.transformer = FalconModel(config, cache_config, quant_config)
+        # only Falcon-11B doesn't share lm_head weight with word embeddings
+        # and previous Falcon model doesn't have tie_word_embeddings config
+        # so we set tie_word_embeddings to True by default
+        self.tie_word_embeddings = (config.tie_word_embeddings
+                                    if config.tie_word_embeddings is not None
+                                    else True)
         if config.tie_word_embeddings:
             self.lm_head_weight = self.transformer.word_embeddings.weight
         else:
@@ -438,6 +444,9 @@ class FalconForCausalLM(nn.Module):
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
+            if name == "lm_head.weight" and self.tie_word_embeddings:
+                # Falcon uses tied embeddings except Falcon-11b.
+                continue
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
                 continue
