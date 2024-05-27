@@ -270,8 +270,8 @@ class EngineArgs:
                             help='Enables automatic prefix caching.')
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
-                            help='Disables sliding window if the model '
-                            'supports sliding window')
+                            help='Disables sliding window, '
+                            'capping to sliding window size')
         parser.add_argument('--use-v2-block-manager',
                             action='store_true',
                             help='Use BlockSpaceMangerV2.')
