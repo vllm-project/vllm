@@ -1818,7 +1818,7 @@ class LLMEngine:
         num_generation_tokens_requests: List[int] = []
         best_of_requests: List[int] = []
         n_requests: List[int] = []
-        max_num_generation_tokens_requests = []
+        max_num_generation_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # NOTE: This loop assumes prefill seq_groups are before
@@ -1961,8 +1961,6 @@ class LLMEngine:
             num_generation_tokens_requests=num_generation_tokens_requests,
             best_of_requests=best_of_requests,
             n_requests=n_requests,
-            max_num_generation_tokens_requests=
-            max_num_generation_tokens_requests,
             finished_reason_requests=finished_reason_requests,
         )
 
