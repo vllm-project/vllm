@@ -20,11 +20,10 @@ USER root
 
 # Import BASE_IMAGE arg from pre-FROM
 ARG BASE_IMAGE
-RUN echo "Base image is $BASE_IMAGE"
 ARG COMMON_WORKDIR
 # Used as ARCHes for all components
-ENV PYTORCH_ROCM_ARCH="gfx90a;gfx942"
-RUN echo "PYTORCH_ROCM_ARCH is $PYTORCH_ROCM_ARCH"
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942"
+ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
 # Install some basic utilities
 RUN apt-get update && apt-get install python3 python3-pip -
