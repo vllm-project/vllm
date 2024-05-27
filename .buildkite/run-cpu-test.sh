@@ -14,13 +14,13 @@ remove_docker_container
 docker run -itd -v ~/.cache/huggingface:/root/.cache/huggingface --network host --env VLLM_CPU_KVCACHE_SPACE=4 --name cpu-test cpu-test
 
 # offline inference
-docker exec cpu-test bash -c "python3 examples/offline_inference.py"
+docker exec cpu-test bash -c "python3 vllm/examples/offline_inference.py"
 
 # async engine test
 #docker exec cpu-test bash -c "cd tests; pytest -v -s async_engine"
 
 # Run basic model test
-docker exec cpu-test bash -c "cd tests;
+docker exec cpu-test bash -c "cd vllm/tests;
   pip install pytest Pillow
   rm -f __init__.py
   bash ../.buildkite/download-images.sh
