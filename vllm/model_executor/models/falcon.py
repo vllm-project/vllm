@@ -393,7 +393,7 @@ class FalconForCausalLM(nn.Module):
         self.tie_word_embeddings = (config.tie_word_embeddings
                                     if config.tie_word_embeddings is not None
                                     else True)
-        if config.tie_word_embeddings:
+        if self.tie_word_embeddings:
             self.lm_head_weight = self.transformer.word_embeddings.weight
         else:
             self.lm_head = ParallelLMHead(
