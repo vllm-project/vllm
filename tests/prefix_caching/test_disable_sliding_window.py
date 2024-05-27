@@ -10,7 +10,7 @@ from vllm import LLM
 MODEL_LEN_LEN = [
     # Example models with sliding window.
     ("bigcode/starcoder2-3b", 4096, 16384),
-    ("mistralai/Mistral-7B-v0.1", 4096, 32768),
+    # ("mistralai/Mistral-7B-v0.1", 4096, 32768), << OOM in CI
 
     # Confirm model with sliding window works.
     # config has "use_sliding_window": false
