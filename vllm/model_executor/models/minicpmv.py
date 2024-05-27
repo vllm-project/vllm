@@ -506,7 +506,7 @@ class MiniCPMV(nn.Module):
         ],
                               dim=0)
         image_start_tokens = torch.where(input_ids == im_start_token_id)[0]
-        # 跳过 im_start
+
         image_start_tokens += 1
         image_end_tokens = torch.where(input_ids == im_end_token_id)[0]
         valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
