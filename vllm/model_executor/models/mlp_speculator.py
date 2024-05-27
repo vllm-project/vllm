@@ -53,7 +53,6 @@ class MLPSpeculator(nn.Module):
         **kwargs
     ) -> None:
         super().__init__()
-        self.current_head_index = 0
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
         self.emb_dim = config.emb_dim
@@ -85,37 +84,48 @@ class MLPSpeculator(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-        # prune the hidden states
-        if self.current_head_index == 0:
-            if self.first_decode_step:
-                self.first_decode_step = False
-            else:
-                self.previous_hidden_state = self.previous_hidden_state.reshape(-1, self.n_predict + 1, self.previous_hidden_state.size(1))
-                self.previous_hidden_state = self.previous_hidden_state.gather(
-                    1,
-                    (self.accepted_token_lengths - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
-                ).squeeze(1) # b x d
 
-        # Project and predict
-        z = self.emb[self.current_head_index](input_ids[-1])  # b k d
-        state = self.proj[self.current_head_index](self.previous_hidden_state)
-        # Weighted add of state_weight*state and emb_weight*z
-        # Let subsequent LN take care of denominator
-        # state_weight is close to 1, so shouldn't be any precision issues
-        state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
-        state = self.activation(self.ln[self.current_head_index](state))  # b k d
+        if self.first_decode_step:
+            self.first_decode_step = False
+        else:
+            self.previous_hidden_state = self.previous_hidden_state.reshape(-1, self.n_predict + 1, self.previous_hidden_state.size(1))
+            self.previous_hidden_state = self.previous_hidden_state.gather(
+                1,
+                (self.accepted_token_lengths - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
+            ).squeeze(1) # b x d
 
-        # todo: not yet supporting top_k_tokens_per_head
 
-        self.previous_hidden_state = state
-        self.current_head_index += 1
-        return state
+        output = torch.empty(
+            self.n_predict, self.previous_hidden_state.size(0), self.previous_hidden_state.size(1),
+            dtype=self.previous_hidden_state.dtype,
+            device=self.previous_hidden_state.device
+        )
+
+        for head_index in range(self.n_predict):
+            # Project and predict
+            z = self.emb[head_index](input_ids[-1])  # b k d
+            state = self.proj[head_index](self.previous_hidden_state)
+            # Weighted add of state_weight*state and emb_weight*z
+            # Let subsequent LN take care of denominator
+            # state_weight is close to 1, so shouldn't be any precision issues
+            state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
+            state = self.activation(self.ln[head_index](state))  # b k d
+            # todo: not yet supporting top_k_tokens_per_head
+            self.previous_hidden_state = state
+            output[head_index] = state
+
+        return output
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        current_head_index = self.current_head_index - 1
-        logits = self.logits_processor(self.head[current_head_index].weight, hidden_states,
-                                       sampling_metadata)
+
+        logits = torch.empty(
+            hidden_states.size(0), len(sampling_metadata.seq_groups), self.vocab_size,
+            dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        for head_index in range(self.n_predict):
+            logits[head_index] = self.logits_processor(self.head[head_index].weight, hidden_states[head_index],
+                                           sampling_metadata)
         return logits
 
     def sample(
@@ -123,7 +133,9 @@ class MLPSpeculator(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
+        next_tokens = []
+        for head_index in range(self.n_predict):
+            next_tokens.append(self.sampler(logits[head_index], sampling_metadata))
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):

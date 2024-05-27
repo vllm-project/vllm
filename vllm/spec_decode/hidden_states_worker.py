@@ -66,9 +66,6 @@ class HiddenStatesWorker(Worker):
             execute_model_req: Optional[ExecuteModelRequest] = None
     ) -> List[SamplerOutput]:
 
-        # reset the head to call in speculator
-        self.speculator.current_head_index = 0
-
         sampler_output, hidden_states = self._get_hidden_states(execute_model_req.seq_group_metadata_list, self.gpu_cache)
 
         # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently

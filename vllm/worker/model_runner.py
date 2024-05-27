@@ -167,12 +167,12 @@ class SingleStepSpeculativeModelRunner:
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
-                if self.model.current_head_index == 0:
-                    if seq_group_metadata.request_id in self.prev_request_context_lengths:
-                        prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
-                        accepted_length = context_len - prev_context_length
-                        accepted_lengths_list.append(accepted_length)
-                    self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
+
+                if seq_group_metadata.request_id in self.prev_request_context_lengths:
+                    prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
+                    accepted_length = context_len - prev_context_length
+                    accepted_lengths_list.append(accepted_length)
+                self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
 
         if not self.model.first_decode_step:
             self.model.accepted_token_lengths = torch.tensor(accepted_lengths_list, device=self.device, dtype=torch.long)

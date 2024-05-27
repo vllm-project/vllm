@@ -11,17 +11,7 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
 
 
-class MultiStepWorker(Worker):
-    """The MultiStepWorker is equivalent to a Worker except that it allows
-    multiple forward passes in a single call, assuming the scheduler has
-    allocated enough space to store the additional KV. This reduces overhead
-    by invoking the scheduler less.
-
-    The MultiStepWorker does not support cache swap operations, or beam search.
-    Cache swap operations do not require large modifications. On the other hand,
-    beam search requires memory allocations during sequence forks and thus
-    requires more thought for MultiStepWorker support.
-    """
+class MLPSpeculatorWorker(Worker):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -38,6 +28,7 @@ class MultiStepWorker(Worker):
             self.vocab_size,
             max_proposal_len=self.max_model_len,
         )
+
 
     def set_include_gpu_probs_tensor(self):
         # Need include_gpu_probs_tensor for multi_step_worker
@@ -60,26 +51,15 @@ class MultiStepWorker(Worker):
 
         # Shallow copy input data so modifications (such as appending tokens)
         # do not cause side-effects.
+        # to-do -- not sure if we still need this?
         copied_seq_group_metadata_list = self._shallow_copy_inputs(
             execute_model_req.seq_group_metadata_list)
-        copied_execute_model_req = execute_model_req.clone(
-            copied_seq_group_metadata_list)
 
-        # Assert enough KV space for sample_len tokens per sequence.
-        self._assert_enough_kv_space(execute_model_req.seq_group_metadata_list, sample_len)
+        model_outputs = self.model_runner.execute_model(
+            copied_seq_group_metadata_list, self.gpu_cache
+        )
 
-        # Run model sample_len times.
-        model_outputs = []
-        for _ in range(sample_len):
-            model_output = super().execute_model(
-                execute_model_req=copied_execute_model_req)
-            assert (len(model_output) == 1
-                    ), "composing multistep workers not supported"
-            model_output = model_output[0]
-
-            self._append_new_tokens(model_output,
-                                    copied_seq_group_metadata_list)
-            model_outputs.append(model_output)
+        assert len(model_outputs) == sample_len
 
         return model_outputs, True
 
@@ -92,28 +72,6 @@ class MultiStepWorker(Worker):
         """
 
         return self._proposer.get_proposals(execute_model_req)
-
-    def _append_new_tokens(
-            self, model_output: SamplerOutput,
-            seq_group_metadata_list: SequenceGroupMetadata) -> None:
-        """Given model output from a single run, append the tokens to the
-        sequences. This is normally done outside of the worker, but it is
-        required if the worker is to perform multiple forward passes.
-        """
-        for seq_group_metadata, sequence_group_outputs in zip(
-                seq_group_metadata_list, model_output):
-            seq_group_metadata.is_prompt = False
-
-            for seq_output in sequence_group_outputs.samples:
-                # NOTE: Beam search is not supported, so we can assume that
-                # parent_seq_id == seq_id.
-                seq = seq_group_metadata.seq_data[seq_output.parent_seq_id]
-
-                token_id = seq_output.output_token
-                token_logprob = seq_output.logprobs[token_id]
-
-                seq.append_token_id(token_id, token_logprob.logprob)
-                seq.update_num_computed_tokens(1)
 
     def _shallow_copy_inputs(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]
@@ -145,41 +103,6 @@ class MultiStepWorker(Worker):
             seq_group_metadata.seq_data = new_seq_data
 
         return new_seq_group_metadata_list
-
-    def _assert_enough_kv_space(
-            self, seq_group_metadata_list: List[SequenceGroupMetadata],
-            num_steps: int) -> None:
-        """Assert there are enough physical blocks per sequence to store the
-        current KV plus additional KV from num_steps tokens.
-        """
-        assert self.model_runner.block_size is not None
-        for seq_group_metadata in seq_group_metadata_list:
-            # Only one seq_id is guaranteed because there is no beam search.
-            seq_id = list(seq_group_metadata.seq_data.keys())[0]
-            seq = seq_group_metadata.seq_data[seq_id]
-
-            # After num_steps, the seq len will be the current seq len
-            # plus one token per step.
-            final_seq_len = seq.get_len() + num_steps
-
-            # We will have final_seq_len - 1 KV because vLLM saves KV for a
-            # token in the iteration after the token was generated.
-            required_num_kv_slots = final_seq_len - 1
-
-            # The allocated number of kv slots is the number of allocated blocks
-            # times the number of slots of block.
-            number_physical_blocks = len(
-                seq_group_metadata.block_tables[seq_id])
-            allocated_kv_slots = (number_physical_blocks *
-                                  self.model_runner.block_size)
-
-            if required_num_kv_slots > allocated_kv_slots:
-                request_id = seq_group_metadata.request_id
-                raise ValueError(
-                    "The worker attempted to run "
-                    f"{num_steps} times but found insufficient KV space for "
-                    f"{request_id=} {seq_id=}. ({allocated_kv_slots=} "
-                    f"{required_num_kv_slots=}).")
 
     def _raise_if_unsupported(
         self,
