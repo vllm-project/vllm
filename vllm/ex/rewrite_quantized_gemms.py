@@ -88,7 +88,7 @@ class replacement_class(torch.nn.Module):
         self.x_scale = torch.empty((1,1), dtype=torch.float32, device='cuda')  # temp hack
 
     def forward(self, x, w, w_scale, x_type):
-        x_q = custom_ops.cutlass_quantize_single(x, self.x_scale[0].item())
+        x_q = custom_ops.static_scaled_int8_quant(x, self.x_scale[0].item())
         return _cutlass_scaled_mm_dq(x_q, w, self.x_scale, w_scale, x_type)
 
 
@@ -107,7 +107,7 @@ def rewrite_quantized_gemms(
     mod: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor]
 ) -> torch.fx.GraphModule:
-#    return mod
+    return mod
     pattern_graph = symbolic_trace(pattern3).graph
 
     #x = torch.empty((16,16), dtype=torch.float16)

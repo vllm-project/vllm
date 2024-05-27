@@ -4,7 +4,6 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.custom_op import CustomOp
 
 
@@ -52,19 +51,21 @@ class RMSNorm(CustomOp):
         from vllm import _custom_ops as ops
 
         if residual is not None:
-            return torch.ops.vllm.fused_add_rms_norm(
+            ops.fused_add_rms_norm(
                 x,
                 residual,
                 self.weight.data,
                 self.variance_epsilon,
             )
+            return x, residual
         out = torch.empty_like(x)
-        return torch.ops.vllm.rms_norm(
+        ops.rms_norm(
             out,
             x,
             self.weight.data,
             self.variance_epsilon,
         )
+        return out
 
     def forward_xpu(
         self,

@@ -226,28 +226,6 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
-def cutlass_quantize(
-    x: torch.Tensor,
-    scales: torch.Tensor,
-    logical_widths: List[int],
-    split_dim: int = 0
-) -> torch.Tensor:
-    x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-    x_q_split = x_q.split(logical_widths, dim=split_dim)
-    x_split = x.split(logical_widths, dim=split_dim)
-
-    for q, dq, scale in zip(x_q_split, x_split, scales):
-        torch.ops._C.static_scaled_int8_quant(q, dq, scale.item())
-
-    return x_q
-
-
-def cutlass_quantize_single(x: torch.Tensor, scale: float) -> torch.Tensor:
-    x_q = torch.empty_like(x, dtype=torch.int8, device="cuda")
-    torch.ops._C.static_scaled_int8_quant(x_q, x, scale)
-    return x_q
-
-
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)

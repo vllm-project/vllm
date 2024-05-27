@@ -130,7 +130,7 @@ class PagedAttention:
 
         if use_v1:
             # Run PagedAttention V1.
-            torch.ops.vllm.paged_attention_v1(
+            ops.paged_attention_v1(
                 output,
                 query,
                 key_cache,
@@ -165,7 +165,7 @@ class PagedAttention:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            torch.ops.vllm.paged_attention_v2(
+            ops.paged_attention_v2(
                 output,
                 exp_sums,
                 max_logits,
@@ -275,138 +275,3 @@ def _reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
 
 
 register_vllm_lowering(torch.ops.vllm.reshape_and_cache, [2, 3])
-
-vllm_lib.define(
-    "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> Tensor"
-)
-#vllm_lib.define(
-#    "paged_attention_v1(Tensor out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, int max_context_len, Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> Tensor"
-#)
-
-
-@torch.library.impl(vllm_lib, "paged_attention_v1", "Meta")
-def _paged_attention_v1_meta(
-    out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes,
-    kv_cache_dtype,
-    kv_scale,
-):
-    return out
-
-
-@torch.library.impl(vllm_lib, "paged_attention_v1", "CUDA")
-def _paged_attention_v1(
-    out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes,
-    kv_cache_dtype,
-    kv_scale,
-):
-    ops.paged_attention_v1(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        kv_scale,
-    )
-    return out
-
-
-register_vllm_lowering(torch.ops.vllm.paged_attention_v1, [0])
-
-vllm_lib.define(
-    "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, SymInt max_context_len, Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> Tensor"
-)
-#vllm_lib.define(
-#    "paged_attention_v2(Tensor out, Tensor exp_sums, Tensor max_logits, Tensor tmp_out, Tensor query, Tensor key_cache, Tensor value_cache, int num_kv_heads, float scale, Tensor block_tables, Tensor context_lens, int block_size, int max_context_len, Tensor? alibi_slopes, str kv_cache_dtype, float kv_scale) -> Tensor"
-#)
-
-
-@torch.library.impl(vllm_lib, "paged_attention_v2", "Meta")
-def _paged_attention_v2_meta(
-    out,
-    exp_sums,
-    max_logits,
-    tmp_out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes,
-    kv_cache_dtype,
-    kv_scale,
-):
-    return out
-
-
-@torch.library.impl(vllm_lib, "paged_attention_v2", "CUDA")
-def _paged_attention_v2(
-    out,
-    exp_sums,
-    max_logits,
-    tmp_out,
-    query,
-    key_cache,
-    value_cache,
-    num_kv_heads,
-    scale,
-    block_tables,
-    context_lens,
-    block_size,
-    max_context_len,
-    alibi_slopes,
-    kv_cache_dtype,
-    kv_scale,
-):
-    ops.paged_attention_v2(
-        out,
-        exp_sums,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        context_lens,
-        block_size,
-        max_context_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        kv_scale,
-    )
-    return out
-
-
-register_vllm_lowering(torch.ops.vllm.paged_attention_v2, [0])
