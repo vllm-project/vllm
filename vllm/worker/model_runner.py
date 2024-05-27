@@ -849,6 +849,11 @@ class ModelRunner:
         seq_lens = torch.ones(max_batch_size, dtype=torch.int32).cuda()
         block_tables = torch.from_numpy(self.graph_block_tables).cuda()
 
+        # Prepare buffer for outputs. These will be reused for all batch sizes.
+        hidden_states = torch.zeros(
+            (max_batch_size, self.model_config.get_hidden_size()),
+            dtype=self.model_config.dtype).cuda()
+
         graph_batch_size = _get_graph_batch_size(
             self.scheduler_config.max_num_seqs)
         batch_size_capture_list = [
@@ -888,6 +893,7 @@ class ModelRunner:
                 graph_runner.capture(
                     input_tokens[:batch_size],
                     input_positions[:batch_size],
+                    hidden_states[:batch_size],
                     kv_caches,
                     attn_metadata,
                     memory_pool=self.graph_memory_pool,
@@ -924,6 +930,7 @@ class CUDAGraphRunner:
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        hidden_states: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         memory_pool: Optional[Tuple[int, int]],
@@ -946,13 +953,15 @@ class CUDAGraphRunner:
         # Capture the graph.
         self._graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
-            hidden_states = self.model(
+            output_hidden_states = self.model(
                 input_ids,
                 positions,
                 kv_caches,
                 attn_metadata,
                 **kwargs,
             )
+            hidden_states.copy_(output_hidden_states)
+            del output_hidden_states
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
