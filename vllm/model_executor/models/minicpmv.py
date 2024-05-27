@@ -39,17 +39,15 @@ from torch.nn.init import trunc_normal_
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
+from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.attention import AttentionMetadata
-from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
-
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -217,12 +215,13 @@ class Resampler(nn.Module):
 
 class MiniCPMV(nn.Module):
 
-    def __init__(self,
-                 config,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None,
-                 ):
+    def __init__(
+        self,
+        config,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
+    ):
         super().__init__()
         self.config = config
         self.llm = MiniCPMForCausalLM(config,
@@ -524,7 +523,7 @@ class MiniCPMV(nn.Module):
         return image_bound, input_ids
 
     def get_embedding(self, data, im_start_token_id, im_end_token_id,
-                           unk_token_id):
+                      unk_token_id):
         if 'vision_hidden_states' not in data:
             pixel_values = data['pixel_values']
             if pixel_values is not None and len(pixel_values) > 0:
