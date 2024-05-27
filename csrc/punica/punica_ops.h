@@ -1,6 +1,6 @@
 #pragma once
 
-#include <torch/extension.h>
+#include "register.h"
 
 void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w,
                    torch::Tensor indicies, int64_t layer_idx, double scale);

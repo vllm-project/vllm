@@ -1,10 +1,6 @@
 #pragma once
 
-#include <torch/extension.h>
-
-#define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
-#define _CONCAT(A, B) A##B
-#define CONCAT(A, B) _CONCAT(A, B)
+#include "register.h"
 
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
