@@ -30,7 +30,6 @@ class Attention(nn.Module):
         scale: float,
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
@@ -39,9 +38,11 @@ class Attention(nn.Module):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
+            sliding_window = cache_config.sliding_window
         else:
             kv_cache_dtype = "auto"
             block_size = 16
+            sliding_window = None
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
