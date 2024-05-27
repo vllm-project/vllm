@@ -57,6 +57,10 @@ class HiddenStatesWorker(Worker):
             sampling_metadata=sampling_metadata,
         )
 
+        # we only need to pass hidden states of most recent token
+        if seq_group_metadata_list[0].is_prompt:
+            hidden_states = hidden_states.index_select(0, sampling_metadata.selected_token_indices)
+
         return output, hidden_states
 
 
@@ -71,5 +75,6 @@ class HiddenStatesWorker(Worker):
         # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently
         if execute_model_req.seq_group_metadata_list[0].is_prompt:
             self.speculator.first_decode_step = True
+
         self.speculator.previous_hidden_state = hidden_states
         return [sampler_output]

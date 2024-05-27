@@ -49,14 +49,8 @@ class MLPSpeculatorWorker(Worker):
         """
         self._raise_if_unsupported(execute_model_req)
 
-        # Shallow copy input data so modifications (such as appending tokens)
-        # do not cause side-effects.
-        # to-do -- not sure if we still need this?
-        copied_seq_group_metadata_list = self._shallow_copy_inputs(
-            execute_model_req.seq_group_metadata_list)
-
         model_outputs = self.model_runner.execute_model(
-            copied_seq_group_metadata_list, self.gpu_cache
+            execute_model_req.seq_group_metadata_list, self.gpu_cache
         )
 
         assert len(model_outputs) == sample_len
@@ -72,37 +66,6 @@ class MLPSpeculatorWorker(Worker):
         """
 
         return self._proposer.get_proposals(execute_model_req)
-
-    def _shallow_copy_inputs(
-        self, seq_group_metadata_list: List[SequenceGroupMetadata]
-    ) -> List[SequenceGroupMetadata]:
-        """Copy input data structures to remove side-effects when input data
-        structures are shared with other modules.
-
-        Helpful when the vLLM scheduler runs in the same process as the worker.
-        The alternative is deep-copying (or other form of deep copy); this has
-        performance downsides.
-        """
-
-        # Shallow-copy the list of SequenceGroupMetadata. This allows us to
-        # append tokens and change is_prompt without external side-effects.
-        new_seq_group_metadata_list = []
-
-        for old_seq_group_metadata in seq_group_metadata_list:
-            # We must shallow-copy seq_group_metadata as is_prompt could change.
-            seq_group_metadata = copy.copy(old_seq_group_metadata)
-            new_seq_group_metadata_list.append(seq_group_metadata)
-
-            # We must shallow-copy seq_data as we will append token ids
-            new_seq_data = {}
-            for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
-                new_seq_data[seq_id] = copy.copy(old_seq_data)
-                new_seq_data[
-                    seq_id].output_token_ids = old_seq_data.output_token_ids[:]
-
-            seq_group_metadata.seq_data = new_seq_data
-
-        return new_seq_group_metadata_list
 
     def _raise_if_unsupported(
         self,

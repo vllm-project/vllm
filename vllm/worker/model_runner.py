@@ -66,7 +66,7 @@ class ModelInput(NamedTuple):
             num_prefills=0,
         )
 
-class SingleStepSpeculativeModelRunner:
+class MLPSpeculatorModelRunner:
     def __init__(
         self,
         model_config: ModelConfig,
@@ -199,30 +199,13 @@ class SingleStepSpeculativeModelRunner:
     ) -> Optional[SamplerOutput]:
         input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
 
-        model_executable = self.model
-        execute_model_kwargs = {
-            "input_ids": input_tokens,
-            "positions": input_positions,
-            "kv_caches": None,
-            "attn_metadata": None,
-        }
-        hidden_states = model_executable(**execute_model_kwargs)
-
         sampling_metadata = SamplingMetadata.prepare(
             seq_group_metadata_list, seq_lens, query_lens, self.device,
             self.pin_memory)
 
-        # Compute the logits.
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
-
-        # Only perform sampling in the driver worker.
-        if not self.is_driver_worker:
-            return None
-
-        # Sample the next token.
-        output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
+        output = self.model.generate_proposals(
+            input_ids=input_tokens,
+            sampling_metadata=sampling_metadata
         )
 
         return output

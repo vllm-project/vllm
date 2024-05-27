@@ -77,12 +77,10 @@ class MLPSpeculator(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size, config.vocab_size, 1.0)
         self.sampler = Sampler()
 
-    def forward(
+    def generate_proposals(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
+        sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
 
         if self.first_decode_step:
@@ -94,48 +92,37 @@ class MLPSpeculator(nn.Module):
                 (self.accepted_token_lengths - 1)[:, None, None].expand(-1, 1, self.previous_hidden_state.size(2))
             ).squeeze(1) # b x d
 
+        # b x 1 x d
+        self.previous_hidden_state = self.previous_hidden_state.reshape(self.previous_hidden_state.size(0), 1, self.previous_hidden_state.size(1))
 
-        output = torch.empty(
-            self.n_predict, self.previous_hidden_state.size(0), self.previous_hidden_state.size(1),
-            dtype=self.previous_hidden_state.dtype,
-            device=self.previous_hidden_state.device
-        )
+        # b x 1
+        last_tokens = input_ids.reshape(-1, 1)
+
+        next_tokens = []
 
         for head_index in range(self.n_predict):
+
             # Project and predict
-            z = self.emb[head_index](input_ids[-1])  # b k d
+            z = self.emb[head_index](last_tokens)  # b k d
             state = self.proj[head_index](self.previous_hidden_state)
+
             # Weighted add of state_weight*state and emb_weight*z
             # Let subsequent LN take care of denominator
             # state_weight is close to 1, so shouldn't be any precision issues
             state = torch.add(state, z, alpha=self.emb_weight / self.state_weight)
+
             state = self.activation(self.ln[head_index](state))  # b k d
             # todo: not yet supporting top_k_tokens_per_head
             self.previous_hidden_state = state
-            output[head_index] = state
 
-        return output
-
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-
-        logits = torch.empty(
-            hidden_states.size(0), len(sampling_metadata.seq_groups), self.vocab_size,
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
-        for head_index in range(self.n_predict):
-            logits[head_index] = self.logits_processor(self.head[head_index].weight, hidden_states[head_index],
+            logits = self.logits_processor(self.head[head_index].weight, state,
                                            sampling_metadata)
-        return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = []
-        for head_index in range(self.n_predict):
-            next_tokens.append(self.sampler(logits[head_index], sampling_metadata))
+            tmp = logits.reshape(-1,logits.size(2))
+            output = self.sampler(tmp, sampling_metadata)
+            last_tokens = output.sampled_token_ids
+            next_tokens.append(output)
+
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
