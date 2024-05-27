@@ -3,7 +3,8 @@ from typing import Optional, Tuple, Type
 import torch
 
 try:
-    from vllm._C import ops as vllm_ops
+    # ruff: noqa: SIM105
+    import vllm._C
 except ImportError as e:
     from vllm.logger import init_logger
     logger = init_logger(__name__)
@@ -314,8 +315,8 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     kv_scale: float,
 ) -> None:
-    vllm_cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
-                                     slot_mapping, kv_cache_dtype, kv_scale)
+    torch.ops._C_cache_ops.reshape_and_cache(key, value, key_cache, value_cache,
+                                             slot_mapping, kv_cache_dtype, kv_scale)
 
 
 def reshape_and_cache_flash(
@@ -326,25 +327,33 @@ def reshape_and_cache_flash(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
 ) -> None:
-    vllm_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                           slot_mapping, kv_cache_dtype)
+    torch.ops._C_cache_ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
+                                                   slot_mapping, kv_cache_dtype)
 
 
 def copy_blocks(key_caches: torch.Tensor, value_caches: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    vllm_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
+    torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
-    vllm_cache_ops.swap_blocks(src, dst, block_mapping)
+    torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)
 
 
 def convert_fp8(output: torch.Tensor,
                 input: torch.Tensor,
                 scale: float = 1.0,
                 kv_dtype: str = "fp8") -> None:
-    vllm_cache_ops.convert_fp8(output, input, scale, kv_dtype)
+    torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
-#TODO: cuda_utils, custom_ar
+def get_device_attribute(attribute: int, device: int) -> int:
+    return torch.ops._C_cuda_utils.get_device_attribute(attribute, device)
+
+
+def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
+    return torch.ops._C_cuda_utils.get_max_shared_memory_per_block_device_attribute(device)
+
+
+#TODO: custom_ar

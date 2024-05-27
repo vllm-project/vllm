@@ -184,30 +184,43 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA, &dynamic_scaled_int8_quant);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Cache ops
-  pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
-  cache_ops.def("swap_blocks", &swap_blocks,
-                "Swap in (out) the cache blocks from src to dst");
-  cache_ops.def("copy_blocks", &copy_blocks,
-                "Copy the cache blocks from src to dst");
-  cache_ops.def("reshape_and_cache", &reshape_and_cache,
-                "Reshape the key and value tensors and cache them");
-  cache_ops.def("reshape_and_cache_flash", &reshape_and_cache_flash,
-                "Reshape the key and value tensors and cache them");
-  cache_ops.def("convert_fp8", &convert_fp8,
-                "Convert the key and value cache to fp8 data type");
+  // Swap in (out) the cache blocks from src to dst.
+  cache_ops.def("swap_blocks(Tensor src, Tensor dst, Tensor block_mapping) -> ()");
+  cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
 
+  // Copy the cache blocks from src to dst.
+  cache_ops.def("copy_blocks", &copy_blocks);
+  cache_ops.impl("copy_blocks", torch::kCUDA, &copy_blocks);
+
+  // Reshape the key and value tensors and cache them.
+  cache_ops.def("reshape_and_cache", &reshape_and_cache);
+  cache_ops.impl("reshape_and_cache", torch::kCUDA, &reshape_and_cache);
+
+  // Reshape the key and value tensors and cache them.
+  cache_ops.def("reshape_and_cache_flash", &reshape_and_cache_flash);
+  cache_ops.impl("reshape_and_cache_flash", torch::kCUDA, &reshape_and_cache_flash);
+
+  // Convert the key and value cache to fp8 data type.
+  cache_ops.def("convert_fp8", &convert_fp8);
+  cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
+}
+
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   // Cuda utils
-  pybind11::module cuda_utils =
-      m.def_submodule("cuda_utils", "vLLM cuda utils");
-  cuda_utils.def("get_device_attribute", &get_device_attribute,
-                 "Gets the specified device attribute.");
 
-  cuda_utils.def("get_max_shared_memory_per_block_device_attribute",
-                 &get_max_shared_memory_per_block_device_attribute,
-                 "Gets the maximum shared memory per block device attribute.");
+  // Gets the specified device attribute.
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
+  cuda_utils.impl("get_device_attribute", torch::kCUDA, &get_device_attribute);
 
+  // Gets the maximum shared memory per block device attribute.
+  cuda_utils.def("get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute", torch::kCUDA,
+                  &get_max_shared_memory_per_block_device_attribute);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifndef USE_ROCM
   // Custom all-reduce kernels
   pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
