@@ -7,7 +7,6 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 
 def main():
     parser = argparse.ArgumentParser(description="vLLM CLI")
-    make_arg_parser(parser)
     subparsers = parser.add_subparsers(required=True)
 
     serve_parser = subparsers.add_parser(
@@ -19,6 +18,7 @@ def main():
         "model-tag",
         type=str,
         help="The model tag to serve")
+    serve_parser = make_arg_parser(serve_parser)
     serve_parser.set_defaults(func=run_server)
     
     complete_parser = subparsers.add_parser(
@@ -29,6 +29,13 @@ def main():
         "complete-prompt",
         type=str,
         help="The prompt to complete")
+    complete_parser.add_argument("--url",
+                                 type=str,
+                                 default=None,
+                                 help="url of the running OpenAI-Compatible RESTful API server")
+    complete_parser.add_argument("--complete-model-name",
+                                type=str, default=None,
+                                help="the model name used in prompt completion")
     complete_parser.set_defaults(func=complete)
 
     args = parser.parse_args()
