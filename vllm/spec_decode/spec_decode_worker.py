@@ -11,7 +11,8 @@ from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
-from vllm.spec_decode.multi_step_worker import CPUMultiStepWorker
+from vllm.spec_decode.multi_step_worker import (CPUMultiStepWorker,
+                                                MultiStepWorker)
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
@@ -56,6 +57,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_by_batch_size: Optional[int],
+        cpu_draft_worker: Optional[bool],
     ) -> "SpecDecodeWorker":
 
         ngram_prompt_lookup_max = (
@@ -70,21 +72,26 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
-            # proposer_worker = MultiStepWorker(**draft_worker_kwargs)
-            from vllm.executor.cpu_executor import (
-                _verify_and_get_cache_config, _verify_and_get_model_config,
-                _verify_and_get_scheduler_config)
-            draft_worker_kwargs["cache_config"] = _verify_and_get_cache_config(
-                draft_worker_kwargs["cache_config"])
-            draft_worker_kwargs["model_config"] = _verify_and_get_model_config(
-                draft_worker_kwargs["model_config"])
-            draft_worker_kwargs[
-                "scheduler_config"] = _verify_and_get_scheduler_config(
-                    draft_worker_kwargs["scheduler_config"])
+            if cpu_draft_worker:
+                from vllm.executor.cpu_executor import (
+                    _verify_and_get_cache_config, _verify_and_get_model_config,
+                    _verify_and_get_scheduler_config)
+                draft_worker_kwargs[
+                    "cache_config"] = _verify_and_get_cache_config(
+                        draft_worker_kwargs["cache_config"])
+                draft_worker_kwargs[
+                    "model_config"] = _verify_and_get_model_config(
+                        draft_worker_kwargs["model_config"])
+                draft_worker_kwargs[
+                    "scheduler_config"] = _verify_and_get_scheduler_config(
+                        draft_worker_kwargs["scheduler_config"])
 
-            draft_worker_kwargs["device_config"].device = torch.device("cpu")
-            draft_worker_kwargs["device_config"].device_type = "cpu"
-            proposer_worker = CPUMultiStepWorker(**draft_worker_kwargs)
+                draft_worker_kwargs["device_config"].device = torch.device(
+                    "cpu")
+                draft_worker_kwargs["device_config"].device_type = "cpu"
+                proposer_worker = CPUMultiStepWorker(**draft_worker_kwargs)
+            else:
+                proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
         logger.info("Configuring SpecDecodeWorker with proposer=%s",
                     type(proposer_worker))

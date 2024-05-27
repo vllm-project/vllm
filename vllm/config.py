@@ -710,6 +710,7 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        cpu_draft_worker: Optional[bool],
     ) -> Optional["SpeculativeConfig"]:
         """Create a SpeculativeConfig if possible, else return None.
 
@@ -743,6 +744,7 @@ class SpeculativeConfig:
                 window, if provided.
             ngram_prompt_lookup_min (Optional[int]): Min size of ngram token
                 window, if provided.
+            cpu_draft_worker (Optional[bool]): Run draft model on CPU.
 
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
@@ -838,6 +840,7 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size,
             ngram_prompt_lookup_max,
             ngram_prompt_lookup_min,
+            cpu_draft_worker,
         )
 
     @staticmethod
@@ -908,6 +911,7 @@ class SpeculativeConfig:
         speculative_disable_by_batch_size: Optional[int],
         ngram_prompt_lookup_max: Optional[int],
         ngram_prompt_lookup_min: Optional[int],
+        cpu_draft_worker: Optional[bool],
     ):
         """Create a SpeculativeConfig object.
 
@@ -921,6 +925,7 @@ class SpeculativeConfig:
                 enqueue requests is larger than this value.
             ngram_prompt_lookup_max: Max size of ngram token window.
             ngram_prompt_lookup_min: Min size of ngram token window.
+            cpu_draft_worker: Run draft model on CPU.
         """
         self.draft_model_config = draft_model_config
         self.draft_parallel_config = draft_parallel_config
@@ -929,6 +934,7 @@ class SpeculativeConfig:
             speculative_disable_by_batch_size
         self.ngram_prompt_lookup_max = ngram_prompt_lookup_max or 0
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min or 0
+        self.cpu_draft_worker = cpu_draft_worker or False
 
         self._verify_args()
 

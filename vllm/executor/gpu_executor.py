@@ -97,6 +97,7 @@ class GPUExecutor(ExecutorBase):
             draft_worker_kwargs=draft_worker_kwargs,
             disable_by_batch_size=self.speculative_config.
             speculative_disable_by_batch_size,
+            cpu_draft_worker=self.speculative_config.cpu_draft_worker,
         )
 
         assert self.parallel_config.world_size == 1, (
@@ -123,15 +124,18 @@ class GPUExecutor(ExecutorBase):
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info(
-            "# GPU blocks: %d, # CPU blocks: %d, # draft GPU blocks: %d, \
-            # draft CPU blocks: %d"
-            , num_gpu_blocks, num_cpu_blocks, \
-            draft_num_gpu_blocks, draft_num_cpu_blocks)
+        logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
+                    num_cpu_blocks)
 
-        self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,
-                                            draft_num_gpu_blocks,
-                                            draft_num_cpu_blocks)
+        if draft_num_gpu_blocks is not None or draft_num_cpu_blocks is not None:
+            logger.info("# draft GPU blocks: %d, # draft CPU blocks: %d",
+                        draft_num_gpu_blocks, draft_num_cpu_blocks)
+
+            self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks,
+                                                draft_num_gpu_blocks,
+                                                draft_num_cpu_blocks)
+        else:
+            self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest
