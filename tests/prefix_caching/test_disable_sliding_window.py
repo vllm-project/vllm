@@ -3,10 +3,9 @@
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
 import pytest
+
 from tests.conftest import cleanup
-
 from vllm import LLM
-
 
 MODEL_LEN_LEN = [
     # Example models with sliding window.
@@ -22,9 +21,7 @@ MODEL_LEN_LEN = [
 
 
 @pytest.mark.parametrize("model_len_len", MODEL_LEN_LEN)
-def test_disable_sliding_window(
-    model_len_len,
-):
+def test_disable_sliding_window(model_len_len, ):
     model, sliding_len, full_len = model_len_len
     vllm_disabled_model = LLM(model, disable_sliding_window=True)
     vllm_disabled_model.generate("Hi my name is")
@@ -45,4 +42,3 @@ def test_disable_sliding_window(
 
     del vllm_enabled_model
     cleanup()
-
