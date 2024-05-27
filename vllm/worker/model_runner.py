@@ -1,3 +1,4 @@
+import gc
 import time
 import warnings
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
@@ -962,6 +963,9 @@ class CUDAGraphRunner:
             )
             hidden_states.copy_(output_hidden_states)
             del output_hidden_states
+            # make sure `output_hidden_states` is deleted
+            # in the graph's memory pool
+            gc.collect()
         torch.cuda.synchronize()
 
         # Save the input and output buffers.
