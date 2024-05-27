@@ -192,7 +192,7 @@ class AQLMConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 70
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
