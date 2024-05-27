@@ -206,6 +206,7 @@ class MultiStepWorker(Worker):
                 "MultiStepWorker does not support beam search.")
 
 
+# Copied from MultiStepWorker
 class CPUMultiStepWorker(CPUWorker):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
