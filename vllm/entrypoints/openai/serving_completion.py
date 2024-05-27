@@ -119,12 +119,17 @@ class OpenAIServingCompletion(OpenAIServing):
                         truncate_prompt_tokens)
                 prompt_ids, prompt_text = prompt_formats
 
-                generators.append(
-                    self.engine.generate(prompt_text,
-                                         sampling_params,
-                                         f"{request_id}-{i}",
-                                         prompt_token_ids=prompt_ids,
-                                         lora_request=lora_request))
+                generator = self.engine.generate(
+                    {
+                        "prompt": prompt_text,
+                        "prompt_token_ids": prompt_ids
+                    },
+                    sampling_params,
+                    f"{request_id}-{i}",
+                    lora_request=lora_request,
+                )
+
+                generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

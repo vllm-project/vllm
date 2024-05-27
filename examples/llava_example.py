@@ -26,7 +26,10 @@ def run_llava_pixel_values():
     # This should be provided by another online or offline component.
     image = Image.open("images/stop_sign.jpg")
 
-    outputs = llm.generate(prompt, multi_modal_data_list=ImagePixelData(image))
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": ImagePixelData(image),
+    })
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
@@ -47,8 +50,10 @@ def run_llava_image_features():
     # This should be provided by another online or offline component.
     image: torch.Tensor = torch.load("images/stop_sign_image_features.pt")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data_list=ImageFeatureData(image))
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": ImageFeatureData(image),
+    })
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
