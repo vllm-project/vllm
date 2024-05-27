@@ -1,3 +1,4 @@
+import copy
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -106,23 +107,24 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         else:
             if cpu_draft_worker:
+                cpu_draft_worker_kwargs = copy.deepcopy(draft_worker_kwargs)
                 from vllm.executor.cpu_executor import (
                     _verify_and_get_cache_config, _verify_and_get_model_config,
                     _verify_and_get_scheduler_config)
-                draft_worker_kwargs[
+                cpu_draft_worker_kwargs[
                     "cache_config"] = _verify_and_get_cache_config(
-                        draft_worker_kwargs["cache_config"])
-                draft_worker_kwargs[
+                        cpu_draft_worker_kwargs["cache_config"])
+                cpu_draft_worker_kwargs[
                     "model_config"] = _verify_and_get_model_config(
-                        draft_worker_kwargs["model_config"])
-                draft_worker_kwargs[
+                        cpu_draft_worker_kwargs["model_config"])
+                cpu_draft_worker_kwargs[
                     "scheduler_config"] = _verify_and_get_scheduler_config(
-                        draft_worker_kwargs["scheduler_config"])
+                        cpu_draft_worker_kwargs["scheduler_config"])
 
-                draft_worker_kwargs["device_config"].device = torch.device(
+                cpu_draft_worker_kwargs["device_config"].device = torch.device(
                     "cpu")
-                draft_worker_kwargs["device_config"].device_type = "cpu"
-                proposer_worker = CPUMultiStepWorker(**draft_worker_kwargs)
+                cpu_draft_worker_kwargs["device_config"].device_type = "cpu"
+                proposer_worker = CPUMultiStepWorker(**cpu_draft_worker_kwargs)
             else:
                 proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
