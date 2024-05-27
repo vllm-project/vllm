@@ -166,6 +166,11 @@ def tinyllama_lora_files():
 
 
 @pytest.fixture(scope="session")
+def phi2_lora_files():
+    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+
+
+@pytest.fixture(scope="session")
 def long_context_lora_files_16k_1():
     return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
 
@@ -180,7 +185,6 @@ def long_context_lora_files_32k():
     return snapshot_download(repo_id="SangBinCho/long_context_32k_testing")
 
 
-# SANG-TODO Download long lora files.
 @pytest.fixture(scope="session")
 def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,

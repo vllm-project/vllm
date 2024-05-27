@@ -60,7 +60,8 @@ steps:
   command: pytest -v -s engine tokenization test_sequence.py test_config.py test_logger.py
 
 - label: Entrypoints Test
-  #mirror_hardwares: [amd]
+  mirror_hardwares: [amd]
+
   commands:
   - pytest -v -s test_inputs.py
   - pytest -v -s entrypoints -m llm

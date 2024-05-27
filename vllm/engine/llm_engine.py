@@ -162,10 +162,11 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "tokenizer_revision=%s, trust_remote_code=%s, dtype=%s, "
-            "max_seq_len=%d, download_dir=%r, load_format=%s, "
-            "tensor_parallel_size=%d, disable_custom_all_reduce=%s, "
-            "quantization=%s, enforce_eager=%s, kv_cache_dtype=%s, "
+            "rope_scaling=%r, tokenizer_revision=%s, "
+            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+            "disable_custom_all_reduce=%s, quantization=%s, "
+            "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, seed=%d, served_model_name=%s)",
             vllm.__version__,
@@ -175,6 +176,7 @@ class LLMEngine:
             model_config.skip_tokenizer_init,
             model_config.tokenizer_mode,
             model_config.revision,
+            model_config.rope_scaling,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
@@ -778,6 +780,14 @@ class LLMEngine:
 
         # Log stats.
         self.do_log_stats(scheduler_outputs, output)
+
+        if not request_outputs:
+            # Stop the execute model loop in parallel workers until there are
+            # more requests to process. This avoids waiting indefinitely in
+            # torch.distributed ops which may otherwise timeout, and unblocks
+            # the RPC thread in the workers so that they can process any other
+            # queued control plane messages, such as add/remove lora adapters.
+            self.model_executor.stop_remote_worker_execution_loop()
 
         return request_outputs
 
