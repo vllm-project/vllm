@@ -83,14 +83,11 @@ def setup(app):
 # Mock out external dependencies here.
 autodoc_mock_imports = [
     "cpuinfo",
-    "torch",
     "transformers",
-    "psutil",
     "prometheus_client",
     "sentencepiece",
     "vllm.cuda_utils",
     "vllm._C",
-    "numpy",
     "tqdm",
     "tensorizer",
 ]
@@ -114,5 +111,16 @@ class MockedClassDocumenter(autodoc.ClassDocumenter):
 
 
 autodoc.ClassDocumenter = MockedClassDocumenter
+
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'typing_extensions':
+    ('https://typing-extensions.readthedocs.io/en/latest', None),
+    'numpy': ('https://numpy.org/doc/stable', None),
+    'torch': ('https://pytorch.org/docs/stable', None),
+    'psutil': ('https://psutil.readthedocs.io/en/stable', None),
+}
+
+autodoc_preserve_defaults = True
 
 navigation_with_keys = False
