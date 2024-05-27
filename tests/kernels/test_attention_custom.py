@@ -22,7 +22,7 @@ PARTITION_SIZE = 256
 # flshattF and tritonflashattF supported: {torch.float16, torch.bfloat16}
 DTYPES = [torch.half, torch.bfloat16, torch.float
           ] if not is_hip() else [torch.half]
-NUM_GEN_SEQS = [64]  # Arbitrary values for testing
+NUM_GEN_SEQS = [1, 64]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 #NUM_HEADS = [(8*x, 8) for x in range(1,17)]  # Arbitrary values for testing
 NUM_HEADS = [(32, 32)]
@@ -152,12 +152,12 @@ def test_paged_attention(
     if use_alibi:
         alibi_slopes = torch.randn(num_query_heads, dtype=torch.float)
 
-    #context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
-    #context_lens[-1] = MAX_SEQ_LEN
-    context_lens = [8192 for _ in range(num_seqs)]
+    context_lens = [random.randint(1, MAX_SEQ_LEN) for _ in range(num_seqs)]
+    context_lens[-1] = MAX_SEQ_LEN
+    #context_lens = [8192 for _ in range(num_seqs)]
     max_context_len = max(context_lens)
     context_lens = torch.tensor(context_lens, dtype=torch.int)
-    print('>>> ctx lens', context_lens)
+    #print('>>> ctx lens', context_lens)
 
     # Create the block tables.
     max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
