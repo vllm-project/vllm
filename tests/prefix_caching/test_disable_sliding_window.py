@@ -3,33 +3,46 @@
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
 import pytest
+from tests.conftest import cleanup
+
+from vllm import LLM
+
 
 MODEL_LEN_LEN = [
+    # Example models with sliding window.
     ("bigcode/starcoder2-3b", 4096, 16384),
-    # too big for automation
+    ("mistralai/Mistral-7B-v0.1", 4096, 32768),
+
+    # Confirm model with sliding window works.
+    # config has "use_sliding_window": false
+    ("Qwen/Qwen1.5-0.5B-Chat", 32768, 32768),
+    # config has no sliding window attribute.
+    ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", 2048, 2048),
 ]
 
 
 @pytest.mark.parametrize("model_len_len", MODEL_LEN_LEN)
 def test_disable_sliding_window(
-    vllm_runner,
     model_len_len,
 ):
     model, sliding_len, full_len = model_len_len
-    vllm_disabled_model = vllm_runner(model, disable_sliding_window=True)
-    _ = vllm_disabled_model.generate_greedy(["Hi my name is"], max_tokens=10)
-    model_config = vllm_disabled_model.model.llm_engine.model_config
+    vllm_disabled_model = LLM(model, disable_sliding_window=True)
+    vllm_disabled_model.generate("Hi my name is")
+    model_config = vllm_disabled_model.llm_engine.model_config
     assert model_config.max_model_len == sliding_len, (
         "Max len expected to equal sliding_len of %s, but got %s", sliding_len,
         model_config.max_model_len)
 
     del vllm_disabled_model
+    cleanup()
 
-    vllm_enabled_model = vllm_runner(model, disable_sliding_window=True)
-    _ = vllm_enabled_model.generate_greedy(["Hi my name is"], max_tokens=10)
-    model_config = vllm_enabled_model.model.llm_engine.model_config
+    vllm_enabled_model = LLM(model, disable_sliding_window=False)
+    vllm_enabled_model.generate("Hi my name is")
+    model_config = vllm_enabled_model.llm_engine.model_config
     assert model_config.max_model_len == full_len, (
-        "Max len expected equal sliding_len of %s, but got %s", full_len,
+        "Max len expected to equal full_len of %s, but got %s", full_len,
         model_config.max_model_len)
 
     del vllm_enabled_model
+    cleanup()
+
