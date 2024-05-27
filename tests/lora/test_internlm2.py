@@ -14,9 +14,9 @@ def do_sample(llm, lora_path: str, lora_id: int) -> str:
             context="CREATE TABLE catalogs (catalog_publisher VARCHAR);"),
         PROMPT_TEMPLATE.format(
             sql_prompt=
-            "Which trip started from the station with the largest dock count? Give me the trip id.",  # noqa: E501
+            "Remove the 'vehicle_safety_testing' table and its records.",  # noqa: E501
             context=
-            "CREATE TABLE trip (id VARCHAR, start_station_id VARCHAR); CREATE TABLE station (id VARCHAR, dock_count VARCHAR);"  # noqa: E501
+            "CREATE TABLE vehicle_safety_testing (id INT PRIMARY KEY, vehicle_model VARCHAR(255), test_score FLOAT);"  # noqa: E501
         ),
         PROMPT_TEMPLATE.format(
             sql_prompt=
@@ -55,7 +55,7 @@ def test_internlm2_lora(internlm2_lora_files):
 
     expected_lora_output = [
         "SELECT catalog_publisher, COUNT(*) as num_catalogs FROM catalogs GROUP BY catalog_publisher ORDER BY num_catalogs DESC LIMIT 1;",  # noqa: E501
-        "SELECT trip.id FROM trip JOIN station ON trip.start_station_id = station.id WHERE station.dock_count = (SELECT MAX(station.dock_count) FROM station);",  # noqa: E501
+        "DROP TABLE vehicle_safety_testing;",  # noqa: E501
         "SELECT COUNT(*) FROM marine_species WHERE location = 'Southern Ocean';",  # noqa: E501
     ]
 
