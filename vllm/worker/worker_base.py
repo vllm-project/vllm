@@ -128,7 +128,7 @@ class WorkerWrapperBase:
         enable_trace_function_call_for_thread()
 
         # see https://github.com/NVIDIA/nccl/issues/1234
-        os['NCCL_CUMEM_ENABLE'] = '0'
+        os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
         mod = importlib.import_module(self.worker_module_name)
         worker_class = getattr(mod, self.worker_class_name)
