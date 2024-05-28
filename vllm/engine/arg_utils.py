@@ -677,7 +677,8 @@ class EngineArgs:
             guided_decoding_backend=self.guided_decoding_backend)
 
         if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled):
+                and scheduler_config.chunked_prefill_enabled
+                and not scheduler_config.use_v2_block_manager):
             raise ValueError(
                 "Chunked prefill is not supported with sliding window. "
                 "Set --disable-sliding-window to disable sliding window.")
