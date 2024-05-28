@@ -1,6 +1,8 @@
 import time
 from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Optional, Tuple)
+                    Optional)
+from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from fastapi import Request
 
@@ -351,8 +353,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
     def _create_completion_logprobs(
         self,
-        token_ids: List[int],
-        top_logprobs: List[Optional[Dict[int, Logprob]]],
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: int,
         initial_text_offset: int = 0,
     ) -> CompletionLogProbs:
@@ -372,8 +374,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_token_logprobs.append(None)
                 out_top_logprobs.append(None)
             else:
-                token = self._get_decoded_token_from_logprob(
-                    step_top_logprobs[token_id])
+                token = self._get_decoded_token(step_top_logprobs[token_id],
+                                                token_id)
                 token_logprob = max(step_top_logprobs[token_id].logprob,
                                     -9999.0)
                 out_tokens.append(token)
@@ -386,7 +388,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 out_top_logprobs.append({
                     # Convert float("-inf") to the
                     # JSON-serializable float that OpenAI uses
-                    self._get_decoded_token_from_logprob(top_lp[1]):
+                    self._get_decoded_token(top_lp[1], top_lp[0]):
                     max(top_lp[1].logprob, -9999.0)
                     for i, top_lp in enumerate(step_top_logprobs.items())
                     if num_output_top_logprobs >= i
@@ -397,6 +399,7 @@ class OpenAIServingCompletion(OpenAIServing):
             else:
                 out_text_offset.append(out_text_offset[-1] + last_token_len)
             last_token_len = len(token)
+
         return CompletionLogProbs(
             text_offset=out_text_offset,
             token_logprobs=out_token_logprobs,

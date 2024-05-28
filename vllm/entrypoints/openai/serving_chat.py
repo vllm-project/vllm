@@ -2,7 +2,9 @@ import codecs
 import time
 from dataclasses import dataclass
 from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
-                    Optional, TypedDict, Union, cast, final)
+                    Optional)
+from typing import Sequence as GenericSequence
+from typing import TypedDict, Union, cast, final
 
 from fastapi import Request
 from openai.types.chat import ChatCompletionContentPartTextParam
@@ -414,19 +416,20 @@ class OpenAIServingChat(OpenAIServing):
             top_logprobs: Optional[int]) -> List[ChatCompletionLogProb]:
         return [
             ChatCompletionLogProb(
-                token=self._get_decoded_token_from_logprob(p),
-                logprob=max(p.logprob, -9999.0),
+                token=self._get_decoded_token(p[1], p[0]),
+                logprob=max(p[1].logprob, -9999.0),
                 bytes=list(
-                    self._get_decoded_token_from_logprob(p).encode(
-                        "utf-8", errors="replace")))
-            for i, p in enumerate(logprobs.values())
+                    self._get_decoded_token(p[1],
+                                            p[0]).encode("utf-8",
+                                                         errors="replace")))
+            for i, p in enumerate(logprobs.items())
             if top_logprobs and i < top_logprobs
         ]
 
     def _create_chat_logprobs(
         self,
-        token_ids: List[int],
-        top_logprobs: List[Optional[Dict[int, Logprob]]],
+        token_ids: GenericSequence[int],
+        top_logprobs: GenericSequence[Optional[Dict[int, Logprob]]],
         num_output_top_logprobs: Optional[int] = None,
     ) -> ChatCompletionLogProbs:
         """Create OpenAI-style logprobs."""

@@ -189,7 +189,7 @@ class OpenAIServing:
         else:
             return input_ids, input_text
 
-    def _get_decoded_token_from_logprob(self, logprob: Logprob) -> str:
+    def _get_decoded_token(self, logprob: Logprob, token_id: int) -> str:
         if logprob.decoded_token is not None:
             return logprob.decoded_token
-        return self.tokenizer.decode(logprob.token_id)
+        return self.tokenizer.decode(token_id)

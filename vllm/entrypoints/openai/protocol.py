@@ -511,14 +511,11 @@ class ChatMessage(OpenAIBaseModel):
 
 class ChatCompletionLogProb(OpenAIBaseModel):
     token: str
-    logprob: float
-    bytes: Optional[List[int]] = None
-
-
-class ChatCompletionLogProbsContent(OpenAIBaseModel):
-    token: str
     logprob: float = -9999.0
     bytes: Optional[List[int]] = None
+
+
+class ChatCompletionLogProbsContent(ChatCompletionLogProb):
     top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
 
 
