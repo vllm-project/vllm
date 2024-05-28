@@ -4,7 +4,6 @@ ARG PYTHON_VERSION=3.11
 
 ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
 
-
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
 ARG PYTHON_VERSION
@@ -39,61 +38,19 @@ RUN microdnf install -y \
 ## CUDA Base ###################################################################
 FROM python-install as cuda-base
 
-# The Nvidia operator won't allow deploying on CUDA 12.0 hosts if
-# this env var is set to 12.2.0, even though it's compatible
-#ENV CUDA_VERSION=12.2.0 \
-ENV CUDA_VERSION=12.0.0 \
-    NV_CUDA_LIB_VERSION=12.2.0-1 \
-    NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    NV_CUDA_CUDART_VERSION=12.2.53-1 \
-    NV_CUDA_COMPAT_VERSION=535.104.12
-
 RUN curl -Lo /etc/yum.repos.d/cuda-rhel9.repo \
         https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
 
 RUN microdnf install -y \
-        cuda-cudart-12-2-${NV_CUDA_CUDART_VERSION} \
-        cuda-compat-12-2-${NV_CUDA_COMPAT_VERSION} \
-    && microdnf clean all
+        cuda-nvcc-12-4 cuda-nvtx-12-4 cuda-libraries-devel-12-4 && \
+    microdnf clean all
 
-
-ARG CUDA_HOME="/usr/local/cuda"
-ENV CUDA_HOME=${CUDA_HOME}\
+ENV CUDA_HOME="/usr/local/cuda" \
     PATH="${CUDA_HOME}/bin:${PATH}" \
     LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${CUDA_HOME}/extras/CUPTI/lib64:${LD_LIBRARY_PATH}"
 
-
-## CUDA Development ############################################################
-FROM cuda-base as cuda-devel
-
-ENV NV_CUDA_CUDART_DEV_VERSION=12.2.53-1 \
-    NV_NVML_DEV_VERSION=12.2.81-1 \
-    NV_LIBCUBLAS_DEV_VERSION=12.2.1.16-1 \
-    NV_LIBNPP_DEV_VERSION=12.1.1.14-1 \
-    NV_LIBNCCL_DEV_PACKAGE_VERSION=2.18.5-1+cuda12.2
-
-RUN microdnf install -y \
-        cuda-command-line-tools-12-2-${NV_CUDA_LIB_VERSION} \
-        cuda-libraries-devel-12-2-${NV_CUDA_LIB_VERSION} \
-        cuda-minimal-build-12-2-${NV_CUDA_LIB_VERSION} \
-        cuda-cudart-devel-12-2-${NV_CUDA_CUDART_DEV_VERSION} \
-        cuda-nvml-devel-12-2-${NV_NVML_DEV_VERSION} \
-        libcublas-devel-12-2-${NV_LIBCUBLAS_DEV_VERSION} \
-        libnpp-devel-12-2-${NV_LIBNPP_DEV_VERSION} \
-        libnccl-devel-${NV_LIBNCCL_DEV_PACKAGE_VERSION} \
-    && microdnf clean all
-
-ENV LIBRARY_PATH="$CUDA_HOME/lib64/stubs"
-
-# Workaround for https://github.com/openai/triton/issues/2507 and
-# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
-# this won't be needed for future versions of this docker image
-# or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.2/compat/
-
 ## Python cuda base #################################################################
-FROM cuda-devel AS python-cuda-base
+FROM cuda-base AS python-cuda-base
 
 ENV VIRTUAL_ENV=/opt/vllm
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
@@ -128,7 +85,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements-build.txt
 
 # install compiler cache to speed up compilation leveraging local or remote caching
-RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y ccache && microdnf clean all
+# git is required for the cutlass kernels
+RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && rpm -ql epel-release && microdnf install -y git ccache && microdnf clean all
 # install build dependencies
 
 # copy input files
@@ -162,13 +120,12 @@ COPY vllm vllm
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
-    CMAKE_BUILD_TYPE=Release python3 setup.py bdist_wheel --dist-dir=dist
+    env CFLAGS="-march=haswell" \
+        CXXFLAGS="$CFLAGS $CXXFLAGS" \
+        CMAKE_BUILD_TYPE=Release \
+        python3 setup.py bdist_wheel --dist-dir=dist
 
 ## Release #####################################################################
-# Note from the non-UBI Dockerfile:
-# We used base cuda image because pytorch installs its own cuda libraries.
-# However pynccl depends on cuda libraries so we had to switch to the runtime image
-# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
 FROM python-install AS vllm-openai
 
 WORKDIR /workspace
