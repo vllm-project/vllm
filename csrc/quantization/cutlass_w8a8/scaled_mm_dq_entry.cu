@@ -2,29 +2,29 @@
 #include <cuda_runtime.h>
 #include <torch/extension.h>
 
-void cutlass_scaled_mm_dq_sm75(torch::Tensor &c, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales);
+void cutlass_scaled_mm_dq_sm75(torch::Tensor& c, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales);
 
-void cutlass_scaled_mm_dq_sm80(torch::Tensor &c, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales);
+void cutlass_scaled_mm_dq_sm80(torch::Tensor& c, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales);
 
-void cutlass_scaled_mm_dq_sm89(torch::Tensor &c, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales);
+void cutlass_scaled_mm_dq_sm89(torch::Tensor& c, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales);
 
-void cutlass_scaled_mm_dq_sm90(torch::Tensor &c, torch::Tensor const &a,
-                               torch::Tensor const &b,
-                               torch::Tensor const &a_scales,
-                               torch::Tensor const &b_scales);
+void cutlass_scaled_mm_dq_sm90(torch::Tensor& c, torch::Tensor const& a,
+                               torch::Tensor const& b,
+                               torch::Tensor const& a_scales,
+                               torch::Tensor const& b_scales);
 
-void cutlass_scaled_mm_dq(torch::Tensor &c, torch::Tensor const &a,
-                          torch::Tensor const &b, torch::Tensor const &a_scales,
-                          torch::Tensor const &b_scales) {
+void cutlass_scaled_mm_dq(torch::Tensor& c, torch::Tensor const& a,
+                          torch::Tensor const& b, torch::Tensor const& a_scales,
+                          torch::Tensor const& b_scales) {
   int32_t major_capability;
   int32_t minor_capability;
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
@@ -36,14 +36,15 @@ void cutlass_scaled_mm_dq(torch::Tensor &c, torch::Tensor const &a,
   // Checks for conformality
   TORCH_CHECK(a.dim() == 2 && b.dim() == 2 && c.dim() == 2);
   TORCH_CHECK(c.size(0) == a.size(0) && a.size(1) == b.size(0) &&
-         b.size(1) == c.size(1));
+              b.size(1) == c.size(1));
   TORCH_CHECK(a_scales.numel() == 1 || a_scales.numel() == a.size(0));
   TORCH_CHECK(b_scales.numel() == 1 || b_scales.numel() == b.size(1));
 
   // Check for strides and alignment
-  TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);           // Row-major
-  TORCH_CHECK(b.stride(0) == 1);                               // Column-major
-  TORCH_CHECK(c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0); // 16 Byte Alignment
+  TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
+  TORCH_CHECK(b.stride(0) == 1);                      // Column-major
+  TORCH_CHECK(c.stride(0) % 16 == 0 &&
+              b.stride(1) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));

@@ -105,8 +105,6 @@ def convert_mapping(
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
-        # SANG-TODO
-        # index_mapping_indices[i] = i
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
         index_mapping_indices, lora_indices, embedding_indices
@@ -312,7 +310,9 @@ class LoRAModel:
             if part_name not in expected_lora_modules:
                 unexpected_modules.append(module)
         # loaded lora's target modules must be a subset of expected_lora_modules
+
         if unexpected_modules:
+            print(unexpected_modules, "modules")
             raise ValueError(
                 f"While loading {lora_dir}, expected"
                 f" target modules in {expected_lora_modules}"
