@@ -58,6 +58,13 @@ class TensorizerConfig:
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
 
+    def __post_init__(self):
+        if not isinstance(self.tensorizer_uri, str):
+            try:
+                self.tensorizer_uri = str(self.tensorizer_uri)
+            except Exception as exc:
+                raise ValueError("tensorizer_uri must be convertible to a string") from exc
+
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
             "tensorizer_uri": self.tensorizer_uri,
@@ -79,7 +86,7 @@ class TensorizerConfig:
             return
 
         if (uri := self.tensorizer_uri) is not None:
-            rank_format_match = re.search('%0(\d)d', uri)
+            rank_format_match = re.search(r'%0\dd', uri)
             if not rank_format_match:
                 raise ValueError(
                     "For a sharded model, Tensorizer URI should include a"

@@ -1,5 +1,6 @@
 import gc
 import json
+import multiprocessing as mp
 import pathlib
 import os
 import subprocess
@@ -12,6 +13,8 @@ import torch
 from tensorizer import EncryptionParams
 
 from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.llm_engine import LLMEngine
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
@@ -20,7 +23,7 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          open_stream,
                                                          serialize_vllm_model)
 
-from ..conftest import VllmRunner
+from ..conftest import VllmRunner, cleanup
 from ..utils import ServerRunner
 
 # yapf conflicts with isort for this docstring
@@ -55,6 +58,19 @@ def get_torch_model(vllm_runner: VllmRunner):
             .driver_worker \
             .model_runner \
             .model
+
+def tensorize_vllm_model(engine_args: EngineArgs, tensorizer_config: TensorizerConfig):
+    engine = LLMEngine.from_engine_args(engine_args)
+    if engine_args.tensor_parallel_size > 1:
+        engine.model_executor._run_workers("save_tensorized_model",
+            tensorizer_config = tensorizer_config,
+        )
+    else:
+        serialize_vllm_model(
+            engine.model_executor.driver_worker.model_runner.model,
+           tensorizer_config,
+        )
+
 
 def write_keyfile(keyfile_path: str):
     encryption_params = EncryptionParams.random()
@@ -261,7 +277,8 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
 
 
-def test_tensorizer_with_tp(vllm_runner):
+@pytest.mark.skip("Requires multiple GPUs")
+def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
         model_ref = "EleutherAI/pythia-1.4b"
         tensorized_path = f"s3://tensorized/{model_ref}/fp16/model.tensors"
@@ -276,6 +293,66 @@ def test_tensorizer_with_tp(vllm_runner):
             ),
             tensor_parallel_size=2,
         )
+
+@pytest.mark.skip("Requires multiple GPUs")
+def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
+                                                                    tmp_path):
+    model_ref = "EleutherAI/pythia-1.4b"
+    # record outputs from un-sharded un-tensorized model
+    base_model = vllm_runner(
+        model_ref,
+    )
+    outputs = base_model.generate(prompts, sampling_params)
+
+    base_model.model.llm_engine.model_executor.shutdown()
+    del base_model
+    cleanup()
+
+    # load model with two shards and serialize with encryption
+    model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
+    key_path = tmp_path / (model_ref + ".key")
+    write_keyfile(key_path)
+
+    config_for_serializing = TensorizerConfig(
+        tensorizer_uri=model_path,
+        encryption_keyfile=key_path,
+    )
+    # FIXME: launching multiple multiprocessing servers within the same program
+    # results in a hang... launch serialization in a separate process as a work
+    # around
+    serialization_proc = mp.get_context('spawn').Process(
+        target=tensorize_vllm_model,
+        kwargs={
+            "engine_args": EngineArgs(
+                model=model_ref,
+                tensor_parallel_size=2,
+                enforce_eager=True,
+            ),
+            "tensorizer_config": config_for_serializing,
+        },
+    )
+    serialization_proc.start()
+    serialization_proc.join()
+    assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
+    assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
+
+
+    config_for_deserializing = TensorizerConfig(
+        tensorizer_uri=model_path,
+        encryption_keyfile=key_path,
+    )
+
+    loaded_vllm_model = vllm_runner(
+        model_ref,
+        tensor_parallel_size=2,
+        load_format="tensorizer",
+        enforce_eager=True,
+        distributed_executor_backend="ray",
+        model_loader_extra_config=config_for_deserializing)
+
+    deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
+
+    assert outputs == deserialized_outputs
 
 
 def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
