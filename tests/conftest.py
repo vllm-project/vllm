@@ -14,6 +14,7 @@ from tests.nm_utils.logging import make_logger
 from vllm import LLM, SamplingParams
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
+from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.sequence import MultiModalData
 
@@ -587,12 +588,22 @@ class VllmRunner:
     ) -> List[Tuple[List[int], str]]:
         if images is not None:
             assert len(prompts) == images.shape[0]
-        req_outputs = self.model.generate(
-            prompts,
-            sampling_params=sampling_params,
-            multi_modal_data=MultiModalData(type=MultiModalData.Type.IMAGE,
-                                            data=images)
-            if images is not None else None)
+
+        prompt_inputs: List[PromptInputs] = []
+        for i, prompt in enumerate(prompts):
+            image = None if images is None else images[i:i + 1]
+            mm_data = None if image is None else MultiModalData(
+                type=MultiModalData.Type.IMAGE,
+                data=image,
+            )
+
+            prompt_inputs.append({
+                "prompt": prompt,
+                "multi_modal_data": mm_data,
+            })
+
+        req_outputs = self.model.generate(prompt_inputs,
+                                          sampling_params=sampling_params)
         outputs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt

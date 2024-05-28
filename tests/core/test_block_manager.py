@@ -133,8 +133,11 @@ def test_append_slot_cow():
 
     # Allocate prompt to gpu block. There is one slot left in the block.
     prompt = Sequence(seq_id=1,
-                      prompt="one two three",
-                      prompt_token_ids=[1, 2, 3],
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [1, 2, 3],
+                          "multi_modal_data": None
+                      },
                       block_size=block_size)
 
     # Fork the sequence, such that a COW will be required when we append a new
@@ -304,7 +307,13 @@ def test_sliding_window_multi_seq():
 
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
-    parent = Sequence(1, "one two three", [0, 1, 2], block_size)
+    parent = Sequence(seq_id=1,
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [0, 1, 2],
+                          "multi_modal_data": None
+                      },
+                      block_size=block_size)
     seq_group = SequenceGroup(request_id="1",
                               seqs=[parent],
                               arrival_time=time.time(),

@@ -123,8 +123,11 @@ def create_sequence(prompt_token_ids=None):
     prompt_token_ids = prompt_token_ids or [1]
     return Sequence(
         seq_id=0,
-        prompt="<s>",
-        prompt_token_ids=prompt_token_ids,
+        inputs={
+            "prompt": "<s>",
+            "prompt_token_ids": prompt_token_ids,
+            "multi_modal_data": None,
+        },
         block_size=16,
     )
 

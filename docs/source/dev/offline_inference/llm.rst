@@ -1,5 +1,5 @@
 LLM Class
-==========
+=========
 
 .. autoclass:: vllm.LLM
     :members:

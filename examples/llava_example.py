@@ -23,11 +23,15 @@ def run_llava_pixel_values():
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    images = torch.load("images/stop_sign_pixel_values.pt")
+    image = torch.load("images/stop_sign_pixel_values.pt")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    outputs = llm.generate({
+        "prompt":
+        prompt,
+        "multi_modal_data":
+        MultiModalData(type=MultiModalData.Type.IMAGE, data=image),
+    })
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
@@ -46,11 +50,14 @@ def run_llava_image_features():
         "\nUSER: What is the content of this image?\nASSISTANT:")
 
     # This should be provided by another online or offline component.
-    images = torch.load("images/stop_sign_image_features.pt")
+    image = torch.load("images/stop_sign_image_features.pt")
 
-    outputs = llm.generate(prompt,
-                           multi_modal_data=MultiModalData(
-                               type=MultiModalData.Type.IMAGE, data=images))
+    outputs = llm.generate({
+        "prompt":
+        prompt,
+        "multi_modal_data":
+        MultiModalData(type=MultiModalData.Type.IMAGE, data=image),
+    })
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
