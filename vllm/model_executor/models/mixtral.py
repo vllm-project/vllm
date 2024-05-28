@@ -50,7 +50,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
-from vllm.utils import print_warning_once
+from vllm.utils import print_warning_once, is_hpu
+
+if is_hpu():
+    from vllm.hpu.ops import static_fused_moe
 
 
 class MixtralMoE(nn.Module):
@@ -220,28 +223,40 @@ class MixtralMoE(nn.Module):
                                          requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
+        if is_hpu():
+            batch_size, sequence_length, hidden_size = hidden_states.shape
+        else:
+            num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.w13_weight,
-                                        self.w2_weight,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=True,
-                                        inplace=True,
-                                        use_fp8=self.use_fp8,
-                                        w1_scale=self.w13_scale,
-                                        w2_scale=self.w2_scale,
-                                        a1_scale=self.a13_scale,
-                                        a2_scale=self.a2_scale)
+
+        if is_hpu():
+            final_hidden_states = static_fused_moe(hidden_states,
+                        self.w13_weight,
+                        self.w2_weight,
+                        router_logits,
+                        self.top_k)
+        else:
+            final_hidden_states = fused_moe(hidden_states,
+                                            self.w13_weight,
+                                            self.w2_weight,
+                                            router_logits,
+                                            self.top_k,
+                                            renormalize=True,
+                                            inplace=True,
+                                            use_fp8=self.use_fp8,
+                                            w1_scale=self.w13_scale,
+                                            w2_scale=self.w2_scale,
+                                            a1_scale=self.a13_scale,
+                                            a2_scale=self.a2_scale)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        return final_hidden_states.view(num_tokens, hidden_size)
+        return (final_hidden_states.view(batch_size, sequence_length, hidden_size) if is_hpu() 
+                else final_hidden_states.view(num_tokens, hidden_size))
 
 
 class MixtralAttention(nn.Module):
