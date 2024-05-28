@@ -35,8 +35,7 @@ def main(args: argparse.Namespace):
               enable_chunked_prefill=args.enable_chunked_prefill,
               download_dir=args.download_dir,
               block_size=args.block_size,
-              gpu_memory_utilization=args.gpu_memory_utilization
-              )
+              gpu_memory_utilization=args.gpu_memory_utilization)
 
     sampling_params = SamplingParams(
         n=args.n,
