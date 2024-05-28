@@ -15,9 +15,10 @@ WORKDIR /workspace/vllm
 
 RUN pip install -v -r requirements-cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
-RUN VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 RUN VLLM_TARGET_DEVICE=cpu python3 setup.py install
 
 WORKDIR /workspace/
+
+RUN ln -s /workspace/vllm/tests  && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
 CMD ["/bin/bash"]
