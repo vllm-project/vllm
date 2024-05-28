@@ -114,7 +114,7 @@ mypy vllm/model_executor --config-file pyproject.toml
 
 
 CODESPELL_EXCLUDES=(
-    '--skip' '*docs/source/_build/**,./tests/lora/data'
+    '--skip' '*docs/source/_build/**,*tests/lora/data/**'
 )
 
 # check spelling of specified files
