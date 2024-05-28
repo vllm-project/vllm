@@ -76,6 +76,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   ops.def("fp8_gemm_new", &fp8_gemm_new, "fp8 GEMM");
   ops.def("fp8_gemm_16_new", &fp8_gemm_16_new, "fp8 GEMM");
 
+  ops.def("static_scaled_int8_quant", &static_scaled_int8_quant,
+          "Compute int8 quantized tensor for given scaling factor");
+
   // Cache ops
   pybind11::module cache_ops = m.def_submodule("cache_ops", "vLLM cache ops");
   cache_ops.def("swap_blocks", &swap_blocks,

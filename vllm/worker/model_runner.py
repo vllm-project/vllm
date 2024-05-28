@@ -269,6 +269,12 @@ class ModelRunner:
         if len(seq_group_metadata_list) == 0:
             return ModelInput.empty(self.device)
 
+        if self.sliding_window is not None:
+            sliding_window_blocks = (self.sliding_window + self.block_size -
+                                     1) // self.block_size
+            block_aligned_sliding_window = \
+                sliding_window_blocks * self.block_size
+
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
             is_prompt = seq_group_metadata.is_prompt
@@ -309,6 +315,30 @@ class ModelRunner:
                                     and self.sliding_window is None
                                     and is_prompt)
 
+                # These are seq_len/context_len capped to the sliding window.
+                # They are passed to decode kernel.
+                # We still need original seq_len/context_len to compute slot
+                # mapping (and input position) below.
+                curr_sliding_window_blocks = None
+                sliding_seq_len = seq_len
+                sliding_context_len = context_len
+
+                # TODO(sang): This is a hack to make sliding window work with
+                # paged attn. We can remove it if we make paged attn kernel
+                # to properly handle slinding window attn.
+                if (self.sliding_window is not None and not is_prompt):
+                    curr_sliding_window_blocks = sliding_window_blocks
+                    if self.scheduler_config.use_v2_block_manager:
+                        # number of elements in last block
+                        suff_len = seq_len % self.block_size
+                        sliding_seq_len = min(
+                            seq_len, block_aligned_sliding_window + suff_len)
+                        if suff_len > 0:
+                            curr_sliding_window_blocks += 1
+                    else:
+                        sliding_seq_len = min(seq_len, self.sliding_window)
+                    sliding_context_len = sliding_seq_len - 1
+
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
                 # NOTE: This only works for oooooooxxx style attention.
@@ -316,6 +346,13 @@ class ModelRunner:
                     assert computed_block_nums is not None
                     context_len = len(computed_block_nums) * self.block_size
                     tokens = tokens[context_len:]
+
+                    # need to think what to set it to when we have both sliding
+                    # window and prefix caching...
+                    assert self.sliding_window is None, \
+                        "Prefix caching is not supported with sliding window"
+                    sliding_context_len = context_len
+
                     if self.attn_backend.get_name() == "flash-attn":
                         # NOTE(woosuk): For flash-attn, the block table should
                         # include the entries for the incoming prefill tokens.
@@ -329,14 +366,9 @@ class ModelRunner:
                     if seq_group_metadata.block_tables is not None:
                         # chunked prefill or decode
                         block_table = seq_group_metadata.block_tables[seq_id]
-                        if self.sliding_window is not None:
-                            # chunked prefill doesn't support sliding window.
-                            assert (not self.scheduler_config.
-                                    chunked_prefill_enabled)
-                            sliding_window_blocks = (self.sliding_window //
-                                                     self.block_size)
-                            block_table = block_table[-sliding_window_blocks:]
-
+                        if curr_sliding_window_blocks is not None:
+                            block_table = block_table[
+                                -curr_sliding_window_blocks:]
                         if self.attn_backend.get_name() == "flashinfer":
                             paged_kv_indices.extend(block_table)
                             paged_kv_indptr.append(paged_kv_indptr[-1] +
@@ -354,16 +386,9 @@ class ModelRunner:
                     block_table = []
                 block_tables.append(block_table)
 
-                # TODO(sang): This is a hack to make sliding window work with
-                # paged attn. We can remove it if we make paged attn kernel
-                # to properly handle slinding window attn.
-                if (self.sliding_window is not None and not is_prompt):
-                    seq_len = min(seq_len, self.sliding_window)
-                    context_len = seq_len - 1
-
-                seq_lens.append(seq_len)
-                context_lens.append(context_len)
-                query_len = seq_len - context_len
+                seq_lens.append(sliding_seq_len)
+                context_lens.append(sliding_context_len)
+                query_len = sliding_seq_len - sliding_context_len
                 query_lens.append(query_len)
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
@@ -380,16 +405,15 @@ class ModelRunner:
                         "seq_len: {}, context_len: {}, query_len: {}".format(
                             seq_len, context_len, query_len))
                     num_decode_tokens += query_len
-                    decode_seq_lens.append(seq_len)
+                    decode_seq_lens.append(sliding_seq_len)
 
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
 
-                lora_index_mapping += [lora_id] * (seq_len - context_len)
+                lora_index_mapping += [lora_id] * query_len
                 lora_prompt_mapping.extend(
                     [lora_id] *
-                    (seq_len -
-                     context_len if seq_group_metadata.sampling_params
+                    (query_len if seq_group_metadata.sampling_params
                      and seq_group_metadata.sampling_params.prompt_logprobs
                      else 1))
 
@@ -417,9 +441,10 @@ class ModelRunner:
                 start_idx = 0
                 if self.sliding_window is not None:
                     if is_prompt:
-                        assert context_len == 0, (
+                        assert self.scheduler_config.use_v2_block_manager \
+                            or context_len == 0, (
                             "Prefix caching is currently not supported with "
-                            "sliding window attention")
+                            "sliding window attention in V1 block manager")
                     # It is an optimization. When it is decoding, it is always
                     # 0. When prefill, we use it to not write slots to kv cache
                     # to save memory.
