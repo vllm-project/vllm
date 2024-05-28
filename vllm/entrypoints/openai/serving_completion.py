@@ -347,7 +347,7 @@ class OpenAIServingCompletion(OpenAIServing):
             choices=choices,
             usage=usage,
         )
-    
+
     def _create_logprobs(
         self,
         token_ids: List[int],
