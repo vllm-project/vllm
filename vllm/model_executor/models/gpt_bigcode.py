@@ -18,30 +18,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPTBigCode model compatible with HuggingFace weights."""
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
 from transformers import GPTBigCodeConfig
 
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig, LoRAConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
                                                QKVParallelLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
 from vllm.sequence import SamplerOutput
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -49,7 +47,8 @@ class GPTBigCodeAttention(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -76,25 +75,27 @@ class GPTBigCodeAttention(nn.Module):
             total_num_heads,
             total_num_kv_heads,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
 
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        self.attn = PagedAttention(self.num_heads,
-                                   self.head_dim,
-                                   scale=self.scale,
-                                   num_kv_heads=self.num_kv_heads)
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              scale=self.scale,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.c_attn(hidden_states)
         q, k, v = qkv.split(
@@ -104,9 +105,7 @@ class GPTBigCodeAttention(nn.Module):
             ],
             dim=-1,
         )
-        key_cache, value_cache = kv_cache
-        attn_output = self.attn(q, k, v, key_cache, value_cache,
-                                input_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         attn_output, _ = self.c_proj(attn_output)
         return attn_output
 
@@ -117,7 +116,7 @@ class GPTBigMLP(nn.Module):
         self,
         intermediate_size: int,
         config: GPTBigCodeConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -125,15 +124,14 @@ class GPTBigMLP(nn.Module):
             hidden_size,
             intermediate_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
-        quant_config = getattr(linear_method, "quant_config", None)
         self.act = get_act_fn(config.activation_function, quant_config,
                               intermediate_size)
 
@@ -149,7 +147,8 @@ class GPTBigCodeBlock(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -157,22 +156,22 @@ class GPTBigCodeBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPTBigCodeAttention(config, linear_method)
+        self.attn = GPTBigCodeAttention(config, cache_config, quant_config)
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPTBigMLP(inner_dim, config, linear_method)
+        self.mlp = GPTBigMLP(inner_dim, config, quant_config)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         attn_output = self.attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         # residual connection
         hidden_states = attn_output + residual
@@ -190,18 +189,24 @@ class GPTBigCodeModel(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
-
-        self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.wte = VocabParallelEmbedding(self.vocab_size,
+                                          self.embed_dim,
+                                          org_num_embeddings=config.vocab_size)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
-            GPTBigCodeBlock(config, linear_method)
+            GPTBigCodeBlock(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -210,8 +215,8 @@ class GPTBigCodeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         inputs_embeds = self.wte(input_ids)
         position_embeds = self.wpe(position_ids)
@@ -219,54 +224,72 @@ class GPTBigCodeModel(nn.Module):
 
         for i in range(len(self.h)):
             layer = self.h[i]
-            hidden_states = layer(hidden_states, kv_caches[i], input_metadata)
+            hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
 
 class GPTBigCodeForCausalLM(nn.Module):
+    packed_modules_mapping = {"c_attn": ["c_attn"]}
+
+    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
+
+    embedding_modules = {
+        "wte": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: GPTBigCodeConfig,
-        linear_method: Optional[LinearMethodBase] = None,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.linear_method = linear_method
-        self.transformer = GPTBigCodeModel(config, linear_method)
+        self.quant_config = quant_config
+        self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
+                                           lora_config)
         self.lm_head_weight = self.transformer.wte.weight
-        self.sampler = Sampler(config.vocab_size)
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
+        self.sampler = Sampler()
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return hidden_states
+
+    def compute_logits(self, hidden_states: torch.Tensor,
+                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head_weight, hidden_states,
+                                       sampling_metadata)
+        return logits
 
     def sample(
         self,
-        hidden_states: torch.Tensor,
+        logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(self.lm_head_weight, hidden_states,
-                                   sampling_metadata)
+        next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 continue
             if ".attn.bias" in name:

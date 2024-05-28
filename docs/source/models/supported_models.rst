@@ -8,84 +8,150 @@ The following is the list of model architectures that are currently supported by
 Alongside each architecture, we include some popular models that use it.
 
 .. list-table::
-  :widths: 25 25 50
+  :widths: 25 25 50 5
   :header-rows: 1
 
   * - Architecture
     - Models
     - Example HuggingFace Models
+    - :ref:`LoRA <lora>`
   * - :code:`AquilaForCausalLM`
-    - Aquila
+    - Aquila & Aquila2
     - :code:`BAAI/Aquila-7B`, :code:`BAAI/AquilaChat-7B`, etc.
+    - ✅︎
+  * - :code:`ArcticForCausalLM`
+    - Arctic
+    - :code:`Snowflake/snowflake-arctic-base`, :code:`Snowflake/snowflake-arctic-instruct`, etc.
+    -
   * - :code:`BaiChuanForCausalLM`
-    - Baichuan
+    - Baichuan & Baichuan2
     - :code:`baichuan-inc/Baichuan2-13B-Chat`, :code:`baichuan-inc/Baichuan-7B`, etc.
-  * - :code:`ChatGLMModel`
-    - ChatGLM
-    - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
-  * - :code:`DeciLMForCausalLM`
-    - DeciLM
-    - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
+    - ✅︎
   * - :code:`BloomForCausalLM`
     - BLOOM, BLOOMZ, BLOOMChat
     - :code:`bigscience/bloom`, :code:`bigscience/bloomz`, etc.
+    -
+  * - :code:`ChatGLMModel`
+    - ChatGLM
+    - :code:`THUDM/chatglm2-6b`, :code:`THUDM/chatglm3-6b`, etc.
+    - ✅︎
+  * - :code:`CohereForCausalLM`
+    - Command-R
+    - :code:`CohereForAI/c4ai-command-r-v01`, etc.
+    -
+  * - :code:`DbrxForCausalLM`
+    - DBRX
+    - :code:`databricks/dbrx-base`, :code:`databricks/dbrx-instruct`, etc.
+    -
+  * - :code:`DeciLMForCausalLM`
+    - DeciLM
+    - :code:`Deci/DeciLM-7B`, :code:`Deci/DeciLM-7B-instruct`, etc.
+    -
   * - :code:`FalconForCausalLM`
     - Falcon
     - :code:`tiiuae/falcon-7b`, :code:`tiiuae/falcon-40b`, :code:`tiiuae/falcon-rw-7b`, etc.
+    -
   * - :code:`GemmaForCausalLM`
     - Gemma
     - :code:`google/gemma-2b`, :code:`google/gemma-7b`, etc.
+    - ✅︎
   * - :code:`GPT2LMHeadModel`
     - GPT-2
     - :code:`gpt2`, :code:`gpt2-xl`, etc.
+    -
   * - :code:`GPTBigCodeForCausalLM`
     - StarCoder, SantaCoder, WizardCoder
     - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
+    -
   * - :code:`GPTJForCausalLM`
     - GPT-J
     - :code:`EleutherAI/gpt-j-6b`, :code:`nomic-ai/gpt4all-j`, etc.
+    -
   * - :code:`GPTNeoXForCausalLM`
     - GPT-NeoX, Pythia, OpenAssistant, Dolly V2, StableLM
     - :code:`EleutherAI/gpt-neox-20b`, :code:`EleutherAI/pythia-12b`, :code:`OpenAssistant/oasst-sft-4-pythia-12b-epoch-3.5`, :code:`databricks/dolly-v2-12b`, :code:`stabilityai/stablelm-tuned-alpha-7b`, etc.
+    -
   * - :code:`InternLMForCausalLM`
     - InternLM
     - :code:`internlm/internlm-7b`, :code:`internlm/internlm-chat-7b`, etc.
+    - ✅︎
   * - :code:`InternLM2ForCausalLM`
     - InternLM2
     - :code:`internlm/internlm2-7b`, :code:`internlm/internlm2-chat-7b`, etc.
+    -
+  * - :code:`JAISLMHeadModel`
+    - Jais
+    - :code:`core42/jais-13b`, :code:`core42/jais-13b-chat`, :code:`core42/jais-30b-v3`, :code:`core42/jais-30b-chat-v3`, etc.
+    -
   * - :code:`LlamaForCausalLM`
-    - LLaMA, LLaMA-2, Vicuna, Alpaca, Yi
-    - :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
+    - LLaMA, Llama 2, Meta Llama 3, Vicuna, Alpaca, Yi
+    - :code:`meta-llama/Meta-Llama-3-8B-Instruct`, :code:`meta-llama/Meta-Llama-3-70B-Instruct`, :code:`meta-llama/Llama-2-13b-hf`, :code:`meta-llama/Llama-2-70b-hf`, :code:`openlm-research/open_llama_13b`, :code:`lmsys/vicuna-13b-v1.3`, :code:`01-ai/Yi-6B`, :code:`01-ai/Yi-34B`, etc.
+    - ✅︎
+  * - :code:`MiniCPMForCausalLM`
+    - MiniCPM
+    - :code:`openbmb/MiniCPM-2B-sft-bf16`, :code:`openbmb/MiniCPM-2B-dpo-bf16`, etc.
+    -
   * - :code:`MistralForCausalLM`
     - Mistral, Mistral-Instruct
     - :code:`mistralai/Mistral-7B-v0.1`, :code:`mistralai/Mistral-7B-Instruct-v0.1`, etc.
+    - ✅︎
   * - :code:`MixtralForCausalLM`
     - Mixtral-8x7B, Mixtral-8x7B-Instruct
-    - :code:`mistralai/Mixtral-8x7B-v0.1`, :code:`mistralai/Mixtral-8x7B-Instruct-v0.1`, etc.
+    - :code:`mistralai/Mixtral-8x7B-v0.1`, :code:`mistralai/Mixtral-8x7B-Instruct-v0.1`, :code:`mistral-community/Mixtral-8x22B-v0.1`, etc.
+    - ✅︎
   * - :code:`MPTForCausalLM`
     - MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter
     - :code:`mosaicml/mpt-7b`, :code:`mosaicml/mpt-7b-storywriter`, :code:`mosaicml/mpt-30b`, etc.
+    -
   * - :code:`OLMoForCausalLM`
     - OLMo
-    - :code:`allenai/OLMo-1B`, :code:`allenai/OLMo-7B`, etc.
+    - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
+    -
   * - :code:`OPTForCausalLM`
     - OPT, OPT-IML
     - :code:`facebook/opt-66b`, :code:`facebook/opt-iml-max-30b`, etc.
+    -
   * - :code:`OrionForCausalLM`
     - Orion
     - :code:`OrionStarAI/Orion-14B-Base`, :code:`OrionStarAI/Orion-14B-Chat`, etc.
+    -
   * - :code:`PhiForCausalLM`
     - Phi
     - :code:`microsoft/phi-1_5`, :code:`microsoft/phi-2`, etc.
+    - ✅︎
+  * - :code:`Phi3ForCausalLM`
+    - Phi-3
+    - :code:`microsoft/Phi-3-mini-4k-instruct`, :code:`microsoft/Phi-3-mini-128k-instruct`, etc.
+    -
+  * - :code:`Phi3SmallForCausalLM`
+    - Phi-3-Small
+    - :code:`microsoft/Phi-3-small-8k-instruct`, :code:`microsoft/Phi-3-small-128k-instruct`, etc.
+    -
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
+    -
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
     - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
+    - ✅︎
+  * - :code:`Qwen2MoeForCausalLM`
+    - Qwen2MoE
+    - :code:`Qwen/Qwen1.5-MoE-A2.7B`, :code:`Qwen/Qwen1.5-MoE-A2.7B-Chat`, etc.
+    -
   * - :code:`StableLmForCausalLM`
     - StableLM
     - :code:`stabilityai/stablelm-3b-4e1t/` , :code:`stabilityai/stablelm-base-alpha-7b-v2`, etc.
+    -
+  * - :code:`Starcoder2ForCausalLM`
+    - Starcoder2
+    - :code:`bigcode/starcoder2-3b`, :code:`bigcode/starcoder2-7b`, :code:`bigcode/starcoder2-15b`, etc.
+    -
+  * - :code:`XverseForCausalLM`
+    - Xverse
+    - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
+    -
+
 
 If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
 Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` for instructions on how to implement support for your model.
@@ -123,3 +189,29 @@ Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-pr
         llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
         output = llm.generate("Hello, my name is")
         print(output)
+
+Model Support Policy
+---------------------
+
+At vLLM, we are committed to facilitating the integration and support of third-party models within our ecosystem. Our approach is designed to balance the need for robustness and the practical limitations of supporting a wide range of models. Here’s how we manage third-party model support:
+
+1. **Community-Driven Support**: We encourage community contributions for adding new models. When a user requests support for a new model, we welcome pull requests (PRs) from the community. These contributions are evaluated primarily on the sensibility of the output they generate, rather than strict consistency with existing implementations such as those in transformers. **Call for contribution:** PRs coming directly from model vendors are greatly appreciated!
+
+2. **Best-Effort Consistency**: While we aim to maintain a level of consistency between the models implemented in vLLM and other frameworks like transformers, complete alignment is not always feasible. Factors like acceleration techniques and the use of low-precision computations can introduce discrepancies. Our commitment is to ensure that the implemented models are functional and produce sensible results.
+
+3. **Issue Resolution and Model Updates**: Users are encouraged to report any bugs or issues they encounter with third-party models. Proposed fixes should be submitted via PRs, with a clear explanation of the problem and the rationale behind the proposed solution. If a fix for one model impacts another, we rely on the community to highlight and address these cross-model dependencies. Note: for bugfix PRs, it is good etiquette to inform the original author to seek their feedback.
+
+4. **Monitoring and Updates**: Users interested in specific models should monitor the commit history for those models (e.g., by tracking changes in the main/vllm/model_executor/models directory). This proactive approach helps users stay informed about updates and changes that may affect the models they use.
+
+5. **Selective Focus**: Our resources are primarily directed towards models with significant user interest and impact. Models that are less frequently used may receive less attention, and we rely on the community to play a more active role in their upkeep and improvement.
+
+Through this approach, vLLM fosters a collaborative environment where both the core development team and the broader community contribute to the robustness and diversity of the third-party models supported in our ecosystem.
+
+Note that, as an inference engine, vLLM does not introduce new models. Therefore, all models supported by vLLM are third-party models in this regard.
+
+We have the following levels of testing for models:
+
+1. **Strict Consistency**: We compare the output of the model with the output of the model in the HuggingFace Transformers library under greedy decoding. This is the most stringent test. Please refer to `test_models.py <https://github.com/vllm-project/vllm/blob/main/tests/models/test_models.py>`_ and `test_big_models.py <https://github.com/vllm-project/vllm/blob/main/tests/models/test_big_models.py>`_ for the models that have passed this test.
+2. **Output Sensibility**: We check if the output of the model is sensible and coherent, by measuring the perplexity of the output and checking for any obvious errors. This is a less stringent test.
+3. **Runtime Functionality**: We check if the model can be loaded and run without errors. This is the least stringent test. Please refer to `functionality tests <https://github.com/vllm-project/vllm/tree/main/tests>`_ and `examples <https://github.com/vllm-project/vllm/tree/main/examples>`_ for the models that have passed this test.
+4. **Community Feedback**: We rely on the community to provide feedback on the models. If a model is broken or not working as expected, we encourage users to raise issues to report it or open pull requests to fix it. The rest of the models fall under this category.

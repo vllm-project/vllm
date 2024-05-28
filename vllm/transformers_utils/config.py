@@ -1,21 +1,28 @@
-from typing import Optional
+from typing import Dict, Optional
 
 from transformers import AutoConfig, PretrainedConfig
 
-from vllm.transformers_utils.configs import *
+from vllm.logger import init_logger
+from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
+                                             JAISConfig, MPTConfig, RWConfig)
 
-_CONFIG_REGISTRY = {
+logger = init_logger(__name__)
+
+_CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
     "chatglm": ChatGLMConfig,
+    "dbrx": DbrxConfig,
     "mpt": MPTConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
+    "jais": JAISConfig,
 }
 
 
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
-               code_revision: Optional[str] = None) -> PretrainedConfig:
+               code_revision: Optional[str] = None,
+               rope_scaling: Optional[dict] = None) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
             model,
@@ -38,4 +45,22 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+    if rope_scaling is not None:
+        logger.info("Updating rope_scaling from %r to %r",
+                    getattr(config, "rope_scaling", None), rope_scaling)
+        config.update({"rope_scaling": rope_scaling})
     return config
+
+
+def get_hf_text_config(config: PretrainedConfig):
+    """Get the "sub" config relevant to llm for multi modal models.
+        No op for pure text models.
+    """
+    if hasattr(config, "text_config"):
+        # The code operates under the assumption that text_config should have
+        # `num_attention_heads` (among others). Assert here to fail early
+        # if transformers config doesn't align with this assumption.
+        assert hasattr(config.text_config, "num_attention_heads")
+        return config.text_config
+    else:
+        return config

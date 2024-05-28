@@ -50,6 +50,7 @@ For more information, check out the following:
 * `vLLM announcing blog post <https://vllm.ai>`_ (intro to PagedAttention)
 * `vLLM paper <https://arxiv.org/abs/2309.06180>`_ (SOSP 2023)
 * `How continuous batching enables 23x throughput in LLM inference while reducing p50 latency <https://www.anyscale.com/blog/continuous-batching-llm-inference>`_ by Cade Daniel et al.
+* :ref:`vLLM Meetups <meetups>`.
 
 
 
@@ -62,18 +63,29 @@ Documentation
 
    getting_started/installation
    getting_started/amd-installation
+   getting_started/neuron-installation
+   getting_started/cpu-installation
    getting_started/quickstart
+   getting_started/examples/examples_index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Offline Inference
+
+   offline_inference/llm
+   offline_inference/sampling_params
 
 .. toctree::
    :maxdepth: 1
    :caption: Serving
 
-   serving/distributed_serving
-   serving/run_on_sky
-   serving/deploying_with_triton
+   serving/openai_compatible_server
    serving/deploying_with_docker
-   serving/serving_with_langchain
+   serving/distributed_serving
    serving/metrics
+   serving/env_vars
+   serving/usage_stats
+   serving/integrations
 
 .. toctree::
    :maxdepth: 1
@@ -83,19 +95,30 @@ Documentation
    models/adding_model
    models/engine_args
    models/lora
+   models/performance
 
 .. toctree::
    :maxdepth: 1
    :caption: Quantization
 
    quantization/auto_awq
-   quantization/fp8_e5m2_kv_cache
+   quantization/fp8_e5m2_kvcache
+   quantization/fp8_e4m3_kvcache
 
 .. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
 
    dev/engine/engine_index
+   dev/kernel/paged_attention
+   dev/dockerfile/dockerfile
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Community
+
+   community/meetups
+   community/sponsors
 
 Indices and tables
 ==================

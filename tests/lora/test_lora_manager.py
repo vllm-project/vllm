@@ -8,11 +8,11 @@ from torch import nn
 
 from vllm.config import LoRAConfig
 from vllm.lora.layers import (ColumnParallelLinearWithLoRA,
-                              RowParallelLinearWithLoRA,
-                              MergedColumnParallelLinearWithLoRA)
+                              MergedColumnParallelLinearWithLoRA,
+                              RowParallelLinearWithLoRA)
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
-from vllm.lora.models import (LoRAModel, LoRAModelManager,
-                              LRUCacheLoRAModelManager, LoRAMapping)
+from vllm.lora.models import (LoRAMapping, LoRAModel, LoRAModelManager,
+                              LRUCacheLoRAModelManager)
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import (LRUCacheWorkerLoRAManager,
                                       WorkerLoRAManager)

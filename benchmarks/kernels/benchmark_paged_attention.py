@@ -1,12 +1,12 @@
-from typing import Optional
 import argparse
 import random
 import time
+from typing import Optional
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
-from vllm._C import ops
 
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
@@ -16,7 +16,7 @@ PARTITION_SIZE = 512
 def main(
     version: str,
     num_seqs: int,
-    context_len: int,
+    seq_len: int,
     num_query_heads: int,
     num_kv_heads: int,
     head_size: int,
@@ -48,12 +48,12 @@ def main(
                                    dtype=torch.float,
                                    device=device)
 
-    context_lens = [context_len for _ in range(num_seqs)]
-    max_context_len = max(context_lens)
-    context_lens = torch.tensor(context_lens, dtype=torch.int, device=device)
+    seq_lens = [seq_len for _ in range(num_seqs)]
+    max_seq_len = max(seq_lens)
+    seq_lens = torch.tensor(seq_lens, dtype=torch.int, device=device)
 
     # Create the block tables.
-    max_num_blocks_per_seq = (max_context_len + block_size - 1) // block_size
+    max_num_blocks_per_seq = (max_seq_len + block_size - 1) // block_size
     block_tables = []
     for _ in range(num_seqs):
         block_table = [
@@ -77,8 +77,7 @@ def main(
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
-        num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
-                          PARTITION_SIZE)
+        num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)
         tmp_output = torch.empty(
             size=(num_seqs, num_query_heads, num_partitions, head_size),
             dtype=output.dtype,
@@ -97,6 +96,9 @@ def main(
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
+        # Using default kv_scale
+        kv_scale = 1.0
+
         for _ in range(num_iters):
             if version == "v1":
                 ops.paged_attention_v1(
@@ -107,11 +109,12 @@ def main(
                     num_kv_heads,
                     scale,
                     block_tables,
-                    context_lens,
+                    seq_lens,
                     block_size,
-                    max_context_len,
+                    max_seq_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    kv_scale,
                 )
             elif version == "v2":
                 ops.paged_attention_v2(
@@ -125,11 +128,12 @@ def main(
                     num_kv_heads,
                     scale,
                     block_tables,
-                    context_lens,
+                    seq_lens,
                     block_size,
-                    max_context_len,
+                    max_seq_len,
                     alibi_slopes,
                     kv_cache_dtype,
+                    kv_scale,
                 )
             else:
                 raise ValueError(f"Invalid version: {version}")
@@ -161,7 +165,7 @@ if __name__ == '__main__':
                         choices=["v1", "v2"],
                         default="v2")
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--context-len", type=int, default=4096)
+    parser.add_argument("--seq_len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
     parser.add_argument("--head-size",
@@ -179,11 +183,11 @@ if __name__ == '__main__':
     parser.add_argument(
         "--kv-cache-dtype",
         type=str,
-        choices=["auto", "fp8_e5m2"],
+        choices=["auto", "fp8", "fp8_e5m2", "fp8_e4m3"],
         default="auto",
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type.')
-    parser.add_argument("--device", type=str, choices=["cuda"], default="cuda")
+        help="Data type for kv cache storage. If 'auto', will use model "
+        "data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. "
+        "ROCm (AMD GPU) supports fp8 (=fp8_e4m3)")
     args = parser.parse_args()
     print(args)
 
@@ -192,7 +196,7 @@ if __name__ == '__main__':
     main(
         version=args.version,
         num_seqs=args.batch_size,
-        context_len=args.context_len,
+        seq_len=args.seq_len,
         num_query_heads=args.num_query_heads,
         num_kv_heads=args.num_kv_heads,
         head_size=args.head_size,
