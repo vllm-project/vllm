@@ -299,11 +299,11 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
     key_path = tmp_path / (model_ref + ".key")
 
-    config_for_serializing = TensorizerConfig(
+    tensorizer_config = TensorizerConfig(
         tensorizer_uri=model_path,
         encryption_keyfile=key_path,
     )
-    # FIXME: launching multiple multiprocessing servers within the same program
+    # FIXME: launching multiple distributed engines within the same program
     # results in a hang... launch serialization in a separate process as a work
     # around
     serialization_proc = mp.get_context('spawn').Process(
@@ -314,7 +314,7 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
                 tensor_parallel_size=2,
                 enforce_eager=True,
             ),
-            "tensorizer_config": config_for_serializing,
+            "tensorizer_config": tensorizer_config,
         },
     )
     serialization_proc.start()
@@ -322,19 +322,12 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
 
-
-    config_for_deserializing = TensorizerConfig(
-        tensorizer_uri=model_path,
-        encryption_keyfile=key_path,
-    )
-
     loaded_vllm_model = vllm_runner(
         model_ref,
         tensor_parallel_size=2,
         load_format="tensorizer",
         enforce_eager=True,
-        distributed_executor_backend="ray",
-        model_loader_extra_config=config_for_deserializing)
+        model_loader_extra_config=tensorizer_config)
 
     deserialized_outputs = loaded_vllm_model.generate(prompts, sampling_params)
 

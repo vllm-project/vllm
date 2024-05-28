@@ -3,9 +3,6 @@ import dataclasses
 import json
 import os
 import uuid
-from functools import partial
-
-from tensorizer import stream_io
 
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
@@ -185,14 +182,6 @@ if __name__ == '__main__':
         "s3_secret_access_key": s3_secret_access_key,
         "s3_endpoint": s3_endpoint
     }
-
-    _, _write_stream = (partial(
-        stream_io.open_stream,
-        mode=mode,
-        s3_access_key_id=s3_access_key_id,
-        s3_secret_access_key=s3_secret_access_key,
-        s3_endpoint=s3_endpoint,
-    ) for mode in ("rb", "wb+"))
 
     model_ref = args.model
 
