@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.outputs import RequestOutput
+from vllm.sequence import Logprob
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -346,3 +347,47 @@ class OpenAIServingCompletion(OpenAIServing):
             choices=choices,
             usage=usage,
         )
+    
+    def _create_logprobs(
+        self,
+        token_ids: List[int],
+        top_logprobs: List[Optional[Dict[int, Logprob]]],
+        num_output_top_logprobs: Optional[int] = None,
+        initial_text_offset: int = 0,
+    ) -> LogProbs:
+        """Create OpenAI-style logprobs."""
+        logprobs = LogProbs()
+        last_token_len = 0
+        if num_output_top_logprobs:
+            logprobs.top_logprobs = []
+
+        for i, token_id in enumerate(token_ids):
+            step_top_logprobs = top_logprobs[i]
+            if step_top_logprobs is None:
+                token = self.tokenizer.decode(token_id)
+                logprobs.tokens.append(token)
+                logprobs.token_logprobs.append(None)
+                assert logprobs.top_logprobs is not None
+                logprobs.top_logprobs.append(None)
+            else:
+                token_logprob = step_top_logprobs[token_id].logprob
+                token = step_top_logprobs[token_id].decoded_token
+                logprobs.tokens.append(token)
+                logprobs.token_logprobs.append(token_logprob)
+
+                if num_output_top_logprobs:
+                    assert logprobs.top_logprobs is not None
+                    logprobs.top_logprobs.append({
+                        # Convert float("-inf") to the
+                        # JSON-serializable float that OpenAI uses
+                        p.decoded_token: max(p.logprob, -9999.0)
+                        for i, p in step_top_logprobs.items()
+                    } if step_top_logprobs else None)
+
+            if len(logprobs.text_offset) == 0:
+                logprobs.text_offset.append(initial_text_offset)
+            else:
+                logprobs.text_offset.append(logprobs.text_offset[-1] +
+                                            last_token_len)
+            last_token_len = len(token)
+        return logprobs
