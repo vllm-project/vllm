@@ -47,7 +47,6 @@ logger = init_logger(__name__)
 class TensorizerConfig:
     tensorizer_uri: str
     vllm_tensorized: Optional[bool] = False
-    is_sharded: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
     encryption_keyfile: Optional[str] = None
@@ -92,7 +91,6 @@ class TensorizerConfig:
                     "For a sharded model, Tensorizer URI should include a"
                     " string format template like '%04d' to be formatted"
                     " with the rank of the shard")
-            self.is_sharded = True
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if (model_config.quantization is not None
@@ -424,7 +422,7 @@ def serialize_vllm_model(
         encryption_params = EncryptionParams(key=key)
 
     output_file = tensorizer_args.tensorizer_uri
-    if tensorizer_config.is_sharded:
+    if re.search(r'%0\dd', output_file):
         from vllm.distributed import get_tensor_model_parallel_rank
         output_file = output_file % get_tensor_model_parallel_rank()
 

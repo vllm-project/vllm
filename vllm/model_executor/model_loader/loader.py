@@ -370,7 +370,7 @@ class TensorizerLoader(BaseModelLoader):
                    cache_config: CacheConfig) -> nn.Module:
         self._verify_config(model_config, parallel_config)
 
-        if self.tensorizer_config.is_sharded:
+        if parallel_config.tensor_parallel_size > 1:
             from vllm.distributed import get_tensor_model_parallel_rank
             self.tensorizer_config.tensorizer_uri = \
                 self.tensorizer_config.tensorizer_uri \

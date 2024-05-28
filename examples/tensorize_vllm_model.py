@@ -220,13 +220,10 @@ if __name__ == '__main__':
         input_dir = args.serialized_directory.rstrip('/')
         suffix = args.suffix if args.suffix else uuid.uuid4().hex
         base_path = f"{input_dir}/vllm/{model_ref}/{suffix}"
-        is_sharded = False
         if engine_args.tensor_parallel_size > 1:
             model_path = f"{base_path}/model-rank-%03d.tensors"
-            is_sharded = True
         else:
             model_path = f"{base_path}/model.tensors"
-            is_sharded = False
 
         # create and write encryption key before initializing engine to support
         # sharded models
@@ -238,7 +235,6 @@ if __name__ == '__main__':
         tensorizer_config = TensorizerConfig(
             tensorizer_uri=model_path,
             encryption_keyfile=keyfile,
-            is_sharded=is_sharded,
             **credentials)
 
         engine = LLMEngine.from_engine_args(engine_args)
