@@ -479,11 +479,23 @@ def make_block_tables_slot_mapping(block_size,
     '''
     Construct fake block tables & slot mappings.
 
-    The first block is at
+    For a sequence with num_tokens tokens the minimum number
+    of required KV cache blocks is
 
-    block_base_addr + sum(min. block count for each seq_len)
+    num_blocks = (num_tokens + block_size) // block_size
 
-    and subsequent blocks count downward toward block_base_addr
+    Then the minimum KV cache size in blocks is
+
+    total_cache_blocks = sum(num_blocks for all seqs) 
+
+    Then, the blocktable mapping counts downward from
+
+    block_base_addr + total_cache_blocks
+
+    to
+
+    block_base_addr
+    
 
     Arguments:
 
@@ -520,8 +532,9 @@ def make_block_tables_slot_mapping(block_size,
     prefill_slot_mapping = []
     decode_slot_mapping = []
     slot_mapping = []
-    block_base_idx = block_base_addr + sum(
-        num_blocks_list)  # Support more blocks than needed
+    # Compute uppermost address of block table
+    total_cache_blocks = sum(num_blocks_list)
+    block_base_idx = block_base_addr + total_cache_blocks
     max_block_idx = block_base_idx
     for sdx, num_tokens in enumerate(seq_lens):
         num_blocks = num_blocks_list[sdx]
