@@ -481,7 +481,7 @@ def make_block_tables_slot_mapping(block_size,
 
     The first block is at
 
-    block_base_addr + sum(num_blocks_list) * 2 - 1
+    block_base_addr + sum(min. block count for each seq_len)
 
     and subsequent blocks count downward toward block_base_addr
 
@@ -508,7 +508,7 @@ def make_block_tables_slot_mapping(block_size,
     * max_block_idx: the highest block address within this block table
     '''
 
-    # Over-provision block table blocks by 1
+    # Provision minimum number of KV cache blocks
     num_blocks_list = [
         num_tokens_to_min_blocks(num_tokens, block_size)
         for num_tokens in seq_lens
@@ -692,6 +692,7 @@ def make_metadata_self_cross(
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
 
+
 def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     '''
     Compute & build entities required for the self-/cross-attention test.
@@ -716,10 +717,10 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     scale = float(1.0 / (head_size**0.5))
     attn_backend = make_backend(backend_name)
     attn = Attention(
-               num_heads,
-               head_size,
-               scale=scale,
-           )
+        num_heads,
+        head_size,
+        scale=scale,
+    )
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size, block_size)
     return scale, attn_backend, attn, kv_cache
 
