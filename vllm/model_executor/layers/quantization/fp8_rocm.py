@@ -328,7 +328,7 @@ class Fp8RocmLinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         assert not bias
         x8 = torch.empty_like(x, dtype=torch.float8_e4m3fnuz)
-        ops.rocm_convert_fp8(x, x8, asf)
+        ops.convert_fp8(x, x8, asf)
         m = weight.shape[0]
         n = x.shape[0]
         k = x.shape[1]
