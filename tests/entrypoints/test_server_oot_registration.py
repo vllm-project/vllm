@@ -1,7 +1,7 @@
-import multiprocessing
 import sys
 import time
 
+import pytest
 import torch
 from openai import OpenAI, OpenAIError
 
@@ -9,6 +9,8 @@ from vllm import ModelRegistry
 from vllm.model_executor.models.opt import OPTForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.utils import get_open_port
+
+pytestmark = pytest.mark.openai
 
 
 class MyOPTForCausalLM(OPTForCausalLM):
@@ -26,15 +28,16 @@ def server_function(port):
     # register our dummy model
     ModelRegistry.register_model("OPTForCausalLM", MyOPTForCausalLM)
     sys.argv = ["placeholder.py"] + \
-        ("--model facebook/opt-125m --dtype"
-        f" float32 --api-key token-abc123 --port {port}").split()
+        ("--model facebook/opt-125m --gpu-memory-utilization 0.10 "
+        f"--dtype float32 --api-key token-abc123 --port {port}").split()
     import runpy
     runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
 
 
 def test_oot_registration_for_api_server():
     port = get_open_port()
-    server = multiprocessing.Process(target=server_function, args=(port, ))
+    ctx = torch.multiprocessing.get_context()
+    server = ctx.Process(target=server_function, args=(port, ))
     server.start()
     client = OpenAI(
         base_url=f"http://localhost:{port}/v1",

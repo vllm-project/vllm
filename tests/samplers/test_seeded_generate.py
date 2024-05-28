@@ -57,11 +57,7 @@ def test_random_sample_with_seed(
                 sampling_params_seed_1,
                 sampling_params_seed_2,
         ):
-            llm._add_request(
-                prompt=prompt,
-                prompt_token_ids=None,
-                params=params,
-            )
+            llm._add_request(prompt, params=params)
 
     results = llm._run_engine(use_tqdm=False)
     all_outputs = [[out.token_ids for out in output.outputs]

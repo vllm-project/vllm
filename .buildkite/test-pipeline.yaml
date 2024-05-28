@@ -63,9 +63,9 @@ steps:
   mirror_hardwares: [amd]
 
   commands:
-  # these tests have to be separated, because each one will allocate all posible GPU memory
-  - pytest -v -s entrypoints --ignore=entrypoints/test_server_oot_registration.py
-  - pytest -v -s entrypoints/test_server_oot_registration.py
+  - pytest -v -s test_inputs.py
+  - pytest -v -s entrypoints -m llm
+  - pytest -v -s entrypoints -m openai
 
 - label: Examples Test
   working_dir: "/vllm-workspace/examples"
@@ -109,6 +109,9 @@ steps:
 - label: LogitsProcessor Test
   mirror_hardwares: [amd]
   command: pytest -v -s test_logits_processor.py
+
+- label: Utils Test
+  command: pytest -v -s test_utils.py
 
 - label: Worker Test
   mirror_hardwares: [amd]

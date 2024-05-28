@@ -70,13 +70,6 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Offline Inference
-
-   offline_inference/llm
-   offline_inference/sampling_params
-
-.. toctree::
-   :maxdepth: 1
    :caption: Serving
 
    serving/openai_compatible_server
@@ -108,7 +101,9 @@ Documentation
 .. toctree::
    :maxdepth: 2
    :caption: Developer Documentation
-
+   
+   dev/sampling_params
+   dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
    dev/dockerfile/dockerfile
