@@ -1,6 +1,6 @@
 # pylint: disable=unused-argument
 import math
-from dataclasses import dataclass,field
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -127,10 +127,10 @@ def _apply_lora_triton(
     batch_size = batch_mlength_lst[0]
     max_length = batch_mlength_lst[1]
 
-    buffer = add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
+    add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
                              b_seq_start_tensor, seq_length_tensor,
                              lora_index_tensor, batch_size, max_length, 0, 1.0)
-    return buffer, output.view_as(org_output)
+    return  output.view_as(org_output)
 
 
 def _apply_lora_packed_nslice(
@@ -227,11 +227,11 @@ class LoRAMapping:
     # Per sampled token:
     prompt_mapping: Tuple[int, ...]
     # Per batch lora index
-    batch_mapping: List[int]=field(default_factory=list)
+    batch_mapping: List[int] = field(default_factory=list)
     # Per batch seq length
-    seq_lens: List[int]=field(default_factory=list)
+    seq_lens: List[int] = field(default_factory=list)
     # prefilling or  decoding.
-    is_prefilling: bool=False
+    is_prefilling: bool = False
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
@@ -1188,10 +1188,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
     #         output,
     #     )
     #     batch_size = self.batch_mlength_list[0]
-    #     # print(f"self.indices[:self.indices_len[0]]={ self.indices[:self.indices_len[0]]},\
-    #     #     lora_index_tensor={self.lora_index_tensor[:batch_size]},batch={self.batch_mlength_list[0]}")
-    #     # #
-    #     mid2_buffer,_=_apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
+    #     mid2_buffer,_=_apply_lora_triton(x, self.lora_a_stacked, 
+    #                         self.lora_b_stacked,
     #                        self.b_seq_start_tensor[:batch_size],
     #                        self.seq_length_tensor[:batch_size],
     #                        self.lora_index_tensor[:batch_size],

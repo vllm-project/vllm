@@ -81,7 +81,7 @@ def convert_mapping(
                 embeddings_indices, long_lora_indices). If long_lora doesn't
                 exist, it only contains first 4 entries.
     """
-    index_mapping_indices: List[int] = list(mapping.batch_mapping).copy()
+    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
@@ -434,7 +434,7 @@ class LoRAModelManager:
         self.seq_length_tensor = torch.empty(self.max_num_batched_tokens,
                                              dtype=torch.long,
                                              device="cuda")
-        self.b_seq_start_tensor = torch.empty(self.max_num_batched_tokens,
+        self.b_seq_start_tensor = torch.zeros(self.max_num_batched_tokens,
                                               dtype=torch.long,
                                               device="cuda")
         self.lora_index_tensor = torch.empty(self.max_num_batched_tokens,
@@ -561,7 +561,35 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
 
-        
+        if mapping.seq_lens:
+            batchs = len(mapping.seq_lens)
+            seq_length_tensor = torch.tensor(mapping.seq_lens,
+                                             dtype=torch.long,
+                                             device="cuda")
+            self.seq_length_tensor[:batchs].copy_(seq_length_tensor)
+            # b_seq_start_tensor = torch.zeros(seq_length_tensor.shape[0] + 1,
+            #                                  dtype=torch.long,
+            #                                  device="cuda")
+            # torch.cumsum(seq_length_tensor,
+            #              dim=0,
+            #              dtype=seq_length_tensor.dtype,
+            #              out=b_seq_start_tensor[1:])
+            torch.cumsum(seq_length_tensor,
+                         dim=0,
+                         dtype=seq_length_tensor.dtype,
+                         out=self.b_seq_start_tensor[1:])
+            # self.b_seq_start_tensor[:batchs].copy_(b_seq_start_tensor)
+            lora_id_lst = []
+            for lora_index in mapping.batch_mapping:
+                lora_id_lst.append(
+                    self.lora_index_to_id.index(lora_index
+                                                ) if lora_index > 0 else -1)
+            lora_id_tensor = torch.tensor(lora_id_lst,
+                                          dtype=torch.long,
+                                          device="cuda")
+            self.lora_index_tensor[:lora_id_tensor.size(0)].copy_(
+                lora_id_tensor)
+            self.batch_mlength_lst[:] = [batchs, max(mapping.seq_lens)]
 
     def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
         if self._last_mapping != lora_mapping:

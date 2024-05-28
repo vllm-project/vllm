@@ -150,7 +150,6 @@ def add_lora(
     punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
     punica_kernels.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
                                  scale)
-    return buffer
 
 
 def add_lora_triton(
@@ -198,7 +197,6 @@ def add_lora_triton(
         max_length,
         add_inputs=True,
     )
-    return buffer
 
 
 def add_lora_slice(

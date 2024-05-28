@@ -587,10 +587,9 @@ class ModelRunner:
             )
 
         if self.lora_config:
-            lora_mapping = LoRAMapping(
-                lora_index_mapping, lora_prompt_mapping,
-                batch_lora_index_mapping, query_lens,
-                bool(attn_metadata.prefill_metadata))
+            lora_mapping = LoRAMapping(lora_index_mapping, lora_prompt_mapping,
+                                       batch_lora_index_mapping, query_lens,
+                                       bool(attn_metadata.prefill_metadata))
         else:
             lora_mapping = None
 
@@ -906,13 +905,10 @@ class ModelRunner:
                 )
 
                 if self.lora_config:
-                    lora_mapping = LoRAMapping(
-                        [0] * batch_size,
-                        [0] * batch_size,
-                        [0] * batch_size,
-                        [1] * batch_size,
-                        False
-                    )
+                    lora_mapping = LoRAMapping([0] * batch_size,
+                                               [0] * batch_size,
+                                               [0] * batch_size,
+                                               [1] * batch_size, False)
                     self.set_active_loras(set(), lora_mapping)
 
                 graph_runner = CUDAGraphRunner(self.model)
