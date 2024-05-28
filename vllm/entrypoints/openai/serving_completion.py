@@ -6,12 +6,13 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (CompletionRequest,
+from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
+                                              CompletionRequest,
                                               CompletionResponse,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              LogProbs, UsageInfo)
+                                              UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
@@ -26,7 +27,7 @@ logger = init_logger(__name__)
 TypeTokenIDs = List[int]
 TypeTopLogProbs = List[Optional[Dict[int, float]]]
 TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], LogProbs]
+    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
 
 
 def parse_prompt_format(prompt) -> Tuple[bool, list]:
@@ -231,7 +232,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             i]:] if output.logprobs else None
 
                     if request.logprobs is not None:
-                        logprobs = self._create_logprobs(
+                        logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
                             num_output_top_logprobs=request.logprobs,
@@ -313,7 +314,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     assert top_logprobs is not None, (
                         "top_logprobs must be provided when logprobs "
                         "is requested")
-                    logprobs = self._create_logprobs(
+                    logprobs = self._create_completion_logprobs(
                         token_ids=token_ids,
                         top_logprobs=top_logprobs,
                         num_output_top_logprobs=request.logprobs,
@@ -348,46 +349,57 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
         )
 
-    def _create_logprobs(
+    def _create_completion_logprobs(
         self,
         token_ids: List[int],
         top_logprobs: List[Optional[Dict[int, Logprob]]],
-        num_output_top_logprobs: Optional[int] = None,
+        num_output_top_logprobs: int,
         initial_text_offset: int = 0,
-    ) -> LogProbs:
-        """Create OpenAI-style logprobs."""
-        logprobs = LogProbs()
+    ) -> CompletionLogProbs:
+        """Create logprobs for OpenAI Completion API."""
+        out_text_offset: List[int] = []
+        out_token_logprobs: List[Optional[float]] = []
+        out_tokens: List[str] = []
+        out_top_logprobs: List[Optional[Dict[str, float]]] = []
+
         last_token_len = 0
-        if num_output_top_logprobs:
-            logprobs.top_logprobs = []
 
         for i, token_id in enumerate(token_ids):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 token = self.tokenizer.decode(token_id)
-                logprobs.tokens.append(token)
-                logprobs.token_logprobs.append(None)
-                assert logprobs.top_logprobs is not None
-                logprobs.top_logprobs.append(None)
+                out_tokens.append(token)
+                out_token_logprobs.append(None)
+                out_top_logprobs.append(None)
             else:
-                token_logprob = step_top_logprobs[token_id].logprob
-                token = step_top_logprobs[token_id].decoded_token
-                logprobs.tokens.append(token)
-                logprobs.token_logprobs.append(token_logprob)
+                token = self._get_decoded_token_from_logprob(
+                    step_top_logprobs[token_id])
+                token_logprob = max(step_top_logprobs[token_id].logprob,
+                                    -9999.0)
+                out_tokens.append(token)
+                out_token_logprobs.append(token_logprob)
 
-                if num_output_top_logprobs:
-                    assert logprobs.top_logprobs is not None
-                    logprobs.top_logprobs.append({
-                        # Convert float("-inf") to the
-                        # JSON-serializable float that OpenAI uses
-                        p.decoded_token: max(p.logprob, -9999.0)
-                        for i, p in step_top_logprobs.items()
-                    } if step_top_logprobs else None)
+                # makes sure to add the top num_output_top_logprobs + 1
+                # logprobs, as defined in the openai API
+                # (cf. https://github.com/openai/openai-openapi/blob/
+                # 893ba52242dbd5387a97b96444ee1c742cfce9bd/openapi.yaml#L7153)
+                out_top_logprobs.append({
+                    # Convert float("-inf") to the
+                    # JSON-serializable float that OpenAI uses
+                    self._get_decoded_token_from_logprob(top_lp[1]):
+                    max(top_lp[1].logprob, -9999.0)
+                    for i, top_lp in enumerate(step_top_logprobs.items())
+                    if num_output_top_logprobs >= i
+                })
 
-            if len(logprobs.text_offset) == 0:
-                logprobs.text_offset.append(initial_text_offset)
+            if len(out_text_offset) == 0:
+                out_text_offset.append(initial_text_offset)
             else:
-                logprobs.text_offset.append(logprobs.text_offset[-1] +
-                                            last_token_len)
+                out_text_offset.append(out_text_offset[-1] + last_token_len)
             last_token_len = len(token)
-        return logprobs
+        return CompletionLogProbs(
+            text_offset=out_text_offset,
+            token_logprobs=out_token_logprobs,
+            tokens=out_tokens,
+            top_logprobs=out_top_logprobs,
+        )

@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ModelPermission)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
@@ -187,3 +188,8 @@ class OpenAIServing:
                 f"Please reduce the length of the messages or completion.", )
         else:
             return input_ids, input_text
+
+    def _get_decoded_token_from_logprob(self, logprob: Logprob) -> str:
+        if logprob.decoded_token is not None:
+            return logprob.decoded_token
+        return self.tokenizer.decode(logprob.token_id)
