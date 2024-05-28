@@ -996,6 +996,8 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def create_trace_span(self, seq_group: SequenceGroup, now: float) -> None:
+        if seq_group.trace_context is None:
+            return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
         with tracer.start_as_current_span(
                 "llm_request",
