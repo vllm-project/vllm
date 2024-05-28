@@ -5,11 +5,11 @@ import torch
 
 from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
-#from vllm.custom_ops import paged_attention_custom
 from vllm._custom_C import paged_attention_custom
 
+import os
+
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-#_PARTITION_SIZE = 512
 _PARTITION_SIZE = 256
 
 
@@ -106,6 +106,13 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
+        use_custom = ((os.environ["VLLM_USE_ROCM_CUSTOM_PAGED_ATTN"] == 1)
+                        and query.dtype == torch.half
+                        and query.shape[2] == 128
+                        and block_size == 16)
+        if not use_custom:
+            global _PARTITION_SIZE
+            _PARTITION_SIZE = 512
         max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
@@ -116,8 +123,8 @@ class PagedAttention:
         # TODO(woosuk): Tune this heuristic.
         # For context len > 8192, use V2 kernel to avoid shared memory shortage.
         use_v1 = (max_context_len <= 8192
-                  and (max_num_partitions == 1 or num_seqs * num_heads > 512))
-        use_v1 = False
+                  and (max_num_partitions == 1 or num_seqs * num_heads > 512)
+                  and not use_custom)
         if use_v1:
             # Run PagedAttention V1.
             ops.paged_attention_v1(
@@ -136,7 +143,7 @@ class PagedAttention:
                 kv_scale,
             )
         else:
-            # Run PagedAttention V2.
+            # Run PagedAttention V2 or PagedAttention Custom.
             assert _PARTITION_SIZE % block_size == 0
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
@@ -149,41 +156,43 @@ class PagedAttention:
                 device=output.device,
             )
             max_logits = torch.empty_like(exp_sums)
-            #ops.paged_attention_v2(
-            #    output,
-            #    exp_sums,
-            #    max_logits,
-            #    tmp_output,
-            #    query,
-            #    key_cache,
-            #    value_cache,
-            #    num_kv_heads,
-            #    scale,
-            #    block_tables,
-            #    context_lens,
-            #    block_size,
-            #    max_context_len,
-            #    alibi_slopes,
-            #    kv_cache_dtype,
-            #    kv_scale,
-            #)
-            paged_attention_custom(
-                output,
-                exp_sums,
-                max_logits,
-                tmp_output,
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                scale,
-                block_tables,
-                context_lens,
-                block_size,
-                max_context_len,
-                alibi_slopes,
-                kv_cache_dtype,
-            )
+            if not use_custom:
+                ops.paged_attention_v2(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    context_lens,
+                    block_size,
+                    max_context_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                    kv_scale,
+                )
+            else:
+                paged_attention_custom(
+                    output,
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    query,
+                    key_cache,
+                    value_cache,
+                    num_kv_heads,
+                    scale,
+                    block_tables,
+                    context_lens,
+                    block_size,
+                    max_context_len,
+                    alibi_slopes,
+                    kv_cache_dtype,
+                )
         return output
 
     @staticmethod
