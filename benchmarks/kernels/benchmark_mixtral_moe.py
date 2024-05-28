@@ -19,7 +19,12 @@ def main(model, tp_size, gpu, dtype: str):
             1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024, 1536,
             2048, 3072, 4096
     ]:
-        run_grid(bs, model=model, method=method, gpu=gpu, tp_size=tp_size, dtype=dtype)
+        run_grid(bs,
+                 model=model,
+                 method=method,
+                 gpu=gpu,
+                 tp_size=tp_size,
+                 dtype=dtype)
 
 
 def run_grid(bs, model, method, gpu, tp_size, dtype: str):
@@ -217,24 +222,18 @@ if __name__ == "__main__":
         choices=['float8', 'float16'],
         help='Data type used for fused_moe kernel computations',
     )
-    parser.add_argument(
-        '--model',
-        type=str,
-        default='8x7B',
-        choices=['8x7B', '8x22B'],
-        help='The Mixtral model to benchmark'
-    )
-    parser.add_argument(
-        '--tp-size',
-        type=int,
-        default=2,
-        help='Tensor paralleli size'
-    )
-    parser.add_argument(
-        '--gpu',
-        type=int,
-        default=0,
-        help="GPU ID for benchmarking"
-    )
+    parser.add_argument('--model',
+                        type=str,
+                        default='8x7B',
+                        choices=['8x7B', '8x22B'],
+                        help='The Mixtral model to benchmark')
+    parser.add_argument('--tp-size',
+                        type=int,
+                        default=2,
+                        help='Tensor paralleli size')
+    parser.add_argument('--gpu',
+                        type=int,
+                        default=0,
+                        help="GPU ID for benchmarking")
     args = parser.parse_args()
     sys.exit(main(args.model, args.tp_size, args.gpu, args.dtype))
