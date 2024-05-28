@@ -6,14 +6,16 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import torch
 from torch.nn.functional import scaled_dot_product_attention
 
-import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
 from vllm.utils import is_cpu
 
-if is_cpu() and envs.VLLM_CPU_IPEX:
-    from vllm.attention.ops.ipex_attn import PagedAttention
+if is_cpu():
+    try:
+        from vllm.attention.ops.ipex_attn import PagedAttention
+    except ImportError:
+        from vllm.attention.ops.paged_attn import PagedAttention
 else:
     from vllm.attention.ops.paged_attn import PagedAttention
 
