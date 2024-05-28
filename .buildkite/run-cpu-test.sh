@@ -18,13 +18,14 @@ docker exec cpu-test bash -c "python3 examples/offline_inference.py"
 
 # Run basic model test
 docker exec cpu-test bash -c "cd tests;
-  pip install pytest Pillow
+  pip install pytest Pillow protobuf
   bash ../.buildkite/download-images.sh
   cd ../
-  pytest -v -s tests/models --ignore=tests/models/test_llava.py --ignore=tests/models/test_mistral.py \
+  pytest -v -s tests/models --ignore=tests/models/test_llava.py \
     --ignore=tests/models/test_big_models.py --ignore=tests/models/test_embedding.py"
 
 # Run big model test
 docker exec cpu-test bash -c "
+  #TODO: remove this after CPU float16 support ready
   sed -i 's/half/float/g' tests/models/test_big_models.py
   pytest -v -s tests/models/test_big_models.py"
