@@ -1,4 +1,4 @@
-.. _deploying_with_docker:
+.. _deploying_with_dstack:
 
 Deploying with dstack
 ============================
