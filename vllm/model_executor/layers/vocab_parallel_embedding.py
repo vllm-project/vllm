@@ -128,7 +128,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         (self.vocab_start_index, self.vocab_end_index,
          self.org_vocab_start_index, self.org_vocab_end_index,
          self.added_vocab_start_index,
-         self.added_vocab_end_index) = self.get_indices(
+         self.added_vocab_end_index) = self._get_indices(
              self.num_embeddings, self.org_vocab_size, tp_rank, self.tp_size,
              padding_size)
         self.embedding_dim = embedding_dim
@@ -152,7 +152,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         })
 
     @classmethod
-    def get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int,
+    def _get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int,
                     tp_size: int,
                     padding_size: int) -> Tuple[int, int, int, int, int, int]:
         """Get start and end indices for vocab parallel embedding, following the
@@ -196,7 +196,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         padding: List[int] = []
         for tp_rank in range(self.tp_size):
             (vocab_start_index, vocab_end_index, _, _, added_vocab_start_index,
-             added_vocab_end_index) = self.get_indices(self.num_embeddings,
+             added_vocab_end_index) = self._get_indices(self.num_embeddings,
                                                        self.org_vocab_size,
                                                        tp_rank, self.tp_size,
                                                        self.padding_size)
