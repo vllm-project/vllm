@@ -5,13 +5,16 @@ import torch
 
 from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
-from vllm._custom_C import paged_attention_custom
-
+from vllm.utils import is_hip
 import os
 
-# Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 256
+custom_attn_available = is_hip() and os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "0") == "1"
+if custom_attn_available:
+    from vllm._custom_C import paged_attention_custom
 
+# Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
+_PARTITION_SIZE_V1V2 = 512
+_PARTITION_SIZE_CUSTOM = 256
 
 @dataclass
 class PagedAttentionMetadata:
@@ -103,16 +106,17 @@ class PagedAttention:
         kv_scale: float,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        use_custom = ((os.environ["VLLM_USE_ROCM_CUSTOM_PAGED_ATTN"] == "1")
+        use_custom = (custom_attn_available
                         and query.dtype == torch.half
-                        and query.shape[2] == 128
-                        and block_size == 16)
+                        and head_size == 128
+                        and block_size == 16
+                        and kv_cache_dtype == "auto")
         if not use_custom:
-            global _PARTITION_SIZE
-            _PARTITION_SIZE = 512
+            _PARTITION_SIZE = _PARTITION_SIZE_V1V2
+        else:
+            _PARTITION_SIZE = _PARTITION_SIZE_CUSTOM
         max_num_partitions = ((max_context_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
         # NOTE(woosuk): We use a simple heuristic to decide whether to use
