@@ -1,4 +1,6 @@
 import asyncio
+# UPSTREAM SYNC
+import sys
 from typing import AsyncIterator, Tuple
 
 import pytest
@@ -6,6 +8,9 @@ import pytest
 from vllm.utils import merge_async_iterators
 
 
+# UPSTREAM SYNC
+@pytest.mark.skipif(sys.version_info < (3, 10),
+                    reason="`anext` requires Python 3.10")
 @pytest.mark.asyncio
 async def test_merge_async_iterators():
 
