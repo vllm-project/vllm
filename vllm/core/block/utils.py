@@ -13,6 +13,7 @@ STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE = \
     "Prefix caching for encoder/decoder models " + \
                     "is not currently supported."
 
+
 def _get_block_mgr_sliding_window_attr(block_mgr):
     '''
     BlockManagerV1 and BlockManagerV2 have slightly different
@@ -33,6 +34,7 @@ def _get_block_mgr_sliding_window_attr(block_mgr):
     raise AttributeError("Block manager instance has neither " + \
                          "block_sliding_window nor " + \
                          "max_block_sliding_window attributes.")
+
 
 def check_no_caching_or_swa_for_blockmgr_encdec(
         block_mgr, seq_group: SequenceGroup) -> None:
