@@ -119,7 +119,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # If True, prefill_metadata() and decode_metadata() will return
     # seqlen & memory-mapping data structures for cross-attention;
     # otherwise, self-attention data structures will be returned.
-    is_cross_attn: bool = False
+    is_encoder_decoder_attn: bool = False
 
     # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
     # sequence length (usually encoder sequence length) in the cross-attention
@@ -166,7 +166,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     @property
     def do_cross_attn(self):
-        return self.is_cross_attn
+        return self.is_encoder_decoder_attn
 
     @do_cross_attn.setter
     def do_cross_attn(self, state: bool):
@@ -188,9 +188,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 assert self.cross_seq_lens is not None
                 self.max_cross_seq_len = max(self.cross_seq_lens)
 
-            self.is_cross_attn = True
+            self.is_encoder_decoder_attn = True
         else:
-            self.is_cross_attn = False
+            self.is_encoder_decoder_attn = False
 
     @property
     def prefill_metadata(self) -> Optional["XFormersMetadata"]:
@@ -225,7 +225,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_cross_attn=False,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -261,7 +261,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_cross_attn=True,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -297,7 +297,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_cross_attn=False,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -328,7 +328,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_cross_attn=True,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -593,7 +593,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                if attn_metadata.is_cross_attn:
+                if attn_metadata.is_encoder_decoder_attn:
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.cross_seq_lens)
                 else:
