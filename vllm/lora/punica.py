@@ -4,8 +4,9 @@ from typing import Optional
 
 import torch
 
-# from vllm.lora.ops.sgmv_expand import sgmv_expand
-# from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.sgmv_expand import sgmv_expand
+from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 
 
 def _raise_import_error(e):
@@ -52,10 +53,16 @@ def bgmv(
     punica_kernels.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
 
 
-def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
-                            w_t_all: torch.Tensor, indicies: torch.LongTensor,
-                            layer_idx: int, scale: float, y_offset: int,
-                            y_slice_size: int):
+def dispatch_bgmv_low_level(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indicies: torch.LongTensor,
+    layer_idx: int,
+    scale: float,
+    y_offset: int,
+    y_slice_size: int,
+):
     """
     Same as `bgmv` but you can operate on slices of y.
     Pass whole y, define y_offset and y_slice_size.
@@ -95,15 +102,17 @@ def dispatch_bgmv_low_level(y: torch.Tensor, x: torch.Tensor,
     )
 
 
-def add_lora(y: torch.Tensor,
-             x: torch.Tensor,
-             wa_t_all: torch.Tensor,
-             wb_t_all: torch.Tensor,
-             indicies: torch.LongTensor,
-             layer_idx: int,
-             scale: float,
-             *,
-             buffer: Optional[torch.Tensor] = None):
+def add_lora(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    indicies: torch.LongTensor,
+    layer_idx: int,
+    scale: float,
+    *,
+    buffer: Optional[torch.Tensor] = None,
+):
     """
     Semantics:
       y[i] += (
@@ -141,19 +150,70 @@ def add_lora(y: torch.Tensor,
     punica_kernels.dispatch_bgmv(buffer, x, wa_t_all, indicies, layer_idx, 1.0)
     punica_kernels.dispatch_bgmv(y, buffer, wb_t_all, indicies, layer_idx,
                                  scale)
+    return buffer
 
 
-def add_lora_slice(y: torch.Tensor,
-                   x: torch.Tensor,
-                   wa_t_all: torch.Tensor,
-                   wb_t_all: torch.Tensor,
-                   indicies: torch.LongTensor,
-                   layer_idx: int,
-                   scale: float,
-                   y_offset: int,
-                   y_slice_size: int,
-                   *,
-                   buffer: Optional[torch.Tensor] = None):
+def add_lora_triton(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batch_size: int,
+    max_length: int,
+    layer_idx: int,
+    scale: float,
+    *,
+    buffer: Optional[torch.Tensor] = None,
+):
+    r = wb_t_all.size(-1)
+    if buffer is None:
+        # We set the buffer to be float32 by default to avoid
+        # numerical inaccuracies that would otherwise happen
+        # due to downcasting.
+        buffer = torch.zeros((x.size(0), r),
+                             dtype=torch.float32,
+                             device=x.device)
+    sgmv_shrink(
+        x,
+        wa_t_all,
+        buffer,
+        b_seq_start_tensor,
+        seq_length_tensor,
+        lora_indices_tensor,
+        batch_size,
+        max_length,
+        scale,
+    )
+    sgmv_expand(
+        buffer,
+        wb_t_all,
+        y,
+        b_seq_start_tensor,
+        seq_length_tensor,
+        lora_indices_tensor,
+        batch_size,
+        max_length,
+        add_inputs=True,
+    )
+    return buffer
+
+
+def add_lora_slice(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    indicies: torch.LongTensor,
+    layer_idx: int,
+    scale: float,
+    y_offset: int,
+    y_slice_size: int,
+    *,
+    buffer: Optional[torch.Tensor] = None,
+):
     """
     Same as `add_lora` but you can operate on slices of y.
     Pass whole y, define y_offset and y_slice_size.
@@ -213,4 +273,85 @@ def add_lora_slice(y: torch.Tensor,
         buffer.size(1),
         y_slice_size,
         y_offset,
+    )
+
+
+def add_lora_triton_slice(
+    y: torch.Tensor,
+    x: torch.Tensor,
+    wa_t_all: torch.Tensor,
+    wb_t_all: torch.Tensor,
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batch_size: int,
+    max_length: int,
+    layer_idx: int,
+    scale: float,
+    y_offset: int,
+    y_slice_size: int,
+    *,
+    buffer: Optional[torch.Tensor] = None,
+):
+    """
+    Same as `add_lora` but you can operate on slices of y.
+    Pass whole y, define y_offset and y_slice_size.
+
+    Semantics:
+      y[i] += (
+          x[i].unsqueeze(0)
+          @ wa_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
+          @ wb_t_all[indices[i], layer_idx, :, :].transpose(-1, -2)
+          * scale
+        ).squeeze(0)
+
+    Args:
+      y: Shape: `[B, H2]`. Output vectors. Will be changed in-place.
+      x: Shape: `[B, H1]`. Input vectors.
+      wa_t_all: Shape: `[None, L, R, H1]`. All of the transposed
+        LoRA A matrices.
+      wb_t_all: Shape: `[None, L, H2, R]`. All of the transposed
+        LoRA B matrices.
+      indicies: Shape: `[B]`. Indices of the LoRA weights.
+      layer_idx: Layer index of LoRA weights.
+      scale: Scaling factor.
+      y_offset: Offset to apply to the starting column of y.
+      y_slice_size: Size of the y column slice.
+    # """
+    # try:
+    #     import vllm._punica_C as punica_kernels
+    # except ImportError as e:
+    #     _raise_import_error(e)
+
+    r = wb_t_all.size(-1)
+    if buffer is None:
+        # We set the buffer to be float32 by default to avoid
+        # numerical inaccuracies that would otherwise happen
+        # due to downcasting.
+        buffer = torch.zeros((x.size(0), r),
+                             dtype=torch.float32,
+                             device=x.device)
+    sgmv_shrink(
+        x,
+        wa_t_all,
+        buffer,
+        b_seq_start_tensor,
+        seq_length_tensor,
+        lora_indices_tensor,
+        batch_size,
+        max_length,
+        scale,
+    )
+    sgmv_expand_slice(
+        buffer,
+        wb_t_all,
+        y,
+        b_seq_start_tensor,
+        seq_length_tensor,
+        lora_indices_tensor,
+        batch_size,
+        max_length,
+        y_offset,
+        y_slice_size,
+        add_inputs=True,
     )

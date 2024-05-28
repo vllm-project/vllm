@@ -1,6 +1,6 @@
 # pylint: disable=unused-argument
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -16,7 +16,9 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_gather)
 from vllm.distributed.utils import divide
-from vllm.lora.punica import add_lora, add_lora_slice, bgmv
+from vllm.lora.punica import (add_lora, add_lora_triton, add_lora_slice,
+                              add_lora_triton_slice, bgmv)
+from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -88,8 +90,47 @@ def _apply_lora(
     x = x.view(-1, x.shape[-1])
     output = output.view(-1, output.shape[-1])
     indices = indices.view(-1)
-    add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0, 1.0)
-    return output.view_as(org_output)
+    buffer = add_lora(output, x, lora_a_stacked, lora_b_stacked, indices, 0,
+                      1.0)
+    return buffer, output.view_as(org_output)
+
+
+def _apply_lora_triton(
+    x: torch.Tensor,
+    lora_a_stacked: torch.Tensor,
+    lora_b_stacked: torch.Tensor,
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_index_tensor: torch.Tensor,
+    batch_mlength_lst: List[int],
+    output: torch.Tensor,
+):
+    # """Applies lora to each input.
+
+    # This method applies all loras to each input. It uses the
+    # indices vector to determine which lora yields the
+    # correct output. An index of -1 means no lora should be
+    # applied. This method adds the final lora results to the
+    # output.
+
+    # Input shapes:
+    #     x:               (batch_size, hidden_dim)
+    #     lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
+    #     lora_b_stacked:  (num_loras, output_dim, lora_rank)
+    #     indices:         (batch_size)
+    #     output:          (batch_size, output_dim)
+    # """
+    org_output = output
+    x = x.view(-1, x.shape[-1])
+    output = output.view(-1, output.shape[-1])
+
+    batch_size = batch_mlength_lst[0]
+    max_length = batch_mlength_lst[1]
+
+    buffer = add_lora_triton(output, x, lora_a_stacked, lora_b_stacked,
+                             b_seq_start_tensor, seq_length_tensor,
+                             lora_index_tensor, batch_size, max_length, 0, 1.0)
+    return buffer, output.view_as(org_output)
 
 
 def _apply_lora_packed_nslice(
@@ -133,12 +174,64 @@ def _apply_lora_packed_nslice(
     return output.view_as(org_output)
 
 
+def _apply_lora_triton_nslice(
+    x: torch.Tensor,
+    lora_a_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    lora_b_stacked: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    b_seq_start_tensor: torch.Tensor,
+    seq_length_tensor: torch.Tensor,
+    lora_index_tensor: torch.Tensor,
+    batch_mlength_lst: List[int],
+    output: torch.Tensor,
+    output_slices: Tuple[int, ...],
+):
+    # """Applies lora to each input.
+
+    # This method applies all loras to each input. It uses the
+    # indices vector to determine which lora yields the
+    # correct output. An index of -1 means no lora should be
+    # applied. This method adds the final lora results to the
+    # output.
+
+    # Input shapes:
+    #     x:               (batch_size, hidden_dim)
+    #     lora_a_stacked:  (num_loras, lora_rank, hidden_dim)
+    #     lora_b_stacked:  (num_loras, output_dim, lora_rank)
+    #     indices:         (batch_size)
+    #     output:          (batch_size, output_dim)
+    # """
+    org_output = output
+    x = x.view(-1, x.shape[-1])
+    output = output.view(-1, output.shape[-1])
+
+    batch_size = batch_mlength_lst[0]
+    max_length = batch_mlength_lst[1]
+
+    offset_left = 0
+    #TODO fuse these kernel
+    for slice_idx in range(len(output_slices)):
+        add_lora_triton_slice(output, x, lora_a_stacked[slice_idx],
+                              lora_b_stacked[slice_idx], b_seq_start_tensor,
+                              seq_length_tensor, lora_index_tensor, batch_size,
+                              max_length, 0, 1.0, offset_left,
+                              output_slices[slice_idx])
+        offset_left += output_slices[slice_idx]
+
+    return output.view_as(org_output)
+
+
 @dataclass
 class LoRAMapping:
     # Per every token in input_ids:
     index_mapping: Tuple[int, ...]
     # Per sampled token:
     prompt_mapping: Tuple[int, ...]
+    # Per batch lora index
+    batch_mapping: List[int]=field(default_factory=list)
+    # Per batch seq length
+    seq_lens: List[int]=field(default_factory=list)
+    # prefilling or  decoding.
+    is_prefilling: bool=False
 
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
@@ -191,6 +284,13 @@ class BaseLayerWithLoRA(nn.Module):
         indices_len: List[int],
     ):
         """Sets the mapping indices."""
+        ...
+
+    def set_kernel_mapping(self, seq_length_tensor: torch.Tensor,
+                           b_seq_start_tensor: torch.Tensor,
+                           lora_index_tensor: torch.Tensor,
+                           batch_mlength_lst: List[int]):
+        """Sets the kernel mapping"""
         ...
 
     @classmethod
@@ -270,6 +370,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.indices_len: List[int]
         self.embeddings_indices: torch.Tensor
 
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -316,6 +421,18 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.embeddings_indices = embeddings_indices
         self.indices_len = indices_len
 
+    def set_kernel_mapping(
+        self,
+        seq_length_tensor: torch.Tensor,
+        b_seq_start_tensor: torch.Tensor,
+        lora_index_tensor: torch.Tensor,
+        batch_mlength_lst: List[int],
+    ):
+        self.seq_length_tensor = seq_length_tensor
+        self.b_seq_start_tensor = b_seq_start_tensor
+        self.lora_index_tensor = lora_index_tensor
+        self.batch_mlength_list = batch_mlength_lst
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         added_tokens_mask = x > self.base_layer.org_vocab_size - 1
         embedding_len = self.indices_len[3]
@@ -336,8 +453,20 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             full_lora_a_embeddings = full_lora_a_embeddings.view(
                 full_lora_a_embeddings.shape[0] *
                 full_lora_a_embeddings.shape[1], -1)
-        bgmv(full_output, full_lora_a_embeddings, self.lora_b_stacked,
-             self.indices[:self.indices_len[0]], 0, 1.0)
+        batchs, max_length = self.batch_mlength_list[
+            0], self.batch_mlength_list[1]
+
+        sgmv_expand(
+            full_lora_a_embeddings,
+            self.lora_b_stacked,
+            full_output,
+            self.b_seq_start_tensor[:batchs],
+            self.seq_length_tensor[:batchs],
+            self.lora_index_tensor[:batchs],
+            batchs,
+            max_length,
+            True,
+        )
         return full_output.view_as(full_output_org)
 
     @classmethod
@@ -393,6 +522,10 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         # lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -441,16 +574,28 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
+    def set_kernel_mapping(
+        self,
+        seq_length_tensor: torch.Tensor,
+        b_seq_start_tensor: torch.Tensor,
+        lora_index_tensor: torch.Tensor,
+        batch_mlength_lst: List[int],
+    ):
+        self.seq_length_tensor = seq_length_tensor
+        self.b_seq_start_tensor = b_seq_start_tensor
+        self.lora_index_tensor = lora_index_tensor
+        self.batch_mlength_list = batch_mlength_lst
+
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            self.indices[:self.indices_len[0]],
-            output,
-        )
+        batch_size = self.batch_mlength_list[0]
+        # maybe we need not  restrict  range to [:batch_size]
+        _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
+                           self.b_seq_start_tensor[:batch_size],
+                           self.seq_length_tensor[:batch_size],
+                           self.lora_index_tensor[:batch_size],
+                           self.batch_mlength_list, output)
         return output
 
     def forward(self, input_):
@@ -542,6 +687,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         # Lazily initialized.
         self.indices: torch.Tensor
 
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
         self.lora_a_stacked[1][index] = 0
@@ -597,14 +747,32 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_packed_nslice(
+        # output_temp=output.clone()
+        # _apply_lora_packed_nslice(
+        #     x,
+        #     self.lora_a_stacked,
+        #     self.lora_b_stacked,
+        #     self.indices[:self.indices_len[0]],
+        #     output,
+        #     (self.output_dim, self.output_dim),
+        # )
+        batchs = self.batch_mlength_list[0]
+        _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.indices[:self.indices_len[0]],
+            self.b_seq_start_tensor[:batchs],
+            self.seq_length_tensor[:batchs],
+            self.lora_index_tensor[:batchs],
+            self.batch_mlength_list,
             output,
             (self.output_dim, self.output_dim),
         )
+        # flag=torch.allclose(output,output_temp,1e-2,1e-2)
+        # if flag:
+        #     print("pass")
+        # else:
+        #     print()
         return output
 
     @classmethod
@@ -774,6 +942,11 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         # lazily initialized.
         self.indices_len: List[int]
 
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[0][index] = 0
         self.lora_b_stacked[0][index] = 0
@@ -851,14 +1024,27 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def apply(self, x: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-        _apply_lora_packed_nslice(
+        # _apply_lora_packed_nslice(
+        #     x,
+        #     self.lora_a_stacked,
+        #     self.lora_b_stacked,
+        #     self.indices[:self.indices_len[0]],
+        #     output,
+        #     self.output_slices,
+        # )
+        batchs = self.batch_mlength_list[0]
+        _apply_lora_triton_nslice(
             x,
             self.lora_a_stacked,
             self.lora_b_stacked,
-            self.indices[:self.indices_len[0]],
+            self.b_seq_start_tensor[:batchs],
+            self.seq_length_tensor[:batchs],
+            self.lora_index_tensor[:batchs],
+            self.batch_mlength_list,
             output,
             self.output_slices,
         )
+
         return output
 
     @classmethod
@@ -915,6 +1101,11 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices: torch.Tensor
         self.indices_len: List[int]
 
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -962,16 +1153,55 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         self.indices = base_indices
         self.indices_len = indices_len
 
+    def set_kernel_mapping(
+        self,
+        seq_length_tensor: torch.Tensor,
+        b_seq_start_tensor: torch.Tensor,
+        lora_index_tensor: torch.Tensor,
+        batch_mlength_lst: List[int],
+    ):
+        self.seq_length_tensor = seq_length_tensor
+        self.b_seq_start_tensor = b_seq_start_tensor
+        self.lora_index_tensor = lora_index_tensor
+        self.batch_mlength_list = batch_mlength_lst
+
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
-        _apply_lora(
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            self.indices[:self.indices_len[0]],
-            output,
-        )
+        batch_size = self.batch_mlength_list[0]
+        # maybe we need not  restrict  range to [:batch_size]
+        _apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
+                           self.b_seq_start_tensor[:batch_size],
+                           self.seq_length_tensor[:batch_size],
+                           self.lora_index_tensor[:batch_size],
+                           self.batch_mlength_list, output)
         return output
+
+    # def apply(self, x: torch.Tensor) -> torch.Tensor:
+    #     output = self.base_layer.quant_method.apply(self.base_layer, x)
+    #     temp_output = output.clone()
+    #     output2 = output.clone()
+    #     mid_buffer,_=_apply_lora(
+    #         x,
+    #         self.lora_a_stacked,
+    #         self.lora_b_stacked,
+    #         self.indices[:self.indices_len[0]],
+    #         output,
+    #     )
+    #     batch_size = self.batch_mlength_list[0]
+    #     # print(f"self.indices[:self.indices_len[0]]={ self.indices[:self.indices_len[0]]},\
+    #     #     lora_index_tensor={self.lora_index_tensor[:batch_size]},batch={self.batch_mlength_list[0]}")
+    #     # #
+    #     mid2_buffer,_=_apply_lora_triton(x, self.lora_a_stacked, self.lora_b_stacked,
+    #                        self.b_seq_start_tensor[:batch_size],
+    #                        self.seq_length_tensor[:batch_size],
+    #                        self.lora_index_tensor[:batch_size],
+    #                        self.batch_mlength_list, output)
+    #     flag = torch.allclose(mid_buffer, mid2_buffer, 3e-2, 2e-2)
+    #     # if not flag:
+    #     #     print("error")
+    #     # else:
+    #     #     print("pass")
+    #     return temp_output
 
     def forward(self, input_):
         """Forward of RowParallelLinear
@@ -1103,6 +1333,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.indices_len: List[int]
         self.indices_padded: torch.Tensor
 
+        self.seq_length_tensor: torch.Tensor
+        self.b_seq_start_tensor: torch.Tensor
+        self.lora_index_tensor: torch.Tensor
+        self.batch_mlength_list: List[int]
+
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
@@ -1139,6 +1374,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.indices = sampler_indices
         self.indices_padded = sampler_indices_padded
         self.indices_len = indices_len
+
+    def set_kernel_mapping(
+        self,
+        seq_length_tensor: torch.Tensor,
+        b_seq_start_tensor: torch.Tensor,
+        lora_index_tensor: torch.Tensor,
+        batch_mlength_lst: List[int],
+    ):
+        self.seq_length_tensor = seq_length_tensor
+        self.b_seq_start_tensor = b_seq_start_tensor
+        self.lora_index_tensor = lora_index_tensor
+        self.batch_mlength_list = batch_mlength_lst
 
     def _get_logits(
         self,
@@ -1186,6 +1433,17 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             logits,
         )
 
+        # batch_size=self.batch_mlength_list[0]
+        # _apply_lora_triton(hidden_states, self.lora_a_stacked, self.lora_b_stacked,
+        #                    self.b_seq_start_tensor[:batch_size],
+        #                    self.seq_length_tensor[:batch_size],
+        #                    self.indices[:self.indices_len[1]],
+        #                    self.batch_mlength_list, logits_temp)
+        # flag=torch.allclose(logits_temp,logits,rtol=1e-2,atol=1e-2)
+        # if flag:
+        #     print("pass")
+        # else:
+        #     print("error")
         # Remove paddings in vocab (if any).
         logits = logits[:, :self.base_layer.vocab_size]
 

@@ -81,7 +81,7 @@ def convert_mapping(
                 embeddings_indices, long_lora_indices). If long_lora doesn't
                 exist, it only contains first 4 entries.
     """
-    index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
+    index_mapping_indices: List[int] = list(mapping.batch_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
@@ -427,6 +427,19 @@ class LoRAModelManager:
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_loras: Dict[int, None] = {}
         self._last_mapping: Optional[LoRAMapping] = None
+
+        # triton kernel mapping
+
+        self.batch_mlength_lst = [-1] * 2
+        self.seq_length_tensor = torch.empty(self.max_num_batched_tokens,
+                                             dtype=torch.long,
+                                             device="cuda")
+        self.b_seq_start_tensor = torch.empty(self.max_num_batched_tokens,
+                                              dtype=torch.long,
+                                              device="cuda")
+        self.lora_index_tensor = torch.empty(self.max_num_batched_tokens,
+                                             dtype=torch.long,
+                                             device="cuda")
         self._create_lora_modules()
         self.model.lora_manager = self
 
@@ -548,6 +561,8 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
 
+        
+
     def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
         if self._last_mapping != lora_mapping:
             self._set_lora_mapping(lora_mapping)
@@ -600,6 +615,10 @@ class LoRAModelManager:
                                    self.sampler_indices_padded,
                                    self.embeddings_indices,
                                    self.long_lora_indices, self.indices_len)
+            new_module.set_kernel_mapping(self.seq_length_tensor,
+                                          self.b_seq_start_tensor,
+                                          self.lora_index_tensor,
+                                          self.batch_mlength_lst)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)

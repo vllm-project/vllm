@@ -7,7 +7,7 @@ import vllm.lora.punica as punica
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 
-#The current punica kernel supports dimension and adds a dimension of 3424.
+# The current punica kernel supports dimension and adds a dimension of 3424.
 HIDDEN_SIZES = [
     128,
     256,
@@ -93,6 +93,7 @@ def _torch_groupgemm(
     seq_len_tensor,
     batchs,
     scaling,
+    op_type,
 ) -> torch.Tensor:
     out_list = []
     current_offset = 0
@@ -103,7 +104,11 @@ def _torch_groupgemm(
         result = torch.nn.functional.linear(input_weight, lora_weight)
         result *= scaling
         out_list.append(result)
-    out_tensor.copy_(torch.cat(out_list, dim=0))
+    cat_result = torch.cat(out_list, dim=0)
+    if op_type == "expand":
+        out_tensor += cat_result
+    else:
+        out_tensor.copy_(cat_result)
     return
 
 
@@ -122,6 +127,7 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
             (lora_nums, max_rank, hidden_size),  # col-major
             dtype=dtype,
         ).to(device)
+        # shrink op need atomic_add, so output is initinized by 0
         ref_out_tensor = torch.zeros((total_tokens, max_rank),
                                      dtype=dtype,
                                      device=inputs_tensor.device)
@@ -132,6 +138,7 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
             device=inputs_tensor.device,
         )
     else:
+
         inputs_tensor = torch.rand(
             (total_tokens, max_rank),
             dtype=dtype,
@@ -140,16 +147,15 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
             (lora_nums, hidden_size, max_rank),  # col-major
             dtype=dtype,
         ).to(device)
-        ref_out_tensor = torch.zeros(
+        # expand op needs to complete y+=a@lora_b, so output is
+        # initinized randomly
+        ref_out_tensor = torch.rand(
             (total_tokens, hidden_size),
             dtype=dtype,
             device=inputs_tensor.device,
         )
-        our_out_tensor = torch.zeros(
-            (total_tokens, hidden_size),
-            dtype=dtype,
-            device=inputs_tensor.device,
-        )
+        # Ensure the same input.
+        our_out_tensor = ref_out_tensor.clone()
 
     lora_indices_tensor = torch.randint(0,
                                         lora_nums - 1 if lora_nums > 1 else 1,
@@ -181,7 +187,7 @@ def _generate_data(batchs, hidden_size, lora_nums, max_rank, max_length, dtype,
 @pytest.mark.parametrize("op_type", OP_TYPES)
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-def test_triton_sgmv(
+def test_sgmv_torch(
     batchs: int,
     num_loras: int,
     rank: int,
@@ -228,25 +234,18 @@ def test_triton_sgmv(
             scaling,
         )
     else:
-        sgmv_expand(
-            inputs_tensor,
-            lora_weights,
-            our_out_tensor,
-            b_seq_start_loc,
-            seq_len_tensor,
-            lora_indices_tensor,
-            batchs,
-            max_seq_length,
-        )
-    _torch_groupgemm(
-        ref_out_tensor,
-        inputs_tensor,
-        lora_weights,
-        lora_indices_tensor,
-        seq_len_tensor,
-        batchs,
-        scaling if op_type == "shrink" else 1.0,
-    )
+        sgmv_expand(inputs_tensor,
+                    lora_weights,
+                    our_out_tensor,
+                    b_seq_start_loc,
+                    seq_len_tensor,
+                    lora_indices_tensor,
+                    batchs,
+                    max_seq_length,
+                    add_inputs=True)
+    _torch_groupgemm(ref_out_tensor, inputs_tensor, lora_weights,
+                     lora_indices_tensor, seq_len_tensor, batchs,
+                     scaling if op_type == "shrink" else 1.0, op_type)
     if op_type == "shrink":
         ref_out_tensor = ref_out_tensor.to(torch.float32)
     assert_close(our_out_tensor, ref_out_tensor)
@@ -285,6 +284,7 @@ def test_sgmv_punica_bgmv(
         indices,
     ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
                        op_type, device)
+
     max_seq_length = seq_len_tensor.max()
     if isinstance(max_seq_length, tuple):
         max_seq_length = max_seq_length[0].item()
@@ -312,6 +312,7 @@ def test_sgmv_punica_bgmv(
             lora_indices_tensor,
             batchs,
             max_seq_length,
+            add_inputs=True,
         )
     lora_weights_4d = lora_weights.unsqueeze(dim=1)
     _punica_bgmv(
@@ -324,3 +325,7 @@ def test_sgmv_punica_bgmv(
     if op_type == "shrink":
         ref_out_tensor = ref_out_tensor.to(torch.float32)
     assert_close(our_out_tensor, ref_out_tensor)
+
+
+# if __name__ == "__main__":
+#     pytest.main(["test_triton_sgmv.py::test_sgmv_torch"])

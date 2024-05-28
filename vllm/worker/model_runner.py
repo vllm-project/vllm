@@ -233,6 +233,7 @@ class ModelRunner:
         input_positions: List[int] = []
         slot_mapping: List[int] = []
         lora_index_mapping: List[int] = []
+        batch_lora_index_mapping: List[int] = []
         lora_prompt_mapping: List[int] = []
         lora_requests: Set[LoRARequest] = set()
 
@@ -386,6 +387,7 @@ class ModelRunner:
                     lora_requests.add(seq_group_metadata.lora_request)
 
                 lora_index_mapping += [lora_id] * (seq_len - context_len)
+                batch_lora_index_mapping += [lora_id if lora_id > 0 else -1]
                 lora_prompt_mapping.extend(
                     [lora_id] *
                     (seq_len -
@@ -586,9 +588,9 @@ class ModelRunner:
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
-                lora_index_mapping,
-                lora_prompt_mapping,
-            )
+                lora_index_mapping, lora_prompt_mapping,
+                batch_lora_index_mapping, query_lens,
+                bool(attn_metadata.prefill_metadata))
         else:
             lora_mapping = None
 
@@ -788,6 +790,32 @@ class ModelRunner:
         torch.cuda.synchronize()
         return
 
+    # def compose_lora_kernel_meta(
+    #     self,
+    #     attn_metadata: AttentionMetadata,
+    # ) -> LoRAKernelMeta:
+    #     if attn_metadata.prefill_metadata:
+    #         max_seq_len = attn_metadata.max_query_len
+    #         seq_start_loc = attn_metadata.query_start_loc
+    #         seq_lens_tensor = attn_metadata.seq_lens_tensor
+    #         batch_size = attn_metadata.num_prefills
+    #     else:
+    #         max_seq_len = attn_metadata.max_query_len
+    #         seq_start_loc = attn_metadata.query_start_loc
+    #         batch_size = attn_metadata.decode_metadata.num_decode_tokens
+    #         seq_lens_tensor = torch.ones((batch_size),
+    #                                      dtype=torch.long,
+    #                                      device=self.device)
+
+    #     if batch_size == 0:
+    #         print("sssss")
+    #     # lora_index_lst = lora_mapping.batch_mapping
+    #     # lora_index_tensor = torch.tensor(lora_index_lst,
+    #     #                                  dtype=torch.long,
+    #     #                                  device=self.device)
+    #     return LoRAKernelMeta(batch_size, max_seq_len, seq_lens_tensor,
+    #                           seq_start_loc)
+
     def remove_all_loras(self):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
@@ -881,6 +909,9 @@ class ModelRunner:
                     lora_mapping = LoRAMapping(
                         [0] * batch_size,
                         [0] * batch_size,
+                        [0] * batch_size,
+                        [1] * batch_size,
+                        False
                     )
                     self.set_active_loras(set(), lora_mapping)
 

@@ -28,8 +28,8 @@ def _sgmv_shrink_kernel(
     SPLIT_K: tl.constexpr,
 ):
     """
-    The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K. 
-    The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally, 
+    The sgmv's shrink triton kernel is based on GroupGEMM+SPLIT-K.
+    The GEMM of Multi-LoRA can be considered as GroupGEMM. Additionally,
     introducing SPLIT-K can improve performance
     """
     pid = tl.program_id(axis=0)
@@ -43,8 +43,6 @@ def _sgmv_shrink_kernel(
     if pid_m * BLOCK_M > M:
         return
     lora_index = tl.load(lora_indices + cur_batch)
-    if lora_index == -1:
-        return
     cur_seq_start = tl.load(b_seq_start_loc + cur_batch)
     offset_m = tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
@@ -57,6 +55,7 @@ def _sgmv_shrink_kernel(
              offset_k[None, :] * xk_stride)
     b_ptr = (lora_ptr + l0_stride * lora_index + rbn[None, :] * lora_k_stride +
              offset_k[:, None] * lora_n_stride)
+
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_K * SPLIT_K)):
         if EVEN_K:
@@ -67,13 +66,14 @@ def _sgmv_shrink_kernel(
             a = tl.load(a_ptr, mask=offset_k[None, :] < k_remaining, other=0.0)
             b = tl.load(b_ptr, mask=offset_k[:, None] < k_remaining, other=0.0)
         accumulator += tl.dot(a, b)
+
         a_ptr += BLOCK_K * SPLIT_K * xk_stride
         b_ptr += BLOCK_K * SPLIT_K * lora_n_stride
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
+
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     c_ptr = (out_ptr + offset_cm[:, None] * cm_stride +
              offset_cn[None, :] * cn_stride)
-
     c_mask = (offset_cm[:, None] <
               (cur_seq_start + M)) & (offset_cn[None, :] < N)
     accumulator *= scaling
@@ -121,16 +121,21 @@ def sgmv_shrink(
     assert b_seq_start_loc.size(0) == batchs
     assert lora_indices_tensor.size(0) == batchs
     assert inputs.is_contiguous()
+
+    if lora_a_weights.ndim == 4:  # shape:(lora_num,1,rank, size)
+        assert lora_a_weights.size(1) == 1
+        lora_a_weights = lora_a_weights.squeeze(dim=1)
+    else:
+        assert lora_a_weights.ndim == 3  # shape:(lora_num,rank, size)
     assert lora_a_weights.is_contiguous()
     assert output_tensor.is_contiguous()
     # TODO tuning this config
-    _, N, K = lora_a_weights.shape  # K=hidden_size,N=rank
+    N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
     BLOCK_M = 32
-    BLOCK_N = 32
+    BLOCK_N = 16
     BLOCK_K = 32
-    SPLIT_K = 8
-    EVEN_K = K % (SPLIT_K * BLOCK_K) == 0
-
+    SPLIT_K = 1
+    EVEN_K = False
     grid = [
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         SPLIT_K,

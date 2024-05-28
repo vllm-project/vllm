@@ -4,7 +4,7 @@ import triton.language as tl
 
 
 @triton.jit
-def _sgmv_expand_kernel(
+def _sgmv_expand_slice_kernel(
     input_ptr,
     lora_ptr,
     out_ptr,
@@ -20,6 +20,7 @@ def _sgmv_expand_kernel(
     lora_n_stride,
     cm_stride,
     cn_stride,
+    slice_offset,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -28,7 +29,12 @@ def _sgmv_expand_kernel(
     CAST_TYPE: tl.constexpr,
 ):
     """
-    The sgmv's expand triton kernel is based on GroupGEMM.
+
+    Similar to the 'sgmv_expand' operator, but with an added parameter 
+    'slice_offset'. The reason for not reusing the 'sgmv_expand' operator 
+    might be that in the future, we could implement  a fusion  operator to 
+    achieve the current functionality instead of having to call it multiple 
+    times.
     """
     pid = tl.program_id(axis=0)
     cur_batch = tl.program_id(axis=1)
@@ -48,25 +54,33 @@ def _sgmv_expand_kernel(
     ram = tl.max_contiguous(tl.multiple_of(offset_m % M, BLOCK_M), BLOCK_M)
     rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
 
-    a_ptr = (input_ptr + cur_seq_start * xm_stride + ram[:, None] * xm_stride +
-             offset_k[None, :] * xk_stride, )
-    b_ptr = (lora_ptr + l0_stride * lora_index +
-             offset_k[:, None] * lora_n_stride + rbn[None, :] * lora_k_stride)
+    a_ptr = (
+        input_ptr
+        + cur_seq_start * xm_stride
+        + ram[:, None] * xm_stride
+        + offset_k[None, :] * xk_stride,
+    )
+    b_ptr = (
+        lora_ptr
+        + l0_stride * lora_index
+        + offset_k[:, None] * lora_n_stride
+        + rbn[None, :] * lora_k_stride
+    )
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(tl.cdiv(K, BLOCK_K)):
         if EVEN_K:
             tiled_a = tl.load(a_ptr)
             tiled_b = tl.load(b_ptr)
         else:
-            tiled_a = tl.load(a_ptr,
-                              mask=offset_k[None, :] < K - k * BLOCK_K,
-                              other=0)
-            tiled_b = tl.load(b_ptr,
-                              mask=offset_k[:, None] < K - k * BLOCK_K,
-                              other=0)
+            tiled_a = tl.load(
+                a_ptr, mask=offset_k[None, :] < K - k * BLOCK_K, other=0
+            )
+            tiled_b = tl.load(
+                b_ptr, mask=offset_k[:, None] < K - k * BLOCK_K, other=0
+            )
         if CAST_TYPE:
             tiled_a = tiled_a.to(lora_ptr.dtype.element_ty)
-        #TODO Can I use D=A@B+C ?
+        # TODO Can I use D=A@B+C ?
         accumulator += tl.dot(
             tiled_a,
             tiled_b,
@@ -75,12 +89,16 @@ def _sgmv_expand_kernel(
         b_ptr += BLOCK_K * lora_n_stride
     tiled_c = accumulator.to(lora_ptr.dtype.element_ty)
     offset_cm = cur_seq_start + tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
-    offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    c_ptr = (out_ptr + offset_cm[:, None] * cm_stride +
-             offset_cn[None, :] * cn_stride)
+    offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N+slice_offset
+    c_ptr = (
+        out_ptr
+        + offset_cm[:, None] * cm_stride
+        + offset_cn[None, :] * cn_stride
+    )
     M = tl.load(seq_lens + cur_batch)
-    c_mask = (offset_cm[:, None] <
-              (cur_seq_start + M)) & (offset_cn[None, :] < N)
+    c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (
+        offset_cn[None, :] < (slice_offset+N)
+    )
     if ADD_INPUTS:
         tiled_out = tl.load(c_ptr, mask=c_mask)
         tiled_c += tiled_out
@@ -88,7 +106,7 @@ def _sgmv_expand_kernel(
 
 
 @torch.inference_mode()
-def sgmv_expand(
+def sgmv_expand_slice(
     inputs: torch.Tensor,
     lora_b_weights: torch.Tensor,
     output_tensor: torch.Tensor,
@@ -97,10 +115,11 @@ def sgmv_expand(
     lora_indices_tensor: torch.Tensor,
     batchs: int,
     max_seq_length: int,
+    slice_offset: int,
+    slice_size: int,
     add_inputs: bool = False,
 ):
     """_summary_
-
 
     Args:
         inputs (torch.Tensor): input tensor
@@ -117,8 +136,9 @@ def sgmv_expand(
         batchs (int): batch size
         max_seq_length (int):  The max sequence lengths of the sequences
             in the batch
+        slice_offst (int): output_tensor's offst
+        slice_size (int): current output_tensor's size
         add_inputs (bool, optional): _description_. Defaults to False.
-        cast_type (bool, optional): _description_. Defaults to False.
     """
 
     assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
@@ -130,6 +150,7 @@ def sgmv_expand(
     assert inputs.size(1) == lora_b_weights.size(-1)
     assert b_seq_start_loc.size(0) == batchs
     assert lora_indices_tensor.size(0) == batchs
+    assert slice_size==lora_b_weights.size(-2)
     assert inputs.is_contiguous()
     assert output_tensor.is_contiguous()
 
@@ -137,13 +158,13 @@ def sgmv_expand(
         assert lora_b_weights.size(1) == 1
         lora_b_weights = lora_b_weights.squeeze(dim=1)
     else:
-        assert lora_b_weights.ndim == 3  # shape:(lora_num,size,rank)
+        assert lora_b_weights.ndim == 3 # shape:(lora_num,size,rank)
 
     assert lora_b_weights.is_contiguous()
 
     # TODO tuning this config
-
     N, K = lora_b_weights.shape[-2:]  # K= rank,N=hidden_size
+
     BLOCK_M = 32
     BLOCK_N = 32
     BLOCK_K = 16
@@ -151,15 +172,15 @@ def sgmv_expand(
     ADD_INPUTS = add_inputs
     CAST_TYPE = False
     if inputs.dtype == torch.float32 and lora_b_weights.dtype in [
-            torch.float16,
-            torch.bfloat16,
+        torch.float16,
+        torch.bfloat16,
     ]:
         CAST_TYPE = True
     grid = [
         triton.cdiv(max_seq_length, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         batchs,
     ]
-    _sgmv_expand_kernel[grid](
+    _sgmv_expand_slice_kernel[grid](
         inputs,
         lora_b_weights,
         output_tensor,
@@ -175,6 +196,7 @@ def sgmv_expand(
         lora_b_weights.stride(2),
         output_tensor.stride(0),
         output_tensor.stride(1),
+        slice_offset,
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
