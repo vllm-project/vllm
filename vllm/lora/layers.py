@@ -1027,7 +1027,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: LogitsProcessor, hidden_size: int,
                  dtype: torch.dtype, device: torch.device,
-                 shared_to_full_mapping: List[int]) -> None:
+                 shared_to_full_mapping: Optional[List[int]]) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.hidden_size = hidden_size
@@ -1096,8 +1096,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
-        self.shared_to_full_mapping_gpu = torch.tensor(
-            self.shared_to_full_mapping, device=self.device, dtype=torch.long)
+        if self.shared_to_full_mapping is not None:
+            self.shared_to_full_mapping_gpu = torch.tensor(
+                self.shared_to_full_mapping,
+                device=self.device,
+                dtype=torch.long)
+        else:
+            self.shared_to_full_mapping_gpu = None
         # Lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
@@ -1154,7 +1159,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         if logits is None:
             return None
 
-        if self.tp_size > 1 and self.org_vocab_size != self.vocab_size:
+        if self.shared_to_full_mapping_gpu is not None:
             # Reindex full logits tensor to ensure 1:1 mapping between
             # index and token_id
             logits = logits[:, self.shared_to_full_mapping_gpu]

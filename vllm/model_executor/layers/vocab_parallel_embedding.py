@@ -153,8 +153,8 @@ class VocabParallelEmbedding(torch.nn.Module):
 
     @classmethod
     def _get_indices(cls, vocab_size: int, org_vocab_size: int, tp_rank: int,
-                    tp_size: int,
-                    padding_size: int) -> Tuple[int, int, int, int, int, int]:
+                     tp_size: int,
+                     padding_size: int) -> Tuple[int, int, int, int, int, int]:
         """Get start and end indices for vocab parallel embedding, following the
         layout outlined in the class docstring.
         
@@ -180,7 +180,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                 org_vocab_end_index, added_vocab_start_index,
                 added_vocab_end_index)
 
-    def get_sharded_to_full_mapping(self) -> List[int]:
+    def get_sharded_to_full_mapping(self) -> Optional[List[int]]:
         """Get a mapping that can be used to reindex the gathered
         logits for sampling.
         
@@ -191,15 +191,17 @@ class VocabParallelEmbedding(torch.nn.Module):
         equal the token_id it corresponds to). The indices returned by this
         method allow us to do that.
         """
+        if self.tp_size < 2:
+            return None
+
         base_embeddings: List[int] = []
         added_embeddings: List[int] = []
         padding: List[int] = []
         for tp_rank in range(self.tp_size):
             (vocab_start_index, vocab_end_index, _, _, added_vocab_start_index,
-             added_vocab_end_index) = self._get_indices(self.num_embeddings,
-                                                       self.org_vocab_size,
-                                                       tp_rank, self.tp_size,
-                                                       self.padding_size)
+             added_vocab_end_index) = self._get_indices(
+                 self.num_embeddings, self.org_vocab_size, tp_rank,
+                 self.tp_size, self.padding_size)
             num_added_embeddings_in_shard = (added_vocab_end_index -
                                              added_vocab_start_index)
             range_start = self.num_embeddings_per_partition * tp_rank
