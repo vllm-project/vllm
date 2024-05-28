@@ -6,10 +6,10 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.block import PhysicalTokenBlock
+from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
+                                   STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.core.block_manager_v1 import (BlockSpaceManagerV1,
-                                        UncachedBlockAllocator,
-                                        str_not_impl_enc_dec_prefix_cache,
-                                        str_not_impl_enc_dec_swa)
+                                        UncachedBlockAllocator)
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
@@ -150,13 +150,13 @@ def test_allocate_encoder_decoder_fails_with_swa():
     with pytest.raises(NotImplementedError) as exc_info:
         block_manager.can_allocate(seq_group)
 
-    assert str(exc_info.value) == str_not_impl_enc_dec_swa
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_SWA
 
     # Assert that allocate() fails due to SWA
     with pytest.raises(NotImplementedError) as exc_info:
         block_manager.allocate(seq_group)
 
-    assert str(exc_info.value) == str_not_impl_enc_dec_swa
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_SWA
 
 
 def test_allocate_encoder_decoder_fails_with_prefix_caching():
@@ -179,13 +179,13 @@ def test_allocate_encoder_decoder_fails_with_prefix_caching():
     with pytest.raises(NotImplementedError) as exc_info:
         block_manager.can_allocate(seq_group)
 
-    assert str(exc_info.value) == str_not_impl_enc_dec_prefix_cache
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE
 
     # Assert that allocate() fails due to prefix caching
     with pytest.raises(NotImplementedError) as exc_info:
         block_manager.allocate(seq_group)
 
-    assert str(exc_info.value) == str_not_impl_enc_dec_prefix_cache
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE
 
 
 def test_append_slot_single_seq():

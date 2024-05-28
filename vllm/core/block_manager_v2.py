@@ -5,21 +5,10 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
-
-'''
-Exception strings for non-implemented encoder/decoder scenarios
-'''
-
-str_not_impl_enc_dec_swa = \
-    "Sliding window attention for encoder/decoder models " + \
-                    "is not currently supported."
-
-str_not_impl_enc_dec_prefix_cache = \
-    "Prefix caching for encoder/decoder models " + \
-                    "is not currently supported."
 
 SeqId = int
 EncoderSeqId = str
@@ -79,9 +68,18 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        assert sliding_window is None, "Sliding window not yet supported"
-
-        self.block_sliding_window = None
+        self.sliding_window = sliding_window
+        # max_block_sliding_window is the max number of blocks that need to be
+        # allocated
+        self.max_block_sliding_window = None
+        if sliding_window is not None:
+            # +1 here because // rounds down
+            num_blocks = sliding_window // block_size + 1
+            # +1 here because the last block may not be full,
+            # and so the sequence stretches one more block at the beginning
+            # For example, if sliding_window is 3 and block_size is 4,
+            # we may need 2 blocks when the second block only holds 1 token.
+            self.max_block_sliding_window = num_blocks + 1
 
         self.watermark = watermark
         assert watermark >= 0.0
@@ -104,12 +102,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
 
-        is_encoder_decoder = seq_group.is_encoder_decoder()
-        if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
-
-        if self.block_sliding_window is not None and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_swa)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
@@ -117,16 +110,15 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        if is_encoder_decoder:
+        if seq_group.is_encoder_decoder():
             num_required_blocks += BlockTable.get_num_required_blocks(
                 seq_group.get_encoder_seq().get_token_ids(),
                 block_size=self.block_size,
             )
 
-        assert self.block_sliding_window is None
-        if self.block_sliding_window is not None:
+        if self.max_block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
-                                      self.block_sliding_window)
+                                      self.max_block_sliding_window)
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
@@ -144,15 +136,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
+            max_block_sliding_window=self.max_block_sliding_window,
         )
-        assert self.block_sliding_window is None
         block_table.allocate(seq.get_token_ids())
 
         return block_table
 
     def allocate(self, seq_group: SequenceGroup) -> None:
-        encoder_seq = seq_group.get_encoder_seq()
-        is_encoder_decoder = seq_group.is_encoder_decoder()
 
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -179,15 +169,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
                 not in self.cross_block_tables), \
                 "block table already exists"
 
-        if (self.block_sliding_window is not None) and \
-           is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_swa)
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
-        if self.enable_caching and is_encoder_decoder:
-            raise NotImplementedError(str_not_impl_enc_dec_prefix_cache)
-
-        if is_encoder_decoder:
-            block_table = self._allocate_sequence(encoder_seq)
+        if seq_group.is_encoder_decoder():
+            block_table = self._allocate_sequence(seq_group.get_encoder_seq())
             self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
@@ -230,6 +215,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
+            num_computed_slots=seq.data.get_num_computed_tokens(),
         )
 
         # Return any new copy-on-writes.
