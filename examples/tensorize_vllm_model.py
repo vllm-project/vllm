@@ -5,14 +5,13 @@ import os
 import uuid
 from functools import partial
 
-from tensorizer import EncryptionParams, stream_io
+from tensorizer import stream_io
 
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 from vllm.model_executor.model_loader.tensorizer import (TensorizerArgs,
                                                          TensorizerConfig,
-                                                         serialize_vllm_model)
+                                                         tensorize_vllm_model)
 
 # yapf conflicts with isort for this docstring
 # yapf: disable
@@ -225,28 +224,12 @@ if __name__ == '__main__':
         else:
             model_path = f"{base_path}/model.tensors"
 
-        # create and write encryption key before initializing engine to support
-        # sharded models
-        if keyfile is not None:
-            encryption_params = EncryptionParams.random()
-            with _write_stream(keyfile) as stream:
-                stream.write(encryption_params.key)
-
         tensorizer_config = TensorizerConfig(
             tensorizer_uri=model_path,
             encryption_keyfile=keyfile,
             **credentials)
 
-        engine = LLMEngine.from_engine_args(engine_args)
-        if args.tensor_parallel_size > 1:
-            engine.model_executor._run_workers("save_tensorized_model",
-                tensorizer_config = tensorizer_config,
-            )
-        else:
-            serialize_vllm_model(
-                engine.model_executor.driver_worker.model_runner.model,
-                tensorizer_config,
-            )
+        tensorize_vllm_model(engine_args, tensorizer_config)
 
     elif args.command == "deserialize":
         if not tensorizer_args:

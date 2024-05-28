@@ -1,8 +1,8 @@
 import gc
 import json
 import multiprocessing as mp
-import pathlib
 import os
+import pathlib
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -14,14 +14,14 @@ from tensorizer import EncryptionParams
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
                                                          is_vllm_tensorized,
                                                          load_with_tensorizer,
                                                          open_stream,
-                                                         serialize_vllm_model)
+                                                         serialize_vllm_model,
+                                                         tensorize_vllm_model)
 
 from ..conftest import VllmRunner, cleanup
 from ..utils import ServerRunner
@@ -58,19 +58,6 @@ def get_torch_model(vllm_runner: VllmRunner):
             .driver_worker \
             .model_runner \
             .model
-
-def tensorize_vllm_model(engine_args: EngineArgs, tensorizer_config: TensorizerConfig):
-    engine = LLMEngine.from_engine_args(engine_args)
-    if engine_args.tensor_parallel_size > 1:
-        engine.model_executor._run_workers("save_tensorized_model",
-            tensorizer_config = tensorizer_config,
-        )
-    else:
-        serialize_vllm_model(
-            engine.model_executor.driver_worker.model_runner.model,
-           tensorizer_config,
-        )
-
 
 def write_keyfile(keyfile_path: str):
     encryption_params = EncryptionParams.random()
@@ -311,7 +298,6 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
     key_path = tmp_path / (model_ref + ".key")
-    write_keyfile(key_path)
 
     config_for_serializing = TensorizerConfig(
         tensorizer_uri=model_path,

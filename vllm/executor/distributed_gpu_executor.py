@@ -6,7 +6,6 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import ExecuteModelRequest, SamplerOutput
 
 logger = init_logger(__name__)
@@ -114,13 +113,6 @@ class DistributedGPUExecutor(GPUExecutor):
                           path=path,
                           pattern=pattern,
                           max_size=max_size)
-
-    def save_tensorized_model(
-        self,
-        tensorizer_config: TensorizerConfig,
-    ) -> None:
-        self._run_workers("save_tensorized_model",
-                          tensorizer_config=tensorizer_config)
 
     @abstractmethod
     def _driver_execute_model(
