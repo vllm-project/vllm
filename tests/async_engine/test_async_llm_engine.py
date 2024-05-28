@@ -32,6 +32,9 @@ class MockEngine:
     async def encode_request_async(self, *args, **kwargs):
         pass
 
+    async def stop_remote_worker_execution_loop_async(self):
+        pass
+
     def generate(self, request_id):
         self.request_id = request_id
 
@@ -56,7 +59,6 @@ class MockEngine:
 
     def has_unfinished_requests_for_virtual_engine(self, virtual_engine):
         return self.request_id is not None
-
 
 class MockAsyncLLMEngine(AsyncLLMEngine):
 
