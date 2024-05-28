@@ -106,7 +106,7 @@ class PagedAttention:
 
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
-        use_custom = ((os.environ["VLLM_USE_ROCM_CUSTOM_PAGED_ATTN"] == 1)
+        use_custom = ((os.environ["VLLM_USE_ROCM_CUSTOM_PAGED_ATTN"] == "1")
                         and query.dtype == torch.half
                         and query.shape[2] == 128
                         and block_size == 16)
