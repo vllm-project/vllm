@@ -1,4 +1,4 @@
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 from tqdm import tqdm
@@ -188,6 +188,59 @@ class LLM:
             self._add_request(**request_data)
 
         return self._run_engine(use_tqdm)
+
+    def generate_chat(
+        self,
+        messages: Union[List[Dict[str, str]], List[List[Dict[str, str]]]],
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        """
+        Generates chat responses for the input messages.
+
+        Converts the messages to prompts using the tokenizer and calls 
+        the `generate` method to generate the responses.
+
+        Args:
+            messages: A list of messages to generate responses for. Each 
+                message is a list of dictionaries with 'role' and 'content' 
+                keys.
+            sampling_params: The sampling parameters for text generation. 
+                If None, we use the default sampling parameters. When it 
+                is a single value, it is applied to every prompt. When it 
+                is a list, the list must have the same length as the 
+                prompts and it is paired one by one with the prompt.
+            use_tqdm: Whether to use tqdm to display the progress bar.
+            lora_request: LoRA request to use for generation, if any.
+            multi_modal_data: Multi modal data.
+
+        Returns:
+            A list of `RequestOutput` objects containing the generated 
+            responses in the same order as the input messages.
+        """
+
+        tokenizer = self.get_tokenizer()
+
+        if all(isinstance(i, list) for i in messages):
+            # Convert messages to prompts
+            prompts = [
+                tokenizer.apply_chat_template(message,
+                                              tokenize=False,
+                                              add_generation_template=True)
+                for message in messages
+            ]
+
+        else:
+            prompts = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_template=True)
+        return self.generate(prompts,
+                             sampling_params,
+                             use_tqdm=use_tqdm,
+                             lora_request=lora_request,
+                             multi_modal_data=multi_modal_data)
 
     def encode(
         self,
