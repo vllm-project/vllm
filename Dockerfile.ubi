@@ -211,3 +211,15 @@ COPY LICENSE /licenses/vllm.md
 
 USER 2000
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+
+
+FROM vllm-openai as vllm-grpc-adapter
+
+USER root
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install vllm-tgis-adapter
+
+ENV GRPC_PORT=8033
+USER 2000
+ENTRYPOINT ["python3", "-m", "vllm_tgis_adapter"]
