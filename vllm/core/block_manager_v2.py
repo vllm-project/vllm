@@ -1,6 +1,7 @@
 """A block manager that manages token blocks."""
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
+from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
@@ -65,9 +66,18 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.num_total_gpu_blocks = num_gpu_blocks
         self.num_total_cpu_blocks = num_cpu_blocks
 
-        assert sliding_window is None, "Sliding window not yet supported"
-
-        self.block_sliding_window = None
+        self.sliding_window = sliding_window
+        # max_block_sliding_window is the max number of blocks that need to be
+        # allocated
+        self.max_block_sliding_window = None
+        if sliding_window is not None:
+            # +1 here because // rounds down
+            num_blocks = sliding_window // block_size + 1
+            # +1 here because the last block may not be full,
+            # and so the sequence stretches one more block at the beginning
+            # For example, if sliding_window is 3 and block_size is 4,
+            # we may need 2 blocks when the second block only holds 1 token.
+            self.max_block_sliding_window = num_blocks + 1
 
         self.watermark = watermark
         assert watermark >= 0.0
@@ -95,10 +105,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_size=self.block_size,
         )
 
-        assert self.block_sliding_window is None
-        if self.block_sliding_window is not None:
+        if self.max_block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
-                                      self.block_sliding_window)
+                                      self.max_block_sliding_window)
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU)
@@ -124,8 +133,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         block_table = BlockTable(
             block_size=self.block_size,
             block_allocator=self.block_allocator,
+            max_block_sliding_window=self.max_block_sliding_window,
         )
-        assert self.block_sliding_window is None
+
         block_table.allocate(seq.get_token_ids())
         self.block_tables[seq.seq_id] = block_table
 
@@ -166,13 +176,14 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> Dict[int, List[int]]:
+    ) -> List[Tuple[int, int]]:
 
         block_table = self.block_tables[seq.seq_id]
 
         block_table.append_token_ids(
             token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
             num_lookahead_slots=num_lookahead_slots,
+            num_computed_slots=seq.data.get_num_computed_tokens(),
         )
 
         # Return any new copy-on-writes.
@@ -242,13 +253,13 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return AllocStatus.LATER
 
     def swap_in(self, seq_group: SequenceGroup,
-                num_lookahead_slots: int) -> Dict[int, int]:
+                num_lookahead_slots: int) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return False
 
-    def swap_out(self, seq_group: SequenceGroup) -> Dict[int, int]:
+    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
         raise NotImplementedError
 
     def get_num_free_gpu_blocks(self) -> int:

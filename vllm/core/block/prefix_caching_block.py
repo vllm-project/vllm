@@ -1,7 +1,7 @@
 """Token blocks."""
 from itertools import takewhile
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional
+from typing import Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -160,21 +160,17 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # If the evictor has blocks available for eviction, evict a block
         # and return it.
         if self.evictor.num_blocks > 0:
+            # here we get an evicted block, which is only added
+            # into evictor if its ref counter is 0
+            # and since its content would be changed, we need
+            # to remove it from _cached_blocks's tracking list
             block_id, content_hash_to_evict = self.evictor.evict()
 
-            # Here we may have scenario that several blocks have
-            # the same content hash, but due to the latter coming block
-            # is coming from mutable to immutable path, their physical
-            # block is added into evictor.
-            # However in this case, we shall not pop the _cached_blocks,
-            # as the same content is still used by others, which means
-            # we need to check ref before decide to pop the list.
-
             _block_id = self._cached_blocks[content_hash_to_evict]
-            refcount = self._refcounter.get(_block_id)
-            if refcount == 1:
-                self._cached_blocks.pop(content_hash_to_evict)
-                assert _block_id == block_id
+            assert self._refcounter.get(_block_id) == 0
+            assert _block_id == block_id
+
+            self._cached_blocks.pop(content_hash_to_evict)
 
             self._refcounter.incr(block_id)
 
@@ -199,7 +195,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def _incr_refcount_cached_block(self, block: Block,
                                     block_id: BlockId) -> None:
-        # since block is already computed, mark it
+        # now _incr_refcount_cached_block comes from two place
+        # allocate_immutable/promote_to_immutable_block where hit
+        # _cached_blocks hash key.
+        # In both cases, it means that already exists a already
+        # computed block which shared with block now
         block.computed = True
 
         refcount = self._refcounter.incr(block_id)
@@ -228,13 +228,19 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                  block: Block) -> None:
         assert isinstance(block, PrefixCachingBlock)
 
-        if block.content_hash is None:
+        # if we comes from promote_to_immutable_block, it means that
+        # block.content_hash is never None.
+        # However we need to release the same content block, so that
+        # physical block could get reused.
+        if block.block_id != block_id or block.content_hash is None:
             refcount = self._refcounter.get(block_id)
             # We have fork case where block would get more than one ref,
             # so we cannot free it from tracking if ref cnt large than 1
-            if refcount <= 1:
-                assert block.block_id is not None
+            assert block.block_id is not None
+            refcount = self._refcounter.get(block.block_id)
+            if refcount == 1:
                 del self._blocks[block.block_id]
+
             return self._hashless_allocator.free(block)
 
         refcount = self._refcounter.decr(block_id)
@@ -317,7 +323,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         if block.content_hash not in self._cached_blocks:
             self._cached_blocks[block.content_hash] = block.block_id
         else:
-            self._free_block_id_for_block(block.block_id, block)
+            self._free_block_id_for_block(
+                self._cached_blocks[block.content_hash], block)
             self._incr_refcount_cached_block(
                 block, self._cached_blocks[block.content_hash])
 
@@ -337,12 +344,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         return self._cow_tracker.cow_block_if_not_appendable(block)
 
-    def clear_copy_on_writes(self) -> Dict[BlockId, List[BlockId]]:
+    def clear_copy_on_writes(self) -> List[Tuple[BlockId, BlockId]]:
         """Returns the copy-on-write source->destination mapping and clears it.
 
         Returns:
-            Dict[BlockId, List[BlockId]]: A dictionary mapping source
-                block indices to lists of destination block indices.
+            List[Tuple[BlockId, BlockId]]: A list mapping source
+                block indices to destination block indices.
         """
         return self._cow_tracker.clear_cows()
 

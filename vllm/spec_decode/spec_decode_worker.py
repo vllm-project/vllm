@@ -1,8 +1,9 @@
 from functools import cached_property
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
@@ -17,9 +18,41 @@ from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
+from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
 logger = init_logger(__name__)
+
+
+def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
+    """Helper method that is the entrypoint for Executors which use
+    WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
+    """
+    assert "speculative_config" in kwargs
+    speculative_config = kwargs.get("speculative_config")
+    assert speculative_config is not None
+
+    target_worker = Worker(*args, **kwargs)
+
+    draft_worker_kwargs = kwargs.copy()
+    # Override draft-model specific worker args.
+    draft_worker_kwargs.update(
+        model_config=speculative_config.draft_model_config,
+        parallel_config=speculative_config.draft_parallel_config,
+        ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
+        ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
+        # TODO allow draft-model specific load config.
+        #load_config=load_config,
+    )
+
+    spec_decode_worker = SpecDecodeWorker.create_worker(
+        scorer_worker=target_worker,
+        draft_worker_kwargs=draft_worker_kwargs,
+        disable_by_batch_size=speculative_config.
+        speculative_disable_by_batch_size,
+    )
+
+    return spec_decode_worker
 
 
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
@@ -54,30 +87,33 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     def create_worker(
         cls,
         scorer_worker: WorkerBase,
-        draft_worker_kwargs,
+        draft_worker_kwargs: Dict[str, Any],
+        disable_by_batch_size: Optional[int],
     ) -> "SpecDecodeWorker":
 
-        if "ngram_prompt_lookup_max" in draft_worker_kwargs:
-            ngram_prompt_lookup_max = (
-                draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
-            ngram_prompt_lookup_min = (
-                draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
-        else:
-            ngram_prompt_lookup_max = 0
+        ngram_prompt_lookup_max = (
+            draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
+        ngram_prompt_lookup_min = (
+            draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
 
+        disable_bonus_tokens = True
         if ngram_prompt_lookup_max > 0:
+            disable_bonus_tokens = False
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
 
+        logger.info("Configuring SpecDecodeWorker with proposer=%s",
+                    type(proposer_worker))
+
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
-            # TODO(cade) disable strict mode for speedup.
-            rejection_sampler=RejectionSampler(strict_mode=True),
-        )
+            disable_by_batch_size=disable_by_batch_size,
+            rejection_sampler=RejectionSampler(
+                disable_bonus_tokens=disable_bonus_tokens, ))
 
     def __init__(
         self,
@@ -85,6 +121,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         scorer_worker: WorkerBase,
         rejection_sampler: RejectionSampler,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
+        disable_by_batch_size: Optional[int] = None,
     ):
         """
         Create a SpecDecodeWorker.
@@ -97,11 +134,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 Worker.
             rejection_sampler: A Torch module used to perform modified rejection
                 sampling for speculative decoding.
+            disable_by_batch_size: If the batch size is larger than this,
+                disable speculative decoding for new incoming requests.
             metrics_collector: Helper class for collecting metrics; can be set
                 for testing purposes.
         """
         self.proposer_worker = proposer_worker
         self.scorer_worker = scorer_worker
+        self.disable_by_batch_size = disable_by_batch_size or float("inf")
         self.rejection_sampler = rejection_sampler
 
         self._metrics = AsyncMetricsCollector(
@@ -134,6 +174,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
+
+    def load_model(self, *args, **kwargs):
+        pass
 
     def _configure_model_sampler_for_spec_decode(self):
         """Configure model sampler to emit GPU tensors. This allows spec decode
@@ -190,36 +233,105 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None
+    ) -> List[SamplerOutput]:
         """Perform speculative decoding on the input batch.
         """
+        if self.rank != self._driver_rank:
+            self._run_non_driver_rank()
+            return []
+
+        if execute_model_req is None:
+            # This signals that there's no more requests to process for now.
+            # All workers are running infinite loop with broadcast_tensor_dict,
+            # and it stops the loop when the driver broadcasts an empty input.
+            # Send an empty input to notify all other workers to stop their
+            # execution loop.
+            broadcast_tensor_dict({}, src=0)
+            return []
+
+        disable_all_speculation = self._should_disable_all_speculation(
+            execute_model_req)
+        num_lookahead_slots = execute_model_req.num_lookahead_slots
+
+        # Broadcast how many lookahead slots are scheduled for this step, and
+        # whether all speculation is disabled, to all non-driver workers.
+
+        # This is required as if the number of draft model runs changes
+        # dynamically, the non-driver workers won't know unless we perform a
+        # communication to inform then.
+        broadcast_dict = dict(
+            num_lookahead_slots=num_lookahead_slots,
+            disable_all_speculation=disable_all_speculation,
+        )
+        broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
 
         assert execute_model_req.seq_group_metadata_list is not None, (
-            "speculative decoding "
-            "requires non-None seq_group_metadata_list")
+            "speculative decoding requires non-None seq_group_metadata_list")
 
-        # If no spec tokens, call the proposer and scorer workers normally.
-        # Used for prefill.
-        if execute_model_req.num_lookahead_slots == 0 or len(
-                execute_model_req.seq_group_metadata_list) == 0:
-            return self._run_no_spec(execute_model_req)
+        self._maybe_disable_speculative_tokens(
+            disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
-        return self._run_speculative_decoding_step(execute_model_req)
+        # Speculative decoding is disabled in the following cases:
+        # 1. Prefill phase: Speculative decoding is not
+        #    used during the prefill phase.
+        # 2. Auto-disable enabled: The running queue size exceeds
+        #    the specified threshold.
+        # 3. No request: There are no requests in the batch.
+        # In any of these cases, the proposer and scorer workers
+        # are called normally.
+        if num_lookahead_slots == 0 or len(
+                execute_model_req.seq_group_metadata_list
+        ) == 0 or disable_all_speculation:
+            return self._run_no_spec(execute_model_req,
+                                     skip_proposer=disable_all_speculation)
+
+        return self._run_speculative_decoding_step(execute_model_req,
+                                                   num_lookahead_slots)
+
+    @torch.inference_mode()
+    def start_worker_execution_loop(self) -> None:
+        """Execute model loop to perform speculative decoding
+        in parallel worker."""
+        while self._run_non_driver_rank():
+            pass
+
+    def _should_disable_all_speculation(
+            self, execute_model_req: ExecuteModelRequest) -> bool:
+        # When the batch size is too large, disable speculative decoding
+        # to stop trading off throughput for latency.
+        disable_all_speculation = (execute_model_req.running_queue_size >=
+                                   self.disable_by_batch_size)
+
+        return disable_all_speculation
+
+    def _maybe_disable_speculative_tokens(
+            self, disable_all_speculation: bool,
+            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+        if not disable_all_speculation:
+            return
+
+        for seq_group_metadata in seq_group_metadata_list:
+            # Once num_speculative_tokens is set to 0, the spec decode
+            # of this request will be disabled forever.
+            # TODO(comaniac): We currently store spec decoding specific
+            # state in the global data structure, but we should maintain
+            # this state within spec decode worker.
+            seq_group_metadata.num_speculative_tokens = 0
 
     @nvtx_range("spec_decode_worker._run_no_spec")
-    def _run_no_spec(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
-        """Run a prefill step, without any speculation. The input is sent to the
-        proposer and scorer model so that the KV cache is consistent between the
-        two.
+    def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
+                     skip_proposer: bool) -> List[SamplerOutput]:
+        """Run a single generation step without any speculation. The input is
+        sent to the proposer and scorer model so that the KV cache is consistent
+        between the two. When skip_proposer is True, the proposer model is
+        not called, meaning that the kv-cache in proposer for requests is not
+        updated, so they cannot enable spec decode in the rest decoding.
         """
-        #logger.info("run proposer worker no spec")
+        if not skip_proposer:
+            self.proposer_worker.execute_model(execute_model_req)
 
-        self.proposer_worker.execute_model(execute_model_req)
-
-        #logger.info("run target worker no spec")
         sampler_output = self.scorer_worker.execute_model(execute_model_req)
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
@@ -231,10 +343,35 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output.logprobs = None
         return [sampler_output]
 
+    def _run_non_driver_rank(self) -> bool:
+        """Run proposer and verifier model in non-driver workers. This is used
+        for both speculation cases (num_lookahead_slots>0) and non-speculation
+        cases (e.g. prefill).
+
+        Returns True iff there are remaining sequences to process.
+        """
+        assert self.rank != self._driver_rank
+
+        data = broadcast_tensor_dict(src=self._driver_rank)
+        if not data:
+            return False
+        num_lookahead_slots = data["num_lookahead_slots"]
+
+        # Even if num_lookahead_slots is zero, we want to run the proposer model
+        # as it may have KV.
+        #
+        # We run the proposer once per lookahead slot. In the future we should
+        # delegate how many times it runs to the proposer.
+        for _ in range(max(num_lookahead_slots, 1)):
+            self.proposer_worker.execute_model()
+
+        self.scorer_worker.execute_model()
+        return True
+
     @nvtx_range("spec_decode_worker._run_speculative_decoding_step")
     def _run_speculative_decoding_step(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+            self, execute_model_req: ExecuteModelRequest,
+            num_lookahead_slots: int) -> List[SamplerOutput]:
         """Execute a single step of speculative decoding.
 
         This invokes the proposer worker to get k speculative tokens for each
@@ -243,23 +380,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
-        #logger.info("get spec proposals")
         # Generate proposals using draft worker.
         proposals = self.proposer_worker.get_spec_proposals(execute_model_req)
 
-        #logger.info("score proposals")
         proposal_scores = self.scorer.score_proposals(
             execute_model_req,
             proposals,
         )
 
-        #logger.info("verify proposals")
         accepted_token_ids, target_logprobs = self._verify_tokens(
             execute_model_req.seq_group_metadata_list, proposal_scores,
             proposals, execute_model_req.num_lookahead_slots)
 
-        #logger.info("create output list")
         return self._create_output_sampler_list(
             execute_model_req.seq_group_metadata_list,
             accepted_token_ids,
@@ -437,6 +571,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @property
     def device(self):
         return self.scorer_worker.device
+
+    @property
+    def _driver_rank(self) -> int:
+        return 0
 
     def get_cache_block_size_bytes(self):
         """Return the size of a cache block in bytes.

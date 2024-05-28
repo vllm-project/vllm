@@ -25,6 +25,7 @@ from torch import nn
 from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -46,6 +47,7 @@ class GPTBigCodeAttention(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -85,7 +87,9 @@ class GPTBigCodeAttention(nn.Module):
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               scale=self.scale,
-                              num_kv_heads=self.num_kv_heads)
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
         self,
@@ -143,6 +147,7 @@ class GPTBigCodeBlock(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -151,7 +156,7 @@ class GPTBigCodeBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPTBigCodeAttention(config, quant_config)
+        self.attn = GPTBigCodeAttention(config, cache_config, quant_config)
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPTBigMLP(inner_dim, config, quant_config)
 
@@ -184,18 +189,24 @@ class GPTBigCodeModel(nn.Module):
     def __init__(
         self,
         config: GPTBigCodeConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
-
-        self.wte = VocabParallelEmbedding(config.vocab_size, self.embed_dim)
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.wte = VocabParallelEmbedding(self.vocab_size,
+                                          self.embed_dim,
+                                          org_num_embeddings=config.vocab_size)
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.h = nn.ModuleList([
-            GPTBigCodeBlock(config, quant_config)
+            GPTBigCodeBlock(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
@@ -220,18 +231,35 @@ class GPTBigCodeModel(nn.Module):
 
 
 class GPTBigCodeForCausalLM(nn.Module):
+    packed_modules_mapping = {"c_attn": ["c_attn"]}
+
+    supported_lora_modules = ["c_fc", "c_proj", "wte", "lm_head", "c_attn"]
+
+    embedding_modules = {
+        "wte": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+
+    embedding_padding_modules = []
 
     def __init__(
         self,
         config: GPTBigCodeConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPTBigCodeModel(config, quant_config)
+        self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
+                                           lora_config)
         self.lm_head_weight = self.transformer.wte.weight
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size)
         self.sampler = Sampler()
 
     def forward(
