@@ -290,7 +290,7 @@ async def test_zero_logprobs_chat(server, client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.logprobs is not None
     assert choice.logprobs.content is not None
-    assert len(choice.logprobs.content[0].top_logprobs) <= 1
+    assert len(choice.logprobs.content[0].top_logprobs) == 1
 
 
 @pytest.mark.parametrize(
@@ -317,7 +317,7 @@ async def test_some_logprobs_chat(server, client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.logprobs is not None
     assert choice.logprobs.content is not None
-    assert len(choice.logprobs.content[0].top_logprobs) <= 6
+    assert len(choice.logprobs.content[0].top_logprobs) == 5
 
 
 @pytest.mark.parametrize(
