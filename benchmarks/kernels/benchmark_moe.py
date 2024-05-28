@@ -302,7 +302,7 @@ def main(args: argparse.Namespace):
         outputs = _benchmark(batch_sizes, 2 * shard_intermediate_size,
                              hidden_size, topk)
         for batch_size, (config, kernel_time) in zip(batch_sizes, outputs):
-            logger.info("W1 batch size: %d, config: %s", batch_size, config)
+            logger.info("Batch size: %d, config: %s", batch_size, config)
             logger.info("Kernel time: %.2f us", kernel_time)
 
 
