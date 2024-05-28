@@ -51,7 +51,7 @@ class StopChecker:
             # Remove the last EOS token unless explicitly specified
             # This prevents unintended exposure of the EOS token
             if new_char_count and (
-                not sampling_params.include_stop_str_in_output):
+                    not sampling_params.include_stop_str_in_output):
                 seq.output_text = seq.output_text[:-new_char_count]
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
