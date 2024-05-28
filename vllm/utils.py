@@ -2,7 +2,6 @@ import asyncio
 import datetime
 import enum
 import gc
-import glob
 import os
 import socket
 import subprocess
@@ -617,16 +616,6 @@ def find_library(lib_name: str) -> str:
 
 def find_nccl_library():
     so_file = envs.VLLM_NCCL_SO_PATH
-    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
-
-    # check if we have vllm-managed nccl
-    vllm_nccl_path = None
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
-        path = os.path.expanduser(
-            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-        files = glob.glob(path)
-        vllm_nccl_path = files[0] if files else None
 
     # manually load the nccl library
     if so_file:
@@ -635,7 +624,7 @@ def find_nccl_library():
             so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+            so_file = find_library("libnccl.so.2")
         elif torch.version.hip is not None:
             so_file = find_library("librccl.so.1")
         else:
