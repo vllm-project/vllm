@@ -510,7 +510,7 @@ def make_block_tables_slot_mapping(block_size,
 
     # Over-provision block table blocks by 1
     num_blocks_list = [
-        num_tokens_to_min_blocks(num_tokens, block_size) + 1
+        num_tokens_to_min_blocks(num_tokens, block_size)
         for num_tokens in seq_lens
     ]
     max_block_table_len = max(num_blocks_list)
@@ -521,7 +521,7 @@ def make_block_tables_slot_mapping(block_size,
     decode_slot_mapping = []
     slot_mapping = []
     block_base_idx = block_base_addr + sum(
-        num_blocks_list) * 2 - 1  # Support more blocks than needed
+        num_blocks_list)  # Support more blocks than needed
     max_block_idx = block_base_idx
     for sdx, num_tokens in enumerate(seq_lens):
         num_blocks = num_blocks_list[sdx]
@@ -692,21 +692,6 @@ def make_metadata_self_cross(
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
 
-
-def make_attention(num_heads: int, head_size: int, scale: float):
-    '''
-    Construct an instance of the Attention wrapper, suited to the number of
-    attention heads and head dimension (num_heads and head_size respectively) as
-    well as the attention scale factor (scale)
-    '''
-
-    return Attention(
-        num_heads,
-        head_size,
-        scale=scale,
-    )
-
-
 def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     '''
     Compute & build entities required for the self-/cross-attention test.
@@ -730,7 +715,11 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
 
     scale = float(1.0 / (head_size**0.5))
     attn_backend = make_backend(backend_name)
-    attn = make_attention(num_heads, head_size, scale)
+    attn = Attention(
+               num_heads,
+               head_size,
+               scale=scale,
+           )
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size, block_size)
     return scale, attn_backend, attn, kv_cache
 
