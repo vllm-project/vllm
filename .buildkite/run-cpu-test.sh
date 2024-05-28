@@ -16,9 +16,6 @@ docker run -itd -v ~/.cache/huggingface:/root/.cache/huggingface --network host 
 # offline inference
 docker exec cpu-test bash -c "python3 examples/offline_inference.py"
 
-# async engine test, not passing due to distributed inference support missing
-#docker exec cpu-test bash -c "cd tests; pytest -v -s async_engine"
-
 # Run basic model test
 docker exec cpu-test bash -c "cd tests;
   pip install pytest Pillow
@@ -28,6 +25,6 @@ docker exec cpu-test bash -c "cd tests;
     --ignore=tests/models/test_big_models.py --ignore=tests/models/test_embedding.py"
 
 # Run big model test
-#docker exec cpu-test bash -c "cd tests;
-#  sed -i 's/half/float/g' tests/models/test_big_tests/models.py
-#  pytest -v -s tests/models/test_big_tests/models.py"
+docker exec cpu-test bash -c "
+  sed -i 's/half/float/g' tests/models/test_big_models.py
+  pytest -v -s tests/models/test_big_models.py"
