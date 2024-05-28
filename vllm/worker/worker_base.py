@@ -121,8 +121,7 @@ class WorkerWrapperBase:
 
     def init_worker(self, *args, **kwargs):
         """
-        Actual initialization of the worker class, and set up
-        function tracing if required.
+        Here we inject some common logic before initializing the worker.
         Arguments are passed to the worker class constructor.
         """
         enable_trace_function_call_for_thread()
