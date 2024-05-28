@@ -1,9 +1,11 @@
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 from transformers import PreTrainedTokenizer
+
+from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
-from vllm.engine.output_processor.stop_checker import StopChecker
 
 
 def sequence_with_eos(text: str, eos_token: str,
