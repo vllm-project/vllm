@@ -237,3 +237,11 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_physical_block_id(self, device: Device, absolute_id: int) -> int:
         pass
+
+    def allocate_or_get_null_block(self) -> Block:
+        """
+        Null blocks are used as a placeholders for KV cache blocks that have
+        been dropped due to sliding window.
+        There is at most one null block per allocator.
+        """
+        pass

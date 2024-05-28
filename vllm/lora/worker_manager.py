@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod, abstractproperty
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Set, Type, Union
+from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
 import torch
 
@@ -17,11 +17,16 @@ logger = init_logger(__name__)
 class AbstractWorkerLoRAManager(ABC):
     """Abstract class for managing LoRA models on the worker side."""
 
-    def __init__(self, max_num_seqs: int, max_num_batched_tokens: int,
-                 vocab_size: int, lora_config: LoRAConfig,
-                 device: torch.device):
+    def __init__(self,
+                 max_num_seqs: int,
+                 max_num_batched_tokens: int,
+                 vocab_size: int,
+                 lora_config: LoRAConfig,
+                 device: torch.device,
+                 max_position_embeddings: Optional[int] = None):
         self.max_num_seqs = max_num_seqs
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_position_embeddings = max_position_embeddings
         self.vocab_size = vocab_size
         self.device = device
         self.lora_config = lora_config
@@ -92,14 +97,21 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
         embedding_modules: Dict[str, str],
         embedding_padding_modules: List[str],
         lora_model_cls: Type[LoRAModel] = LoRAModel,
+        max_position_embeddings: Optional[int] = None,
     ):
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self.embedding_padding_modules = embedding_padding_modules
         # Lazily initialized by create_lora_manager.
         self._lora_manager: LoRAModelManager
-        super().__init__(max_num_seqs, max_num_batched_tokens, vocab_size,
-                         lora_config, device)
+        super().__init__(
+            max_num_seqs,
+            max_num_batched_tokens,
+            vocab_size,
+            lora_config,
+            device,
+            max_position_embeddings=max_position_embeddings,
+        )
 
     @property
     def is_enabled(self) -> bool:
@@ -162,6 +174,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_request.lora_local_path,
                 expected_lora_modules,
+                max_position_embeddings=self.max_position_embeddings,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
                 dtype=self.lora_config.lora_dtype,
@@ -191,7 +204,7 @@ class WorkerLoRAManager(AbstractWorkerLoRAManager):
                 lora_request.lora_int_id)
         else:
             dummy_lora = self._lora_manager.create_dummy_lora(
-                lora_request.lora_int_id, rank, self.embedding_modules)
+                lora_request.lora_int_id, rank, 1, self.embedding_modules)
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._lora_manager.add_lora(dummy_lora)
