@@ -318,7 +318,8 @@ class OpenAIServingChat(OpenAIServing):
                             index=i,
                             delta=DeltaMessage(content=delta_text),
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason)
+                            finish_reason=output.finish_reason,
+                            stop_reason=output.stop_reason)
                         chunk = ChatCompletionStreamResponse(
                             id=request_id,
                             object=chunk_object_type,
@@ -376,7 +377,8 @@ class OpenAIServingChat(OpenAIServing):
                 index=output.index,
                 message=ChatMessage(role=role, content=output.text),
                 logprobs=logprobs,
-                finish_reason=output.finish_reason)
+                finish_reason=output.finish_reason,
+                stop_reason=output.stop_reason)
             choices.append(choice_data)
 
         if request.echo:

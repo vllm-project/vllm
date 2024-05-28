@@ -511,6 +511,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     message: ChatMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -532,6 +533,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    stop_reason: Optional[Union[int, str]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
