@@ -24,8 +24,8 @@ DTYPES = [torch.half, torch.bfloat16, torch.float
           ] if not is_hip() else [torch.half]
 NUM_GEN_SEQS = [1, 64]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-#NUM_HEADS = [(8*x, 8) for x in range(1,17)]  # Arbitrary values for testing
-NUM_HEADS = [(32, 32)]
+NUM_HEADS = [(8*x, 8) for x in range(1,17)]  # Arbitrary values for testing
+#NUM_HEADS = [(32, 32)]
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
@@ -113,7 +113,7 @@ def ref_single_query_cached_kv_attention(
         output[i].copy_(out, non_blocking=True)
 
 
-@pytest.mark.parametrize("version", ["v2"])
+@pytest.mark.parametrize("version", ["v2", "custom"])
 @pytest.mark.parametrize("num_seqs", NUM_GEN_SEQS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -198,7 +198,7 @@ def test_paged_attention(
             kv_cache_dtype,
             kv_scale,
         )
-    elif version == "v2":
+    elif version == "v2" or version == "custom":
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
                           PARTITION_SIZE)
         assert PARTITION_SIZE % block_size == 0
@@ -212,25 +212,43 @@ def test_paged_attention(
             dtype=torch.float32,
         )
         max_logits = torch.empty_like(exp_sums)
-        paged_attention_custom(
-        #ops.paged_attention_v2(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale,
-            block_tables,
-            context_lens,
-            block_size,
-            max_context_len,
-            alibi_slopes,
-            kv_cache_dtype,
-            #kv_scale,
-        )
+        if version == "v2":
+            ops.paged_attention_v2(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                context_lens,
+                block_size,
+                max_context_len,
+                alibi_slopes,
+                kv_cache_dtype,
+                kv_scale,
+            )
+        elif version == "custom":
+            paged_attention_custom(
+                output,
+                exp_sums,
+                max_logits,
+                tmp_output,
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                scale,
+                block_tables,
+                context_lens,
+                block_size,
+                max_context_len,
+                alibi_slopes,
+                kv_cache_dtype,
+            )
     else:
         raise AssertionError(f"Unknown version: {version}")
 
