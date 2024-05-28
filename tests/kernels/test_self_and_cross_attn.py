@@ -14,7 +14,8 @@ from vllm.utils import make_tensor_with_pad
 # If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
 #
 # TODO: FlashAttention forward only supports head dimension at most 128
-# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
+# https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d0
+# 37782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
@@ -113,7 +114,7 @@ def make_qkv(batch_size,
              max_kv_seq_len,
              num_heads,
              head_size,
-             is_cross_attn=True,
+             is_encoder_decoder_attn=True,
              force_max_len=False,
              device=CUDA_DEVICE):
     '''
@@ -137,12 +138,12 @@ def make_qkv(batch_size,
     * max_kv_seq_len: max key/value seq len
     * num_heads
     * head_size
-    * is_cross_attn: if True, query seqlen may differ from key/value seqlen (as
+    * is_encoder_decoder_attn: if True, query seqlen may differ from key/value seqlen (as
       is often the case for cross-attention); o/w, query/key/value seqlens match
       at each batch index (max_kv_seq_len is unused)
     * force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
       seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
-      and max_kv_seq_len, unless forced by is_cross_attn=False
+      and max_kv_seq_len, unless forced by is_encoder_decoder_attn=False
     * device: CPU or CUDA device
 
     Returns:
@@ -178,7 +179,7 @@ def make_qkv(batch_size,
             random.randint(2, max_q_seq_len) for _ in range(batch_size)
         ]
     kv_seq_lens = None
-    if not is_cross_attn:
+    if not is_encoder_decoder_attn:
         # K,V seq lens match Q for self-attention
         kv_seq_lens = q_seq_lens
     else:
@@ -644,7 +645,7 @@ def make_metadata_self_cross(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            is_cross_attn=False,
+            is_encoder_decoder_attn=False,
             cross_seq_lens=cross_seq_lens,
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
@@ -685,7 +686,7 @@ def make_metadata_self_cross(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            is_cross_attn=False,
+            is_encoder_decoder_attn=False,
             cross_seq_lens=cross_seq_lens,
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
@@ -840,7 +841,7 @@ def self_attn_setup(batch_size,
                                   max_kv_seq_len,
                                   num_heads,
                                   head_size,
-                                  is_cross_attn=False)
+                                  is_encoder_decoder_attn=False)
 
     causal_mask = build_causal_mask(max_q_seq_len,
                                     max_kv_seq_len).to(CUDA_DEVICE)
@@ -1004,7 +1005,7 @@ def cross_attn_setup_reuses_query(query,
                  max_kv_seq_len,
                  num_heads,
                  head_size,
-                 is_cross_attn=True)
+                 is_encoder_decoder_attn=True)
 
     ideal_output = ref_masked_attention(query,
                                         key,
