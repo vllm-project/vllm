@@ -138,9 +138,10 @@ def make_qkv(batch_size,
     * max_kv_seq_len: max key/value seq len
     * num_heads
     * head_size
-    * is_encoder_decoder_attn: if True, query seqlen may differ from key/value seqlen (as
-      is often the case for cross-attention); o/w, query/key/value seqlens match
-      at each batch index (max_kv_seq_len is unused)
+    * is_encoder_decoder_attn: if True, query seqlen may differ from 
+      key/value seqlen (as is often the case for cross-attention); 
+      o/w, query/key/value seqlens match at each batch index 
+      (max_kv_seq_len is unused)
     * force_max_len: if True, all query seqlens are max_q_seq_len; o/w query
       seqlens are random in [2,max_q_seq_lens]. Same for key/value seqlens
       and max_kv_seq_len, unless forced by is_encoder_decoder_attn=False

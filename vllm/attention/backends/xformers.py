@@ -225,7 +225,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_encoder_decoder_attn=False,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=
+                False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -261,7 +262,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_encoder_decoder_attn=True,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=
+                True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -297,7 +299,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_encoder_decoder_attn=False,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=
+                False,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -328,7 +331,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_encoder_decoder_attn=True,  # Begin cross-attention fields below...
+                is_encoder_decoder_attn=
+                True,  # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
