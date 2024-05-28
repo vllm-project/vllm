@@ -3,7 +3,6 @@ import asyncio
 import importlib
 import inspect
 import os
-import requests
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
@@ -26,7 +25,6 @@ from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
-from openai import OpenAI
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -182,45 +180,7 @@ def run_server(args):
                 ssl_certfile=args.ssl_certfile,
                 ssl_ca_certs=args.ssl_ca_certs,
                 ssl_cert_reqs=args.ssl_cert_reqs)
-    
-def complete(args, **kwargs):
-    if args.url is not None:
-        url = args.url
-    else:
-        url = f"http://{args.host}:{args.port}"
-    create_completion_url = url + "/v1/completions"
-    create_completion_headers = {
-        "Content-Type": "application/json"
-    }
 
-    if args.complete_model_name:
-        complete_model_name = args.complete_model_name
-    else:
-        query_models_url = url + "/v1/models"
-        list_models_response = requests.get(query_models_url)
-        if list_models_response.status_code == 200:
-            models_json = list_models_response.json()
-            if models_json["data"]:
-                complete_model_name = models_json["data"][0]["id"]
-            else:
-                raise Exception("No models available to use for completion.")
-    
-    completion_request_data = CompletionRequest(
-        model=complete_model_name,
-        prompt=args.complete_prompt,
-        **kwargs
-    ).model_dump()
-    
-    completion_response = requests.post(url=create_completion_url,
-                                        headers=create_completion_headers,
-                                        json=completion_request_data)
-    
-    if completion_response.status_code == 200:
-        completion = completion_response.json()
-        choice = completion.get("choices", [])[0].get("text", "No completion found.")
-        print(f"Response Content: {choice}")
-    else:
-        print(f"Error response: {completion_response.text}")
 
 if __name__ == "__main__":
     # NOTE(simon):
