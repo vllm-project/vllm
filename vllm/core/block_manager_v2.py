@@ -138,7 +138,6 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        assert self.block_sliding_window is None
         block_table.allocate(seq.get_token_ids())
 
         return block_table
