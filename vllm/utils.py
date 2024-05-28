@@ -564,28 +564,6 @@ def init_cached_hf_modules():
     init_hf_modules()
 
 
-def nccl_integrity_check(filepath):
-    """
-    when the library is corrupted, we cannot catch
-    the exception in python. it will crash the process.
-    instead, we use the exit code of `ldd` to check
-    if the library is corrupted. if not, we will return
-    the version of the library.
-    """
-    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
-    import ctypes
-
-    nccl = ctypes.CDLL(filepath)
-    version = ctypes.c_int()
-    nccl.ncclGetVersion.restype = ctypes.c_int
-    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    result = nccl.ncclGetVersion(ctypes.byref(version))
-    assert result == 0
-    return version.value
-
-
 @lru_cache(maxsize=None)
 def find_library(lib_name: str) -> str:
     """
