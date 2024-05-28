@@ -235,14 +235,14 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
     int32_t m = a.size(0);
     if (out.dtype() == torch::kBFloat16) {
 
-      using Cutlass3xGemmDefault = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::bfloat16_t,
-                                      TileShape, ClusterShape, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmDefault = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t,
+                                      TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
 
-      using Cutlass3xGemmM128 = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::bfloat16_t,
-                                      TileShapeM128, ClusterShapeM128, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmM128 = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t,
+                                      TileShapeM128, ClusterShapeM128, KernelSchedule, EpilogueSchedule>;
 
-      using Cutlass3xGemmM64 = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::bfloat16_t,
-                                      TileShapeM64, ClusterShapeM64, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmM64 = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t,
+                                      TileShapeM64, ClusterShapeM64, KernelSchedule, EpilogueSchedule>;
 
       if (m > 128) {
         return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmDefault>(
@@ -260,14 +260,14 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
 
-      using Cutlass3xGemmDefault = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::half_t,
-                                      TileShape, ClusterShape, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmDefault = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t,
+                                      TileShape, ClusterShape, KernelSchedule, EpilogueSchedule>;
 
-      using Cutlass3xGemmM128 = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::half_t,
-                                      TileShapeM128, ClusterShapeM128, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmM128 = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t,
+                                      TileShapeM128, ClusterShapeM128, KernelSchedule, EpilogueSchedule>;
 
-      using Cutlass3xGemmM64 = cutlass_3x_gemm<cutlass:float_e4m3_t, cutlass::half_t,
-                                      TileShapeM64, ClusterShapeM64, KernelShape, EpilogueSchedule>;
+      using Cutlass3xGemmM64 = cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t,
+                                      TileShapeM64, ClusterShapeM64, KernelSchedule, EpilogueSchedule>;
 
       if (m > 128) {
         return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmDefault>(
