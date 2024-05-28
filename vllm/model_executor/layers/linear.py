@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm import _custom_C
 from vllm.logger import init_logger
 from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parallel_utils.communication_op import (
