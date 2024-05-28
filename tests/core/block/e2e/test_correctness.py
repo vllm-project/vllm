@@ -4,6 +4,8 @@ import pytest
 
 from vllm import SamplingParams
 
+from .conftest import get_token_ids_from_llm_generator
+
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
@@ -444,12 +446,3 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
         assert expected_token_ids == actual_token_ids
 
     assert baseline_token_ids == test_token_ids
-
-
-def get_token_ids_from_llm_generator(llm_generator, prompts, sampling_params):
-    for llm in llm_generator:
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        del llm
-
-    return token_ids
