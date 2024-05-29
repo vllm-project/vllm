@@ -33,7 +33,7 @@ from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
                            SequenceGroup, SequenceGroupMetadata,
                            SequenceStatus)
-from vllm.tracing import init_tracer
+from vllm.tracing import SpanAttributes, init_tracer
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
                                                      get_tokenizer_group)
@@ -999,6 +999,7 @@ class LLMEngine:
         if seq_group.trace_context is None:
             return
         arrival_time_nano_seconds = int(seq_group.metrics.arrival_time * 1e9)
+
         with tracer.start_as_current_span(
                 "llm_request",
                 kind=SpanKind.SERVER,
@@ -1009,30 +1010,32 @@ class LLMEngine:
             e2e_time = now - seq_group.metrics.arrival_time
             # attribute names are based on
             # https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/llm-spans.md
-            seq_span.set_attribute("gen_ai.response.model",
+            seq_span.set_attribute(SpanAttributes.LLM_RESPONSE_MODEL,
                                    self.model_config.model)
-            seq_span.set_attribute("gen_ai.request.id", seq_group.request_id)
-            seq_span.set_attribute("gen_ai.request.temperature",
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_ID,
+                                   seq_group.request_id)
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TEMPERATURE,
                                    seq_group.sampling_params.temperature)
-            seq_span.set_attribute("gen_ai.request.top_p",
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_TOP_P,
                                    seq_group.sampling_params.top_p)
-            seq_span.set_attribute("gen_ai.request.max_tokens",
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_MAX_TOKENS,
                                    seq_group.sampling_params.max_tokens)
-            seq_span.set_attribute("gen_ai.request.best_of",
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_BEST_OF,
                                    seq_group.sampling_params.best_of)
-            seq_span.set_attribute("gen_ai.request.n",
+            seq_span.set_attribute(SpanAttributes.LLM_REQUEST_N,
                                    seq_group.sampling_params.n)
-            seq_span.set_attribute("gen_ai.usage.num_sequences",
+            seq_span.set_attribute(SpanAttributes.LLM_USAGE_NUM_SEQUENCES,
                                    seq_group.num_seqs())
-            seq_span.set_attribute("gen_ai.usage.prompt_tokens",
+            seq_span.set_attribute(SpanAttributes.LLM_USAGE_PROMPT_TOKENS,
                                    len(seq_group.prompt_token_ids))
             seq_span.set_attribute(
-                "gen_ai.usage.completion_tokens",
+                SpanAttributes.LLM_USAGE_COMPLETION_TOKENS,
                 sum([
                     seq.get_output_len()
                     for seq in seq_group.get_finished_seqs()
                 ]))
-            seq_span.set_attribute("gen_ai.latency.time_in_queue",
+            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_TIME_IN_QUEUE,
                                    seq_group.metrics.time_in_queue)
-            seq_span.set_attribute("gen_ai.latency.time_to_first_token", ttft)
-            seq_span.set_attribute("gen_ai.latency.e2e", e2e_time)
+            seq_span.set_attribute(
+                SpanAttributes.LLM_LATENCY_TIME_TO_FIRST_TOKEN, ttft)
+            seq_span.set_attribute(SpanAttributes.LLM_LATENCY_E2E, e2e_time)

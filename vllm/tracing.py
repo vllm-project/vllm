@@ -1,3 +1,4 @@
+import opentelemetry.semconv.ai
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
     OTLPSpanExporter)
 from opentelemetry.sdk.trace import TracerProvider
@@ -16,3 +17,15 @@ def init_tracer(instrumenting_module_name):
 
     tracer = trace_provider.get_tracer(instrumenting_module_name)
     return tracer
+
+
+class SpanAttributes(opentelemetry.semconv.ai.SpanAttributes):
+    # The following span attribute names are added here because they are missing
+    # from the Semantic Conventions for LLM.
+    LLM_REQUEST_ID = "gen_ai.request.id"
+    LLM_REQUEST_BEST_OF = "gen_ai.request.best_of"
+    LLM_REQUEST_N = "gen_ai.request.n"
+    LLM_USAGE_NUM_SEQUENCES = "gen_ai.usage.num_sequences"
+    LLM_LATENCY_TIME_IN_QUEUE = "gen_ai.latency.time_in_queue"
+    LLM_LATENCY_TIME_TO_FIRST_TOKEN = "gen_ai.latency.time_to_first_token"
+    LLM_LATENCY_E2E = "gen_ai.latency.e2e"
