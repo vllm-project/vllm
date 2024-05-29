@@ -162,6 +162,7 @@ def parse_args():
 def deserialize():
     llm = LLM(model=args.model,
               load_format="tensorizer",
+              tensor_parallel_size=args.tensor_parallel_size,
               model_loader_extra_config=tensorizer_config
     )
     return llm
