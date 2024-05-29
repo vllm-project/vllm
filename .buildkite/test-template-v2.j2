@@ -47,6 +47,12 @@ steps:
       queue: cpu_queue
     command: bash .buildkite/run-cpu-test.sh
 
+  - label: "Check"
+    depends_on: ~
+    agents:
+      queue: cpu_queue
+    command: bash .buildkite/run-check.sh
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     depends_on: ~
