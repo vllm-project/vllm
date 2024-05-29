@@ -747,7 +747,8 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     # Construct KV cache
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size, block_size)
     return scale, attn_backend, attn, kv_cache
-    
+
+
 def encoder_attn_setup(batch_size,
                        num_heads,
                        head_size,
@@ -870,8 +871,7 @@ def encoder_attn_setup(batch_size,
     #     prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
     #         bdx, :prefill_q_seq_len]
 
-    packed_ideal_output, _ = pack_tensor(ideal_output,
-                                         q_seq_lens)
+    packed_ideal_output, _ = pack_tensor(ideal_output, q_seq_lens)
 
     block_tables, \
     _, \
@@ -895,6 +895,7 @@ def encoder_attn_setup(batch_size,
     block_tables, \
     slot_mapping, \
     q_seq_lens
+
 
 def decoder_attn_setup(batch_size,
                        num_heads,
@@ -1245,7 +1246,6 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
 def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                            batch_size: int, block_size: int,
                            max_q_seq_len: int, max_kv_seq_len: int) -> None:
-
     '''
     Encoder-only attention test:
 
@@ -1327,10 +1327,9 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    assert torch.allclose(
-        packed_ideal_output,
-        packed_actual_output.view_as(
-            packed_ideal_output))
+    assert torch.allclose(packed_ideal_output,
+                          packed_actual_output.view_as(packed_ideal_output))
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
