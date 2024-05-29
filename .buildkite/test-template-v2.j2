@@ -49,7 +49,6 @@ steps:
 
   {% for step in steps %}
   - label: "{{ step.label }}"
-    depends_on: ~
     agents:
       {% if step.no_gpu %}
       queue: cpu_queue
