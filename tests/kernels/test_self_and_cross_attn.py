@@ -1202,6 +1202,7 @@ def run_encoder_or_decoder_self_attention_test(attn: Attention, packed_query: to
       & attn_metadata
     '''
     assert attn_type in [AttentionType.DECODER, AttentionType.ENCODER]
+    assert attn_metadata.is_prompt or attn_type != AttentionType.ENCODER
     attn_metadata.attention_type = attn_type
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
