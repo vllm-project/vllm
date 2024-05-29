@@ -5,6 +5,7 @@ import gc
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
@@ -234,9 +235,11 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                # NOTE: Pass the error msg in cancel()
-                # when only Python 3.9+ is supported.
-                task.cancel()
+                if sys.version_info >= (3, 9):
+                    # msg parameter only supported in Python 3.9+
+                    task.cancel(e)
+                else:
+                    task.cancel()
             raise e
         await asyncio.gather(*_tasks)
 
