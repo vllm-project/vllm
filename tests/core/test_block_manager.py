@@ -133,8 +133,11 @@ def test_append_slot_cow():
 
     # Allocate prompt to gpu block. There is one slot left in the block.
     prompt = Sequence(seq_id=1,
-                      prompt="one two three",
-                      prompt_token_ids=[1, 2, 3],
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [1, 2, 3],
+                          "multi_modal_data": None
+                      },
                       block_size=block_size)
 
     # Fork the sequence, such that a COW will be required when we append a new
@@ -142,8 +145,10 @@ def test_append_slot_cow():
     child = prompt.fork(new_seq_id=2)
 
     # Allocate space for the sequence group.
-    seq_group = SequenceGroup("1", [prompt, child], SamplingParams(),
-                              time.time(), time.perf_counter)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[prompt, child],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams())
     block_manager.allocate(seq_group)
 
     # Fork and append a new token id. We expect a COW to be scheduled.
@@ -302,9 +307,18 @@ def test_sliding_window_multi_seq():
 
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
-    parent = Sequence(1, "one two three", [0, 1, 2], block_size)
-    seq_group = SequenceGroup("1", [parent], SamplingParams(), time.time(),
-                              None)
+    parent = Sequence(seq_id=1,
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [0, 1, 2],
+                          "multi_modal_data": None
+                      },
+                      block_size=block_size)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[parent],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(),
+                              lora_request=None)
     block_manager.allocate(seq_group)
 
     # assert the number of blocks allocated is correct

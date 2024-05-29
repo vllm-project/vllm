@@ -9,7 +9,7 @@ from vllm.utils import is_hip
 logger = init_logger(__name__)
 
 # Architecture -> (module, class).
-_MODELS = {
+_GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
@@ -54,8 +54,16 @@ _MODELS = {
     "StableLMEpochForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "StableLmForCausalLM": ("stablelm", "StablelmForCausalLM"),
     "Starcoder2ForCausalLM": ("starcoder2", "Starcoder2ForCausalLM"),
+    "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "XverseForCausalLM": ("xverse", "XverseForCausalLM"),
+    "Phi3SmallForCausalLM": ("phi3_small", "Phi3SmallForCausalLM"),
 }
+
+_EMBEDDING_MODELS = {
+    "MistralModel": ("llama_embedding", "LlamaEmbeddingModel"),
+}
+
+_MODELS = {**_GENERATION_MODELS, **_EMBEDDING_MODELS}
 
 # Architecture -> type.
 # out of tree models
@@ -112,6 +120,10 @@ class ModelRegistry:
                 model_cls.__name__)
         global _OOT_MODELS
         _OOT_MODELS[model_arch] = model_cls
+
+    @staticmethod
+    def is_embedding_model(model_arch: str) -> bool:
+        return model_arch in _EMBEDDING_MODELS
 
 
 __all__ = [
