@@ -252,6 +252,78 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
+        ...
+
+    @overload  # LEGACY: single (token ids + optional prompt)
+    def generate(
+        self,
+        prompts: Optional[str] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        *,
+        prompt_token_ids: List[int],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # LEGACY: multi (token ids + optional prompt)
+    def generate(
+        self,
+        prompts: Optional[List[str]] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        List[SamplingParams]]] = None,
+        *,
+        prompt_token_ids: List[List[int]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload  # LEGACY: single or multi token ids [pos-only]
+    def generate(
+        self,
+        prompts: None,
+        sampling_params: None,
+        prompt_token_ids: Union[List[int], List[List[int]]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @overload
+    def generate(
+        self,
+        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        /,  # We may enable `inputs` keyword after removing the old API
+        *,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> List[RequestOutput]:
+        ...
+
+    @deprecate_kwargs("prompts",
+                      "prompt_token_ids",
+                      "multi_modal_data",
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+                      additional_message="Please use the 'inputs' parameter "
+                      "instead.")
+    def generate(
+        self,
+        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+                       Optional[Union[str, List[str]]]] = None,
+        sampling_params: Optional[Union[SamplingParams,
+                                        Sequence[SamplingParams]]] = None,
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
         NOTE: This class automatically batches the given prompts, considering
@@ -320,6 +392,78 @@ class LLM:
         lora_request: Optional[LoRARequest] = None,
         multi_modal_data_list: Optional[Union[
             Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        ...
+
+    @overload  # LEGACY: single (token ids + optional prompt)
+    def encode(
+        self,
+        prompts: Optional[str] = None,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        *,
+        prompt_token_ids: List[int],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        ...
+
+    @overload  # LEGACY: multi (token ids + optional prompt)
+    def encode(
+        self,
+        prompts: Optional[List[str]] = None,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        *,
+        prompt_token_ids: List[List[int]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        ...
+
+    @overload  # LEGACY: single or multi token ids [pos-only]
+    def encode(
+        self,
+        prompts: None,
+        pooling_params: None,
+        prompt_token_ids: Union[List[int], List[List[int]]],
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        ...
+
+    @overload
+    def encode(
+        self,
+        inputs: Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+        /,  # We may enable `inputs` keyword after removing the old API
+        *,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> List[EmbeddingRequestOutput]:
+        ...
+
+    @deprecate_kwargs("prompts",
+                      "prompt_token_ids",
+                      "multi_modal_data",
+                      is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
+                      additional_message="Please use the 'inputs' parameter "
+                      "instead.")
+    def encode(
+        self,
+        prompts: Union[Union[PromptStrictInputs, Sequence[PromptStrictInputs]],
+                       Optional[Union[str, List[str]]]] = None,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        prompt_token_ids: Optional[Union[List[int], List[List[int]]]] = None,
+        use_tqdm: bool = True,
+        lora_request: Optional[LoRARequest] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
