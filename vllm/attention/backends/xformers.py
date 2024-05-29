@@ -147,7 +147,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[AttentionBias]] = None
 
     @property
-    def has_valid_cross_attn_metadata(self):
+    def is_all_cross_attn_metadata_set(self):
         # No cross-attention metadata is present whatsoever
         no_md = (self.cross_seq_lens is
                  None) and (self.cross_slot_mapping is
@@ -173,7 +173,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     def attention_type(self, atype: AttentionType) -> None:
 
         if atype == AttentionType.ENCODER_DECODER:
-            assert self.has_valid_cross_attn_metadata, \
+            assert self.is_all_cross_attn_metadata_set, \
             "Must have self.cross_seq_lens not None " + \
             "in order to enable cross-attention"
 
