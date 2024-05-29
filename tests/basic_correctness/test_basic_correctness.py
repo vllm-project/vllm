@@ -18,7 +18,11 @@ VLLM_ATTENTION_BACKEND = "VLLM_ATTENTION_BACKEND"
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("facebook/opt-125m")
+    backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
+    enforce_eager = False
+    if backend_by_env_var == "FLASHINFER":
+        enforce_eager = True
+    llm = LLM("facebook/opt-125m", enforce_eager=enforce_eager)
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
