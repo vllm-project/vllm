@@ -106,7 +106,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value = value.view(batch_size, seq_len, self.num_kv_heads,
                            self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache[0] is not None:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
@@ -134,13 +134,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         else:
             # Decoding run.
             assert kv_cache is not None
-            # FIXME(woosuk): megacore must be None for TPUv5e.
-            if self.num_kv_heads % 2 == 0:
-                megacore_mode = "kv_head"
-            elif batch_size % 2 == 0:
-                megacore_mode = "batch"
-            else:
-                megacore_mode = None
+            megacore_mode = None
+            if torch_xla.tpu.version() == 4:
+                if self.num_kv_heads % 2 == 0:
+                    megacore_mode = "kv_head"
+                elif batch_size % 2 == 0:
+                    megacore_mode = "batch"
+
             output = torch.ops.xla.paged_attention(
                 query.squeeze(dim=1),
                 key_cache,
