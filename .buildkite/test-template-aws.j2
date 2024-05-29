@@ -63,9 +63,8 @@ steps:
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_TOKEN
-            - NVIDIA_VISIBLE_DEVICES=all
+            - NVIDIA_VISIBLE_DEVICES=0
             - CUDA_LAUNCH_BLOCKING=1
-            - NVIDIA_DRIVER_CAPABILITIES=compute,utility
           volumes:
             - /dev/shm:/dev/shm
   {% endfor %}
