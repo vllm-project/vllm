@@ -8,12 +8,10 @@ import torch
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
-from vllm.attention.backends.utils import (STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL,
-                                           STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+from vllm.attention.backends.utils import (
+    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL, STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 from vllm.attention.backends.xformers import XFormersBackend
-from vllm.utils import make_tensor_with_pad
-
-from vllm.utils import is_hip
+from vllm.utils import is_hip, make_tensor_with_pad
 
 # If not is_hip(): supported head sizes are [64, 80, 96, 112, 128, 256]
 #
@@ -1243,6 +1241,7 @@ def run_encoder_decoder_cross_attention_test(
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
+
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1340,6 +1339,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     # - Is encoder attention result correct?
     assert torch.allclose(packed_ideal_output,
                           packed_actual_output.view_as(packed_ideal_output))
+
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
