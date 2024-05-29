@@ -234,7 +234,6 @@ def test_append_slot_cow():
                       inputs={
                           "prompt": "one two three",
                           "prompt_token_ids": [1, 2, 3],
-                          "multi_modal_data": None
                       },
                       block_size=block_size)
 
@@ -525,7 +524,6 @@ def test_sliding_window_multi_seq():
                       inputs={
                           "prompt": "one two three",
                           "prompt_token_ids": [0, 1, 2],
-                          "multi_modal_data": None
                       },
                       block_size=block_size)
     seq_group = SequenceGroup(request_id="1",
