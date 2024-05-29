@@ -64,60 +64,42 @@ class TPUModelRunner:
         model = ModelWrapper(model)
         self.model = torch.compile(model, backend="openxla", fullgraph=True)
 
-    def warmup_model(
+    def _dummy_run(
         self,
+        batch_size: int,
+        seq_len: int,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        is_prefill: bool,
     ) -> None:
-        torch._dynamo.config.cache_size_limit = 128
-        # Prefill
-        logger.info("Compiling the model with different input shapes...")
-        start = time.time()
-        for batch_size in [1]:
-            for seq_len in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
-                if batch_size * seq_len > 8192:
-                    continue
-                token_ids = torch.zeros((batch_size, seq_len),
-                                        dtype=torch.int32,
-                                        device=self.device)
-                position_ids = torch.zeros((batch_size, seq_len),
-                                           dtype=torch.int32,
-                                           device=self.device)
-                slot_mapping = torch.zeros((batch_size, seq_len),
-                                           dtype=torch.int64,
-                                           device=self.device)
-                block_tables = None
-                context_lens = None
-                attn_metadata = self.attn_backend.make_metadata(
-                    num_prefills=0,
-                    num_prefill_tokens=0,
-                    num_decode_tokens=0,
-                    prefill_metadata=None,
-                    decode_metadata=None,
-                    kv_cache_dtype=None,
-                    slot_mapping=slot_mapping,
-                    block_tables=block_tables,
-                    context_lens=context_lens,
-                    is_prompt=True,
-                )
-                input_lens = torch.ones((batch_size, ),
-                                        dtype=torch.int32,
-                                        device=self.device)
-                xm.mark_step()
-
-                # Dummy run.
-                self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                           input_lens)
-                xm.mark_step()
-                xm.wait_device_ops()
-                logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
-
-        end = time.time()
-        logger.info(f"Compilation for prefill done in {(end - start):.2f} s.")
-
-        # Decode
-        start = time.time()
-        for batch_size in [1, 2, 4, 8] + [16 * i for i in range(1, 17)]:
-            seq_len = 1
+        if is_prefill:
+            token_ids = torch.zeros((batch_size, seq_len),
+                                    dtype=torch.int32,
+                                    device=self.device)
+            position_ids = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int32,
+                                       device=self.device)
+            slot_mapping = torch.zeros((batch_size, seq_len),
+                                       dtype=torch.int64,
+                                       device=self.device)
+            block_tables = None
+            context_lens = None
+            attn_metadata = self.attn_backend.make_metadata(
+                num_prefills=0,
+                num_prefill_tokens=0,
+                num_decode_tokens=0,
+                prefill_metadata=None,
+                decode_metadata=None,
+                kv_cache_dtype=None,
+                slot_mapping=slot_mapping,
+                block_tables=block_tables,
+                context_lens=context_lens,
+                is_prompt=True,
+            )
+            input_lens = torch.ones((batch_size, ),
+                                    dtype=torch.int32,
+                                    device=self.device)
+        else:
+            assert seq_len == 1
             token_ids = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int32,
                                     device=self.device)
@@ -148,12 +130,41 @@ class TPUModelRunner:
                 context_lens=context_lens,
                 is_prompt=False,
             )
-            xm.mark_step()
 
-            # Dummy run.
-            self.model(token_ids, position_ids, kv_caches, attn_metadata,
-                       input_lens)
-            xm.mark_step()
+        xm.mark_step()
+        # Dummy run.
+        self.model(token_ids, position_ids, kv_caches, attn_metadata,
+                   input_lens)
+        xm.mark_step()
+
+    def warmup_model(
+        self,
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+    ) -> None:
+        return
+        torch._dynamo.config.cache_size_limit = 128
+        # Prefill
+        logger.info("Compiling the model with different input shapes...")
+        start = time.time()
+        for batch_size in [1]:
+            for seq_len in [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]:
+                if batch_size * seq_len > 8192:
+                    continue
+                self._dummy_run(batch_size,
+                                seq_len,
+                                kv_caches,
+                                is_prefill=True)
+                xm.wait_device_ops()
+                logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
+
+        end = time.time()
+        logger.info(f"Compilation for prefill done in {(end - start):.2f} s.")
+
+        # Decode
+        start = time.time()
+        for batch_size in [1, 2, 4, 8] + [16 * i for i in range(1, 17)]:
+            seq_len = 1
+            self._dummy_run(batch_size, seq_len, kv_caches, is_prefill=False)
             xm.wait_device_ops()
             logger.info(f"batch_size: {batch_size}, seq_len: {seq_len}")
 
@@ -386,19 +397,20 @@ class ModelWrapper(nn.Module):
             batch_size, dtype=torch.int32, device=input_lens.device) * seq_len
         logits_indices = base_indicies + input_lens - 1
 
-        num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
-        slot_mapping = attn_metadata.slot_mapping
-        slot_mapping = slot_mapping.flatten()
-        head_indicies = torch.arange(0,
-                                     num_kv_heads,
-                                     device=slot_mapping.device,
-                                     dtype=slot_mapping.dtype)
-        head_indicies *= block_size * num_blocks
-        slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
-            -1, num_kv_heads)
-        slot_mapping = slot_mapping + head_indicies.view(1, -1)
-        slot_mapping = slot_mapping.flatten()
-        attn_metadata.slot_mapping = slot_mapping
+        if kv_caches[0][0] is not None:
+            num_kv_heads, num_blocks, block_size, _ = kv_caches[0][0].shape
+            slot_mapping = attn_metadata.slot_mapping
+            slot_mapping = slot_mapping.flatten()
+            head_indicies = torch.arange(0,
+                                         num_kv_heads,
+                                         device=slot_mapping.device,
+                                         dtype=slot_mapping.dtype)
+            head_indicies *= block_size * num_blocks
+            slot_mapping = slot_mapping.repeat_interleave(num_kv_heads).view(
+                -1, num_kv_heads)
+            slot_mapping = slot_mapping + head_indicies.view(1, -1)
+            slot_mapping = slot_mapping.flatten()
+            attn_metadata.slot_mapping = slot_mapping
 
         hidden_states = self.model(
             token_ids,

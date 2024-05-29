@@ -73,7 +73,29 @@ class TPUWorker(LoraNotSupportedWorkerBase):
         self.model_runner.load_model()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        num_tpu_blocks = 2000  # FIXME
+        num_layers = self.model_config.get_num_layers(self.parallel_config)
+        head_size = self.model_config.get_head_size()
+        num_kv_heads = self.model_config.get_num_kv_heads(self.parallel_config)
+        num_tokens = self.scheduler_config.max_num_batched_tokens
+
+        kv_caches = [(None, None) for _ in range(num_layers)]
+        self.model_runner._dummy_run(
+            batch_size=1,
+            seq_len=num_tokens,
+            kv_caches=kv_caches,
+            is_prefill=True,
+        )
+        xm.wait_device_ops()
+
+        m = xm.get_memory_info(self.device)
+        free_bytes = m["bytes_limit"] - m["bytes_used"]
+        kv_cache_bytes = int(free_bytes *
+                             self.cache_config.gpu_memory_utilization)
+        kv_cache_dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size = self.cache_config.block_size
+        num_tpu_blocks = (kv_cache_bytes //
+                          (kv_cache_dtype_btyes * block_size * num_layers * 2 *
+                           head_size * num_kv_heads))
         return num_tpu_blocks, 0
 
     def initialize_cache(
