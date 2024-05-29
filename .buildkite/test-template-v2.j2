@@ -5,6 +5,7 @@
 steps:
   - label: ":docker: build image"
     commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
       - "docker push {{ docker_image }}"
     agents:
@@ -71,6 +72,7 @@ steps:
       - docker#v5.2.0:
           image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:9597351df7f8d7f7be3c25da5ed9e3e1a2b1002d"
           always-pull: true
+          propagate-environment: true
           {% if not step.no_gpu %}
           gpus: all
           {% endif %}

@@ -39,6 +39,8 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
+    hf_token = os.getenv("HF_TOKEN")
+    print("HF TOKEN: ", hf_token)
     backend_by_env_var = os.getenv(VLLM_ATTENTION_BACKEND)
     if backend_by_env_var == "FLASHINFER" and enforce_eager is False:
         pytest.skip("Skipping non-eager test for FlashInferBackend.")
