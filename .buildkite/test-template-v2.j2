@@ -49,6 +49,7 @@ steps:
 
   {% for step in steps %}
   - label: "{{ step.label }}"
+    depends_on: ~
     agents:
       {% if step.no_gpu %}
       queue: cpu_queue
@@ -69,7 +70,7 @@ steps:
           limit: 5
     plugins:
       - docker#v5.2.0:
-          image: {{ docker_image }}
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:472ad7e320a4948d6dd1b3d3ccd7d931d13539bf"
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
