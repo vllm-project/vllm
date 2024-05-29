@@ -5,11 +5,13 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
 SeqId = int
+EncoderSeqId = str
 
 
 class BlockSpaceManagerV2(BlockSpaceManager):
@@ -94,16 +96,25 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
+        self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         # FIXME(woosuk): Here we assume that all sequences in the group share
         # the same prompt. This may not be true for preempted sequences.
-        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
 
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
+
+        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
             seq.get_token_ids(),
             block_size=self.block_size,
         )
+
+        if seq_group.is_encoder_decoder():
+            num_required_blocks += BlockTable.get_num_required_blocks(
+                seq_group.get_encoder_seq().get_token_ids(),
+                block_size=self.block_size,
+            )
 
         if self.max_block_sliding_window is not None:
             num_required_blocks = min(num_required_blocks,
@@ -121,7 +132,19 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         else:
             return AllocStatus.LATER
 
+    def _allocate_sequence(self, seq: Sequence) -> BlockTable:
+        block_table = BlockTable(
+            block_size=self.block_size,
+            block_allocator=self.block_allocator,
+            max_block_sliding_window=self.max_block_sliding_window,
+        )
+        block_table.allocate(seq.get_token_ids())
+
+        return block_table
+
     def allocate(self, seq_group: SequenceGroup) -> None:
+
+        # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
         assert not (set(seq.seq_id for seq in waiting_seqs)
                     & self.block_tables.keys()), "block table already exists"
@@ -129,19 +152,28 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         # NOTE: Here we assume that all sequences in the group have the same
         # prompt.
         seq = waiting_seqs[0]
-
-        block_table = BlockTable(
-            block_size=self.block_size,
-            block_allocator=self.block_allocator,
-            max_block_sliding_window=self.max_block_sliding_window,
-        )
-
-        block_table.allocate(seq.get_token_ids())
+        block_table: BlockTable = self._allocate_sequence(seq)
         self.block_tables[seq.seq_id] = block_table
 
         # Assign the block table for each sequence.
         for seq in waiting_seqs[1:]:
             self.block_tables[seq.seq_id] = block_table.fork()
+
+        # Allocate cross-attention block table for encoder sequence
+        #
+        # NOTE: Here we assume that all sequences in the group have the same
+        # encoder prompt.
+        request_id = seq_group.request_id
+
+        assert (request_id
+                not in self.cross_block_tables), \
+                "block table already exists"
+
+        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
+
+        if seq_group.is_encoder_decoder():
+            block_table = self._allocate_sequence(seq_group.get_encoder_seq())
+            self.cross_block_tables[request_id] = block_table
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -197,9 +229,24 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self.block_tables[seq.seq_id].free()
         del self.block_tables[seq.seq_id]
 
+    def free_cross(self, seq_group: SequenceGroup) -> None:
+        request_id = seq_group.request_id
+        if request_id not in self.cross_block_tables:
+            # Already freed or hasn't been scheduled yet.
+            return
+        self.cross_block_tables[request_id].free()
+        del self.cross_block_tables[request_id]
+
     def get_block_table(self, seq: Sequence) -> List[int]:
         assert seq.seq_id in self.block_tables
         block_ids = self.block_tables[seq.seq_id].physical_block_ids
+        assert all(b is not None for b in block_ids)
+        return block_ids  # type: ignore
+
+    def get_cross_block_table(self, seq_group: SequenceGroup) -> List[int]:
+        request_id = seq_group.request_id
+        assert request_id in self.cross_block_tables
+        block_ids = self.cross_block_tables[request_id].physical_block_ids
         assert all(b is not None for b in block_ids)
         return block_ids  # type: ignore
 
