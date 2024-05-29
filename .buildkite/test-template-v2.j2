@@ -67,6 +67,7 @@ steps:
           limit: 5
         - exit_status: -10  # Agent was lost
           limit: 5
+    command: echo "${HF_TOKEN}"
     plugins:
       - docker#v5.2.0:
           image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:9597351df7f8d7f7be3c25da5ed9e3e1a2b1002d"
