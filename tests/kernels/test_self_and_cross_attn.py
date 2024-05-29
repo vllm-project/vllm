@@ -1178,11 +1178,11 @@ def enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
     max_block_idx
 
 
-def run_encoder_or_decoder_self_attention_test(attn: Attention, packed_query: torch.Tensor,
-                                               packed_key: torch.Tensor,
-                                               packed_value: torch.Tensor, kv_cache: torch.Tensor,
-                                               attn_metadata: AttentionMetadata,
-                                               attn_type: AttentionType) -> torch.Tensor:
+def run_encoder_or_decoder_self_attention_test(
+        attn: Attention, packed_query: torch.Tensor, packed_key: torch.Tensor,
+        packed_value: torch.Tensor, kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        attn_type: AttentionType) -> torch.Tensor:
     '''
     Run encoder attention or decoder self-attention test.
 
@@ -1206,17 +1206,17 @@ def run_encoder_or_decoder_self_attention_test(attn: Attention, packed_query: to
       & attn_metadata
     '''
     assert attn_type in [AttentionType.DECODER, AttentionType.ENCODER]
-    assert attn_metadata.num_decode_tokens==0 or attn_type != AttentionType.ENCODER
+    assert attn_metadata.num_decode_tokens == 0 or \
+      attn_type != AttentionType.ENCODER
     attn_metadata.attention_type = attn_type
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
 
-def run_encoder_decoder_cross_attention_test(attn: Attention, packed_query: torch.Tensor,
-                                             packed_key: torch.Tensor,
-                                             packed_value: torch.Tensor,
-                                             kv_cache: torch.Tensor,
-                                             attn_metadata: AttentionMetadata) -> torch.Tensor:
+def run_encoder_decoder_cross_attention_test(
+        attn: Attention, packed_query: torch.Tensor, packed_key: torch.Tensor,
+        packed_value: torch.Tensor, kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata) -> torch.Tensor:
     '''
     Run encoder/decoder cross-attention test.
 
@@ -1323,7 +1323,8 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         is_encoder_only_test=True,
     )
 
-    packed_actual_output: torch.Tensor = run_encoder_or_decoder_self_attention_test(
+    packed_actual_output: torch.Tensor = \
+      run_encoder_or_decoder_self_attention_test(
         attn,
         packed_query,
         packed_key,
@@ -1458,7 +1459,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         cross_slot_mapping=cross_prefill_slot_mapping,
     )
 
-    self_prefill_packed_actual_output: torch.Tensor = run_encoder_or_decoder_self_attention_test(
+    self_prefill_packed_actual_output: torch.Tensor = \
+      run_encoder_or_decoder_self_attention_test(
         attn,
         prefill_packed_query,
         self_prefill_packed_key,
@@ -1473,7 +1475,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         self_prefill_packed_actual_output.view_as(
             self_prefill_packed_ideal_output))
 
-    cross_prefill_packed_actual_output: torch.Tensor = run_encoder_decoder_cross_attention_test(
+    cross_prefill_packed_actual_output: torch.Tensor = \
+      run_encoder_decoder_cross_attention_test(
         attn, prefill_packed_query, cross_prefill_packed_key,
         cross_prefill_packed_value, kv_cache, prefill_attn_metadata)
 
@@ -1500,7 +1503,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         cross_slot_mapping=cross_decode_slot_mapping,
     )
 
-    self_decode_packed_actual_output: torch.Tensor = run_encoder_or_decoder_self_attention_test(
+    self_decode_packed_actual_output: torch.Tensor = \
+      run_encoder_or_decoder_self_attention_test(
         attn,
         decode_packed_query,
         self_decode_packed_key,
@@ -1515,7 +1519,8 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         self_decode_packed_actual_output.view_as(
             self_decode_packed_ideal_output))
 
-    cross_decode_packed_actual_output: torch.Tensor = run_encoder_decoder_cross_attention_test(
+    cross_decode_packed_actual_output: torch.Tensor = \
+      run_encoder_decoder_cross_attention_test(
         attn, decode_packed_query, None, None, kv_cache, decode_attn_metadata)
 
     # - Decode cross-attention correct?
