@@ -449,8 +449,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if attn_type != AttentionType.DECODER:
             # Raise NotImplementedError for unsupported encoder/decoder
             # scenarios
-            from vllm.attention.backends.utils import \
-                check_hip_or_chunked_prefill_attention_encdec
+            from vllm.attention.backends.utils import (
+                check_hip_or_chunked_prefill_attention_encdec)
             check_hip_or_chunked_prefill_attention_encdec(attn_metadata)
 
         if (kv_cache is not None):
