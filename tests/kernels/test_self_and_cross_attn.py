@@ -8,6 +8,7 @@ import torch
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
+from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import make_tensor_with_pad
 
@@ -1528,3 +1529,15 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         cross_decode_packed_ideal_output,
         cross_decode_packed_actual_output.view_as(
             cross_decode_packed_ideal_output))
+
+    # Set up a contrived scenario where the attention metadata
+    # is configured for chunked prefill & encoder/decoder cross-
+    # attention. Required that this triggers a NotImplementedError.
+    decode_attn_metadata.num_prefill_tokens = 1
+    with pytest.raises(NotImplementedError) as exc_info:
+        run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
+                                                 None, None, kv_cache,
+                                                 decode_attn_metadata)
+
+    # "Encoder decoder models do not currently support chunked prefill"
+    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL

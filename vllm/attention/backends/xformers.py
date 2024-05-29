@@ -11,6 +11,7 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
+from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -477,10 +478,18 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        assert attn_type == AttentionType.ENCODER_DECODER or (
-            key.shape[0] == num_prefill_tokens + num_decode_tokens)
-        assert attn_type == AttentionType.ENCODER_DECODER or (
-            value.shape[0] == num_prefill_tokens + num_decode_tokens)
+        if attn_type == AttentionType.ENCODER_DECODER:
+            # Encoder/decoder models are currently incompatible
+            # with chunked prefill.
+            if num_prefill_tokens > 0 and num_decode_tokens > 0:
+                raise NotImplementedError( \
+                    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL)
+        else:
+            # This is a decoder self-attention scenario;
+            # ensure key/value shape match total number of
+            # tokens to process
+            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
