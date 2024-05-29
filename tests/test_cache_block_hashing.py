@@ -74,7 +74,6 @@ def test_auto_prefix_caching(model: str, block_size: int, max_num_seqs: int,
                                inputs={
                                    "prompt": prompt,
                                    "prompt_token_ids": prompt_token_ids,
-                                   "multi_modal_data": None,
                                },
                                block_size=block_size,
                                eos_token_id=tokenizer.tokenizer.eos_token_id,
