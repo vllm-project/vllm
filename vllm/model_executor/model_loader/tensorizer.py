@@ -1,10 +1,12 @@
 import argparse
 import dataclasses
+import io
+import os
 import re
 import time
 from dataclasses import dataclass
 from functools import partial
-from typing import Generator, Optional, Tuple, Type, Union
+from typing import BinaryIO, Generator, Optional, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -14,7 +16,6 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
-from vllm.executor.distributed_gpu_executor import DistributedGPUExecutor
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -59,14 +60,13 @@ class TensorizerConfig:
     model_class: Optional[Type[torch.nn.Module]] = None
     hf_config: Optional[PretrainedConfig] = None
     dtype: Optional[Union[str, torch.dtype]] = None
+    _is_sharded: bool = False
 
     def __post_init__(self):
-        if not isinstance(self.tensorizer_uri, str):
-            try:
-                self.tensorizer_uri = str(self.tensorizer_uri)
-            except Exception as exc:
-                raise ValueError(
-                    "tensorizer_uri must be convertible to a string") from exc
+        # check if the configuration is for a sharded model
+        if isinstance(self.tensorizer_uri, str) \
+            and re.search(r'%0\dd', self.tensorizer_uri):
+            self._is_sharded = True
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
@@ -85,16 +85,14 @@ class TensorizerConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        if (parallel_config.tensor_parallel_size == 1):
-            return
-
-        if (uri := self.tensorizer_uri) is not None:
-            rank_format_match = re.search(r'%0\dd', uri)
-            if not rank_format_match:
-                raise ValueError(
-                    "For a sharded model, Tensorizer URI should include a"
-                    " string format template like '%04d' to be formatted"
-                    " with the rank of the shard")
+        # tensorizer_uri is used for a vLLM serialized model
+        if self.tensorizer_uri \
+            and parallel_config.tensor_parallel_size > 1 \
+            and not self._is_sharded:
+            raise ValueError(
+                "For a sharded model, tensorizer_uri should include a"
+                " string format template like '%04d' to be formatted"
+                " with the rank of the shard")
 
     def verify_with_model_config(self, model_config: "ModelConfig") -> None:
         if (model_config.quantization is not None
@@ -112,7 +110,8 @@ def load_with_tensorizer(tensorizer_config: TensorizerConfig,
 
 @dataclass
 class TensorizerArgs:
-    tensorizer_uri: str
+    tensorizer_uri: Union[io.BufferedIOBase, io.RawIOBase, BinaryIO, str,
+                          bytes, os.PathLike, int]
     vllm_tensorized: Optional[bool] = False
     verify_hash: Optional[bool] = False
     num_readers: Optional[int] = None
@@ -426,7 +425,7 @@ def serialize_vllm_model(
         encryption_params = EncryptionParams(key=key)
 
     output_file = tensorizer_args.tensorizer_uri
-    if re.search(r'%0\dd', output_file):
+    if tensorizer_config._is_sharded:
         from vllm.distributed import get_tensor_model_parallel_rank
         output_file = output_file % get_tensor_model_parallel_rank()
 
@@ -446,6 +445,11 @@ def tensorize_vllm_model(engine_args: EngineArgs,
        Intended to be used separately from running a vLLM server since it
        creates its own Engine instance.
     """
+    engine_config = engine_args.create_engine_config()
+    tensorizer_config.verify_with_model_config(engine_config.model_config)
+    tensorizer_config.verify_with_parallel_config(
+        engine_config.parallel_config)
+
     # generate the encryption key before creating the engine to support sharding
     if generate_keyfile and (keyfile :=
                              tensorizer_config.encryption_keyfile) is not None:
@@ -459,7 +463,7 @@ def tensorize_vllm_model(engine_args: EngineArgs,
             stream.write(encryption_params.key)
 
     engine = LLMEngine.from_engine_args(engine_args)
-    if isinstance(engine.model_executor, DistributedGPUExecutor):
+    if tensorizer_config._is_sharded:
         # if the engine is a distributed engine (for tensor parallel) then each
         # worker shard needs to serialize its part of the model.
         engine.model_executor._run_workers(
