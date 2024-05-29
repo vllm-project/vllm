@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from typing import Callable, Dict, List, Optional
 
@@ -105,12 +106,20 @@ def can_actually_p2p(i, j):
     cuda_visible_devices = os.getenv('CUDA_VISIBLE_DEVICES', None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
-    temp_path = tempfile.mktemp()
+
+    # make sure the temp file is not the same across different calls
+    temp_path = tempfile.mktemp() + str(time.time())
+    # create an empty file
+    with open(temp_path, "w"):
+        pass
     init_method = f"file://{temp_path}"
-    pi = mp.Process(target=producer,
-                    args=(i, init_method, cuda_visible_devices))
-    pj = mp.Process(target=consumer,
-                    args=(j, init_method, cuda_visible_devices))
+
+    # make sure the processes are spawned
+    smp = mp.get_context("spawn")
+    pi = smp.Process(target=producer,
+                     args=(i, init_method, cuda_visible_devices))
+    pj = smp.Process(target=consumer,
+                     args=(j, init_method, cuda_visible_devices))
     pi.start()
     pj.start()
     pi.join()
