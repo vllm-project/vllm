@@ -2,6 +2,8 @@ import os
 import subprocess
 import sys
 import time
+import warnings
+from contextlib import contextmanager
 
 import ray
 import requests
@@ -88,3 +90,15 @@ def multi_process_tensor_parallel(
     ray.get(refs)
 
     ray.shutdown()
+
+
+@contextmanager
+def error_on_warning():
+    """
+    Within the scope of this context manager, tests will fail if any warning
+    is emitted.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+
+        yield
