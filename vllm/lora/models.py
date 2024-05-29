@@ -20,6 +20,12 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.utils import LRUCache, is_pin_memory_available
 
+# NOTE: The number of _MAX_BATCHS derived from worker's model_runner.
+# _BATCH_SIZES_TO_CAPTURE.It needs to be updated if _BATCH_SIZES_TO_CAPTURE
+# is changed.
+
+_MAX_BATCHS = 256+16 #max(_BATCH_SIZES_TO_CAPTURE)+16
+
 logger = init_logger(__name__)
 
 _GLOBAL_LORA_ID = 0
@@ -83,7 +89,7 @@ def convert_mapping(
     """
     index_mapping_indices: List[int] = list(mapping.index_mapping).copy()
     embedding_indices = index_mapping_indices.copy()
-    lora_indices = index_mapping_indices.copy()
+    lora_indices = mapping.batch_mapping.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
@@ -93,22 +99,27 @@ def convert_mapping(
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
     ]
-    lora_idx = None
+    token_lora_idx = None
     for i in range(len(index_mapping_indices)):
         # TODO index can be slow. optimize
-        lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
-                    if index_mapping_indices[i] > 0 else -1)
-        embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
-        lora_indices[i] = lora_idx
+        token_lora_idx = (lora_index_to_id.index(index_mapping_indices[i])
+                          if index_mapping_indices[i] > 0 else -1)
+        embedding_indices[
+            i] = token_lora_idx if index_mapping_indices[i] > 0 else 0
         if long_lora_context:
             assert long_lora_offsets is not None
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
             long_lora_offsets[i] = lora_offset
+    # every seq lora_id
+    for i in range(len(lora_indices)):
+        lora_indices[i] = (lora_index_to_id.index(lora_indices[i])
+                           if lora_indices[i] > 0 else -1)
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
-        index_mapping_indices, lora_indices, embedding_indices
+        index_mapping_indices, embedding_indices
     ]
+    base_indices = torch.tensor(lora_indices, dtype=torch.long, device="cuda")
     if long_lora_context:
         assert long_lora_offsets is not None
         indices_list.append(long_lora_offsets)
@@ -117,11 +128,11 @@ def convert_mapping(
                                          device="cuda",
                                          dtype=torch.long)
     embeddings_indices = torch.stack([
-        indices[2] * extra_vocab_size,
-        indices[2] * (vocab_size + extra_vocab_size)
+        indices[1] * extra_vocab_size,
+        indices[1] * (vocab_size + extra_vocab_size)
     ])
     embeddings_indices[embeddings_indices == -1] = max_loras - 1
-    base_indices = indices[1]
+
     sampler_indices = prompt_mapping_tensor
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
@@ -132,7 +143,7 @@ def convert_mapping(
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
     if long_lora_context:
-        long_lora_indices = indices[3]
+        long_lora_indices = indices[2]
         long_lora_indices_len = long_lora_indices.shape[-1]
     # Contain length of indices tensors. Used to index into each tensor.
     indices_len = [
@@ -400,6 +411,7 @@ class LoRAModelManager:
                                               self.max_num_batched_tokens,
                                               dtype=torch.long,
                                               device="cuda")
+
         self.long_lora_indices = torch.empty(self.max_num_batched_tokens,
                                              dtype=torch.long,
                                              device="cuda")
@@ -429,17 +441,19 @@ class LoRAModelManager:
         self._last_mapping: Optional[LoRAMapping] = None
 
         # triton kernel mapping
-
-        self.batch_mlength_lst = [-1] * 2
-        self.seq_length_tensor = torch.empty(self.max_num_batched_tokens,
+        self.seq_length_tensor = torch.empty(_MAX_BATCHS,
                                              dtype=torch.long,
                                              device="cuda")
-        self.b_seq_start_tensor = torch.zeros(self.max_num_batched_tokens,
+        self.b_seq_start_tensor = torch.zeros(_MAX_BATCHS,
                                               dtype=torch.long,
                                               device="cuda")
-        self.lora_index_tensor = torch.empty(self.max_num_batched_tokens,
-                                             dtype=torch.long,
-                                             device="cuda")
+
+        # element contains batch_size, max_length, 0 or 1. Use 1 for the 
+        # prefilling stage and 0 for the decoding stage.The reason for 
+        # distinguishing between the prefilling and decoding stage is that 
+        # if we have implemented bgmv, it can be utilized during the decoding 
+        # stage.
+        self.batch_mlen_stage_lst = [-1] * 3
         self._create_lora_modules()
         self.model.lora_manager = self
 
@@ -561,35 +575,23 @@ class LoRAModelManager:
         # Maintain the reference
         self.indices_len[:] = indices_len
 
-        if mapping.seq_lens:
+        # Mapping for sgmv kernel
+        if mapping.seq_lens and mapping.batch_mapping:
             batchs = len(mapping.seq_lens)
             seq_length_tensor = torch.tensor(mapping.seq_lens,
                                              dtype=torch.long,
                                              device="cuda")
             self.seq_length_tensor[:batchs].copy_(seq_length_tensor)
-            # b_seq_start_tensor = torch.zeros(seq_length_tensor.shape[0] + 1,
-            #                                  dtype=torch.long,
-            #                                  device="cuda")
-            # torch.cumsum(seq_length_tensor,
-            #              dim=0,
-            #              dtype=seq_length_tensor.dtype,
-            #              out=b_seq_start_tensor[1:])
-            torch.cumsum(seq_length_tensor,
-                         dim=0,
-                         dtype=seq_length_tensor.dtype,
-                         out=self.b_seq_start_tensor[1:])
-            # self.b_seq_start_tensor[:batchs].copy_(b_seq_start_tensor)
-            lora_id_lst = []
-            for lora_index in mapping.batch_mapping:
-                lora_id_lst.append(
-                    self.lora_index_to_id.index(lora_index
-                                                ) if lora_index > 0 else -1)
-            lora_id_tensor = torch.tensor(lora_id_lst,
-                                          dtype=torch.long,
-                                          device="cuda")
-            self.lora_index_tensor[:lora_id_tensor.size(0)].copy_(
-                lora_id_tensor)
-            self.batch_mlength_lst[:] = [batchs, max(mapping.seq_lens)]
+            temp_tensor=torch.cumsum(
+                seq_length_tensor,
+                dim=0,
+                dtype=seq_length_tensor.dtype)
+            self.b_seq_start_tensor[1:temp_tensor.size(0)+1].copy_(temp_tensor)
+            
+            self.batch_mlen_stage_lst[:] = [
+                batchs,
+                max(mapping.seq_lens), 1 if mapping.is_prefilling else 0
+            ]
 
     def set_lora_mapping(self, lora_mapping: LoRAMapping) -> None:
         if self._last_mapping != lora_mapping:
@@ -642,11 +644,10 @@ class LoRAModelManager:
             new_module.set_mapping(self.base_indices, self.sampler_indices,
                                    self.sampler_indices_padded,
                                    self.embeddings_indices,
-                                   self.long_lora_indices, self.indices_len)
-            new_module.set_kernel_mapping(self.seq_length_tensor,
-                                          self.b_seq_start_tensor,
-                                          self.lora_index_tensor,
-                                          self.batch_mlength_lst)
+                                   self.long_lora_indices, self.indices_len,
+                                   self.seq_length_tensor,
+                                   self.b_seq_start_tensor,
+                                   self.batch_mlen_stage_lst)
 
     def register_module(self, module_name: str, module: "BaseLayerWithLoRA"):
         assert isinstance(module, BaseLayerWithLoRA)

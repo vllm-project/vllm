@@ -6,6 +6,7 @@ import torch
 import vllm.lora.punica as punica
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 
 # The current punica kernel supports dimension and adds a dimension of 3424.
 HIDDEN_SIZES = [
@@ -327,5 +328,69 @@ def test_sgmv_punica_bgmv(
     assert_close(our_out_tensor, ref_out_tensor)
 
 
-# if __name__ == "__main__":
-#     pytest.main(["test_triton_sgmv.py::test_sgmv_torch"])
+@pytest.mark.skip("TODO")
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("scaling", SCALES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEED)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+def test_sgmv_expand_nslice(
+    hidden_size,
+    scaling: float,
+    dtype: torch.dtype,
+    op_type: str,
+    seed: int,
+    device: str,
+):
+    # avoid `No suitable kernel. h_in=xx h_out=xxxx ` error
+    if dtype == torch.float32 or hidden_size == 3424:
+        return
+    torch.manual_seed(seed)
+    batchs = 4  # Arbitrary values for testing
+    rank = 16
+    seq_len = 333  # Arbitrary values for testing
+    num_loras = 8  # Arbitrary values for testing
+    (
+        inputs_tensor,
+        lora_weights,
+        our_out_tensor,
+        ref_out_tensor,
+        b_seq_start_loc,
+        lora_indices_tensor,
+        seq_len_tensor,
+        indices,
+    ) = _generate_data(batchs, hidden_size, num_loras, rank, seq_len, dtype,
+                       op_type, device)
+
+    max_seq_length = seq_len_tensor.max()
+    if isinstance(max_seq_length, tuple):
+        max_seq_length = max_seq_length[0].item()
+    else:
+        max_seq_length = max_seq_length.item()
+
+    sgmv_expand_slice(
+        inputs_tensor,
+        lora_weights,
+        our_out_tensor,
+        b_seq_start_loc,
+        seq_len_tensor,
+        lora_indices_tensor,
+        batchs,
+        max_seq_length,
+        1024,
+        add_inputs=True,
+    )
+    lora_weights_4d = lora_weights.unsqueeze(dim=1)
+    _punica_bgmv(
+        ref_out_tensor,
+        inputs_tensor,
+        lora_weights_4d,
+        indices,
+        scaling if op_type == "shrink" else 1.0,
+    )
+
+    assert_close(our_out_tensor, ref_out_tensor)
+
+
+if __name__ == "__main__":
+    pytest.main(["test_triton_sgmv.py::test_sgmv_expand_nslice"])
