@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 from contextlib import contextmanager
 from typing import Callable, Dict, List, Optional
 
@@ -23,13 +24,15 @@ def mute_output():
         yield
 
 
-def producer(i, cuda_visible_devices: Optional[str] = None):
+def producer(i: int,
+             init_method: str,
+             cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     with mute_output():
         dist.init_process_group(
             backend="gloo",
-            init_method="tcp://127.0.0.1:12345",
+            init_method=init_method,
             world_size=2,
             rank=0,
         )
@@ -44,13 +47,15 @@ def producer(i, cuda_visible_devices: Optional[str] = None):
         assert torch.all(data == 1).item()
 
 
-def consumer(j, cuda_visible_devices: Optional[str] = None):
+def consumer(j: int,
+             init_method: str,
+             cuda_visible_devices: Optional[str] = None):
     if cuda_visible_devices is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     with mute_output():
         dist.init_process_group(
             backend="gloo",
-            init_method="tcp://127.0.0.1:12345",
+            init_method=init_method,
             world_size=2,
             rank=1,
         )
@@ -100,8 +105,12 @@ def can_actually_p2p(i, j):
     cuda_visible_devices = os.getenv('CUDA_VISIBLE_DEVICES', None)
     # pass the CUDA_VISIBLE_DEVICES to the child process
     # to make sure they see the same set of GPUs
-    pi = mp.Process(target=producer, args=(i, cuda_visible_devices))
-    pj = mp.Process(target=consumer, args=(j, cuda_visible_devices))
+    temp_path = tempfile.mktemp()
+    init_method = f"file://{temp_path}"
+    pi = mp.Process(target=producer,
+                    args=(i, init_method, cuda_visible_devices))
+    pj = mp.Process(target=consumer,
+                    args=(j, init_method, cuda_visible_devices))
     pi.start()
     pj.start()
     pi.join()
