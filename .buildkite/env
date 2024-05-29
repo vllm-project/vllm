@@ -1,4 +1,0 @@
-#!/bin/bash
-set -euo pipefail
-
-export HF_TOKEN="123456"
