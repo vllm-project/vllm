@@ -15,8 +15,11 @@ def sequence_with_eos(text: str, eos_token: str,
     """
     seq = Sequence(
         seq_id=0,
-        prompt="",
-        prompt_token_ids=[],
+        inputs={
+            "prompt": "",
+            "prompt_token_ids": [],
+            "multi_modal_data": None,
+        },
         block_size=16,
         eos_token_id=eos_token_id,
     )
