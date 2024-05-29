@@ -51,4 +51,4 @@ To run vLLM:
 
 .. note::
 
-        For `v0.4.1` and `v0.4.2`, the vLLM docker images are supposed to be run under the root user (not the case for the rest versions). In these versions, a library under the root user's home directory, i.e. `/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` will be loaded during runtime. If you are running the container under a different user, you may need to change the permissions of the library (and all the parent directories) to allow the user to access it. Then run vLLM with environment variable `VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` .
+        **For `v0.4.1` and `v0.4.2` only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. ``/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable ``VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` .
