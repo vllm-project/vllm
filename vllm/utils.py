@@ -13,7 +13,7 @@ import warnings
 from collections import defaultdict
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (AsyncIterator, Awaitable, Callable, Dict, Generic,
+from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
                     Union)
 
