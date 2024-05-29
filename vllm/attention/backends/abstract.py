@@ -5,6 +5,13 @@ from typing import (Any, Dict, Generic, List, Optional, Set, Tuple, Type,
 
 import torch
 
+from enum import Enum, auto
+
+class AttentionType(Enum):
+    DECODER = auto() # Decoder attention between previously layer Q/K/V
+    ENCODER = auto() # Encoder attention between previously layer Q/K/V
+    ENCODER_DECODER = auto() # Attention between dec. Q and enc. K/V
+
 
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""

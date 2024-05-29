@@ -10,10 +10,11 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          LowerTriangularMaskWithTensorBias)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata)
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+
 
 logger = init_logger(__name__)
 
@@ -119,7 +120,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     # If True, prefill_metadata() and decode_metadata() will return
     # seqlen & memory-mapping data structures for cross-attention;
     # otherwise, self-attention data structures will be returned.
-    is_encoder_decoder_attn: bool = False
+    _attn_type: AttentionType = AttentionType.DECODER
 
     # (batch_size,). The "cross-sequence-length" per sequence,i.e. the key/value
     # sequence length (usually encoder sequence length) in the cross-attention
@@ -165,13 +166,13 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         return True
 
     @property
-    def do_cross_attn(self):
-        return self.is_encoder_decoder_attn
+    def attention_type(self) -> AttentionType:
+        return self._attn_type
 
-    @do_cross_attn.setter
-    def do_cross_attn(self, state: bool):
+    @attention_type.setter
+    def attention_type(self, atype: AttentionType) -> None:
 
-        if state:
+        if atype == AttentionType.ENCODER_DECODER:
             assert self.has_valid_cross_attn_metadata, \
             "Must have self.cross_seq_lens not None " + \
             "in order to enable cross-attention"
@@ -188,17 +189,18 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 assert self.cross_seq_lens is not None
                 self.max_cross_seq_len = max(self.cross_seq_lens)
 
-            self.is_encoder_decoder_attn = True
+            self._attn_type = AttentionType.ENCODER_DECODER
         else:
-            self.is_encoder_decoder_attn = False
+            # AttentionType.{ENCODER,DECODER}
+            self._attn_type = atype
 
     @property
     def prefill_metadata(self) -> Optional["XFormersMetadata"]:
         if self.num_prefills == 0:
             return None
 
-        if not self.do_cross_attn:
-            # Self-attention prefill
+        if self._attn_type != AttentionType.ENCODER_DECODER:
+            # Decoder or encoder self-attention prefill
 
             if self._self_cached_prefill_metadata is not None:
                 return self._self_cached_prefill_metadata
@@ -225,8 +227,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_encoder_decoder_attn=
-                False,  # Begin cross-attention fields below...
+                _attn_type=
+                self._attn_type,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -235,7 +237,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             return self._self_cached_prefill_metadata
 
         else:
-            # Cross-attention prefill
+            # Encoder/decoder cross-attention prefill
 
             if self._cross_cached_prefill_metadata is not None:
                 return self._cross_cached_prefill_metadata
@@ -262,8 +264,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                is_encoder_decoder_attn=
-                True,  # Begin cross-attention fields below...
+                _attn_type=
+                AttentionType.ENCODER_DECODER,
+                # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -276,8 +279,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         if self.num_decode_tokens == 0:
             return None
 
-        if not self.do_cross_attn:
-            # Self-attention decode
+        if self._attn_type != AttentionType.ENCODER_DECODER:
+            # Decoder or encoder self-attention prefill
 
             if self._self_cached_decode_metadata is not None:
                 return self._self_cached_decode_metadata
@@ -299,8 +302,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_encoder_decoder_attn=
-                False,  # Begin cross-attention fields below...
+                _attn_type=
+                self._attn_type,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -309,7 +312,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             return self._self_cached_decode_metadata
 
         else:
-            # Cross-attention decode
+            # Encoder/decoder cross-attention decode
 
             if self._cross_cached_decode_metadata is not None:
                 return self._cross_cached_decode_metadata
@@ -331,8 +334,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                is_encoder_decoder_attn=
-                True,  # Begin cross-attention fields below...
+                _attn_type=
+                AttentionType.ENCODER_DECODER,
+                # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
                 max_cross_seq_len=self.max_cross_seq_len,
@@ -443,7 +447,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
-        do_cross_attn = attn_metadata.do_cross_attn
+        attn_type = attn_metadata._attn_type
 
         if (kv_cache is not None):
             # Even if there are no new key/value pairs to cache,
@@ -454,7 +458,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
             if (key is not None) and (value is not None):
 
-                if do_cross_attn:
+                if attn_type == AttentionType.ENCODER_DECODER:
                     # Update cross-attention KV cache (prefill-only)
                     # During cross-attention decode, key & value will be None,
                     # preventing this IF-statement branch from running
@@ -476,9 +480,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        assert do_cross_attn or (key.shape[0]
+        assert attn_type == AttentionType.ENCODER_DECODER or (key.shape[0]
                                  == num_prefill_tokens + num_decode_tokens)
-        assert do_cross_attn or (value.shape[0]
+        assert attn_type == AttentionType.ENCODER_DECODER or (value.shape[0]
                                  == num_prefill_tokens + num_decode_tokens)
 
         output = torch.empty_like(query)
@@ -487,7 +491,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
 
-        if not do_cross_attn and key is not None and value is not None:
+        if attn_type != AttentionType.ENCODER_DECODER \
+            and key is not None and value is not None:
+
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
 
@@ -529,7 +535,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output[:num_prefill_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-            if do_cross_attn:
+            if attn_type == AttentionType.ENCODER_DECODER:
                 # Paged attention against cross-attention KV cache
                 seq_lens_arg = decode_meta.cross_seq_lens_tensor
                 max_seq_len_arg = decode_meta.max_cross_seq_len
@@ -597,12 +603,19 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                if attn_metadata.is_encoder_decoder_attn:
+                if attn_metadata.attention_type() == AttentionType.ENCODER_DECODER:
+                    # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.cross_seq_lens)
                 else:
-                    attn_bias = BlockDiagonalCausalMask.from_seqlens(
-                        attn_metadata.seq_lens)
+                    if attn_metadata.attention_type() == AttentionType.ENCODER:
+                        # Default encoder self-attention mask is non-causal
+                        attn_bias = BlockDiagonalMask.from_seqlens(
+                            attn_metadata.seq_lens)
+                    else:
+                        # Default decoder self-attention mask is causal
+                        attn_bias = BlockDiagonalCausalMask.from_seqlens(
+                            attn_metadata.seq_lens)
                 if self.sliding_window is not None:
                     attn_bias = attn_bias.make_local_attention(
                         self.sliding_window)

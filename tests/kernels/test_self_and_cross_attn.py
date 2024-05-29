@@ -7,7 +7,8 @@ import pytest
 import torch
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionType)
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import make_tensor_with_pad
 
@@ -114,7 +115,7 @@ def make_qkv(batch_size,
              max_kv_seq_len,
              num_heads,
              head_size,
-             is_encoder_decoder_attn=True,
+             attn_type: AttentionType = AttentionType.ENCODER_DECODER,
              force_max_len=False,
              device=CUDA_DEVICE):
     '''
@@ -180,7 +181,7 @@ def make_qkv(batch_size,
             random.randint(2, max_q_seq_len) for _ in range(batch_size)
         ]
     kv_seq_lens = None
-    if not is_encoder_decoder_attn:
+    if attn_type != AttentionType.ENCODER_DECODER:
         # K,V seq lens match Q for self-attention
         kv_seq_lens = q_seq_lens
     else:
@@ -845,7 +846,7 @@ def self_attn_setup(batch_size,
                                   max_kv_seq_len,
                                   num_heads,
                                   head_size,
-                                  is_encoder_decoder_attn=False)
+                                  attn_type=False)
 
     causal_mask = build_causal_mask(max_q_seq_len,
                                     max_kv_seq_len).to(CUDA_DEVICE)
@@ -1009,7 +1010,7 @@ def cross_attn_setup_reuses_query(query,
                  max_kv_seq_len,
                  num_heads,
                  head_size,
-                 is_encoder_decoder_attn=True)
+                 attn_type=True)
 
     ideal_output = ref_masked_attention(query,
                                         key,
