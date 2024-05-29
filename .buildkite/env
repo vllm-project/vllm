@@ -1,5 +1,0 @@
-#!/bin/bash
-set -euo pipefail
-
-SECRET=$(aws secretsmanager get-secret-value --secret-id "hf_token" --query SecretString --output text)
-export HF_TOKEN=$SECRET
