@@ -50,6 +50,8 @@ def _sgmv_shrink_kernel(
     if pid_m * BLOCK_M > M:
         return
     lora_index = tl.load(lora_indices + cur_batch)
+    if lora_index == -1:
+        return
     cur_seq_start = tl.load(b_seq_start_loc + cur_batch)
     offset_m = tl.arange(0, BLOCK_M) + pid_m * BLOCK_M
     offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
