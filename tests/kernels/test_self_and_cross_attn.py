@@ -593,6 +593,7 @@ def make_metadata_self_cross(
     context_lens: List[int],
     block_tables,
     slot_mapping,
+    is_encoder_only_test: bool,
     device=CUDA_DEVICE,
     cross_seq_lens: Optional[List[int]] = None,
     cross_block_tables: Optional[torch.Tensor] = None,
@@ -624,6 +625,9 @@ def make_metadata_self_cross(
 
     * AttentionMetadata structure supporting self- and cross-attention
     '''
+
+    default_attn_type = AttentionType.ENCODER if is_encoder_only_test \
+                          else AttentionType.DECODER
 
     if is_prompt:
         num_prefills = len(seq_lens)
@@ -660,7 +664,7 @@ def make_metadata_self_cross(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            is_encoder_decoder_attn=False,
+            _attn_type=default_attn_type,
             cross_seq_lens=cross_seq_lens,
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
@@ -701,7 +705,7 @@ def make_metadata_self_cross(
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             use_cuda_graph=False,
-            is_encoder_decoder_attn=False,
+            _attn_type=default_attn_type,
             cross_seq_lens=cross_seq_lens,
             cross_slot_mapping=cross_slot_mapping_tensor,
             cross_block_tables=cross_block_tables)
@@ -745,6 +749,7 @@ def self_attn_setup(batch_size,
                     block_size,
                     scale,
                     max_q_seq_len,
+                    attn_type: AttentionType,
                     block_base_addr=0):
     '''
     Set up test vectors & data structures for self-attention test.
@@ -846,7 +851,7 @@ def self_attn_setup(batch_size,
                                   max_kv_seq_len,
                                   num_heads,
                                   head_size,
-                                  attn_type=False)
+                                  attn_type=attn_type)
 
     causal_mask = build_causal_mask(max_q_seq_len,
                                     max_kv_seq_len).to(CUDA_DEVICE)
@@ -1010,7 +1015,7 @@ def cross_attn_setup_reuses_query(query,
                  max_kv_seq_len,
                  num_heads,
                  head_size,
-                 attn_type=True)
+                 attn_type=AttentionType.ENCODER_DECODER)
 
     ideal_output = ref_masked_attention(query,
                                         key,
@@ -1062,8 +1067,9 @@ def cross_attn_setup_reuses_query(query,
 
 def run_self_attention_test(attn: Attention, packed_query, packed_key,
                             packed_value, kv_cache,
-                            attn_metadata: AttentionMetadata):
-    attn_metadata.do_cross_attn = False
+                            attn_metadata: AttentionMetadata,
+                            attn_type: AttentionType):
+    attn_metadata.attention_type = attn_type
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
@@ -1071,10 +1077,27 @@ def run_self_attention_test(attn: Attention, packed_query, packed_key,
 def run_cross_attention_test(attn: Attention, packed_query, packed_key,
                              packed_value, kv_cache,
                              attn_metadata: AttentionMetadata):
-    attn_metadata.do_cross_attn = True
+    attn_metadata.attention_type = AttentionType.ENCODER_DECODER
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
+@pytest.mark.skip()
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("backend_name", BACKEND_NAMES)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
+@pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
+def test_encoder_attention(num_heads: int,
+                           head_size: int,
+                           backend_name: str,
+                           batch_size: int,
+                           block_size: int,
+                           max_q_seq_len: int,
+                           max_kv_seq_len: int) -> None:
+
+    pass
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1083,15 +1106,15 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
 @pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
-def test_prefill_decode_self_and_cross_attention(num_heads: int,
-                                                 head_size: int,
-                                                 backend_name: str,
-                                                 batch_size: int,
-                                                 block_size: int,
-                                                 max_q_seq_len: int,
-                                                 max_kv_seq_len: int) -> None:
+def test_enc_dec_self_and_cross_attention_prefill_decode_phases(num_heads: int,
+                                                                head_size: int,
+                                                                backend_name: str,
+                                                                batch_size: int,
+                                                                block_size: int,
+                                                                max_q_seq_len: int,
+                                                                max_kv_seq_len: int) -> None:
     '''
-    Test:
+    Encoder/decoder attention test:
 
     * Construct fake test vectors for self- and cross-attention
     * Construct attention metadata structure with self- and cross-attention
@@ -1159,6 +1182,7 @@ def test_prefill_decode_self_and_cross_attention(num_heads: int,
                                                 block_size,
                                                 scale,
                                                 max_q_seq_len,
+                                                attn_type=AttentionType.DECODER,
                                                 block_base_addr=self_block_base_addr)
 
     # Cross-attention setup
@@ -1195,6 +1219,7 @@ def test_prefill_decode_self_and_cross_attention(num_heads: int,
         context_lens,
         self_prefill_block_tables,
         self_prefill_slot_mapping,
+        is_encoder_only_test=False,
         cross_seq_lens=cross_kv_seq_lens,
         cross_block_tables=cross_prefill_block_tables,
         cross_slot_mapping=cross_prefill_slot_mapping,
@@ -1202,7 +1227,8 @@ def test_prefill_decode_self_and_cross_attention(num_heads: int,
 
     self_prefill_packed_actual_output: torch.Tensor = run_self_attention_test(
         attn, prefill_packed_query, self_prefill_packed_key,
-        self_prefill_packed_value, kv_cache, prefill_attn_metadata)
+        self_prefill_packed_value, kv_cache, prefill_attn_metadata,
+        attn_type=AttentionType.DECODER)
 
     # - Prefill self-attention correct?
     assert torch.allclose(
@@ -1231,6 +1257,7 @@ def test_prefill_decode_self_and_cross_attention(num_heads: int,
         context_lens,
         self_decode_block_tables,
         self_decode_slot_mapping,
+        is_encoder_only_test=False,
         cross_seq_lens=cross_kv_seq_lens,
         cross_block_tables=cross_decode_block_tables,
         cross_slot_mapping=cross_decode_slot_mapping,
@@ -1238,7 +1265,8 @@ def test_prefill_decode_self_and_cross_attention(num_heads: int,
 
     self_decode_packed_actual_output: torch.Tensor = run_self_attention_test(
         attn, decode_packed_query, self_decode_packed_key,
-        self_decode_packed_value, kv_cache, decode_attn_metadata)
+        self_decode_packed_value, kv_cache, decode_attn_metadata,
+        attn_type=AttentionType.DECODER)
 
     # - Decode self-attention correct?
     assert torch.allclose(

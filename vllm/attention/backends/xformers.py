@@ -447,7 +447,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
-        attn_type = attn_metadata._attn_type
+        attn_type = attn_metadata.attention_type
 
         if (kv_cache is not None):
             # Even if there are no new key/value pairs to cache,
@@ -603,12 +603,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                if attn_metadata.attention_type() == AttentionType.ENCODER_DECODER:
+                if attn_metadata.attention_type == AttentionType.ENCODER_DECODER:
                     # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.cross_seq_lens)
                 else:
-                    if attn_metadata.attention_type() == AttentionType.ENCODER:
+                    if attn_metadata.attention_type == AttentionType.ENCODER:
                         # Default encoder self-attention mask is non-causal
                         attn_bias = BlockDiagonalMask.from_seqlens(
                             attn_metadata.seq_lens)
