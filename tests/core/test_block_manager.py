@@ -1,4 +1,5 @@
 import time
+from collections import defaultdict
 from typing import List
 
 import pytest
@@ -132,8 +133,11 @@ def test_append_slot_cow():
 
     # Allocate prompt to gpu block. There is one slot left in the block.
     prompt = Sequence(seq_id=1,
-                      prompt="one two three",
-                      prompt_token_ids=[1, 2, 3],
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [1, 2, 3],
+                          "multi_modal_data": None
+                      },
                       block_size=block_size)
 
     # Fork the sequence, such that a COW will be required when we append a new
@@ -141,8 +145,10 @@ def test_append_slot_cow():
     child = prompt.fork(new_seq_id=2)
 
     # Allocate space for the sequence group.
-    seq_group = SequenceGroup("1", [prompt, child], SamplingParams(),
-                              time.time(), time.perf_counter)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[prompt, child],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams())
     block_manager.allocate(seq_group)
 
     # Fork and append a new token id. We expect a COW to be scheduled.
@@ -155,7 +161,10 @@ def test_append_slot_cow():
 
     cows = block_manager.append_slots(child)
     assert cows
-    for src_block, dst_blocks in cows.items():
+    dict_cows = defaultdict(list)
+    for src_block, dst_block in cows:
+        dict_cows[src_block].append(dst_block)
+    for src_block, dst_blocks in dict_cows.items():
         assert src_block not in dst_blocks
 
     after_blocks = block_manager.get_num_free_gpu_blocks()
@@ -215,7 +224,7 @@ def test_swap():
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_out(seq_group)
-    assert list(mapping.keys()) == gpu_blocks
+    assert [x[0] for x in mapping] == gpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_cpu_blocks == after_cpu_blocks + len(gpu_blocks)
@@ -224,11 +233,11 @@ def test_swap():
 
     # Swap seq group from CPU -> GPU.
     cpu_blocks = block_manager.get_block_table(prompt)
-    assert block_manager.can_swap_in(seq_group)
+    assert block_manager.can_swap_in(seq_group) == AllocStatus.OK
     before_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     before_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     mapping = block_manager.swap_in(seq_group)
-    assert list(mapping.keys()) == cpu_blocks
+    assert [x[0] for x in mapping] == cpu_blocks
     after_cpu_blocks = block_manager.get_num_free_cpu_blocks()
     after_gpu_blocks = block_manager.get_num_free_gpu_blocks()
     assert before_cpu_blocks + len(cpu_blocks) == after_cpu_blocks
@@ -298,9 +307,18 @@ def test_sliding_window_multi_seq():
 
     assert block_manager.get_num_free_gpu_blocks() == num_gpu_blocks
 
-    parent = Sequence(1, "one two three", [0, 1, 2], block_size)
-    seq_group = SequenceGroup("1", [parent], SamplingParams(), time.time(),
-                              None)
+    parent = Sequence(seq_id=1,
+                      inputs={
+                          "prompt": "one two three",
+                          "prompt_token_ids": [0, 1, 2],
+                          "multi_modal_data": None
+                      },
+                      block_size=block_size)
+    seq_group = SequenceGroup(request_id="1",
+                              seqs=[parent],
+                              arrival_time=time.time(),
+                              sampling_params=SamplingParams(),
+                              lora_request=None)
     block_manager.allocate(seq_group)
 
     # assert the number of blocks allocated is correct

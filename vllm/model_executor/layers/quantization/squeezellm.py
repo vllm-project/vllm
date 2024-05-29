@@ -4,10 +4,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.linear import (LinearMethodBase,
-                                               set_weight_attrs)
+from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import is_hip
 
 
@@ -51,14 +51,17 @@ class SqueezeLLMConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(config, ["wbits"])
         return cls(weight_bits)
 
-    def get_linear_method(self) -> "SqueezeLLMLinearMethod":
-        return SqueezeLLMLinearMethod(self)
+    def get_quant_method(
+            self, layer: torch.nn.Module) -> Optional[QuantizeMethodBase]:
+        if isinstance(layer, LinearBase):
+            return SqueezeLLMLinearMethod(self)
+        return None
 
     def get_scaled_act_names(self) -> List[str]:
         return []
 
 
-class SqueezeLLMLinearMethod(LinearMethodBase):
+class SqueezeLLMLinearMethod(QuantizeMethodBase):
     """Linear method for SqueezeLLM.
 
     Args:
@@ -70,7 +73,7 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
-                       output_size_per_partition: int, input_size: int,
+                       output_partition_sizes: List[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
         if input_size_per_partition % self.quant_config.pack_factor != 0:
@@ -78,6 +81,8 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
                 "The input size is not aligned with the quantized "
                 "weight shape. This can be caused by too large "
                 "tensor parallel size.")
+
+        output_size_per_partition = sum(output_partition_sizes)
         qweight = Parameter(
             torch.empty(
                 input_size_per_partition // self.quant_config.pack_factor,
@@ -110,10 +115,10 @@ class SqueezeLLMLinearMethod(LinearMethodBase):
         layer.register_parameter("lookup_table", lookup_table)
         set_weight_attrs(lookup_table, extra_weight_attrs)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         qweight = layer.qweight
         lookup_table = layer.lookup_table
         out_shape = x.shape[:-1] + (qweight.shape[-1], )
