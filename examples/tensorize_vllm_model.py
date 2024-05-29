@@ -55,6 +55,12 @@ Which downloads the model tensors from your S3 bucket and deserializes them.
 You can also provide a `--keyfile` argument to decrypt the model weights if 
 they were serialized with encryption.
 
+To support distributed tensor-parallel models, each model shard will be
+serialized to a separate file. The tensorizer_uri is then specified as a string
+template with a format specifier such as '%03d' that will be rendered with the
+shard's rank. Sharded models serialized with this script will be named as
+model-rank-%03d.tensors
+
 For more information on the available arguments for serializing, run 
 `python -m examples.tensorize_vllm_model serialize --help`.
 
