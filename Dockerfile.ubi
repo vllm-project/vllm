@@ -180,6 +180,9 @@ ENV PATH=$VIRTUAL_ENV/bin/:$PATH
 RUN microdnf install -y gcc \
     && microdnf clean all
 
+# Custom cache manager (fix for https://issues.redhat.com/browse/RHOAIENG-8043)
+COPY extras/custom_cache_manager.py /opt/vllm/lib/python3.11/site-packages/custom_cache_manager.py
+
 # install vllm wheel first, so that torch etc will be installed
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
@@ -189,7 +192,8 @@ ENV HF_HUB_OFFLINE=1 \
     PORT=8000 \
     HOME=/home/vllm \
     VLLM_USAGE_SOURCE=production-docker-image \
-    VLLM_WORKER_MULTIPROC_METHOD=fork
+    VLLM_WORKER_MULTIPROC_METHOD=fork \
+    TRITON_CACHE_MANAGER="custom_cache_manager:CustomCacheManager"
 
 # setup non-root user for OpenShift
 RUN umask 002 \
