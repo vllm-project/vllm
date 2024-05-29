@@ -45,22 +45,15 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
         weight_scale_dim = sum(
             output_partition_sizes) if is_tensor_partitioned else 1
 
-        input_scale = Parameter(torch.empty(1,
-                                            device="cuda",
-                                            dtype=torch.float32),
+        input_scale = Parameter(torch.empty(1, dtype=torch.float32),
                                 requires_grad=False)
-        input_zero_point = Parameter(torch.empty(1,
-                                                 device="cuda",
-                                                 dtype=torch.int8),
+        input_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                      requires_grad=False)
 
         weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             device="cuda",
                                              dtype=torch.float32),
                                  requires_grad=False)
-        weight_zero_point = Parameter(torch.empty(1,
-                                                  device="cuda",
-                                                  dtype=torch.int8),
+        weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),

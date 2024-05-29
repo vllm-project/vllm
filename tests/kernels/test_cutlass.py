@@ -81,14 +81,14 @@ def cutlass_int8_gemm_helper(m: int,
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
+
 @pytest.mark.parametrize("m", [512, 222, 33, 1])
 @pytest.mark.parametrize("n", [256, 1024])
 @pytest.mark.parametrize("k", [128, 496, 1024])
 @pytest.mark.parametrize("per_token_act_quant", [True, False])
 @pytest.mark.parametrize("per_out_ch_weight_quant", [True, False])
 @pytest.mark.parametrize("per_token_out_quant", [True, False])
-def test_cutlass_int8_q_gemm(m, n, k,
-                             per_token_act_quant: bool, 
+def test_cutlass_int8_q_gemm(m, n, k, per_token_act_quant: bool,
                              per_out_ch_weight_quant: bool,
                              per_token_out_quant: bool):
 
@@ -110,8 +110,8 @@ def test_cutlass_int8_q_gemm(m, n, k,
 
     out = ops.cutlass_scaled_mm_qout(a, b, scale_a, scale_b, scale_c)
     baseline = (scale_c * torch.mm(scale_a * a.to(dtype=torch.float32),
-                        scale_b *
-                        b.to(dtype=torch.float32))).to(dtype=torch.int8)
+                                   scale_b * b.to(dtype=torch.float32))).to(
+                                       dtype=torch.int8)
 
     assert torch.allclose(out, baseline, rtol=1e-1, atol=1e0)
 
