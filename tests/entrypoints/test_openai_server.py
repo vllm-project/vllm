@@ -183,6 +183,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     assert completion.choices[0].text is not None and len(
         completion.choices[0].text) >= 5
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
@@ -201,6 +202,7 @@ async def test_no_logprobs(server, client: openai.AsyncOpenAI,
     )
     choice = completion.choices[0]
     assert choice.logprobs is None
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -223,6 +225,7 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     assert choice.logprobs.token_logprobs is not None
     assert choice.logprobs.top_logprobs is not None
     assert len(choice.logprobs.top_logprobs[0]) <= 1
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
