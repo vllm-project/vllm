@@ -11,7 +11,7 @@ import threading
 import uuid
 import warnings
 from collections import defaultdict
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
@@ -31,6 +31,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
+    "fp8_e4m3": torch.uint8,
+    "fp8_e5m2": torch.uint8,
 }
 
 
@@ -282,6 +284,9 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 
 
 def get_open_port() -> int:
+    port = envs.VLLM_PORT
+    if port is not None:
+        return port
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -329,7 +334,7 @@ def _generate_random_fp8(
     from vllm import _custom_ops as ops
     tensor_tmp = torch.empty_like(tensor, dtype=torch.float16)
     tensor_tmp.uniform_(low, high)
-    ops.convert_fp8(tensor_tmp, tensor)
+    ops.convert_fp8(tensor, tensor_tmp)
     del tensor_tmp
 
 
@@ -653,3 +658,44 @@ def enable_trace_function_call_for_thread() -> None:
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
+
+
+def identity(value: T) -> T:
+    return value
+
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def deprecate_kwargs(
+        *kws: str,
+        is_deprecated: Union[bool, Callable[[], bool]] = True,
+        additional_message: Optional[str] = None) -> Callable[[F], F]:
+    deprecated_kws = set(kws)
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
+
+    def wrapper(fn: F) -> F:
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            if is_deprecated():
+                deprecated_kwargs = kwargs.keys() & deprecated_kws
+                if deprecated_kwargs:
+                    msg = (
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
+                    warnings.warn(
+                        DeprecationWarning(msg),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
+
+            return fn(*args, **kwargs)
+
+        return inner  # type: ignore
+
+    return wrapper

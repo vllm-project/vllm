@@ -129,6 +129,7 @@ class SchedulerOutputs:
     num_lookahead_slots: int
     # The number of requests in the running queue
     running_queue_size: int
+    preempted: int
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -263,16 +264,14 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        if self.scheduler_config.chunked_prefill_enabled:
-            self.prompt_limit = self.scheduler_config.max_model_len
-        else:
-            self.prompt_limit = min(
-                self.scheduler_config.max_model_len,
-                self.scheduler_config.max_num_batched_tokens)
+        version = "v1"
+        if self.scheduler_config.use_v2_block_manager:
+            version = "v2"
+        if self.scheduler_config.embedding_mode:
+            version = "embedding"
 
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
-            version="v2" if self.scheduler_config.
-            use_v2_block_manager else "v1")
+            version)
 
         # Create the block space manager.
         self.block_manager = BlockSpaceManagerImpl(
@@ -305,6 +304,7 @@ class Scheduler:
         self.artificial_preempt_cnt = (ARTIFICIAL_PREEMPTION_MAX_CNT
                                        if self.enable_artificial_preemption
                                        else 0)
+        self.num_cumulative_preemption: int = 0
 
     @property
     def lora_enabled(self) -> bool:
@@ -589,6 +589,21 @@ class Scheduler:
             infeasible_seq_groups=infeasible_seq_groups,
         )
 
+    def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
+        if self.scheduler_config.chunked_prefill_enabled:
+            prompt_limit = self.scheduler_config.max_model_len
+        else:
+            prompt_limit = min(self.scheduler_config.max_model_len,
+                               self.scheduler_config.max_num_batched_tokens)
+
+        # Model is fine tuned with long context. Return the fine tuned max_len.
+        if (seq_group.lora_request
+                and seq_group.lora_request.long_lora_max_len):
+            assert prompt_limit <= seq_group.lora_request.long_lora_max_len
+            return seq_group.lora_request.long_lora_max_len
+        else:
+            return prompt_limit
+
     def _schedule_prefills(
         self,
         waiting_queue: deque,
@@ -643,11 +658,11 @@ class Scheduler:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
 
-            if num_new_tokens > self.prompt_limit:
+            prompt_limit = self._get_prompt_limit(seq_group)
+            if num_new_tokens > prompt_limit:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
-                    " and exceeds limit of %d", num_new_tokens,
-                    self.prompt_limit)
+                    " and exceeds limit of %d", num_new_tokens, prompt_limit)
                 for seq in waiting_seqs:
                     seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
@@ -729,8 +744,8 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
         curr_loras = set(
-            seq_group.lora_int_id
-            for seq_group in self.running) if self.lora_enabled else None
+            seq_group.lora_int_id for seq_group in self.running
+            if seq_group.lora_int_id > 0) if self.lora_enabled else None
 
         remaining_waiting, prefills = (self.waiting,
                                        SchedulerPrefillOutputs.create_empty())
@@ -780,6 +795,8 @@ class Scheduler:
         # Update swapped requests.
         self.swapped = remaining_swapped
         self.swapped.extend(running_scheduled.swapped_out)
+        preempted = (len(running_scheduled.preempted) +
+                     len(running_scheduled.swapped_out))
 
         # There should be no prefill from running queue because this policy
         # doesn't allow chunked prefills.
@@ -799,6 +816,7 @@ class Scheduler:
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
+            preempted=preempted,
         )
 
     def _schedule_chunked_prefill(self):
@@ -886,6 +904,8 @@ class Scheduler:
             ignored_seq_groups=prefills.ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
+            preempted=(len(running_scheduled.preempted) +
+                       len(running_scheduled.swapped_out)),
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -968,6 +988,7 @@ class Scheduler:
                 sampling_params=seq_group.sampling_params,
                 block_tables=block_tables,
                 do_sample=do_sample,
+                pooling_params=seq_group.pooling_params,
                 token_chunk_size=token_chunk_size,
                 lora_request=seq_group.lora_request,
                 computed_block_nums=common_computed_block_nums,
@@ -1051,6 +1072,17 @@ class Scheduler:
                 preemption_mode = PreemptionMode.RECOMPUTE
             else:
                 preemption_mode = PreemptionMode.SWAP
+
+        if self.num_cumulative_preemption % 50 == 0:
+            logger.warning(
+                "Sequence group %s is preempted by %s mode because there is "
+                "not enough KV cache space. This can affect the end-to-end "
+                "performance. Increase gpu_memory_utilization or "
+                "tensor_parallel_size to provide more KV cache memory. "
+                "total_num_cumulative_preemption=%d", seq_group.request_id,
+                preemption_mode, self.num_cumulative_preemption + 1)
+        self.num_cumulative_preemption += 1
+
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
