@@ -41,7 +41,7 @@ def producer(i, cuda_visible_devices: Optional[str] = None):
         dist.broadcast_object_list([(func, args)], src=0)
         dist.barrier()
         torch.cuda.synchronize()
-        assert data.mean().item() == 1
+        assert torch.all(data == 1).item()
 
 
 def consumer(j, cuda_visible_devices: Optional[str] = None):
@@ -68,7 +68,7 @@ def consumer(j, cuda_visible_devices: Optional[str] = None):
         data += 1
         dist.barrier()
         torch.cuda.synchronize()
-        assert data.mean().item() == 1
+        assert torch.all(data == 1).item()
 
 
 def can_actually_p2p(i, j):
