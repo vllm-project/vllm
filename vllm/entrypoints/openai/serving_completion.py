@@ -8,10 +8,15 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.entrypoints.openai.protocol import (
-    CompletionLogProbs, CompletionRequest, CompletionResponse,
-    CompletionResponseChoice, CompletionResponseStreamChoice,
-    CompletionStreamResponse, UsageInfo)
+# yapf: disable
+from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
+                                              CompletionRequest,
+                                              CompletionResponse,
+                                              CompletionResponseChoice,
+                                              CompletionResponseStreamChoice,
+                                              CompletionStreamResponse,
+                                              UsageInfo)
+# yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
