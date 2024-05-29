@@ -1233,18 +1233,15 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
-
-#@pytest.mark.skip()
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
-@pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
+@pytest.mark.parametrize("max_seq_len", MAX_Q_SEQ_LENS)
 def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                            batch_size: int, block_size: int,
-                           max_q_seq_len: int, max_kv_seq_len: int) -> None:
+                           max_seq_len: int) -> None:
 
     '''
     Encoder-only attention test:
@@ -1300,7 +1297,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                                      head_size,
                                      block_size,
                                      scale,
-                                     max_q_seq_len)
+                                     max_seq_len)
 
     context_lens = [0 for _ in range(batch_size)]
 
