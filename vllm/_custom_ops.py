@@ -275,7 +275,8 @@ def scaled_int8_quant(
 
     # Dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
-                               dtype=torch.float32)
+                               dtype=torch.float32,
+                               device="cuda")
     vllm_ops.dynamic_scaled_int8_quant(q, input, input_scales)
     return q, input_scales
 
