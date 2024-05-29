@@ -21,7 +21,7 @@ if sys.version_info < (3, 10):
             def __anext__(self) -> _AwaitableT_co:
                 ...
 
-    def anext(i: _SupportsSynchronousAnext[_AwaitableT], /) -> _AwaitableT:
+    def anext(i: "_SupportsSynchronousAnext[_AwaitableT]", /) -> "_AwaitableT":
         return i.__anext__()
 
 
