@@ -162,7 +162,21 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         assert (
             not invalid_md_if_not_no_md), "Invalid cross-attention metadata"
 
+        self._maybe_infer_implicit_cross_attention_metadata()
         return True
+
+    def _maybe_infer_implicit_cross_attention_metadata(self):
+        # Infer implicit cross-attention fields
+        # from user-provided fields, if needed
+        if self.cross_seq_lens_tensor is None:
+            assert self.seq_lens_tensor is not None
+            self.cross_seq_lens_tensor = torch.tensor(
+                self.cross_seq_lens,
+                dtype=self.seq_lens_tensor.dtype,
+                device=self.seq_lens_tensor.device)
+        if self.max_cross_seq_len is None:
+            assert self.cross_seq_lens is not None
+            self.max_cross_seq_len = max(self.cross_seq_lens)
 
     @property
     def attention_type(self) -> AttentionType:
@@ -175,19 +189,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             assert self.is_all_cross_attn_metadata_set, \
             "Must have self.cross_seq_lens not None " + \
             "in order to enable cross-attention"
-
-            # Infer implicit cross-attention fields
-            # from user-provided fields, if needed
-            if self.cross_seq_lens_tensor is None:
-                assert self.seq_lens_tensor is not None
-                self.cross_seq_lens_tensor = torch.tensor(
-                    self.cross_seq_lens,
-                    dtype=self.seq_lens_tensor.dtype,
-                    device=self.seq_lens_tensor.device)
-            if self.max_cross_seq_len is None:
-                assert self.cross_seq_lens is not None
-                self.max_cross_seq_len = max(self.cross_seq_lens)
-
+            self._maybe_infer_implicit_cross_attention_metadata()
             self._attn_type = AttentionType.ENCODER_DECODER
         else:
             # AttentionType.{ENCODER,DECODER}
@@ -263,6 +265,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         target_attention_type = self.attention_type
 
         if self._self_cached_decode_metadata is not None:
+            if self._self_cached_decode_metadata.attention_type != \
+                target_attention_type:
+                self._self_cached_decode_metadata.attn_bias = None
+
             self._self_cached_decode_metadata.attention_type = \
                 target_attention_type
             return self._self_cached_decode_metadata
