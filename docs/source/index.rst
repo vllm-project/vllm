@@ -99,7 +99,7 @@ Documentation
    quantization/fp8_e4m3_kvcache
 
 .. toctree::
-   :maxdepth: 2
+   :maxdepth: 1
    :caption: Developer Documentation
    
    dev/sampling_params
