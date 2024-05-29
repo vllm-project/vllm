@@ -1189,6 +1189,10 @@ def run_encoder_or_decoder_self_attention_test(attn: Attention, packed_query: to
     attn_metadata.attention_type is assigned attn_type in order to configure
     the kernel invocation for either encoder or decoder self-attention.
 
+    attn_type must be AttentionType.ENCODER or DECODER; if ENCODER,
+    attn_metadata.num_decode_tokens must be 0 (i.e. there is no such thing as
+    "decode-phase enocder attention".)
+
     Arguments:
 
     * attn: Attention wrapper instance
@@ -1202,7 +1206,7 @@ def run_encoder_or_decoder_self_attention_test(attn: Attention, packed_query: to
       & attn_metadata
     '''
     assert attn_type in [AttentionType.DECODER, AttentionType.ENCODER]
-    assert attn_metadata.is_prompt or attn_type != AttentionType.ENCODER
+    assert attn_metadata.num_decode_tokens==0 or attn_type != AttentionType.ENCODER
     attn_metadata.attention_type = attn_type
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
