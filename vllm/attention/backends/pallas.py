@@ -78,6 +78,17 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if sliding_window is not None:
             raise NotImplementedError("Sliding window is not implemented.")
 
+        if torch_xla.tpu.version() == 4:
+            if self.num_kv_heads % 2 == 0:
+                self.megacore_mode = "kv_head"
+            else:
+                # FIXME(woosuk): If the batch size is not a multiple of 2, the
+                # megacore mode should be None.
+                self.megacore_mode = "batch"
+        else:
+            # Do not utilize megacore.
+            self.megacore_mode = None
+
     def forward(
         self,
         query: torch.Tensor,
@@ -134,12 +145,11 @@ class PallasAttentionBackendImpl(AttentionImpl):
         else:
             # Decoding run.
             assert kv_cache is not None
-            megacore_mode = None
-            if torch_xla.tpu.version() == 4:
-                if self.num_kv_heads % 2 == 0:
-                    megacore_mode = "kv_head"
-                elif batch_size % 2 == 0:
-                    megacore_mode = "batch"
+
+            megacore_mode = self.megacore_mode
+            if megacore_mode == "batch":
+                if batch_size % 2 != 0:
+                    megacore_mode = None
 
             output = torch.ops.xla.paged_attention(
                 query.squeeze(dim=1),
