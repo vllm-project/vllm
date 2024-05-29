@@ -488,8 +488,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
 
-        if attn_type != AttentionType.ENCODER_DECODER \
-            and key is not None and value is not None:
+        if key is not None and value is not None:
 
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
