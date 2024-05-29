@@ -1530,9 +1530,20 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
         cross_decode_packed_actual_output.view_as(
             cross_decode_packed_ideal_output))
 
+    # The following test conditions could in principle be a
+    # standalone test, however the test setup is so involved that it is easier
+    # to piggyback off of the test vectors & other data structures
+    # created for testing decode-phase encoder/decoder cross-
+    # attention above.
+    # ----
     # Set up a contrived scenario where the attention metadata
     # is configured for chunked prefill & encoder/decoder cross-
     # attention. Required that this triggers a NotImplementedError.
+    #
+    # We assume that decode_attn_metadata.num_decode_tokens > 1
+    # already; the line below sets up a chunked prefill
+    # metadata configuration where there is nominally a mix
+    # of prefill and decode tokens.
     decode_attn_metadata.num_prefill_tokens = 1
     with pytest.raises(NotImplementedError) as exc_info:
         run_encoder_decoder_cross_attention_test(attn, decode_packed_query,
