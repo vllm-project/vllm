@@ -65,6 +65,7 @@ def _merge_vision_embeddings(input_ids: torch.Tensor,
 
     inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
                                                  vision_embeddings.shape[-1])
+
     return inputs_embeds
 
 

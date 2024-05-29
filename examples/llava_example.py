@@ -30,6 +30,7 @@ def run_llava_pixel_values():
         "prompt": prompt,
         "multi_modal_data": ImagePixelData(image),
     })
+
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
