@@ -3,9 +3,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
     import flashinfer
+    from flash_attn import flash_attn_varlen_func
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
     from flashinfer.prefill import BatchPrefillWithPagedKVCacheWrapper
-    from flash_attn import flash_attn_varlen_func
 except ImportError:
     flashinfer = None
     flash_attn_varlen_func = None
@@ -13,6 +13,7 @@ except ImportError:
     BatchPrefillWithPagedKVCacheWrapper = None
 
 import torch
+
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
@@ -234,8 +235,10 @@ class FlashInferImpl(AttentionImpl):
         query = query.contiguous(
         )  # Flashinfer requires query to be contiguous
         if prefill_meta := attn_metadata.prefill_metadata:
-            # We will use flash attention for prefill when kv_cache is not provided.
-            # This happens when vllm runs the profiling to determine the number of blocks.
+            # We will use flash attention for prefill
+            # when kv_cache is not provided.
+            # This happens when vllm runs the profiling to
+            # determine the number of blocks.
             if kv_cache is None:
                 output = flash_attn_varlen_func(
                     q=query,
