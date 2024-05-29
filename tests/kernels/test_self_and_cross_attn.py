@@ -751,8 +751,10 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
 def encoder_attn_setup(batch_size,
                        num_heads,
                        head_size,
+                       block_size,
                        scale,
-                       max_q_seq_len):
+                       max_q_seq_len,
+                       block_base_addr=0):
     '''
     Set up test vectors & data structures for encoder attention test.
 
@@ -871,6 +873,15 @@ def encoder_attn_setup(batch_size,
     prefill_packed_ideal_output, _ = pack_tensor(prefill_ideal_output,
                                                  prefill_q_seq_lens)
 
+    _, \
+    _, \
+    prefill_slot_mapping, \
+    prefill_block_tables, \
+    _, \
+    _, \
+    _ = make_block_tables_slot_mapping(
+        block_size, q_seq_lens, block_base_addr=block_base_addr)
+
     prefill_packed_query, \
     prefill_packed_key, \
     prefill_packed_value, _, _ = pack_qkv(
@@ -884,10 +895,8 @@ def encoder_attn_setup(batch_size,
     prefill_packed_ideal_output, \
     prefill_q_seq_lens, \
     prefill_kv_seq_lens, \
-    decode_q_seq_lens, \
-    decode_kv_seq_lens, \
-    q_seq_lens, \
-    kv_seq_lens
+    prefill_slot_mapping, \
+    prefill_block_tables
 
 def decoder_attn_setup(batch_size,
                        num_heads,
@@ -1227,7 +1236,7 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
                         attn_metadata)
 
 
-@pytest.mark.skip()
+#@pytest.mark.skip()
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("backend_name", BACKEND_NAMES)
@@ -1280,22 +1289,20 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                            backend_name)
 
     # Self-attention setup
-
-    self_block_base_addr = 0
-
-    query, \
+    # Let encoder_attn_setup() choose default block table
+    # base address
+    _, \
     packed_query, \
     packed_key, \
     packed_value, \
     packed_ideal_output, \
     prefill_q_seq_lens, \
-    prefill_kv_seq_lens, \
     _, \
-    _, \
-    q_seq_lens, \
-    kv_seq_lens = encoder_attn_setup(batch_size,
+    slot_mapping, \
+    block_tables = encoder_attn_setup(batch_size,
                                      num_heads,
                                      head_size,
+                                     block_size,
                                      scale,
                                      max_q_seq_len)
 
@@ -1306,8 +1313,8 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         True,
         prefill_q_seq_lens,
         context_lens,
-        None,
-        None,
+        block_tables,
+        slot_mapping,
         is_encoder_only_test=True,
         cross_seq_lens=None,
         cross_block_tables=None,
