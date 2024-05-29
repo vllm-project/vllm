@@ -25,7 +25,7 @@ class MockEngine:
         return [RequestOutput(
             request_id=self.request_id)] if self.request_id else []
 
-    async def encode_request_async(self, *args, **kwargs):
+    async def process_model_inputs_async(self, *args, **kwargs):
         pass
 
     def generate(self, request_id):

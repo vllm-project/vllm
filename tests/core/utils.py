@@ -21,7 +21,13 @@ def create_dummy_prompt(
     # and prompt "0 ... block_size".
     prompt_tokens = list(range(prompt_length))
     prompt_str = " ".join([str(t) for t in prompt_tokens])
-    prompt = Sequence(int(request_id), prompt_str, prompt_tokens, block_size)
+    prompt = Sequence(int(request_id),
+                      inputs={
+                          "prompt": prompt_str,
+                          "prompt_token_ids": prompt_tokens,
+                          "multi_modal_data": None,
+                      },
+                      block_size=block_size)
     seq_group = SequenceGroup(request_id=request_id,
                               seqs=[prompt],
                               arrival_time=time.time(),
@@ -51,8 +57,11 @@ def create_seq_group(
     for seq_id_offset, output_len in enumerate(seq_output_lens):
         seq = Sequence(
             seq_id=seq_id_start + seq_id_offset,
-            prompt="",
-            prompt_token_ids=prompt_token_ids,
+            inputs={
+                "prompt": "",
+                "prompt_token_ids": prompt_token_ids,
+                "multi_modal_data": None,
+            },
             block_size=16,
         )
 
