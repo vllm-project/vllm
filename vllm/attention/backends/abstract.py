@@ -8,8 +8,8 @@ import torch
 
 
 class AttentionType(Enum):
-    DECODER = auto()  # Decoder attention between previously layer Q/K/V
-    ENCODER = auto()  # Encoder attention between previously layer Q/K/V
+    DECODER = auto()  # Decoder attention between previous layer Q/K/V
+    ENCODER = auto()  # Encoder attention between previous layer Q/K/V
     ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
 
