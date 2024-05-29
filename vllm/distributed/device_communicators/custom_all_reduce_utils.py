@@ -163,3 +163,6 @@ def gpu_p2p_access_check(i: int, j: int) -> bool:
         cache = json.load(f)
     _gpu_p2p_access_cache = cache
     return _gpu_p2p_access_cache[f"{i}->{j}"]
+
+
+__all__ = ["gpu_p2p_access_check"]
