@@ -1,7 +1,7 @@
 import copy
 import itertools
 import random
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import pytest
 import torch
@@ -29,7 +29,8 @@ MAX_Q_SEQ_LENS = [128]
 MAX_K_SEQ_LENS = [128]
 
 
-def build_causal_mask(q_max_seq_len, kv_max_seq_len):
+def build_causal_mask(q_max_seq_len: int, kv_max_seq_len: int) \
+                                                -> torch.Tensor:
     '''
     Create a q_max_seq_len x kv_max_seq_len causal mask
 
@@ -109,14 +110,14 @@ def ref_masked_attention(query: torch.Tensor,
     return out
 
 
-def make_qkv(batch_size,
-             max_q_seq_len,
-             max_kv_seq_len,
-             num_heads,
-             head_size,
+def make_qkv(batch_size: int,
+             max_q_seq_len: int,
+             max_kv_seq_len: int,
+             num_heads: int,
+             head_size: int,
              attn_type: AttentionType = AttentionType.ENCODER_DECODER,
-             force_max_len=False,
-             device=CUDA_DEVICE):
+             force_max_len: bool = False,
+             device: Union[torch.device, str] = CUDA_DEVICE) -> tuple:
     '''
     Construct QKV test tensors for self- and cross-attention.
 
@@ -276,7 +277,9 @@ def make_qkv(batch_size,
            decode_kv_seq_lens
 
 
-def pack_tensor(unpacked_tensor, seq_lens, device=CUDA_DEVICE):
+def pack_tensor(unpacked_tensor: torch.Tensor,
+                seq_lens: List[int],
+                device: Union[torch.device, str] = CUDA_DEVICE) -> tuple:
     '''
     Pack a batch_size x padded_seq_len x num_heads x head_size tensor into an
     unpadded number_of_tokens x num_heads x head_size tensor, where
@@ -309,7 +312,8 @@ def pack_tensor(unpacked_tensor, seq_lens, device=CUDA_DEVICE):
     return packed_tensor, start_loc_list
 
 
-def pack_qkv(query, key, value, q_seq_lens, kv_seq_lens):
+def pack_qkv(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+             q_seq_lens: List[int], kv_seq_lens: List[int]) -> tuple:
     '''
     Individually pack each of Q, K and V, each with dimensions batch_size x
     padded_seq_len x num_heads x head_size, into respective number_of_tokens x
@@ -379,7 +383,8 @@ def make_backend(backend_name: str) -> AttentionBackend:
 def make_metadata_tensors(is_prompt: bool,
                           seq_lens: List[int],
                           context_lens: List[int],
-                          device=CUDA_DEVICE) -> tuple:
+                          device: Union[torch.device, str] = \
+                            CUDA_DEVICE) -> tuple:
     '''
     Build scalar & tensor values required to build attention metadata structure.
 
@@ -434,12 +439,13 @@ def make_metadata_tensors(is_prompt: bool,
            query_start_loc
 
 
-def make_kv_cache(num_blocks,
-                  num_heads,
-                  head_size,
-                  block_size,
-                  device=CUDA_DEVICE,
-                  default_val=0.0):
+def make_kv_cache(num_blocks: int,
+                  num_heads: int,
+                  head_size: int,
+                  block_size: int,
+                  device: Union[torch.device, str] = \
+                    CUDA_DEVICE,
+                  default_val: float=0.0) -> torch.Tensor:
     '''
     Create a fake KV cache.
 
@@ -464,7 +470,7 @@ def make_kv_cache(num_blocks,
     return kv_cache
 
 
-def num_tokens_to_min_blocks(num_tokens, block_size):
+def num_tokens_to_min_blocks(num_tokens: int, block_size: int) -> int:
     '''
     Compute the minimum number of blocks required to hold num_tokens tokens,
     given block_size
@@ -472,10 +478,11 @@ def num_tokens_to_min_blocks(num_tokens, block_size):
     return (num_tokens + block_size) // block_size
 
 
-def make_block_tables_slot_mapping(block_size,
-                                   seq_lens,
-                                   block_base_addr=0,
-                                   device=CUDA_DEVICE):
+def make_block_tables_slot_mapping(block_size: int,
+                                   seq_lens: List,
+                                   block_base_addr: int=0,
+                                   device: Union[torch.device, str] = \
+                                    CUDA_DEVICE) -> tuple:
     '''
     Construct fake block tables & slot mappings.
 
@@ -585,15 +592,15 @@ def make_block_tables_slot_mapping(block_size,
            max_block_idx
 
 
-def make_metadata_self_cross(
+def make_test_metadata(
     attn_backend: AttentionBackend,
     is_prompt: bool,
     seq_lens: List[int],
     context_lens: List[int],
-    block_tables,
-    slot_mapping,
+    block_tables: torch.Tensor,
+    slot_mapping: torch.Tensor,
     is_encoder_only_test: bool,
-    device=CUDA_DEVICE,
+    device: Union[torch.device, str] = CUDA_DEVICE,
     cross_seq_lens: Optional[List[int]] = None,
     cross_block_tables: Optional[torch.Tensor] = None,
     cross_slot_mapping: Optional[List[int]] = None,
@@ -601,6 +608,10 @@ def make_metadata_self_cross(
     '''
     Construct fake attention metadata for a combined self-/cross-attention
     scenario i.e. an encoder/decoder model. 
+
+    is_encoder_only_test=True causes the default attention metadata attention
+    type to be AttentionType.ENCODER. False causes the default to 
+    be AttentionType.DECODER.
 
     Assumptions:
 
@@ -614,6 +625,8 @@ def make_metadata_self_cross(
     * context_lens: list of context lengths for each sequence
     * block_tables: self-attention block tables
     * slot_mapping: self-attention slot_mapping
+    * is_encoder_only_test: True if testing encoder; False if testing
+      decoder self-attention or encoder/decoder cross-attention.
     * device: CPU or CUDA device
     * cross_seq_lens: list of token counts for each encoder sequence, if any
       exist
@@ -644,13 +657,9 @@ def make_metadata_self_cross(
                                                 context_lens,
                                                 device=device)
 
-        slot_mapping_tensor = slot_mapping
-
-        cross_slot_mapping_tensor = cross_slot_mapping
-
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping_tensor,
+            slot_mapping=slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -665,7 +674,7 @@ def make_metadata_self_cross(
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             cross_seq_lens=cross_seq_lens,
-            cross_slot_mapping=cross_slot_mapping_tensor,
+            cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
     else:  # not is_prompt
@@ -685,13 +694,9 @@ def make_metadata_self_cross(
                                                 context_lens,
                                                 device=device)
 
-        slot_mapping_tensor = slot_mapping
-
-        cross_slot_mapping_tensor = cross_slot_mapping
-
         return attn_backend.make_metadata(
             num_prefills=num_prefills,
-            slot_mapping=slot_mapping_tensor,
+            slot_mapping=slot_mapping,
             num_prefill_tokens=num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -706,11 +711,12 @@ def make_metadata_self_cross(
             use_cuda_graph=False,
             _attn_type=default_attn_type,
             cross_seq_lens=cross_seq_lens,
-            cross_slot_mapping=cross_slot_mapping_tensor,
+            cross_slot_mapping=cross_slot_mapping,
             cross_block_tables=cross_block_tables)
 
 
-def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
+def basic_setup(num_heads: int, head_size: int, num_blocks: int,
+                block_size: int, backend_name: str) -> tuple:
     '''
     Compute & build entities required for the self-/cross-attention test.
 
@@ -747,37 +753,24 @@ def basic_setup(num_heads, head_size, num_blocks, block_size, backend_name):
     # Construct KV cache
     kv_cache = make_kv_cache(num_blocks, num_heads, head_size, block_size)
     return scale, attn_backend, attn, kv_cache
-    
-def encoder_attn_setup(batch_size,
-                       num_heads,
-                       head_size,
-                       block_size,
-                       scale,
-                       max_q_seq_len,
-                       block_base_addr=0):
+
+
+def encoder_attn_setup(batch_size: int,
+                       num_heads: int,
+                       head_size: int,
+                       block_size: int,
+                       scale: float,
+                       max_q_seq_len: int,
+                       block_base_addr: int = 0) -> tuple:
     '''
     Set up test vectors & data structures for encoder attention test.
 
-    A triplet of synthetic query/key/value tensors are constructed ("baseline"
-    query/key/value). Given this is a self-attention test, the key & value
+    A triplet of synthetic query/key/value tensors are constructed. 
+    Given this is an encoder attention test, the key & value
     sequences will have the same length as the corresponding queries.
 
-    "Prefill" query/key/value tensors are derived by masking out the last value
-    in each baseline query/key/value. These tensors are used to test prefill &
-    populate KV cache for a subsequent decode test.
-
-    "Decode" query/key/value tensors are derived by extracting *only* the last
-    value from each baseline query/key/value (i.e. complement of the prefill
-    tensors.) These tensors are used to test decode, conditional on the kv cache
-    being populated during the prefill test.
-
-    The baseline query/key/value tensors are passed to an ideal reference
-    self-attention implementation to generate a "Baseline" ideal output tensor.
-    This tensor is split into the "Prefill" ideal output tensor (all but the
-    last element of each output sequence) and the "Decode" ideal output tensor
-    (*only* the last element of each output sequence); the "Prefill" and
-    "Decode" ideal output tensors can be used to validate the prefill and decode
-    test results, respectively.
+    The query/key/value tensors are passed to an ideal reference
+    self-attention implementation to generate an ideal output tensor.
 
     This function also constructs the self-attention KV cache memory mapping
     (slot mapping and block table), ensuring that the block table starts at
@@ -794,42 +787,14 @@ def encoder_attn_setup(batch_size,
     * block_base_addr: self-attention block table base address
 
     Returns:
-
-    * query: "baseline" query; batch_size x padded_seq_len x num_heads x
-      head_size
-    * prefill_packed_query: "prefill" query; number_of_tokens x num_heads x
-      head_size
-    * prefill_packed_key: self-attn "prefill" key; number_of_tokens x num_heads
-      x head_size
-    * prefill_packed_value: self-attn "prefill" value; number_of_tokens x
-      num_heads x head_size
-    * prefill_packed_ideal_output: self-attn "prefill" ideal output;
-      number_of_tokens x num_heads x head_size
-    * prefill_q_seq_lens: list of token counts for each *prefill query* (one
-      less than baseline query)
-    * prefill_kv_seq_lens: list of token counts for each self-attn *prefill
-      key/value* (should match prefill_q_seq_lens)
-    * decode_packed_query: "decode" query; number_of_tokens x num_heads x
-      head_size
-    * decode_packed_key: self-attn "decode" key; number_of_tokens x num_heads x
-      head_size
-    * decode_packed_value: self-attn "decode" key; number_of_tokens x num_heads
-      x head_size
-    * decode_packed_ideal_output: self-attn "decode" ideal output;
-      number_of_tokens x num_heads x head_size
-    * decode_q_seq_lens: list of token counts for each *decode query* (should
-      be 1)
-    * decode_kv_seq_lens: list of token counts for each self-attn *decode
-      key/value* (should match decode_q_seq_lens)
-    * q_seq_lens: "baseline" query seq lens; number_of_tokens x num_heads x
-      head_size
-    * kv_seq_lens: self-attn "baseline" key/value seq lens; number_of_tokens
-      x num_heads x head_size
-    * decode_block_tables: fake self-attn decode-phase block table
-    * decode_slot_mapping: fake self-attn decode-phase slot mapping
-    * prefill_slot_mapping: fake self-attn prefill-phase slot mapping
-    * prefill_block_tables: fake self-attn prefill-phase block table
-    * max_block_idx: highest block address in the self-attention block-table
+    
+    * packed_query: number_of_tokens x num_heads x head_size
+    * packed_key: number_of_tokens x num_heads x head_size
+    * packed_value: number_of_tokens x num_heads x head_size
+    * packed_ideal_output: number_of_tokens x num_heads x head_size
+    * block_tables: fake self-attn decode-phase block table
+    * slot_mapping: fake self-attn decode-phase slot mapping
+    * q_seq_lens: list of query sequence lengths
     '''
 
     max_kv_seq_len = max_q_seq_len
@@ -857,7 +822,7 @@ def encoder_attn_setup(batch_size,
                  head_size,
                  attn_type=AttentionType.ENCODER)
 
-    # No attention mask
+    # No causal attention mask
     ideal_output = ref_masked_attention(query,
                                         key,
                                         value,
@@ -865,13 +830,7 @@ def encoder_attn_setup(batch_size,
                                         q_seq_lens=q_seq_lens,
                                         kv_seq_lens=kv_seq_lens)
 
-    # prefill_ideal_output = torch.zeros_like(ideal_output)
-    # for bdx, prefill_q_seq_len in enumerate(prefill_q_seq_lens):
-    #     prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
-    #         bdx, :prefill_q_seq_len]
-
-    packed_ideal_output, _ = pack_tensor(ideal_output,
-                                         q_seq_lens)
+    packed_ideal_output, _ = pack_tensor(ideal_output, q_seq_lens)
 
     block_tables, \
     _, \
@@ -896,13 +855,14 @@ def encoder_attn_setup(batch_size,
     slot_mapping, \
     q_seq_lens
 
-def decoder_attn_setup(batch_size,
-                       num_heads,
-                       head_size,
-                       block_size,
-                       scale,
-                       max_q_seq_len,
-                       block_base_addr=0):
+
+def decoder_attn_setup(batch_size: int,
+                       num_heads: int,
+                       head_size: int,
+                       block_size: int,
+                       scale: float,
+                       max_q_seq_len: int,
+                       block_base_addr: int = 0) -> tuple:
     '''
     Set up test vectors & data structures for self-attention test.
 
@@ -1074,17 +1034,18 @@ def decoder_attn_setup(batch_size,
     max_block_idx
 
 
-def enc_dec_attn_setup_reuses_query(query,
-                                    q_seq_lens,
-                                    prefill_q_seq_lens,
-                                    batch_size,
-                                    num_heads,
-                                    head_size,
-                                    block_size,
-                                    scale,
-                                    max_q_seq_len,
-                                    max_kv_seq_len,
-                                    block_base_addr=0):
+def enc_dec_cross_attn_setup_reuses_query(query: torch.Tensor,
+                                          q_seq_lens: List,
+                                          prefill_q_seq_lens: List,
+                                          batch_size: int,
+                                          num_heads: int,
+                                          head_size: int,
+                                          block_size: int,
+                                          scale: float,
+                                          max_q_seq_len: int,
+                                          max_kv_seq_len: int,
+                                          block_base_addr: Optional[int]=0) \
+                                            -> tuple:
     '''
     Set up test vectors & data structures for cross-attention test.
 
@@ -1092,7 +1053,7 @@ def enc_dec_attn_setup_reuses_query(query,
     ("baseline" key/value). Given this is a cross-attention test, we assume
     query tensors were already synthesized for a prior self-attention test and
     will be reused for cross-attention. The key & value sequences generated here
-    will may have a different length than the corresponding queries (as is often
+    may have a different length than the corresponding queries (as is often
     the case for cross-attention between decoder and encoder sequences.)
 
     Cross attention key & value tensors do not grow during autoregressive
@@ -1217,21 +1178,62 @@ def enc_dec_attn_setup_reuses_query(query,
     max_block_idx
 
 
-def run_self_attention_test(attn: Attention, packed_query, packed_key,
-                            packed_value, kv_cache,
+def run_self_attention_test(attn: Attention, packed_query: torch.Tensor,
+                            packed_key: torch.Tensor,
+                            packed_value: torch.Tensor, kv_cache: torch.Tensor,
                             attn_metadata: AttentionMetadata,
-                            attn_type: AttentionType):
+                            attn_type: AttentionType) -> torch.Tensor:
+    '''
+    Run encoder attention or decoder self-attention test.
+
+    attn_metadata.attention_type is assigned attn_type in order to configure
+    the kernel invocation for either encoder or decoder self-attention.
+
+    Arguments:
+
+    * attn: Attention wrapper instance
+    * packed_{query,key,value}: total_num_tokens x (num_heads*head_size)
+    * kv_cache
+    * attn_metadata: attention metadata for encoder/decoder-self attention
+    * attn_type: AttentionType.DECODER or AttentionType.ENCODER
+
+    Returns:
+    * Attention.forward() applied to packed_{query,key,value}, kv_cache
+      & attn_metadata
+    '''
+    assert attn_type in [AttentionType.DECODER, AttentionType.ENCODER]
     attn_metadata.attention_type = attn_type
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
 
-def run_cross_attention_test(attn: Attention, packed_query, packed_key,
-                             packed_value, kv_cache,
-                             attn_metadata: AttentionMetadata):
+def run_cross_attention_test(attn: Attention, packed_query: torch.Tensor,
+                             packed_key: torch.Tensor,
+                             packed_value: torch.Tensor,
+                             kv_cache: torch.Tensor,
+                             attn_metadata: AttentionMetadata) -> torch.Tensor:
+    '''
+    Run encoder/decoder cross-attention test.
+
+    attn_metadata.attention_type is assigned AttentionType.ENCODER_DECODER 
+    in order to configure the kernel invocation for encoder/decoder cross-
+    attention.
+
+    Arguments:
+
+    * attn: Attention wrapper instance
+    * packed_{query,key,value}: total_num_tokens x (num_heads*head_size)
+    * kv_cache
+    * attn_metadata: attention metadata for encoder/decoder-self attention
+
+    Returns:
+    * Attention.forward() applied to packed_{query,key,value}, kv_cache
+      & attn_metadata
+    '''
     attn_metadata.attention_type = AttentionType.ENCODER_DECODER
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1242,50 +1244,49 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
 def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
                            batch_size: int, block_size: int,
                            max_seq_len: int) -> None:
-
     '''
     Encoder-only attention test:
 
-    * Construct fake test vectors for self- and cross-attention
-    * Construct attention metadata structure with self- and cross-attention
-      attributes
-    * Test self- and cross-attention in the following order
-    
-        * Prefill self-attention
-        * Prefill cross-attention
-        * Decode self-attention
-        * Decode cross-attention
-        * This order would exacerbate any accidental overlap in the
-          self-/cross-attention block tables, which we attempt to avoid
+    * Construct fake test vectors for encoder attention
+    * Construct attention metadata structure with encoder-attention-
+      specific attributes
+    * Run encoder attention with metadata structure & test vectors
     * Validate output correctness against ideal reference attention
       implementation
 
-    Block tables are constructed such that cross-attention KV cache is in a
-    higher, non-intersecting address-space than self-attention KV cache.
+    Encoder attention (by default) does not restrict which sequence offsets
+    may attend to each other. Thus the reference ideal reference
+    implementation does not employ a causal attention mask.
 
-    Self- and cross-attention share the same query tensor but not the K/V
-    tensors. Self-attention K/Vs must have the same seq len as Q while
-    cross-attention K/Vs are allowed to differ in seq len, as is often the case
-    for cross-attention.
+    Encoder attention does not utilize KV cache however the XFormer backend
+    requires block_tables & slot_mapping to be non-None and have a valid
+    structure, thus this test constructs dummy memory-mapping structures.
+
+    Encoder attention is basically structured like decoder self-attention
+    in that Q/K/V are all derived from the previous layer output & have
+    the same sequence length (in contrast to encoder/decoder cross-
+    attention where K/V are drawn from the encoder hidden states and
+    may have a different length than Q derived from decoder previous
+    layer output.)
     '''
 
-    # Num KV cache blocks
-    # num_blocks = 4096
-
     # Attention scale factor, attention backend instance, attention wrapper
-    # instance, KV cache init
+    # instance. Encoder attention does not require KV cache.
     scale, \
     attn_backend, \
     attn, \
     _ = basic_setup(num_heads,
-                           head_size,
-                           None,
-                           None,
-                           backend_name)
+                    head_size,
+                    None,
+                    None,
+                    backend_name)
 
     # Self-attention setup
     # Let encoder_attn_setup() choose default block table
-    # base address
+    # base address; the block_tables and slot_mapping
+    # tensors are not actually utilized by encoder attention
+    # anyway but are required to be present & valid by the
+    # backend.
     packed_query, \
     packed_key, \
     packed_value, \
@@ -1301,7 +1302,13 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
 
     context_lens = [0 for _ in range(batch_size)]
 
-    attn_metadata: AttentionMetadata = make_metadata_self_cross(
+    # Metadata config for encoder attention:
+    #
+    # * Use prefill kernel
+    # * Signal that this is an encoder-only test so that
+    #   metadata attention_type property is correctly
+    #   configured as AttentionType.ENCODER
+    attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
         q_seq_lens,
@@ -1309,9 +1316,6 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         block_tables,
         slot_mapping,
         is_encoder_only_test=True,
-        cross_seq_lens=None,
-        cross_block_tables=None,
-        cross_slot_mapping=None,
     )
 
     packed_actual_output: torch.Tensor = run_self_attention_test(
@@ -1324,10 +1328,9 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
         attn_type=AttentionType.ENCODER)
 
     # - Is encoder attention result correct?
-    assert torch.allclose(
-        packed_ideal_output,
-        packed_actual_output.view_as(
-            packed_ideal_output))
+    assert torch.allclose(packed_ideal_output,
+                          packed_actual_output.view_as(packed_ideal_output))
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1421,7 +1424,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     cross_decode_slot_mapping, \
     cross_prefill_slot_mapping, \
     cross_prefill_block_tables, \
-    _ = enc_dec_attn_setup_reuses_query(query,
+    _ = enc_dec_cross_attn_setup_reuses_query(query,
                                       q_seq_lens,
                                       prefill_q_seq_lens,
                                       batch_size,
@@ -1437,7 +1440,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     context_lens = [0 for _ in range(batch_size)]
 
-    prefill_attn_metadata: AttentionMetadata = make_metadata_self_cross(
+    prefill_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         True,
         prefill_q_seq_lens,
@@ -1479,7 +1482,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
 
     # DECODE: self- and cross-attention tests
 
-    decode_attn_metadata: AttentionMetadata = make_metadata_self_cross(
+    decode_attn_metadata: AttentionMetadata = make_test_metadata(
         attn_backend,
         False,
         q_seq_lens,
