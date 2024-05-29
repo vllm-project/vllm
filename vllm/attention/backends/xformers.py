@@ -11,7 +11,6 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -447,6 +446,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # seqlen datastructures we utilize
         attn_type = attn_metadata.attention_type
 
+        if attn_type != AttentionType.DECODER:
+            # Raise NotImplementedError for unsupported encoder/decoder
+            # scenarios
+            from vllm.attention.backends.utils import \
+                check_hip_or_chunked_prefill_attention_encdec
+            check_hip_or_chunked_prefill_attention_encdec(attn_metadata)
+
         if (kv_cache is not None):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
@@ -478,16 +484,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        if attn_type == AttentionType.ENCODER_DECODER:
-            # Encoder/decoder models are currently incompatible
-            # with chunked prefill.
-            if num_prefill_tokens > 0 and num_decode_tokens > 0:
-                raise NotImplementedError( \
-                    STR_NOT_IMPL_ENC_DEC_CHUNKED_PREFILL)
-        else:
-            # This is a decoder self-attention scenario;
-            # ensure key/value shape match total number of
-            # tokens to process
+        if attn_type != AttentionType.ENCODER_DECODER:
+            # Only enforce this shape-constraint for decoder
+            # self-attention
             assert key.shape[0] == num_prefill_tokens + num_decode_tokens
             assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
