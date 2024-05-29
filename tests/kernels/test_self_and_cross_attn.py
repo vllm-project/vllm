@@ -1192,7 +1192,7 @@ def run_encoder_or_decoder_self_attention_test(
 
     attn_type must be AttentionType.ENCODER or DECODER; if ENCODER,
     attn_metadata.num_decode_tokens must be 0 (i.e. there is no such thing as
-    "decode-phase enocder attention".)
+    "decode-phase encoder attention".)
 
     Arguments:
 
