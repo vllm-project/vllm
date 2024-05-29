@@ -1,9 +1,7 @@
 """Block manager utils."""
 from vllm.sequence import SequenceGroup
 
-'''
-Exception strings for non-implemented block manager encoder/decoder scenarios
-'''
+# Exception strings for non-implemented block manager encoder/decoder scenarios
 
 STR_NOT_IMPL_ENC_DEC_SWA = \
     "Sliding window attention for encoder/decoder models " + \
