@@ -203,6 +203,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         target_attention_type = self.attention_type
 
         if self._self_cached_prefill_metadata is not None:
+            if self._self_cached_prefill_metadata.attention_type != \
+                target_attention_type:
+                self._self_cached_prefill_metadata.attn_bias = None
+
             self._self_cached_prefill_metadata.attention_type = \
                 target_attention_type
             return self._self_cached_prefill_metadata
