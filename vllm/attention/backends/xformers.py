@@ -15,7 +15,6 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
 
-
 logger = init_logger(__name__)
 
 
@@ -227,8 +226,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                _attn_type=
-                self._attn_type,  # Begin cross-attention fields below...
+                _attn_type=self.
+                _attn_type,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -264,8 +263,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                                                              num_prefills],
                 block_tables=self.block_tables[:self.num_prefills],
                 use_cuda_graph=False,
-                _attn_type=
-                AttentionType.ENCODER_DECODER,
+                _attn_type=AttentionType.ENCODER_DECODER,
                 # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
@@ -302,8 +300,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                _attn_type=
-                self._attn_type,  # Begin cross-attention fields below...
+                _attn_type=self.
+                _attn_type,  # Begin cross-attention fields below...
                 cross_seq_lens=None,
                 cross_seq_lens_tensor=None,
                 max_cross_seq_len=None,
@@ -334,8 +332,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                 context_lens_tensor=None,
                 block_tables=self.block_tables[self.num_prefills:],
                 use_cuda_graph=self.use_cuda_graph,
-                _attn_type=
-                AttentionType.ENCODER_DECODER,
+                _attn_type=AttentionType.ENCODER_DECODER,
                 # Begin cross-attention fields below...
                 cross_seq_lens=self.cross_seq_lens,
                 cross_seq_lens_tensor=self.cross_seq_lens_tensor,
@@ -480,10 +477,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        assert attn_type == AttentionType.ENCODER_DECODER or (key.shape[0]
-                                 == num_prefill_tokens + num_decode_tokens)
-        assert attn_type == AttentionType.ENCODER_DECODER or (value.shape[0]
-                                 == num_prefill_tokens + num_decode_tokens)
+        assert attn_type == AttentionType.ENCODER_DECODER or (
+            key.shape[0] == num_prefill_tokens + num_decode_tokens)
+        assert attn_type == AttentionType.ENCODER_DECODER or (
+            value.shape[0] == num_prefill_tokens + num_decode_tokens)
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
@@ -603,7 +600,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # FIXME(woosuk): This is a hack.
         if attn_metadata.attn_bias is None:
             if self.alibi_slopes is None:
-                if attn_metadata.attention_type == AttentionType.ENCODER_DECODER:
+                if attn_metadata.attention_type == \
+                    AttentionType.ENCODER_DECODER:
                     # Default enc/dec cross-attention mask is non-causal
                     attn_bias = BlockDiagonalMask.from_seqlens(
                         attn_metadata.seq_lens, attn_metadata.cross_seq_lens)

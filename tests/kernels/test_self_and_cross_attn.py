@@ -7,8 +7,7 @@ import pytest
 import torch
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionType)
+from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.xformers import XFormersBackend
 from vllm.utils import make_tensor_with_pad
 
@@ -1081,6 +1080,7 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
     return attn.forward(packed_query, packed_key, packed_value, kv_cache,
                         attn_metadata)
 
+
 @pytest.mark.skip()
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1089,15 +1089,12 @@ def run_cross_attention_test(attn: Attention, packed_query, packed_key,
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
 @pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
-def test_encoder_attention(num_heads: int,
-                           head_size: int,
-                           backend_name: str,
-                           batch_size: int,
-                           block_size: int,
-                           max_q_seq_len: int,
-                           max_kv_seq_len: int) -> None:
+def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
+                           batch_size: int, block_size: int,
+                           max_q_seq_len: int, max_kv_seq_len: int) -> None:
 
     pass
+
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -1106,13 +1103,9 @@ def test_encoder_attention(num_heads: int,
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("max_q_seq_len", MAX_Q_SEQ_LENS)
 @pytest.mark.parametrize("max_kv_seq_len", MAX_K_SEQ_LENS)
-def test_enc_dec_self_and_cross_attention_prefill_decode_phases(num_heads: int,
-                                                                head_size: int,
-                                                                backend_name: str,
-                                                                batch_size: int,
-                                                                block_size: int,
-                                                                max_q_seq_len: int,
-                                                                max_kv_seq_len: int) -> None:
+def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
+        num_heads: int, head_size: int, backend_name: str, batch_size: int,
+        block_size: int, max_q_seq_len: int, max_kv_seq_len: int) -> None:
     '''
     Encoder/decoder attention test:
 
@@ -1226,8 +1219,12 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(num_heads: int,
     )
 
     self_prefill_packed_actual_output: torch.Tensor = run_self_attention_test(
-        attn, prefill_packed_query, self_prefill_packed_key,
-        self_prefill_packed_value, kv_cache, prefill_attn_metadata,
+        attn,
+        prefill_packed_query,
+        self_prefill_packed_key,
+        self_prefill_packed_value,
+        kv_cache,
+        prefill_attn_metadata,
         attn_type=AttentionType.DECODER)
 
     # - Prefill self-attention correct?
@@ -1264,8 +1261,12 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(num_heads: int,
     )
 
     self_decode_packed_actual_output: torch.Tensor = run_self_attention_test(
-        attn, decode_packed_query, self_decode_packed_key,
-        self_decode_packed_value, kv_cache, decode_attn_metadata,
+        attn,
+        decode_packed_query,
+        self_decode_packed_key,
+        self_decode_packed_value,
+        kv_cache,
+        decode_attn_metadata,
         attn_type=AttentionType.DECODER)
 
     # - Decode self-attention correct?
