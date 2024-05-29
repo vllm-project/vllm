@@ -22,3 +22,7 @@ steps:
     - pytest -v -s lora/test_long_context.py::test_self_consistency
     - pytest -v -s lora/test_long_context.py::test_quality
     - pytest -v -s lora/test_long_context.py::test_max_len
+
+- label: Metrics Test
+  mirror_hardwares: [amd]
+  command: pytest -v -s metrics
