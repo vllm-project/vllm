@@ -8,6 +8,7 @@ from .utils import check_logprobs_close
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
+    "mistralai/Mistral-7B-Instruct-v0.3",
 ]
 
 

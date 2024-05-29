@@ -100,6 +100,7 @@ class OpenAIServing:
                 token_logprob = step_top_logprobs[token_id].logprob
                 token = step_top_logprobs[token_id].decoded_token
                 logprobs.tokens.append(token)
+                token_logprob = max(token_logprob, -9999.0)
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
@@ -142,7 +143,8 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -154,7 +156,8 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None

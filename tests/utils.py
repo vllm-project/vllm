@@ -1,8 +1,10 @@
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 import time
 from typing import List
+import warnings
 
 import openai
 import ray
@@ -138,3 +140,15 @@ def multi_process_tensor_parallel(
     ray.get(refs)
 
     ray.shutdown()
+
+
+@contextmanager
+def error_on_warning():
+    """
+    Within the scope of this context manager, tests will fail if any warning
+    is emitted.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+
+        yield
