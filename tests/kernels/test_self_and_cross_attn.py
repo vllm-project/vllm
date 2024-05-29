@@ -837,25 +837,25 @@ def encoder_attn_setup(batch_size,
     query, \
     key, \
     value, \
-    prefill_query, \
-    prefill_key, \
-    prefill_value, \
-    decode_query, \
-    decode_key, \
-    decode_value, \
+    _, \
+    _, \
+    _, \
+    _, \
+    _, \
+    _, \
     q_seq_lens, \
     kv_seq_lens, \
     _, \
     _, \
-    prefill_q_seq_lens, \
-    prefill_kv_seq_lens, \
-    decode_q_seq_lens, \
-    decode_kv_seq_lens = make_qkv(batch_size,
-                                  max_q_seq_len,
-                                  max_kv_seq_len,
-                                  num_heads,
-                                  head_size,
-                                  attn_type=AttentionType.ENCODER)
+    _, \
+    _, \
+    _, \
+    _ = make_qkv(batch_size,
+                 max_q_seq_len,
+                 max_kv_seq_len,
+                 num_heads,
+                 head_size,
+                 attn_type=AttentionType.ENCODER)
 
     # No attention mask
     ideal_output = ref_masked_attention(query,
@@ -865,38 +865,36 @@ def encoder_attn_setup(batch_size,
                                         q_seq_lens=q_seq_lens,
                                         kv_seq_lens=kv_seq_lens)
 
-    prefill_ideal_output = torch.zeros_like(ideal_output)
-    for bdx, prefill_q_seq_len in enumerate(prefill_q_seq_lens):
-        prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
-            bdx, :prefill_q_seq_len]
+    # prefill_ideal_output = torch.zeros_like(ideal_output)
+    # for bdx, prefill_q_seq_len in enumerate(prefill_q_seq_lens):
+    #     prefill_ideal_output[bdx, :prefill_q_seq_len] = ideal_output[
+    #         bdx, :prefill_q_seq_len]
 
-    prefill_packed_ideal_output, _ = pack_tensor(prefill_ideal_output,
-                                                 prefill_q_seq_lens)
+    packed_ideal_output, _ = pack_tensor(ideal_output,
+                                         q_seq_lens)
 
+    block_tables, \
     _, \
     _, \
-    prefill_slot_mapping, \
-    prefill_block_tables, \
     _, \
+    slot_mapping, \
     _, \
     _ = make_block_tables_slot_mapping(
         block_size, q_seq_lens, block_base_addr=block_base_addr)
 
-    prefill_packed_query, \
-    prefill_packed_key, \
-    prefill_packed_value, _, _ = pack_qkv(
-        prefill_query, prefill_key, prefill_value, prefill_q_seq_lens,
-        prefill_kv_seq_lens)
+    packed_query, \
+    packed_key, \
+    packed_value, _, _ = pack_qkv(
+        query, key, value, q_seq_lens,
+        kv_seq_lens)
 
-    return query, \
-    prefill_packed_query, \
-    prefill_packed_key, \
-    prefill_packed_value, \
-    prefill_packed_ideal_output, \
-    prefill_q_seq_lens, \
-    prefill_kv_seq_lens, \
-    prefill_slot_mapping, \
-    prefill_block_tables
+    return packed_query, \
+    packed_key, \
+    packed_value, \
+    packed_ideal_output, \
+    block_tables, \
+    slot_mapping, \
+    q_seq_lens
 
 def decoder_attn_setup(batch_size,
                        num_heads,
@@ -1291,15 +1289,13 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     # Self-attention setup
     # Let encoder_attn_setup() choose default block table
     # base address
-    _, \
     packed_query, \
     packed_key, \
     packed_value, \
     packed_ideal_output, \
-    prefill_q_seq_lens, \
-    _, \
+    block_tables, \
     slot_mapping, \
-    block_tables = encoder_attn_setup(batch_size,
+    q_seq_lens = encoder_attn_setup(batch_size,
                                      num_heads,
                                      head_size,
                                      block_size,
@@ -1311,7 +1307,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     attn_metadata: AttentionMetadata = make_metadata_self_cross(
         attn_backend,
         True,
-        prefill_q_seq_lens,
+        q_seq_lens,
         context_lens,
         block_tables,
         slot_mapping,
