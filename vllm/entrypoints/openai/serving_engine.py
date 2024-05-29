@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field
 from typing_extensions import Annotated
@@ -100,6 +100,7 @@ class OpenAIServing:
                 token_logprob = step_top_logprobs[token_id].logprob
                 token = step_top_logprobs[token_id].decoded_token
                 logprobs.tokens.append(token)
+                token_logprob = max(token_logprob, -9999.0)
                 logprobs.token_logprobs.append(token_logprob)
 
                 if num_output_top_logprobs:
@@ -142,7 +143,8 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -154,7 +156,8 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
@@ -165,13 +168,14 @@ class OpenAIServing:
         raise ValueError(f"The model `{request.model}` does not exist.")
 
     def _validate_prompt_and_tokenize(
-        self,
-        request: Union[ChatCompletionRequest, CompletionRequest,
-                       EmbeddingRequest],
-        prompt: Optional[str] = None,
-        prompt_ids: Optional[List[int]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-    ) -> Tuple[List[int], str]:
+            self,
+            request: Union[ChatCompletionRequest, CompletionRequest,
+                           EmbeddingRequest],
+            prompt: Optional[str] = None,
+            prompt_ids: Optional[List[int]] = None,
+            truncate_prompt_tokens: Optional[Annotated[int,
+                                                       Field(ge=1)]] = None,
+            add_special_tokens: bool = True) -> Tuple[List[int], str]:
         if not (prompt or prompt_ids):
             raise ValueError("Either prompt or prompt_ids should be provided.")
         if (prompt and prompt_ids):
@@ -179,10 +183,19 @@ class OpenAIServing:
                 "Only one of prompt or prompt_ids should be provided.")
 
         if prompt_ids is None:
-            tokenizer_kwargs = {} if truncate_prompt_tokens is None else {
-                "truncation": True,
-                "max_length": truncate_prompt_tokens,
+            # When using OpenAIServingChat for chat completions, the
+            # special tokens (e.g., BOS) have already been added by the
+            # chat template. Therefore, we do not need to add them again.
+            # Set add_special_tokens to False to avoid adding the BOS tokens
+            # again.
+            tokenizer_kwargs: Dict[str, Any] = {
+                "add_special_tokens": add_special_tokens
             }
+            if truncate_prompt_tokens is not None:
+                tokenizer_kwargs.update({
+                    "truncation": True,
+                    "max_length": truncate_prompt_tokens,
+                })
             input_ids = self.tokenizer(prompt, **tokenizer_kwargs).input_ids
         elif truncate_prompt_tokens is not None:
             input_ids = prompt_ids[-truncate_prompt_tokens:]

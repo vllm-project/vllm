@@ -1,6 +1,6 @@
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
@@ -197,15 +197,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         num_heads: int,
         head_size: int,
         scale: float,
-        num_kv_heads: Optional[int] = None,
-        alibi_slopes: Optional[List[float]] = None,
-        sliding_window: Optional[int] = None,
-        kv_cache_dtype: str = "auto",
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        assert blocksparse_params is None, ValueError(
+            "ROCFlashAttention does not support blocksparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -231,8 +234,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             self.attn_func = triton_attention
             logger.debug("Using Triton FA in ROCmBackend")
         else:
-            # if not using triton, navi3x not use flash-attn either
-            if torch.cuda.get_device_capability()[0] == 11:
+            # if not using triton, navi3x/navi21/navi10 do not use flash-attn
+            # either
+            if torch.cuda.get_device_capability()[0] != 9:
                 self.use_naive_attn = True
             else:
                 try:
