@@ -9,9 +9,18 @@ steps:
   command: pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
-- label: AsyncEngine Test
+- label: Distributed Comm Ops Test
   #mirror_hardwares: [amd]
-  command: pytest -v -s async_engine
+  command: pytest -v -s distributed/test_comm_ops.py
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
+
+- label: Distributed Tests (Multiple Groups)
+  #mirror_hardwares: [amd]
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  commands:
+  - pytest -v -s distributed/test_pynccl.py
 
 - label: Documentation Build
   working_dir: "/vllm-workspace/test_docs/docs"
