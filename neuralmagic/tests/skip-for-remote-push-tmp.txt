@@ -99,6 +99,7 @@ tests/engine/output_processor/test_multi_step.py
 tests/engine/test_computed_prefix_blocks.py
 tests/basic_correctness/test_chunked_prefill.py
 tests/basic_correctness/test_preemption.py
+tests/basic_correctness/test_basic_server_correctness.py
 tests/test_cache_block_hashing.py
 tests/test_logger.py
 tests/test_regression.py

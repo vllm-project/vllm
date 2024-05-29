@@ -84,4 +84,5 @@ tests/engine/test_detokenization.py
 tests/engine/test_computed_prefix_blocks.py
 tests/basic_correctness/test_chunked_prefill.py
 tests/basic_correctness/test_basic_correctness.py
+tests/basic_correctness/test_basic_server_correctness.py
 tests/test_cache_block_hashing.py
