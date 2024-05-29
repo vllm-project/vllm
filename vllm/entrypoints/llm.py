@@ -177,8 +177,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data_list: Optional[Union[
-            Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[RequestOutput]:
         ...
 
@@ -318,8 +317,7 @@ class LLM:
         prompt_token_ids: Optional[List[List[int]]] = None,
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data_list: Optional[Union[
-            Optional[MultiModalData], List[Optional[MultiModalData]]]] = None,
+        multi_modal_data: Optional[MultiModalData] = None,
     ) -> List[EmbeddingRequestOutput]:
         ...
 
