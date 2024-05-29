@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 from vllm.block import LogicalTokenBlock
+from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -210,8 +211,7 @@ class Sequence:
 
     Args:
         seq_id: The ID of the sequence.
-        prompt: The prompt of the sequence.
-        prompt_token_ids: The token IDs of the prompt.
+        inputs: The inputs of the sequence.
         block_size: The block size of the sequence. Should be the same as the
             block size used by the block manager and cache engine.
         lora_request: LoRA request.
@@ -220,25 +220,24 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        prompt: str,
-        prompt_token_ids: List[int],
+        inputs: LLMInputs,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.seq_id = seq_id
-        self.prompt = prompt
+        self.inputs = inputs
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
 
-        self.data: SequenceData = SequenceData(prompt_token_ids)
+        self.data = SequenceData(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
         # Initialize the logical token blocks with the prompt token ids.
-        self._append_tokens_to_blocks(prompt_token_ids)
+        self._append_tokens_to_blocks(self.prompt_token_ids)
         self.status = SequenceStatus.WAITING
         self.stop_reason: Union[int, str, None] = None
 
@@ -247,6 +246,18 @@ class Sequence:
         self.read_offset = 0
         # Input + output tokens
         self.tokens: Optional[List[str]] = None
+
+    @property
+    def prompt(self) -> Optional[str]:
+        return self.inputs["prompt"]
+
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        return self.inputs["prompt_token_ids"]
+
+    @property
+    def multi_modal_data(self) -> Optional["MultiModalData"]:
+        return self.inputs["multi_modal_data"]
 
     @property
     def lora_int_id(self) -> int:
@@ -415,7 +426,6 @@ class SequenceGroup:
         sampling_params: The sampling parameters used to generate the outputs.
         arrival_time: The arrival time of the request.
         lora_request: LoRA request.
-        multi_modal_data: Multi modal data associated with the request.
         embeddings: The embeddings vectors of the prompt of the sequence group
             for an embedding model.
         pooling_params: The pooling parameters used to generate the pooling
@@ -429,7 +439,6 @@ class SequenceGroup:
         arrival_time: float,
         sampling_params: Optional[SamplingParams] = None,
         lora_request: Optional[LoRARequest] = None,
-        multi_modal_data: Optional[MultiModalData] = None,
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
     ) -> None:
@@ -444,12 +453,11 @@ class SequenceGroup:
         self.lora_request = lora_request
         self.prompt_logprobs: Optional[PromptLogprobs] = None
         self.state = SequenceGroupState()
-        self.multi_modal_data = multi_modal_data
         self.embeddings = embeddings
         self.pooling_params = pooling_params
 
     @property
-    def prompt(self) -> str:
+    def prompt(self) -> Optional[str]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
         return next(iter(self.seqs_dict.values())).prompt
@@ -458,7 +466,13 @@ class SequenceGroup:
     def prompt_token_ids(self) -> List[int]:
         # All sequences in the group should have the same prompt.
         # We use the prompt of an arbitrary sequence.
-        return next(iter(self.seqs_dict.values())).data.prompt_token_ids
+        return next(iter(self.seqs_dict.values())).prompt_token_ids
+
+    @property
+    def multi_modal_data(self) -> Optional[MultiModalData]:
+        # All sequences in the group should have the same multi-modal data.
+        # We use the multi-modal data of an arbitrary sequence.
+        return next(iter(self.seqs_dict.values())).multi_modal_data
 
     @property
     def lora_int_id(self) -> int:

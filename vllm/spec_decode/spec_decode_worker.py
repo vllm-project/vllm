@@ -273,10 +273,17 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._maybe_disable_speculative_tokens(
             disable_all_speculation, execute_model_req.seq_group_metadata_list)
 
-        # If no spec tokens, call the proposer and scorer workers normally.
-        # Used for prefill.
+        # Speculative decoding is disabled in the following cases:
+        # 1. Prefill phase: Speculative decoding is not
+        #    used during the prefill phase.
+        # 2. Auto-disable enabled: The running queue size exceeds
+        #    the specified threshold.
+        # 3. No request: There are no requests in the batch.
+        # In any of these cases, the proposer and scorer workers
+        # are called normally.
         if num_lookahead_slots == 0 or len(
-                execute_model_req.seq_group_metadata_list) == 0:
+                execute_model_req.seq_group_metadata_list
+        ) == 0 or disable_all_speculation:
             return self._run_no_spec(execute_model_req,
                                      skip_proposer=disable_all_speculation)
 
@@ -316,8 +323,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
                      skip_proposer: bool) -> List[SamplerOutput]:
-        """Run a prefill step, without any speculation. The input is sent to
-        the proposer and scorer model so that the KV cache is consistent
+        """Run a single generation step without any speculation. The input is
+        sent to the proposer and scorer model so that the KV cache is consistent
         between the two. When skip_proposer is True, the proposer model is
         not called, meaning that the kv-cache in proposer for requests is not
         updated, so they cannot enable spec decode in the rest decoding.

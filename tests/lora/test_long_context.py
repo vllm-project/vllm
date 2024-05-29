@@ -91,15 +91,13 @@ def batched_generate(
 ):
     for input in inputs:
         prompt, sampling_param, lora_req = input
-        requests_data = llm._validate_and_prepare_requests(
+        # Add requests to the engine and run the engine
+        llm._validate_and_add_requests(
             prompt,
             sampling_param,
             lora_request=lora_req,
         )
 
-        # Add requests to the engine and run the engine
-        for request_data in requests_data:
-            llm._add_request(**request_data)
     outputs = llm._run_engine(use_tqdm=True)
     return [outputs[i].outputs[0].text.strip() for i in range(len(outputs))]
 
