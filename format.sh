@@ -113,8 +113,11 @@ mypy vllm/logging --config-file pyproject.toml
 mypy vllm/model_executor --config-file pyproject.toml
 
 
+# If git diff returns a file that is in the skip list, the file may be checked anyway:
+# https://github.com/codespell-project/codespell/issues/1915
+# Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
 CODESPELL_EXCLUDES=(
-    '--skip' '*docs/source/_build/**,*tests/lora/data/*'
+    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,tests/lora/data/**,build/**'
 )
 
 
