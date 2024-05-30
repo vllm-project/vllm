@@ -6,12 +6,13 @@ from compressed_tensors.quantization.lifecycle.apply import (
 from compressed_tensors.quantization.quant_args import (QuantizationArgs,
                                                         QuantizationStrategy)
 from pydantic import BaseModel
+
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW8A8StaticTensor,
-    CompressedTensorsW4A16)
+    CompressedTensorsScheme, CompressedTensorsW4A16,
+    CompressedTensorsW8A8StaticTensor)
 
 
 class CompressedTensorsConfig(QuantizationConfig):

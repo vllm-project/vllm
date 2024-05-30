@@ -3,10 +3,12 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
-    CompressedTensorsLinearMethod, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsLinearMethod, CompressedTensorsW4A16,
+    CompressedTensorsW8A8StaticTensor)
 
 
 def test_compressed_tensors_w8a8_static_setup(vllm_runner):
@@ -34,3 +36,25 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner):
     assert qkv_proj.weight_scale.shard_splitter is not None
     assert qkv_proj.weight_scale.logical_widths is not None
     assert qkv_proj.input_scale.dtype is torch.float32
+
+
+@pytest.fixture(params=[
+    ("nm-testing/tinyllama-one-shot-w4a16-channel-packed", "channel", None),
+    ("nm-testing/tinyllama-one-shot-w4a16-group128-packed", "group", 128)
+])
+def test_compressed_tensors_w4a16(vllm_runner, model: str, strategy: str,
+                                  group: int):
+    llm = vllm_runner(model, quantization="sparseml", enforce_eager=True)
+    model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model
+    layer = model.model.layers[0]
+
+    qkv_proj = layer.self_attn.qkv_proj
+    assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
+    assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16)
+
+    assert qkv_proj.scheme.strategy == strategy
+    assert qkv_proj.scheme.group_size == group
+
+    assert qkv_proj.weight_packed.dtype is torch.int32
+    assert qkv_proj.weight_scale.dtype is torch.float16
+    assert qkv_proj.weight_packed.pack_factor == 8
