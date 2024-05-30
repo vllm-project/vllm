@@ -12,9 +12,9 @@ from transformers import (AutoModelForCausalLM, AutoProcessor, AutoTokenizer,
 from vllm.config import TokenizerPoolConfig, VisionLanguageConfig
 from vllm.distributed import destroy_model_parallel
 from vllm.entrypoints.llm import LLM
-from vllm.sampling_params import SamplingParams
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import MultiModalData
 
 logger = init_logger(__name__)

@@ -511,11 +511,11 @@ class LLM:
                                  "must be the same.")
             if all(isinstance(param, SamplingParams) for param in params):
                 params = [
-                    self._add_guided_processor(param) for param in params if isinstance(param, SamplingParams) 
+                    self._add_guided_processor(param) for param in params
+                    if isinstance(param, SamplingParams)
                 ]
         elif isinstance(params, SamplingParams):
-                params = self._add_guided_processor(params)
-                
+            params = self._add_guided_processor(params)
 
         for i, request_inputs in enumerate(inputs):
             self._add_request(

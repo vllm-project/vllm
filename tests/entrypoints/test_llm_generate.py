@@ -1,10 +1,9 @@
 import json
 import re
-
-import jsonschema
 import weakref
 from typing import List
 
+import jsonschema
 import pytest
 
 from vllm.entrypoints.llm import LLM
@@ -14,7 +13,6 @@ from vllm.sampling_params import SamplingParams
 from ..conftest import cleanup
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-
 
 PROMPTS = [
     "Hello, my name is",
@@ -36,9 +34,7 @@ pytestmark = pytest.mark.llm
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
-    llm = LLM(model=MODEL_NAME,
-              max_model_len= 1024)
-
+    llm = LLM(model=MODEL_NAME, max_model_len=1024)
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -168,7 +164,7 @@ def test_guided_regex(sample_regex, llm):
         sampling_params=sampling_params,
         use_tqdm=True,
     )
-    
+
     assert outputs is not None
     for output in outputs:
         assert output is not None
@@ -196,7 +192,7 @@ def test_guided_json_completion(sample_json_schema, llm):
     )
 
     assert outputs is not None
-    
+
     for output in outputs:
         assert output is not None
         assert isinstance(output, RequestOutput)
