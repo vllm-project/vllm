@@ -70,6 +70,14 @@ class VocabParallelEmbeddingShardIndices:
                 self.padded_added_vocab_start_index)
 
     @property
+    def num_org_vocab_padding(self) -> int:
+        return self.num_org_elements_padded - self.num_org_elements
+
+    @property
+    def num_added_vocab_padding(self) -> int:
+        return self.num_added_elements_padded - self.num_added_elements
+
+    @property
     def num_elements_padded(self) -> int:
         return self.num_org_elements_padded + self.num_added_elements_padded
 
@@ -94,9 +102,9 @@ class VocabParallelEmbeddingShardIndices:
 
 
 @torch.jit.script
-def _get_masked_input_and_mask(
+def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,
-        org_vocab_end_index: int, padded_org_vocab_end_index: int,
+        org_vocab_end_index: int, num_org_vocab_padding: int,
         added_vocab_start_index: int,
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
     # torch.jit.script will fuse all of the pointwise ops below
@@ -105,8 +113,10 @@ def _get_masked_input_and_mask(
                                                           org_vocab_end_index)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (
         input_ < added_vocab_end_index)
-    valid_offset = (org_vocab_start_index * org_vocab_mask) + (
-        padded_org_vocab_end_index * added_vocab_mask)
+    added_offset = added_vocab_start_index - (
+        org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
+    valid_offset = (org_vocab_start_index *
+                    org_vocab_mask) + (added_offset * added_vocab_mask)
     vocab_mask = org_vocab_mask | added_vocab_mask
     input_ = vocab_mask * (input_ - valid_offset)
     return input_, ~vocab_mask
@@ -288,10 +298,10 @@ class VocabParallelEmbedding(torch.nn.Module):
     def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            masked_input, input_mask = _get_masked_input_and_mask(
+            masked_input, input_mask = get_masked_input_and_mask(
                 input_, self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
-                self.shard_indices.padded_org_vocab_end_index,
+                self.shard_indices.num_org_vocab_padding,
                 self.shard_indices.added_vocab_start_index,
                 self.shard_indices.added_vocab_end_index)
         else:
