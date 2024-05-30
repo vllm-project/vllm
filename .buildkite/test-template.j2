@@ -11,7 +11,7 @@ steps:
             watch:
               - path: ".buildkite/"
                 config:
-                  command: "skip test"
+                  command: echo "skip test"
 
   - label: "Run regression only if test check is passed"
     depends_on: "test-check"
