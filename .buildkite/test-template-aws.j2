@@ -65,6 +65,7 @@ steps:
             - HF_TOKEN
             - NVIDIA_VISIBLE_DEVICES=all
             - CUDA_LAUNCH_BLOCKING=1
+            - PYTORCH_NO_CUDA_MEMORY_CACHING=1
           volumes:
             - /dev/shm:/dev/shm
   {% endfor %}
