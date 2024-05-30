@@ -536,6 +536,10 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
 
+class UsageInfo(OpenAIBaseModel):
+    prompt_tokens: int = 0
+    total_tokens: int = 0
+    completion_tokens: Optional[int] = 0
 
 class BatchRequestInput(OpenAIBaseModel):
     """
