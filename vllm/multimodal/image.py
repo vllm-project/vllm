@@ -14,8 +14,8 @@ from .base import MultiModalData, MultiModalPlugin
 logger = init_logger(__name__)
 
 
-def _get_seq_data(seq_len: int,
-                  vlm_config: VisionLanguageConfig) -> SequenceData:
+def _get_dummy_seq_data(seq_len: int,
+                        vlm_config: VisionLanguageConfig) -> SequenceData:
     # NOTE: We assume that <image> token is repeated `image_feature_size` times
     # and then concatenated with the text prompt
     # TODO: Enable other ways of inserting the image into the prompt
@@ -26,7 +26,7 @@ def _get_seq_data(seq_len: int,
     return SequenceData(token_ids)
 
 
-def _get_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
+def _get_dummy_values(vlm_config: VisionLanguageConfig) -> torch.Tensor:
     if vlm_config.image_processor is None:
         values_dtype = torch.float16
     else:
@@ -42,8 +42,8 @@ def get_dummy_image_data(
 ) -> Tuple[SequenceData, MultiModalData]:
     """Standard dummy data factory for image data (to be used in
     :meth:`vlm.multimodal.MultiModalRegistry.register_dummy_data`)."""
-    seq_data = _get_seq_data(seq_len, vlm_config)
-    values = _get_values(vlm_config)
+    seq_data = _get_dummy_seq_data(seq_len, vlm_config)
+    values = _get_dummy_values(vlm_config)
 
     config_input_type = vlm_config.image_input_type
     ImageInputType = VisionLanguageConfig.ImageInputType
