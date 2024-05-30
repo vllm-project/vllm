@@ -105,12 +105,13 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
             "ignore_warning": True,
         })
         layer.register_parameter("weight_scale", weight_scale)
-        set_weight_attrs(weight_scale, {
-            "weight_loader": weight_loader,
-            "shard_splitter": self.scales_shard_splitter,
-            "logical_widths": output_partition_sizes,
-            "ignore_warning": True,
-        })
+        set_weight_attrs(
+            weight_scale, {
+                "weight_loader": weight_loader,
+                "shard_splitter": self.scales_shard_splitter,
+                "logical_widths": output_partition_sizes,
+                "ignore_warning": True,
+            })
         layer.register_parameter("weight_zero_point", weight_zero_point)
         set_weight_attrs(weight_zero_point, {
             "weight_loader": weight_loader,
