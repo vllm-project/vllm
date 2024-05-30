@@ -1034,7 +1034,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         dtype: data type of the model
         device: device of the model
         sharded_to_full_mapping: index mapping from sharded vocab to full vocab
-            received from base_layer.get_sharded_to_full_mapping()
+            received from base_layer.get_sharded_to_full_mapping(). If None,
+            no reindexing will be done.
     """
 
     def __init__(self, base_layer: LogitsProcessor, hidden_size: int,
