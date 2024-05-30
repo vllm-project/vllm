@@ -29,15 +29,12 @@ logger = init_logger(__name__)
 
 _PAD_SLOT_ID = -1
 LORA_WARMUP_RANK = 8
-_BATCH_SIZE_ALIGNMENT = 4
-# Capture graphs for token size 1, 2, 4, up to 256 tokens,
-# for every _BATCH_SIZE_ALIGNMENT tokens.
+_BATCH_SIZE_ALIGNMENT = 8
+# Capture graphs for token size 1, 2, 4, 8, 16, 24, 32, 40, ..., 256.
 # NOTE: _get_graph_batch_size needs to be updated if this list is changed.
-_MAX_SIZE_TO_CAPTURE = 256
-_BATCH_SIZES_TO_CAPTURE = [1, 2, 4]
-while _BATCH_SIZES_TO_CAPTURE[-1] < _MAX_SIZE_TO_CAPTURE:
-    _BATCH_SIZES_TO_CAPTURE.append(_BATCH_SIZES_TO_CAPTURE[-1] +
-                                   _BATCH_SIZE_ALIGNMENT)
+_BATCH_SIZES_TO_CAPTURE = [1, 2, 4] + [
+    _BATCH_SIZE_ALIGNMENT * i for i in range(1, 33)
+]
 
 
 class ModelInput(NamedTuple):
