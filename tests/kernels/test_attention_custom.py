@@ -23,16 +23,11 @@ PARTITION_SIZE = 256
 DTYPES = [torch.half, torch.bfloat16, torch.float
           ] if not is_hip() else [torch.half]
 NUM_GEN_SEQS = [1, 17, 64]  # Arbitrary values for testing
-NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
 NUM_HEADS = [(8*x, 8) for x in range(1,17)]  # Arbitrary values for testing
-#NUM_HEADS = [(32, 32)]
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
-#HEAD_SIZES = [64, 80, 96, 112, 128, 256
-#              ] if not is_hip() else [128]
 HEAD_SIZES = [128]
-
 BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto"]
@@ -40,7 +35,6 @@ SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-
 
 def ref_masked_attention(
     query: torch.Tensor,

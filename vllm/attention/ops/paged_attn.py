@@ -8,7 +8,7 @@ from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.utils import is_hip
 import os
 
-custom_attn_available = is_hip() and os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "0") == "1"
+custom_attn_available = is_hip() and  (not os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "1") == "0")
 if custom_attn_available:
     from vllm._custom_C import paged_attention_custom
 
