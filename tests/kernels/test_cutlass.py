@@ -207,14 +207,21 @@ class CutlassLayer(torch.nn.Module):
                                         self.out_dtype)
 
 
-def test_cutlass_cuda_graph():
+@pytest.mark.parametrize("per_act_token", [True, False])
+@pytest.mark.parametrize("per_out_ch", [True, False])
+def test_cutlass_cuda_graph(per_act_token: bool, per_out_ch: bool):
     m, n, k = 512, 512, 512
 
     a = to_int8(torch.randn((m, k), device="cuda"))
     b = to_int8(torch.randn((n, k), device="cuda").t())
 
-    scale_a = (torch.randn((m, 1), device="cuda", dtype=torch.float32) / 10)
-    scale_b = (torch.randn((1, n), device="cuda", dtype=torch.float32) / 10)
+    m_a_scales = m if per_act_token else 1
+    n_b_scales = n if per_out_ch else 1
+
+    scale_a = (torch.randn(
+        (m_a_scales, 1), device="cuda", dtype=torch.float32) / 10)
+    scale_b = (torch.randn(
+        (1, n_b_scales), device="cuda", dtype=torch.float32) / 10)
 
     # Construct a trivial model with a single layer that calls a CUTLASS kernel
     model = CutlassLayer(b, scale_a, scale_b, torch.bfloat16)
