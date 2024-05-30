@@ -284,23 +284,21 @@ if __name__ == '__main__':
             return torch.float8_e4m3fn
         raise ValueError("unsupported dtype")
 
-    # fmt: off
     parser = argparse.ArgumentParser(
         description="""
             Benchmark Cutlass GEMM.
 
             To run square matrices gemm:
-                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 square_bench --dim-start 128 --dim-end 512 --dim-increment 64
+                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 square_bench --dim-start 128 --dim-end 512 --dim-increment 64 # noqa: E501
             To run constant N and K and sweep M:
-                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 range_bench --dim-start 128 --dim-end 512 --dim-increment 64 --n-constant 16384 --k-constant 16384
+                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 range_bench --dim-start 128 --dim-end 512 --dim-increment 64 --n-constant 16384 --k-constant 16384 # noqa: E501
             To run a model dimensions:
-                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 model_bench --models meta-llama/Llama-2-7b-hf/TP1 --batch-sizes 16
+                python3 ./benchmarks/cutlass_benchmarks.py --dtype fp8 model_bench --models meta-llama/Llama-2-7b-hf/TP1 --batch-sizes 16 # noqa: E501
 
             Output:
-                - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various gemms.
+                - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various gemms.# noqa: E501
             """,
         formatter_class=argparse.RawTextHelpFormatter)
-    # fmt: on
 
     parser.add_argument("--dtype",
                         type=to_torch_dtype,
