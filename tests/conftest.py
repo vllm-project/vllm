@@ -390,7 +390,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         sampling_params: SamplingParams,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[List[MultiModalData]] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -398,7 +398,7 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = ImagePixelData(image)
+                inputs[i]["multi_modal_data"] = image
 
         req_outputs = self.model.generate(inputs,
                                           sampling_params=sampling_params)
@@ -439,7 +439,7 @@ class VllmRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional[List[Image.Image]] = None,
+        images: Optional[List[MultiModalData]] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = self.generate(prompts, greedy_params, images=images)
