@@ -36,14 +36,14 @@ model_and_vl_config = [
 ]
 
 
-def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
+def as_dict(vlm_config: VisionLanguageConfig) -> Dict:
     """Flatten vision language config to pure args.
 
     Compatible with what llm entrypoint expects.
     """
     result = {}
-    for field in fields(vision_language_config):
-        value = getattr(vision_language_config, field.name)
+    for field in fields(vlm_config):
+        value = getattr(vlm_config, field.name)
         if isinstance(value, Enum):
             result[field.name] = value.name.lower()
         elif isinstance(value, tuple):
@@ -51,8 +51,7 @@ def as_dict(vision_language_config: VisionLanguageConfig) -> Dict:
         else:
             result[field.name] = value
 
-    result[
-        "no_image_processor"] = vision_language_config.image_processor is None
+    result["disable_image_processor"] = vlm_config.image_processor is None
 
     return result
 
