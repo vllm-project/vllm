@@ -6,10 +6,11 @@ from typing import Optional
 import torch
 
 from vllm._C import ops
+from vllm._custom_C import paged_attention_custom
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, create_kv_caches_with_random
 
 NUM_BLOCKS = 1024
-PARTITION_SIZE = 512
+PARTITION_SIZE = 256
 
 
 @torch.inference_mode()
@@ -77,6 +78,9 @@ def main(
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
+        if not args.custom_paged_attn:
+            global PARTITION_SIZE
+            PARTITION_SIZE = 512
         num_partitions = ((max_context_len + PARTITION_SIZE - 1) //
                           PARTITION_SIZE)
         tmp_output = torch.empty(
@@ -118,24 +122,43 @@ def main(
                     kv_scale,
                 )
             elif version == "v2":
-                ops.paged_attention_v2(
-                    output,
-                    exp_sums,
-                    max_logits,
-                    tmp_output,
-                    query,
-                    key_cache,
-                    value_cache,
-                    num_kv_heads,
-                    scale,
-                    block_tables,
-                    context_lens,
-                    block_size,
-                    max_context_len,
-                    alibi_slopes,
-                    kv_cache_dtype,
-                    kv_scale,
-                )
+                if not args.custom_paged_attn:
+                    ops.paged_attention_v2(
+                        output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        scale,
+                        block_tables,
+                        context_lens,
+                        block_size,
+                        max_context_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                        kv_scale,
+                    )
+                else:
+                    paged_attention_custom(
+                        output,
+                        exp_sums,
+                        max_logits,
+                        tmp_output,
+                        query,
+                        key_cache,
+                        value_cache,
+                        num_kv_heads,
+                        scale,
+                        block_tables,
+                        context_lens,
+                        block_size,
+                        max_context_len,
+                        alibi_slopes,
+                        kv_cache_dtype,
+                    )
             else:
                 raise ValueError(f"Invalid version: {version}")
         torch.cuda.synchronize()
@@ -191,6 +214,9 @@ if __name__ == '__main__':
         'FP8_E5M2 (without scaling) is only supported on cuda version greater '
         'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
         'common inference criteria.')
+    parser.add_argument("--custom-paged-attn",
+                        action="store_true",
+                        help="Use custom paged attention")
     args = parser.parse_args()
     print(args)
 
