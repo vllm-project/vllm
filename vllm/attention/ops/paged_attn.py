@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -6,7 +7,6 @@ import torch
 from vllm._C import cache_ops, ops
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
 from vllm.utils import is_hip
-import os
 
 custom_attn_available = is_hip() and \
                     (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN", "1") != "0")

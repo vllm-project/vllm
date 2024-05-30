@@ -6,8 +6,8 @@ import torch
 from allclose_default import get_default_atol, get_default_rtol
 
 from vllm._C import cache_ops, ops
-from vllm.utils import get_max_shared_memory_bytes, is_hip
 from vllm._custom_C import paged_attention_custom
+from vllm.utils import get_max_shared_memory_bytes, is_hip
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
