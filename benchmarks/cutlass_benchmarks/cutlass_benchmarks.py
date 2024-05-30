@@ -1,7 +1,7 @@
 import argparse
 import torch
 import torch.utils.benchmark as TBenchmark
-from torch.utils.benchmark import Measurement as TMeasurement 
+from torch.utils.benchmark import Measurement as TMeasurement
 import time
 import pickle as pkl
 
@@ -12,17 +12,21 @@ from typing import Tuple, Callable, Iterable
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
 
-# helpers 
+# helpers
+
 
 def to_fp8(tensor: torch.tensor) -> torch.tensor:
     finfo = torch.finfo(torch.float8_e4m3fn)
     return torch.round(tensor.clamp(
         min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
+
 def to_int8(tensor: torch.tensor) -> torch.tensor:
     return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
 
-def make_rand_tensors(dtype: torch.dtype, m: int, n: int, k: int) -> Tuple[torch.tensor, torch.tensor]:
+
+def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
+                      k: int) -> Tuple[torch.tensor, torch.tensor]:
 
     a = torch.randn((m, k), device='cuda') * 5
     b = torch.randn((n, k), device='cuda').t() * 5
@@ -34,191 +38,207 @@ def make_rand_tensors(dtype: torch.dtype, m: int, n: int, k: int) -> Tuple[torch
 
     raise ValueError("unsupported dtype")
 
+
 # impl
 
-def pytorch_i8_impl(a: torch.tensor,
-                    b: torch.tensor,
-                    scale_a: torch.tensor,
+
+def pytorch_i8_impl(a: torch.tensor, b: torch.tensor, scale_a: torch.tensor,
                     scale_b: torch.tensor,
                     out_dtype: torch.dtype) -> torch.tensor:
     return torch.mm(a, b)
 
-def pytorch_fp8_impl(a: torch.tensor,
-                     b: torch.tensor,
-                     scale_a: torch.tensor,
+
+def pytorch_fp8_impl(a: torch.tensor, b: torch.tensor, scale_a: torch.tensor,
                      scale_b: torch.tensor,
                      out_dtype: torch.dtype) -> torch.tensor:
-    return torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype)
+    return torch._scaled_mm(a,
+                            b,
+                            scale_a=scale_a,
+                            scale_b=scale_b,
+                            out_dtype=out_dtype)
 
-def pytorch_fp8_impl_fast_accum(a: torch.tensor,
-                                b: torch.tensor,
-                                scale_a: torch.tensor,
-                                scale_b: torch.tensor,
+
+def pytorch_fp8_impl_fast_accum(a: torch.tensor, b: torch.tensor,
+                                scale_a: torch.tensor, scale_b: torch.tensor,
                                 out_dtype: torch.dtype) -> torch.tensor:
-    return torch._scaled_mm(a, b, scale_a=scale_a, scale_b=scale_b, out_dtype=out_dtype, use_fast_accum=True)
+    return torch._scaled_mm(a,
+                            b,
+                            scale_a=scale_a,
+                            scale_b=scale_b,
+                            out_dtype=out_dtype,
+                            use_fast_accum=True)
 
-def cutlass_impl(a: torch.tensor,
-                 b: torch.tensor,
-                 scale_a: torch.tensor,
+
+def cutlass_impl(a: torch.tensor, b: torch.tensor, scale_a: torch.tensor,
                  scale_b: torch.tensor,
                  out_dtype: torch.dtype) -> torch.tensor:
-    return ops.cutlass_scaled_mm_dq(a, b, scale_a, scale_b, out_dtype = out_dtype)
+    return ops.cutlass_scaled_mm_dq(a,
+                                    b,
+                                    scale_a,
+                                    scale_b,
+                                    out_dtype=out_dtype)
+
 
 # bench
-def bench_fn(a: torch.tensor,
-             b: torch.tensor,
-             scale_a: torch.tensor,
-             scale_b: torch.tensor,
-             out_dtype: torch.dtype,
-             label: str,
-             sub_label: str,
-             fn: Callable,
-             description: str) -> TMeasurement:
+def bench_fn(a: torch.tensor, b: torch.tensor, scale_a: torch.tensor,
+             scale_b: torch.tensor, out_dtype: torch.dtype, label: str,
+             sub_label: str, fn: Callable, description: str) -> TMeasurement:
 
     min_run_time = 1
 
     globals = {
-            "a" : a,
-            "b" : b,
-            "scale_a" : scale_a,
-            "scale_b" : scale_b,
-            "out_dtype" : out_dtype,
-            "fn" : fn,
-            }
+        "a": a,
+        "b": b,
+        "scale_a": scale_a,
+        "scale_b": scale_b,
+        "out_dtype": out_dtype,
+        "fn": fn,
+    }
     return TBenchmark.Timer(
-                stmt="fn(a, b, scale_a, scale_b, out_dtype)",
-                globals=globals,
-                label=label,
-                sub_label=sub_label,
-                description=description,
-            ).blocked_autorange(min_run_time=min_run_time)
+        stmt="fn(a, b, scale_a, scale_b, out_dtype)",
+        globals=globals,
+        label=label,
+        sub_label=sub_label,
+        description=description,
+    ).blocked_autorange(min_run_time=min_run_time)
 
-def bench_int8(dtype: torch.dtype,
-        m: int,
-        k: int,
-        n: int,
-        label: str,
-        sub_label: str) -> Iterable[TMeasurement]:
+
+def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
+               sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.int8
     a, b = make_rand_tensors(torch.int8, m, n, k)
-    scale_a = torch.tensor(1.0, device="cuda", dtype = torch.float32)
-    scale_b = torch.tensor(1.0, device="cuda", dtype = torch.float32)
+    scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
 
     timers = []
     # pytorch impl
-    timers.append(bench_fn(a.to(dtype=torch.bfloat16, device="cuda"),
-                           b.to(dtype=torch.bfloat16, device="cuda"),
-                           scale_a, scale_b, torch.bfloat16, label, sub_label, 
-                           pytorch_i8_impl, "pytorch_bf16_bf16_bf16_matmul-no-scales"))
+    timers.append(
+        bench_fn(a.to(dtype=torch.bfloat16, device="cuda"),
+                 b.to(dtype=torch.bfloat16, device="cuda"), scale_a, scale_b,
+                 torch.bfloat16, label, sub_label, pytorch_i8_impl,
+                 "pytorch_bf16_bf16_bf16_matmul-no-scales"))
 
     # cutlass impl
-    timers.append(bench_fn(a, b,
-                           scale_a.to(device="cpu"), scale_b, torch.bfloat16, label, sub_label, 
-                           cutlass_impl, "cutlass_i8_i8_bf16_scaled_mm"))
+    timers.append(
+        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
+                 torch.bfloat16, label, sub_label, cutlass_impl,
+                 "cutlass_i8_i8_bf16_scaled_mm"))
 
     return timers
 
-def bench_fp8(dtype: torch.dtype,
-        m: int,
-        k: int,
-        n: int,
-        label: str,
-        sub_label: str) -> Iterable[TMeasurement]:
+
+def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
+              sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.float8_e4m3fn
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
-    scale_a = torch.tensor(1.0, device="cuda", dtype = torch.float32)
-    scale_b = torch.tensor(1.0, device="cuda", dtype = torch.float32)
+    scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
 
     timers = []
 
-    # pytorch impl: bf16 output, without fp8 fast accum 
-    timers.append(bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label, 
-                        pytorch_fp8_impl, "pytorch_fp8_fp8_bf16_scaled_mm"))
+    # pytorch impl: bf16 output, without fp8 fast accum
+    timers.append(
+        bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label,
+                 pytorch_fp8_impl, "pytorch_fp8_fp8_bf16_scaled_mm"))
 
     # pytorch impl: bf16 output, with fp8 fast accum
-    timers.append(bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label, 
-                        pytorch_fp8_impl_fast_accum, "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum"))
+    timers.append(
+        bench_fn(a, b, scale_a, scale_b, torch.bfloat16, label, sub_label,
+                 pytorch_fp8_impl_fast_accum,
+                 "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum"))
 
     # pytorch impl: fp16 output, without fp8 fast accum
-    timers.append(bench_fn(a, b, scale_a, scale_b, torch.float16, label, sub_label, 
-                        pytorch_fp8_impl, "pytorch_fp8_fp8_fp16_scaled_mm"))
+    timers.append(
+        bench_fn(a, b, scale_a, scale_b, torch.float16, label, sub_label,
+                 pytorch_fp8_impl, "pytorch_fp8_fp8_fp16_scaled_mm"))
 
     # pytorch impl: fp16 output, with fp8 fast accum
-    timers.append(bench_fn(a, b, scale_a, scale_b, torch.float16, label, sub_label, 
-                        pytorch_fp8_impl_fast_accum, "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum"))
+    timers.append(
+        bench_fn(a, b, scale_a, scale_b, torch.float16, label, sub_label,
+                 pytorch_fp8_impl_fast_accum,
+                 "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum"))
 
     # cutlass impl: bf16 output
-    timers.append(bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                           torch.bfloat16, label, sub_label, 
-                           cutlass_impl, "cutlass_fp8_fp8_bf16_scaled_mm"))
+    timers.append(
+        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
+                 torch.bfloat16, label, sub_label, cutlass_impl,
+                 "cutlass_fp8_fp8_bf16_scaled_mm"))
     # cutlass impl: fp16 output
-    timers.append(bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
-                           torch.float16, label, sub_label, 
-                           cutlass_impl, "cutlass_fp8_fp8_fp16_scaled_mm"))
+    timers.append(
+        bench_fn(a, b, scale_a.to(device="cpu"), scale_b.to(device="cpu"),
+                 torch.float16, label, sub_label, cutlass_impl,
+                 "cutlass_fp8_fp8_fp16_scaled_mm"))
     return timers
 
-def bench(dtype: torch.dtype,
-        m: int,
-        k: int,
-        n: int,
-        label: str,
-        sub_label: str) -> Iterable[TMeasurement]:
+
+def bench(dtype: torch.dtype, m: int, k: int, n: int, label: str,
+          sub_label: str) -> Iterable[TMeasurement]:
     if dtype == torch.int8:
         return bench_int8(dtype, m, k, n, label, sub_label)
     if dtype == torch.float8_e4m3fn:
         return bench_fp8(dtype, m, k, n, label, sub_label)
     raise ValueError("unsupported type")
 
+
 # runner
 def print_timers(timers: Iterable[TMeasurement]):
     compare = TBenchmark.Compare(timers)
     compare.print()
 
-def run(dtype: torch.dtype, MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
+
+def run(dtype: torch.dtype,
+        MKNs: Iterable[Tuple[int, int, int]]) -> Iterable[TMeasurement]:
 
     results = []
     for m, k, n in MKNs:
-        timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm", f"MKN=({m}x{k}x{n})")
+        timers = bench(dtype, m, k, n, f"scaled-{dtype}-gemm",
+                       f"MKN=({m}x{k}x{n})")
         print_timers(timers)
         results.extend(timers)
-    
+
     return results
 
-# output makers 
+
+# output makers
 def make_output(data: Iterable[TMeasurement],
                 MKNs: Iterable[Tuple[int, int, int]],
                 base_description: str,
-                timestamp = None):
+                timestamp=None):
 
-    print (f"== All Results {base_description} ====")
+    print(f"== All Results {base_description} ====")
     print_timers(data)
 
-    # pickle all the results 
+    # pickle all the results
     timestamp = int(time.time()) if timestamp is None else timestamp
     with open(f"{base_description}-{timestamp}.pkl", "wb") as f:
         pkl.dump(data, f)
- 
+
+
 # argparse runners
 
+
 def run_square_bench(args):
-    dim_sizes = list(range(args.dim_start, args.dim_end + 1, args.dim_increment))
+    dim_sizes = list(
+        range(args.dim_start, args.dim_end + 1, args.dim_increment))
     MKNs = list(zip(dim_sizes, dim_sizes, dim_sizes))
     data = run(args.dtype, MKNs)
 
     make_output(data, MKNs, f"square_bench-{args.dtype}")
 
+
 def run_range_bench(args):
     dim_sizes = list(range(args.dim_start, args.dim_end, args.dim_increment))
     n = len(dim_sizes)
-    Ms = [args.m_constant] * n if args.m_constant is not None else dim_sizes 
-    Ks = [args.k_constant] * n if args.k_constant is not None else dim_sizes 
-    Ns = [args.n_constant] * n if args.n_constant is not None else dim_sizes 
+    Ms = [args.m_constant] * n if args.m_constant is not None else dim_sizes
+    Ks = [args.k_constant] * n if args.k_constant is not None else dim_sizes
+    Ns = [args.n_constant] * n if args.n_constant is not None else dim_sizes
     MKNs = list(zip(Ms, Ks, Ns))
     data = run(args.dtype, MKNs)
 
     make_output(data, MKNs, f"range_bench-{args.dtype}")
 
-def run_model_bench(args): 
+
+def run_model_bench(args):
 
     print("Benchmarking models:")
     for i, model in enumerate(args.models):
@@ -242,7 +262,7 @@ def run_model_bench(args):
 
     # Print all results
     for data, model in zip(model_bench_data, models):
-        print (f"== Results {args.dtype} {model} ====")
+        print(f"== Results {args.dtype} {model} ====")
         print_timers(data)
 
     timestamp = int(time.time())
@@ -254,18 +274,18 @@ def run_model_bench(args):
     with open(f"model_bench-{args.dtype}-{timestamp}.pkl", "wb") as f:
         pkl.dump(all_data, f)
 
+
 if __name__ == '__main__':
 
     def to_torch_dtype(dt):
         if dt == "int8":
-            return  torch.int8
+            return torch.int8
         if dt == "fp8":
             return torch.float8_e4m3fn
         raise ValueError("unsupported dtype")
 
     parser = argparse.ArgumentParser(
-            description=
-            """
+        description="""
             Benchmark Cutlass GEMM.
 
             To run square matrices gemm:
@@ -278,8 +298,10 @@ if __name__ == '__main__':
             Output:
                 - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various gemms.
             """,
-            formatter_class=argparse.RawTextHelpFormatter)
-    parser.add_argument("--dtype", type=to_torch_dtype, required=True,
+        formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("--dtype",
+                        type=to_torch_dtype,
+                        required=True,
                         help="Available options are ['int8', 'fp8']")
     subparsers = parser.add_subparsers(dest="cmd")
 
@@ -299,8 +321,15 @@ if __name__ == '__main__':
     range_parser.set_defaults(func=run_range_bench)
 
     model_parser = subparsers.add_parser("model_bench")
-    model_parser.add_argument("--models", nargs="+", type=str, default=DEFAULT_MODELS, choices=WEIGHT_SHAPES.keys())
-    model_parser.add_argument("--batch-sizes", nargs="+", type=int, default=DEFAULT_BATCH_SIZES)
+    model_parser.add_argument("--models",
+                              nargs="+",
+                              type=str,
+                              default=DEFAULT_MODELS,
+                              choices=WEIGHT_SHAPES.keys())
+    model_parser.add_argument("--batch-sizes",
+                              nargs="+",
+                              type=int,
+                              default=DEFAULT_BATCH_SIZES)
     model_parser.set_defaults(func=run_model_bench)
 
     args = parser.parse_args()
