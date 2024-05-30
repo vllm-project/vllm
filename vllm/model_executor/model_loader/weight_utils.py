@@ -124,9 +124,11 @@ def get_quant_config(model_config: ModelConfig,
     if hf_quant_config is None:
         compression_config = getattr(model_config.hf_config,
                                      "compression_config", None)
+        print(compression_config)
         if compression_config is not None:
             hf_quant_config = compression_config.get("quantization_config",
                                                      None)
+            print(hf_quant_config)
 
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
