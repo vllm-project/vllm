@@ -3,6 +3,8 @@ from typing import Dict, List, Optional, Tuple
 import intel_extension_for_pytorch.llm.modules as ipex_modules
 import torch
 
+from vllm import _custom_ops as ops
+
 
 class PagedAttention:
 
@@ -30,9 +32,9 @@ class PagedAttention:
         num_blocks = kv_cache.shape[1]
 
         key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, -1, num_kv_heads, head_size)
+        key_cache = key_cache.view(num_blocks, num_kv_heads, -1, head_size)
         value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, -1, num_kv_heads, head_size)
+        value_cache = value_cache.view(num_blocks, num_kv_heads, -1, head_size)
         return key_cache, value_cache
 
     @staticmethod
@@ -66,7 +68,7 @@ class PagedAttention:
         *args,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
-        block_size = value_cache.shape[1]
+        block_size = value_cache.shape[2]
         head_mapping = torch.arange(
             0,
             num_kv_heads,
@@ -113,4 +115,6 @@ class PagedAttention:
         src_to_dists: Dict[int, List[int]],
         *args,
     ) -> None:
-        raise NotImplementedError
+        key_caches = [kv_cache[0] for kv_cache in kv_caches]
+        value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        ops.copy_blocks(key_caches, value_caches, src_to_dists)
