@@ -41,46 +41,19 @@ class CompressedTensorsW8A8StaticTensor(CompressedTensorsScheme):
 
         # TODO: remove zero_point parameters once the configs given remove them
 
-        # Note on input/weight scales and zero_points
-        #
-        # When the scales have a single value, it is required that they be
-        # on the CPU for 2 reasons,
-        # 1. Performance:
-        #   When the scales (input_scale/weight_scales) have only a single
-        #   value, we perform a scalar broadcast of that value during the
-        #   quant/dequant operations. The "quant" and the "gemm+dequant"
-        #   kernels accept the Scalar by-value. These tensors are allocated
-        #   on the CPU in order to avoid the GPU-to-CPU copy when passing
-        #   by-value.
-        #
-        # 2. CUDA Graphs:
-        #   CUDA Graphs don't support GPU-to-CPU copy operations during
-        #   stream capture.
-        #
-        # TODO: zero-points are not supported yet. But we expect a similar
-        # pattern.
-
         is_tensor_partitioned = len(output_partition_sizes) != 1
         weight_scale_dim = sum(
             output_partition_sizes) if is_tensor_partitioned else 1
-        weight_scale_device = "cpu" if weight_scale_dim == 1 else "cuda"
 
-        input_scale = Parameter(torch.empty(1,
-                                            device="cpu",
-                                            dtype=torch.float32),
+        input_scale = Parameter(torch.empty(1, dtype=torch.float32),
                                 requires_grad=False)
-        input_zero_point = Parameter(torch.empty(1,
-                                                 device="cpu",
-                                                 dtype=torch.int8),
+        input_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                      requires_grad=False)
 
         weight_scale = Parameter(torch.empty(weight_scale_dim,
-                                             device=weight_scale_device,
                                              dtype=torch.float32),
                                  requires_grad=False)
-        weight_zero_point = Parameter(torch.empty(1,
-                                                  device="cpu",
-                                                  dtype=torch.int8),
+        weight_zero_point = Parameter(torch.empty(1, dtype=torch.int8),
                                       requires_grad=False)
 
         weight = Parameter(torch.empty(sum(output_partition_sizes),
