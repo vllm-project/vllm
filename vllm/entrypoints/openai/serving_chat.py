@@ -177,9 +177,15 @@ class OpenAIServingChat(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        result_generator = self.engine.generate(prompt_text, sampling_params,
-                                                request_id, prompt_ids,
-                                                lora_request)
+        result_generator = self.engine.generate(
+            {
+                "prompt": prompt_text,
+                "prompt_token_ids": prompt_ids
+            },
+            sampling_params,
+            request_id,
+            lora_request,
+        )
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -281,7 +287,7 @@ class OpenAIServingChat(OpenAIServing):
                         logprobs = self._create_logprobs(
                             token_ids=delta_token_ids,
                             top_logprobs=top_logprobs,
-                            num_output_top_logprobs=request.logprobs,
+                            num_output_top_logprobs=request.top_logprobs,
                             initial_text_offset=len(previous_texts[i]),
                         )
                     else:
@@ -368,7 +374,7 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = self._create_logprobs(
                     token_ids=token_ids,
                     top_logprobs=top_logprobs,
-                    num_output_top_logprobs=request.logprobs,
+                    num_output_top_logprobs=request.top_logprobs,
                 )
             else:
                 logprobs = None
