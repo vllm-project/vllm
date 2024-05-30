@@ -109,7 +109,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
-    top_logprobs: Optional[int] = None
+    top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
@@ -192,8 +192,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(self) -> SamplingParams:
-        if self.logprobs and not self.top_logprobs:
-            raise ValueError("Top logprobs must be set when logprobs is.")
+        # We now allow logprobs being true without top_logrobs.
 
         logits_processors = None
         if self.logit_bias:
@@ -249,6 +248,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "top_logprobs" in data and data["top_logprobs"] is not None:
+            if "logprobs" not in data or data["logprobs"] is False:
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
+                )
+            elif not 0 <= data["top_logprobs"] <= 20:
+                raise ValueError(
+                    "`top_logprobs` must be a value in the interval [0, 20].")
         return data
 
 
@@ -397,6 +409,15 @@ class CompletionRequest(OpenAIBaseModel):
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "logprobs" in data and data[
+                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
+            raise ValueError(("if passed, `logprobs` must be a value",
+                              " in the interval [0, 5]."))
+        return data
+
 
 class EmbeddingRequest(BaseModel):
     # Ordered by official OpenAI API documentation
@@ -416,7 +437,7 @@ class EmbeddingRequest(BaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
-class LogProbs(OpenAIBaseModel):
+class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
     tokens: List[str] = Field(default_factory=list)
@@ -426,7 +447,7 @@ class LogProbs(OpenAIBaseModel):
 class CompletionResponseChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[CompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = Field(
         default=None,
@@ -449,7 +470,7 @@ class CompletionResponse(OpenAIBaseModel):
 class CompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     text: str
-    logprobs: Optional[LogProbs] = None
+    logprobs: Optional[CompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = Field(
         default=None,
@@ -489,11 +510,25 @@ class ChatMessage(OpenAIBaseModel):
     content: str
 
 
+class ChatCompletionLogProb(OpenAIBaseModel):
+    token: str
+    logprob: float = -9999.0
+    bytes: Optional[List[int]] = None
+
+
+class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
+
+
+class ChatCompletionLogProbs(OpenAIBaseModel):
+    content: Optional[List[ChatCompletionLogProbsContent]] = None
+
+
 class ChatCompletionResponseChoice(OpenAIBaseModel):
     index: int
     message: ChatMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
@@ -514,8 +549,8 @@ class DeltaMessage(OpenAIBaseModel):
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     index: int
     delta: DeltaMessage
-    logprobs: Optional[LogProbs] = None
-    finish_reason: Optional[str] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
     stop_reason: Optional[Union[int, str]] = None
 
 
