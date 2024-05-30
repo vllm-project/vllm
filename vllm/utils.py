@@ -2,16 +2,16 @@ import asyncio
 import datetime
 import enum
 import gc
-import glob
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
 import warnings
 from collections import defaultdict
-from functools import lru_cache, partial
+from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncIterator, Awaitable, Callable, Dict, Generic,
                     Hashable, List, Optional, OrderedDict, Tuple, TypeVar,
@@ -235,9 +235,11 @@ def merge_async_iterators(
                 yield item
         except (Exception, asyncio.CancelledError) as e:
             for task in _tasks:
-                # NOTE: Pass the error msg in cancel()
-                # when only Python 3.9+ is supported.
-                task.cancel()
+                if sys.version_info >= (3, 9):
+                    # msg parameter only supported in Python 3.9+
+                    task.cancel(e)
+                else:
+                    task.cancel()
             raise e
         await asyncio.gather(*_tasks)
 
@@ -565,28 +567,6 @@ def init_cached_hf_modules():
     init_hf_modules()
 
 
-def nccl_integrity_check(filepath):
-    """
-    when the library is corrupted, we cannot catch
-    the exception in python. it will crash the process.
-    instead, we use the exit code of `ldd` to check
-    if the library is corrupted. if not, we will return
-    the version of the library.
-    """
-    exit_code = os.system(f"ldd {filepath} 2>&1 > /dev/null")
-    if exit_code != 0:
-        raise RuntimeError(f"Failed to load NCCL library from {filepath} .")
-    import ctypes
-
-    nccl = ctypes.CDLL(filepath)
-    version = ctypes.c_int()
-    nccl.ncclGetVersion.restype = ctypes.c_int
-    nccl.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
-    result = nccl.ncclGetVersion(ctypes.byref(version))
-    assert result == 0
-    return version.value
-
-
 @lru_cache(maxsize=None)
 def find_library(lib_name: str) -> str:
     """
@@ -616,17 +596,13 @@ def find_library(lib_name: str) -> str:
 
 
 def find_nccl_library():
+    """
+    We either use the library file specified by the `VLLM_NCCL_SO_PATH`
+    environment variable, or we find the library file brought by PyTorch.
+    After importing `torch`, `libnccl.so.2` or `librccl.so.1` can be
+    found by `ctypes` automatically.
+    """
     so_file = envs.VLLM_NCCL_SO_PATH
-    VLLM_CONFIG_ROOT = envs.VLLM_CONFIG_ROOT
-
-    # check if we have vllm-managed nccl
-    vllm_nccl_path = None
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".")[0]
-        path = os.path.expanduser(
-            f"{VLLM_CONFIG_ROOT}/vllm/nccl/cu{cuda_major}/libnccl.so.*")
-        files = glob.glob(path)
-        vllm_nccl_path = files[0] if files else None
 
     # manually load the nccl library
     if so_file:
@@ -635,9 +611,9 @@ def find_nccl_library():
             so_file)
     else:
         if torch.version.cuda is not None:
-            so_file = vllm_nccl_path or find_library("libnccl.so.2")
+            so_file = "libnccl.so.2"
         elif torch.version.hip is not None:
-            so_file = find_library("librccl.so.1")
+            so_file = "librccl.so.1"
         else:
             raise ValueError("NCCL only supports CUDA and ROCm backends.")
         logger.info("Found nccl from library %s", so_file)
@@ -658,3 +634,44 @@ def enable_trace_function_call_for_thread() -> None:
                                 filename)
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         enable_trace_function_call(log_path)
+
+
+def identity(value: T) -> T:
+    return value
+
+
+F = TypeVar('F', bound=Callable[..., Any])
+
+
+def deprecate_kwargs(
+        *kws: str,
+        is_deprecated: Union[bool, Callable[[], bool]] = True,
+        additional_message: Optional[str] = None) -> Callable[[F], F]:
+    deprecated_kws = set(kws)
+
+    if not callable(is_deprecated):
+        is_deprecated = partial(identity, is_deprecated)
+
+    def wrapper(fn: F) -> F:
+
+        @wraps(fn)
+        def inner(*args, **kwargs):
+            if is_deprecated():
+                deprecated_kwargs = kwargs.keys() & deprecated_kws
+                if deprecated_kwargs:
+                    msg = (
+                        f"The keyword arguments {deprecated_kwargs} are "
+                        "deprecated and will be removed in a future update.")
+                    if additional_message is not None:
+                        msg += f" {additional_message}"
+
+                    warnings.warn(
+                        DeprecationWarning(msg),
+                        stacklevel=3,  # The inner function takes up one level
+                    )
+
+            return fn(*args, **kwargs)
+
+        return inner  # type: ignore
+
+    return wrapper
