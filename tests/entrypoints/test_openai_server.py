@@ -439,15 +439,14 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert chat_completion.id is not None
-    assert chat_completion.choices is not None and len(
-        chat_completion.choices) == 1
-    assert chat_completion.choices[0].message is not None
-    assert chat_completion.choices[0].logprobs is not None
-    assert chat_completion.choices[0].logprobs.content[
-        0].top_logprobs is not None
-    assert len(
-        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
-    message = chat_completion.choices[0].message
+    assert len(chat_completion.choices) == 1
+
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "length"
+    assert chat_completion.usage == openai.types.CompletionUsage(
+        completion_tokens=10, prompt_tokens=37, total_tokens=47)
+
+    message = choice.message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
     messages.append({"role": "assistant", "content": message.content})
