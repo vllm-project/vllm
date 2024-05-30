@@ -1,5 +1,5 @@
 # default base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2"
+ARG BASE_IMAGE="rocm/pytorch:rocm6.1.1_ubuntu20.04_py3.9_pytorch_release-2.1.2"
 
 ARG COMMON_WORKDIR=/app
 
@@ -40,7 +40,7 @@ WORKDIR ${COMMON_WORKDIR}
 # -----------------------
 # hipBLASLt build stages
 FROM base AS build_hipblaslt
-ARG HIPBLASLT_BRANCH="ee51a9d1"
+ARG HIPBLASLT_BRANCH="6f65c6e"
 RUN git clone https://github.com/ROCm/hipBLASLt \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
@@ -56,7 +56,7 @@ FROM export_hipblaslt_${BUILD_HIPBLASLT} AS export_hipblaslt
 # -----------------------
 # RCCL build stages
 FROM base AS build_rccl
-ARG RCCL_BRANCH="eeea3b6"
+ARG RCCL_BRANCH="73221b4"
 RUN git clone https://github.com/ROCm/rccl \
     && cd rccl \
     && git checkout ${RCCL_BRANCH} \
