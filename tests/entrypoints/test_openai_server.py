@@ -375,7 +375,10 @@ async def test_some_logprobs_chat(server, client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
 async def test_too_many_chat_logprobs(server, client: openai.AsyncOpenAI,
                                       model_name: str):
     messages = [{
