@@ -114,7 +114,8 @@ class PagedAttention:
         use_custom = (custom_attn_available and query.dtype == torch.half
                       and head_size == 128 and block_size == 16
                       and kv_cache_dtype == "auto"
-                      and (gqa_ratio >= 1 and gqa_ratio <= 16))
+                      and (gqa_ratio >= 1 and gqa_ratio <= 16)
+                      and max_context_len <= 32768)
         if not use_custom:
             _PARTITION_SIZE = _PARTITION_SIZE_V1V2
         else:
