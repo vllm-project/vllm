@@ -541,7 +541,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
 
         return new_block_table
 
-     def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
 
         request_id = seq_group.request_id
 
