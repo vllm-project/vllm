@@ -911,7 +911,8 @@ def test_vocab_parallel_embedding_indices(tp_size, seed):
         # Ensure that we are not exceeding the vocab size
         computed_vocab_size += vocab_end_index - vocab_start_index
         computed_org_vocab_size += org_vocab_end_index - org_vocab_start_index
-        computed_added_vocab_size += added_vocab_end_index - added_vocab_start_index
+        computed_added_vocab_size += (added_vocab_end_index -
+                                      added_vocab_start_index)
 
         # Ensure that the ranges are not overlapping
         all_tokens.extend(range(vocab_start_index, vocab_end_index))
