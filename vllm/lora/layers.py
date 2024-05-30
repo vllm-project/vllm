@@ -1024,10 +1024,22 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
+    """
+    LoRA wrapper for LogitsProcessor, with extra logic to handle LoRA application
+    and added LoRA vocabulary.
+
+    Args:
+        base_layer: LogitsProcessor layer
+        hidden_size: hidden size of the model
+        dtype: data type of the model
+        device: device of the model
+        sharded_to_full_mapping: index mapping from sharded vocab to full vocab
+            recieved from base_layer.get_sharded_to_full_mapping()
+    """
 
     def __init__(self, base_layer: LogitsProcessor, hidden_size: int,
                  dtype: torch.dtype, device: torch.device,
-                 shared_to_full_mapping: Optional[List[int]]) -> None:
+                 sharded_to_full_mapping: Optional[List[int]]) -> None:
         super().__init__()
         self.base_layer = base_layer
         self.hidden_size = hidden_size
@@ -1035,7 +1047,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.device = device
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.shared_to_full_mapping = shared_to_full_mapping
+        self.sharded_to_full_mapping = sharded_to_full_mapping
 
     @property
     def logits_as_input(self):
@@ -1096,13 +1108,13 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=self.dtype,
             device=self.device,
         )
-        if self.shared_to_full_mapping is not None:
-            self.shared_to_full_mapping_gpu = torch.tensor(
-                self.shared_to_full_mapping,
+        if self.sharded_to_full_mapping is not None:
+            self.sharded_to_full_mapping_gpu = torch.tensor(
+                self.sharded_to_full_mapping,
                 device=self.device,
                 dtype=torch.long)
         else:
-            self.shared_to_full_mapping_gpu = None
+            self.sharded_to_full_mapping_gpu = None
         # Lazily initialized.
         self.indices: torch.Tensor
         self.indices_len: List[int]
@@ -1159,10 +1171,24 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         if logits is None:
             return None
 
-        if self.shared_to_full_mapping_gpu is not None:
+        if self.sharded_to_full_mapping_gpu is not None:
             # Reindex full logits tensor to ensure 1:1 mapping between
             # index and token_id
-            logits = logits[:, self.shared_to_full_mapping_gpu]
+            # Example for:
+            #   org_vocab_size = 4
+            #   added_vocab_size = 2
+            #   pad_to_size = 8
+            #   tp_size = 2
+
+            # indices:  [0, 1, 2,  3, 4, 5, 6,  7]
+            # token_id: [0, 1, 4, -1, 2, 3, 5, -1]
+
+            # Therefore, the mapping is expected to be:
+            # [0, 1, 4, 6, 2, 3, 5, 7] so that when we reindex,
+            # we get:
+            # indices:  [0, 1, 2, 3, 4, 5,  6,  7]
+            # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
+            logits = logits[:, self.sharded_to_full_mapping_gpu]
 
         lora_logits = torch.empty(
             self.embeddings_tensors.shape[0] + 1,

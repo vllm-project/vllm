@@ -48,10 +48,10 @@ def _get_masked_input_and_mask(
                                                           org_vocab_end_index)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (
         input_ < added_vocab_end_index)
-    combined_offset = (org_vocab_start_index * org_vocab_mask) + (
+    valid_offset = (org_vocab_start_index * org_vocab_mask) + (
         added_vocab_start_index * added_vocab_mask)
     vocab_mask = org_vocab_mask | added_vocab_mask
-    input_ = vocab_mask * (input_ - combined_offset)
+    input_ = vocab_mask * (input_ - valid_offset)
     return input_, ~vocab_mask
 
 
@@ -156,26 +156,38 @@ class VocabParallelEmbedding(torch.nn.Module):
                      tp_size: int,
                      padding_size: int) -> Tuple[int, int, int, int, int, int]:
         """Get start and end indices for vocab parallel embedding, following the
-        layout outlined in the class docstring.
+        layout outlined in the class docstring, based on the given tp_rank and
+        tp_size.
         
         vocab_*_index -> refers to the entire vocab (original+lora+padding).
         org_*_index -> refers to base model index.
         added_*_index -> refers to lora-added index.
         """
-        org_vocab_size_padded = pad_vocab_size(org_vocab_size, padding_size)
+        vocab_size_padded = pad_vocab_size(vocab_size, padding_size)
+        org_vocab_size_padded = pad_vocab_size(org_vocab_size, tp_size)
         num_added_embeddings = vocab_size - org_vocab_size
+        num_added_embeddings_padded = pad_vocab_size(num_added_embeddings,
+                                                     tp_size)
+        vocab_start_index, vocab_end_index = (
+            vocab_range_from_global_vocab_size(vocab_size_padded, tp_rank,
+                                               tp_size))
         org_vocab_start_index, org_vocab_end_index = (
             vocab_range_from_global_vocab_size(org_vocab_size_padded, tp_rank,
                                                tp_size))
         added_vocab_start_index, added_vocab_end_index = (
-            vocab_range_from_global_vocab_size(num_added_embeddings,
+            vocab_range_from_global_vocab_size(num_added_embeddings_padded,
                                                tp_rank,
                                                tp_size,
                                                offset=org_vocab_size))
-        num_added_embeddings_in_shard = (added_vocab_end_index -
-                                         added_vocab_start_index)
-        vocab_start_index = org_vocab_start_index
-        vocab_end_index = org_vocab_end_index + num_added_embeddings_in_shard
+
+        # remove padding
+        org_vocab_start_index = min(org_vocab_start_index, org_vocab_size)
+        org_vocab_end_index = min(org_vocab_end_index, org_vocab_size)
+        added_vocab_start_index = min(added_vocab_start_index,
+                                      num_added_embeddings + org_vocab_size)
+        added_vocab_end_index = min(added_vocab_end_index,
+                                    num_added_embeddings + org_vocab_size)
+
         return (vocab_start_index, vocab_end_index, org_vocab_start_index,
                 org_vocab_end_index, added_vocab_start_index,
                 added_vocab_end_index)

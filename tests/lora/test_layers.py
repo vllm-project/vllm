@@ -32,7 +32,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead, VocabParallelEmbedding, DEFAULT_VOCAB_PADDING_SIZE,
+    pad_vocab_size)
 from vllm.model_executor.utils import set_random_seed
 
 from .utils import DummyLoRAManager
@@ -868,3 +869,68 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
 
     torch.allclose(ref_q, actual_q)
     torch.allclose(ref_k, actual_k)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+@pytest.mark.parametrize("seed", list(range(128)))
+def test_vocab_parallel_embedding_indices(tp_size, seed):
+    random.seed(seed)
+    vocab_size = random.randint(4000, 64000)
+    added_vocab_size = random.randint(0, 1024)
+    org_vocab_size = vocab_size - added_vocab_size
+    last_vocab_end_index = 0
+    last_org_vocab_end_index = 0
+    last_added_vocab_end_index = org_vocab_size
+    computed_vocab_size = 0
+    computed_org_vocab_size = 0
+    computed_added_vocab_size = 0
+
+    all_tokens = []
+    all_org_tokens = []
+    all_added_tokens = []
+
+    for tp_rank in range(tp_size):
+        (vocab_start_index, vocab_end_index, org_vocab_start_index,
+         org_vocab_end_index, added_vocab_start_index,
+         added_vocab_end_index) = VocabParallelEmbedding._get_indices(
+             vocab_size=vocab_size,
+             org_vocab_size=org_vocab_size,
+             tp_rank=tp_rank,
+             tp_size=tp_size,
+             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+         )
+        assert vocab_start_index <= vocab_end_index
+        assert org_vocab_start_index <= org_vocab_end_index
+        assert added_vocab_start_index <= added_vocab_end_index
+
+        # Assert that the ranges are contiguous
+        assert vocab_start_index == last_vocab_end_index
+        assert org_vocab_start_index == last_org_vocab_end_index
+        assert added_vocab_start_index == last_added_vocab_end_index
+
+        # Ensure that we are not exceeding the vocab size
+        computed_vocab_size += vocab_end_index - vocab_start_index
+        computed_org_vocab_size += org_vocab_end_index - org_vocab_start_index
+        computed_added_vocab_size += added_vocab_end_index - added_vocab_start_index
+
+        # Ensure that the ranges are not overlapping
+        all_tokens.extend(range(vocab_start_index, vocab_end_index))
+        all_org_tokens.extend(range(org_vocab_start_index,
+                                    org_vocab_end_index))
+        all_added_tokens.extend(
+            range(added_vocab_start_index, added_vocab_end_index))
+
+        last_vocab_end_index = vocab_end_index
+        last_org_vocab_end_index = org_vocab_end_index
+        last_added_vocab_end_index = added_vocab_end_index
+
+    assert computed_vocab_size == pad_vocab_size(vocab_size,
+                                                 DEFAULT_VOCAB_PADDING_SIZE)
+    assert computed_org_vocab_size == org_vocab_size
+    assert computed_added_vocab_size == added_vocab_size
+
+    # Ensure that the ranges are not overlapping
+    assert len(all_tokens) == len(set(all_tokens))
+    assert len(all_org_tokens) == len(set(all_org_tokens))
+    assert len(all_added_tokens) == len(set(all_added_tokens))
+    assert not set(all_org_tokens).intersection(set(all_added_tokens))
