@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Any, Dict, List, Optional, Tuple, TypeVar, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import Field
 from typing_extensions import Annotated
@@ -21,8 +21,6 @@ from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 logger = init_logger(__name__)
-
-T = TypeVar("T")
 
 
 @dataclass
