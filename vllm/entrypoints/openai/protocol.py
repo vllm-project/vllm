@@ -142,7 +142,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
     tools: Optional[List[ChatCompletionToolsParam]] = None
-    tool_choice: Optional[Union[Literal["none", "required"],
+    tool_choice: Optional[Union[Literal["none"],
                                 ChatCompletionNamedToolChoiceParam]] = "none"
     user: Optional[str] = None
 
@@ -267,14 +267,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "guided_regex" in data and data["guided_regex"] is not None,
             "guided_choice" in data and data["guided_choice"] is not None
         ])
-        if guide_count > 1 and "tool_choice" in data and data[
-                "tool_choice"] != "none":
-            raise ValueError(
-                "You can only either use guided decoding or tools, not both.")
+        # you can only use one kind of guided decoding
         if guide_count > 1:
             raise ValueError(
                 "You can only use one kind of guided decoding "
                 "('guided_json', 'guided_regex' or 'guided_choice').")
+        # you can only either use guided decoding or tools, not both
+        if guide_count > 1 and "tool_choice" in data and data[
+                "tool_choice"] != "none":
+            raise ValueError(
+                "You can only either use guided decoding or tools, not both.")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_choice(cls, data):
+        if "tool_choice" in data and data["tool_choice"] != "none":
+            if type(data["tool_choice"]
+                    ) is not ChatCompletionNamedToolChoiceParam:
+                raise ValueError("Currently only named tools are supported.")
+            if "tools" not in data or data["tools"] is None:
+                raise ValueError(
+                    "When using `tool_choice`, `tools` must be set.")
         return data
 
     @model_validator(mode="before")
