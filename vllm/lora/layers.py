@@ -221,10 +221,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.num_org_embeddings_per_partition:self.
                 base_layer.num_org_embeddings_per_partition +
                 self.base_layer.num_added_embeddings_per_partition]
-            self.embeddings_slice = (self.base_layer.added_vocab_start_index -
-                                     self.base_layer.org_vocab_size,
-                                     self.base_layer.added_vocab_end_index -
-                                     self.base_layer.org_vocab_size)
+            self.embeddings_slice = (
+                self.base_layer.shard_indices.added_vocab_start_index -
+                self.base_layer.org_vocab_size,
+                self.base_layer.shard_indices.added_vocab_end_index -
+                self.base_layer.org_vocab_size)
             self.base_layer.weight.data[
                 self.base_layer.num_org_embeddings_per_partition:].fill_(0)
         else:
