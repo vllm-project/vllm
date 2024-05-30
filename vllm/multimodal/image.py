@@ -15,6 +15,10 @@ logger = init_logger(__name__)
 
 
 def _get_seq_data(seq_len: int, vlm_config: VisionLanguageConfig):
+    # NOTE: We assume that <image> token is repeated `image_feature_size` times
+    # and then concatenated with the text prompt
+    # TODO: Enable other ways of inserting the image into the prompt
+
     token_ids = [vlm_config.image_token_id] * vlm_config.image_feature_size
     token_ids += [0] * (seq_len - vlm_config.image_feature_size)
 
