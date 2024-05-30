@@ -1,0 +1,22 @@
+steps:
+  - label: "check changes path"
+    key: "check-path"
+    plugins:
+        - monebag/monorepo-diff#v2.5.9:
+            diff: "git diff --name-only HEAD~1"
+            watch:
+              - path:
+                  - ".buildkite/"
+                  - ".github/"
+                  - "cmake/"                  
+                  - "benchmarks/"
+                  - "csrc/"
+                  - "tests/"
+                  - "vllm/"
+                config:
+                  label: ":pipeline:"
+                  commands:
+                  - "ls .buildkite || buildkite-agent annotate --style error 'Please merge upstream main branch for buildkite CI'"
+                  - "cd .buildkite && minijinja-cli test-template.j2 test-pipeline.yaml > pipeline.yml"
+                  - "cat pipeline.yml"
+                  - "buildkite-agent pipeline upload pipeline.yml"
