@@ -1,6 +1,5 @@
 import gc
 import json
-import multiprocessing as mp
 import os
 import pathlib
 import subprocess
@@ -264,7 +263,8 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
             model_loader_extra_config=TensorizerConfig(tensorizer_uri="test"))
 
 
-@pytest.mark.skip("Requires multiple GPUs")
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Test requires 2 GPUs")
 def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
         model_ref = "EleutherAI/pythia-1.4b"
@@ -279,21 +279,26 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner):
                 s3_endpoint="object.ord1.coreweave.com",
             ),
             tensor_parallel_size=2,
+            disable_custom_all_reduce=True,
         )
 
-@pytest.mark.skip("Requires multiple GPUs")
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason="Test requires 2 GPUs")
 def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
                                                                     tmp_path):
     model_ref = "EleutherAI/pythia-1.4b"
     # record outputs from un-sharded un-tensorized model
     base_model = vllm_runner(
         model_ref,
+        disable_custom_all_reduce=True,
+        enforce_eager=True,
     )
     outputs = base_model.generate(prompts, sampling_params)
 
     base_model.model.llm_engine.model_executor.shutdown()
     del base_model
     cleanup()
+    ray.shutdown()
 
     # load model with two shards and serialize with encryption
     model_path = str(tmp_path / (model_ref + "-%02d.tensors"))
@@ -303,29 +308,26 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
         tensorizer_uri=model_path,
         encryption_keyfile=key_path,
     )
-    # FIXME: launching multiple distributed engines within the same program
-    # results in a hang... launch serialization in a separate process as a work
-    # around
-    serialization_proc = mp.get_context('spawn').Process(
-        target=tensorize_vllm_model,
-        kwargs={
-            "engine_args": EngineArgs(
+
+    tensorize_vllm_model(
+        engine_args=EngineArgs(
                 model=model_ref,
                 tensor_parallel_size=2,
+                disable_custom_all_reduce=True,
                 enforce_eager=True,
             ),
-            "tensorizer_config": tensorizer_config,
-        },
+        tensorizer_config=tensorizer_config,
     )
-    serialization_proc.start()
-    serialization_proc.join()
     assert os.path.isfile(model_path % 0), "Serialization subprocess failed"
     assert os.path.isfile(model_path % 1), "Serialization subprocess failed"
+    cleanup()
+    ray.shutdown()
 
     loaded_vllm_model = vllm_runner(
         model_ref,
         tensor_parallel_size=2,
         load_format="tensorizer",
+        disable_custom_all_reduce=True,
         enforce_eager=True,
         model_loader_extra_config=tensorizer_config)
 
