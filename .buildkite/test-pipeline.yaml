@@ -4,11 +4,6 @@
 # the final pipeline yaml file.
 
 steps:
-# - label: Regression Test
-#   mirror_hardwares: [amd]
-#   command: pytest -v -s test_regression.py
-#   working_dir: "/vllm-workspace/tests" # optional
-
 - label: Test should not be triggered
   plugins:
     - monebag/monorepo-diff#v2.5.9:
@@ -26,6 +21,10 @@ steps:
           - path: ".buildkite/"
             config:
               command: "echo should be triggered"
+# - label: Regression Test
+#   mirror_hardwares: [amd]
+#   command: pytest -v -s test_regression.py
+#   working_dir: "/vllm-workspace/tests" # optional
 
 # - label: AsyncEngine Test
 #   #mirror_hardwares: [amd]
