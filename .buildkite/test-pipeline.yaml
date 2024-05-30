@@ -7,4 +7,4 @@ steps:
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests/spec_decode/e2e"
-  command: pytest -v -s test_multistep_correctness.py
+  command: pytest -vv -s test_multistep_correctness.py
