@@ -1,12 +1,17 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-
+from compressed_tensors.quantization.lifecycle.apply import (
+    find_first_name_or_class_match)
+from compressed_tensors.quantization.quant_args import (QuantizationArgs,
+                                                        QuantizationStrategy)
+from pydantic import BaseModel
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW8A8StaticTensor)
+    CompressedTensorsScheme, CompressedTensorsW8A8StaticTensor,
+    CompressedTensorsW4A16)
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -47,10 +52,15 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 layer_quant_details[target] = {}
-                layer_quant_details[target]["weight"] = quant_config.get(
-                    "weights")
-                layer_quant_details[target]["input"] = quant_config.get(
-                    "input_activations")
+                layer_quant_details[target][
+                    "weight"] = QuantizationArgs.parse_obj(
+                        quant_config.get("weights"))
+                try:
+                    layer_quant_details[target][
+                        "input"] = QuantizationArgs.parse_obj(
+                            quant_config.get("input_activations"))
+                except:
+                    layer_quant_details[target]["input"] = None
 
         return cls(layer_quant_details=layer_quant_details, ignore=ignore)
 
@@ -58,40 +68,60 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_config_filenames(cls) -> List[str]:
         return []
 
-    def _get_schema(self, weight_quant: Dict, input_quant: Dict):
-        # TODO: Refactor as additional cases are supported
+    def _is_static_tensor_w8a8(self, weight_quant: BaseModel,
+                               input_quant: BaseModel) -> bool:
+        is_8_bits = weight_quant.num_bits == input_quant.num_bits == 8
+        is_tensor = (weight_quant.strategy == input_quant.strategy ==
+                     QuantizationStrategy.TENSOR.value)
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        is_static = not weight_quant.dynamic and not input_quant.dynamic
 
-        weight_bit = weight_quant.get("num_bits")
-        input_bit = input_quant.get("num_bits")
+        if is_8_bits and is_tensor and is_symmetric and is_static:
+            return True
+        return False
 
-        weight_strategy = weight_quant.get("strategy")
-        input_strategy = input_quant.get("strategy")
+    def _is_w4a16(self, weight_quant: BaseModel,
+                  input_quant: BaseModel) -> bool:
+        input_quant_none = input_quant is None
+        is_4_bits = weight_quant.num_bits == 4
+        is_symmetric = weight_quant.symmetric
+        is_static = not weight_quant.dynamic
 
-        weight_symmetric = weight_quant.get("symmetric")
-        input_symmetric = input_quant.get("symmetric")
+        if is_4_bits and input_quant_none and is_symmetric and is_static:
+            return True
+        return False
 
-        is_8_bits = weight_bit == input_bit == 8
-        is_tensor = weight_strategy == input_strategy == "tensor"
-        is_symmetric = weight_symmetric and input_symmetric
+    def _get_schema(self, weight_quant: BaseModel, input_quant: BaseModel):
+        if self._is_w4a16(weight_quant, input_quant):
+            return CompressedTensorsW4A16(strategy=weight_quant.strategy,
+                                          group_size=weight_quant.group_size)
 
-        if is_8_bits and is_tensor and is_symmetric and \
-                torch.cuda.is_available():
-            # CompressedTensorsW8A8StaticTensor only supports CUDA path for
-            # now.
+        elif self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor()
-        raise NotImplementedError(
-            "Scheme not supported. Only CUDA, 8-bit static symmtetric "
-            "per tensor quantization is currently supported")
+
+        raise NotImplementedError("Scheme not supported.")
 
     def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
+        """
+        Fetch the appropriate scheme based on the values in the config
+        for a given layer. Returns CompressedTensorsUnquantized if the layer 
+        is in the ignore list. For all other layers, use 
+        find_first_name_or_class_match from compressed_tensors to map the 
+        layer/layer name to the list of targets defined in the config. 
+        The target is then used to fetch the corresponding 
+        CompressedTensorsScheme
 
-        # TODO: update with matching function from `compressed_tensors`
-        layer_type_name = None
-        layer_name_class = type(layer).__name__.lower()
-        for target in self.layer_quant_details:
-            if target.lower() in layer_name_class:
-                layer_type_name = target
-                break
+        :param layer: torch layer
+        :return: the CompressedTensorsScheme for the layer 
+        """
+        # TODO: update/map layer_name for llama models before
+        # using find_first_name_or_class_match?
+        layer_type_name = find_first_name_or_class_match(
+            name="",
+            module=layer,
+            targets=self.layer_quant_details.keys(),
+            check_contains=True)
+
         if layer_type_name is None:
             raise ValueError(f"Could not matching target for layer {layer}")
 
@@ -100,7 +130,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         if layer_quant_details is None:
             raise ValueError(
                 f"Could not find quantization details for {layer}.")
-
         return self._get_schema(weight_quant=layer_quant_details["weight"],
                                 input_quant=layer_quant_details["input"])
 
@@ -124,6 +153,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         scheme = self.quantization_config.get_scheme(layer=layer)
         scheme.create_weights(
             layer=layer,
+            input_size=input_size,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
             output_size=output_size,
