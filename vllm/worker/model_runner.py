@@ -518,9 +518,6 @@ class ModelRunner:
         else:
             multi_modal_input = None
 
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.int,
-                                       device=self.device)
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
