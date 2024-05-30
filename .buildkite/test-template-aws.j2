@@ -3,6 +3,7 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
+
   {% for step in steps %}
   - label: "{{ step.label }}"
     depends_on: ~
@@ -27,7 +28,7 @@ steps:
     plugins:
       - docker#v5.2.0:
           image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:472ad7e320a4948d6dd1b3d3ccd7d931d13539bf"
-          shm-size: "2g"
+          shm-size: "11g"
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
