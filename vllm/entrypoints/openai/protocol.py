@@ -240,6 +240,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logits_processors=logits_processors,
         )
 
+    @model_validator(mode='before')
+    def validate_stream_options(cls, values):
+        if values.get('stream_options') is not None and not values.get('stream'):
+            raise ValueError("stream_options can only be set if stream is true")
+        return values
+    
     @model_validator(mode="before")
     @classmethod
     def check_guided_decoding_count(cls, data):
