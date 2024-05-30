@@ -109,7 +109,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     frequency_penalty: Optional[float] = 0.0
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
-    top_logprobs: Optional[int] = None
+    top_logprobs: Optional[int] = 0
     max_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
@@ -192,8 +192,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     # doc: end-chat-completion-extra-params
 
     def to_sampling_params(self) -> SamplingParams:
-        if self.logprobs and not self.top_logprobs:
-            raise ValueError("Top logprobs must be set when logprobs is.")
+        # We now allow logprobs being true without top_logrobs.
 
         logits_processors = None
         if self.logit_bias:

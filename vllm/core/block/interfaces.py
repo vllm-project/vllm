@@ -203,3 +203,12 @@ class DeviceAwareBlockAllocator(ABC):
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
         pass
+
+    @abstractmethod
+    def allocate_or_get_null_block(self) -> Block:
+        """
+        Null blocks are used as a placeholders for KV cache blocks that have
+        been dropped due to sliding window.
+        There is at most one null block per allocator.
+        """
+        pass
