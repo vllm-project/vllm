@@ -93,6 +93,8 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
         image_processor = self._get_hf_image_processor(model_config,
                                                        vlm_config)
         if image_processor is None:
+            # NOTE: This is based on the code found in
+            # torchvision.transforms.v2.functional.pil_to_tensor
             image_arr = np.array(image, copy=True)
             pixel_values = torch.as_tensor(image_arr) \
                 .view(1, image.height, image.width, -1) \
