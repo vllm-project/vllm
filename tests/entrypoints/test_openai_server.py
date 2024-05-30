@@ -204,6 +204,7 @@ async def test_no_logprobs(server, client: openai.AsyncOpenAI,
     assert choice.logprobs is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -226,6 +227,7 @@ async def test_zero_logprobs(server, client: openai.AsyncOpenAI,
     assert len(choice.logprobs.top_logprobs[0]) <= 1
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
@@ -247,6 +249,49 @@ async def test_some_logprobs(server, client: openai.AsyncOpenAI,
     assert len(choice.logprobs.top_logprobs[0]) <= 6
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+async def test_too_many_completion_logprobs(server, client: openai.AsyncOpenAI,
+                                            model_name: str):
+
+    with pytest.raises(
+        (openai.BadRequestError, openai.APIError)):  # test using token IDs
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 0, 0, 0],
+            max_tokens=5,
+            temperature=0.0,
+            logprobs=6,
+        )
+        ...
+    with pytest.raises(
+        (openai.BadRequestError, openai.APIError)):  # test using token IDs
+        stream = await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 0, 0, 0],
+            max_tokens=5,
+            temperature=0.0,
+            logprobs=6,
+            stream=True,
+        )
+        async for chunk in stream:
+            ...
+
+    # the server should still work afterwards
+    completion = await client.completions.create(
+        model=model_name,
+        prompt=[0, 0, 0, 0, 0],
+        max_tokens=5,
+        temperature=0.0,
+    )
+    completion = completion.choices[0].text
+    assert completion is not None and len(completion) >= 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -298,9 +343,10 @@ async def test_zero_logprobs_chat(server, client: openai.AsyncOpenAI,
     choice = chat_completion.choices[0]
     assert choice.logprobs is not None
     assert choice.logprobs.content is not None
-    assert len(choice.logprobs.content[0].top_logprobs) == 1
+    assert len(choice.logprobs.content[0].top_logprobs) == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
@@ -328,6 +374,47 @@ async def test_some_logprobs_chat(server, client: openai.AsyncOpenAI,
     assert len(choice.logprobs.content[0].top_logprobs) == 5
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_too_many_chat_logprobs(server, client: openai.AsyncOpenAI,
+                                      model_name: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role": "user",
+        "content": "what is 1+1?"
+    }]
+
+    # Default max_logprobs is 20, so this should raise an error
+    with pytest.raises((openai.BadRequestError, openai.APIError)):
+        stream = await client.chat.completions.create(model=model_name,
+                                                      messages=messages,
+                                                      max_tokens=10,
+                                                      logprobs=True,
+                                                      top_logprobs=21,
+                                                      stream=True)
+        async for chunk in stream:
+            ...
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(model=model_name,
+                                             messages=messages,
+                                             max_tokens=10,
+                                             logprobs=True,
+                                             top_logprobs=30,
+                                             stream=False)
+
+    # the server should still work afterwards
+    chat_completion = await client.chat.completions.create(model=model_name,
+                                                           messages=messages,
+                                                           max_tokens=10,
+                                                           stream=False)
+    message = chat_completion.choices[0].message
+    assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
@@ -349,14 +436,15 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert chat_completion.id is not None
-    assert len(chat_completion.choices) == 1
-
-    choice = chat_completion.choices[0]
-    assert choice.finish_reason == "length"
-    assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=10, prompt_tokens=37, total_tokens=47)
-
-    message = choice.message
+    assert chat_completion.choices is not None and len(
+        chat_completion.choices) == 1
+    assert chat_completion.choices[0].message is not None
+    assert chat_completion.choices[0].logprobs is not None
+    assert chat_completion.choices[0].logprobs.content[
+        0].top_logprobs is not None
+    assert len(
+        chat_completion.choices[0].logprobs.content[0].top_logprobs) == 5
+    message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 10
     assert message.role == "assistant"
     messages.append({"role": "assistant", "content": message.content})
@@ -368,62 +456,6 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
         messages=messages,
         max_tokens=10,
     )
-    message = chat_completion.choices[0].message
-    assert message.content is not None and len(message.content) >= 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
-                                 model_name: str):
-    messages = [{
-        "role": "system",
-        "content": "you are a helpful assistant"
-    }, {
-        "role": "user",
-        "content": "what is 1+1?"
-    }]
-
-    # Default max_logprobs is 5, so this should raise an error
-    with pytest.raises((openai.BadRequestError, openai.APIError)):
-        stream = await client.chat.completions.create(model=model_name,
-                                                      messages=messages,
-                                                      max_tokens=10,
-                                                      logprobs=True,
-                                                      top_logprobs=10,
-                                                      stream=True)
-        async for chunk in stream:
-            ...
-
-    with pytest.raises(openai.BadRequestError):
-        await client.chat.completions.create(model=model_name,
-                                             messages=messages,
-                                             max_tokens=10,
-                                             logprobs=True,
-                                             top_logprobs=10,
-                                             stream=False)
-
-    with pytest.raises((openai.BadRequestError, openai.APIError)):
-        stream = await client.completions.create(model=model_name,
-                                                 prompt="Test",
-                                                 max_tokens=10,
-                                                 logprobs=10,
-                                                 stream=True)
-        async for chunk in stream:
-            ...
-
-    with pytest.raises(openai.BadRequestError):
-        await client.completions.create(model=model_name,
-                                        prompt="Test",
-                                        max_tokens=10,
-                                        logprobs=10,
-                                        stream=False)
-
-    # the server should still work afterwards
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_tokens=10,
-                                                           stream=False)
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
 

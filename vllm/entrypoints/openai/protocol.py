@@ -250,6 +250,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "top_logprobs" in data and data["top_logprobs"] is not None:
+            if "logprobs" not in data or data["logprobs"] is False:
+                raise ValueError(
+                    "when using `top_logprobs`, `logprobs` must be set to true."
+                )
+            elif not 0 <= data["top_logprobs"] <= 20:
+                raise ValueError(
+                    "`top_logprobs` must be a value in the interval [0, 20].")
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -396,6 +409,15 @@ class CompletionRequest(OpenAIBaseModel):
                 "('guided_json', 'guided_regex' or 'guided_choice').")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_logprobs(cls, data):
+        if "logprobs" in data and data[
+                "logprobs"] is not None and not 0 <= data["logprobs"] <= 5:
+            raise ValueError(("if passed, `logprobs` must be a value",
+                              " in the interval [0, 5]."))
+        return data
+
 
 class EmbeddingRequest(BaseModel):
     # Ordered by official OpenAI API documentation
@@ -489,18 +511,18 @@ class ChatMessage(OpenAIBaseModel):
     content: str
 
 
-class ChatCompletionTopLogprob(OpenAIBaseModel):
+class ChatCompletionLogProb(OpenAIBaseModel):
     token: str
+    logprob: float = -9999.0
     bytes: Optional[List[int]] = None
-    logprob: Optional[float]
 
 
-class ChatCompletionLogProb(ChatCompletionTopLogprob):
-    top_logprobs: List[ChatCompletionTopLogprob] = Field(default_factory=list)
+class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
 
 
 class ChatCompletionLogProbs(OpenAIBaseModel):
-    content: Optional[List[ChatCompletionLogProb]] = None
+    content: Optional[List[ChatCompletionLogProbsContent]] = None
 
 
 class ChatCompletionResponseChoice(OpenAIBaseModel):
