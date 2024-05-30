@@ -570,15 +570,15 @@ class EngineArgs:
             self.qlora_adapter_name_or_path is not None) and \
             self.load_format != "bitsandbytes":
             raise ValueError(
-                "BitsAndBytes quantization only supports 'bitsandbytes' load "
-                f"format, but got {self.load_format}")
+                "BitsAndBytes quantization and QLoRA adapter only support "
+                f"'bitsandbytes' load format, but got {self.load_format}")
 
         if (self.load_format == "bitsandbytes" or
             self.qlora_adapter_name_or_path is not None) and \
             self.quantization != "bitsandbytes":
             raise ValueError(
-                "BitsAndBytes load format can only be used with bitsandbytes'"
-                f" quantization, but got {self.quantization}")
+                "BitsAndBytes load format and QLoRA adapter only support "
+                f"'bitsandbytes' quantization, but got {self.quantization}")
 
         device_config = DeviceConfig(self.device)
         model_config = ModelConfig(
