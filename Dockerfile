@@ -106,8 +106,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
 
-# Manually install flashinfer
-RUN pip install flashinfer -i https://flashinfer.ai/whl/cu121/torch2.3/
 #################### vLLM installation IMAGE ####################
 
 
