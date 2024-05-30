@@ -3,33 +3,6 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - group: "AMD Tests"
-    depends_on: ~
-    steps:
-    {% for step in steps %}
-    {% if step.mirror_hardwares and "amd" in step.mirror_hardwares %}
-      - label: "AMD: {{ step.label }}"
-        agents:
-          queue: amd
-        command: bash .buildkite/run-amd-test.sh "cd {{ (step.working_dir or default_working_dir) | safe  }} ; {{ step.command  or (step.commands | join(" ; ")) | safe }}"
-        env:
-          DOCKER_BUILDKIT: "1"
-    {% endif %}
-    {% endfor %}
-
-  - label: "Neuron Test"
-    depends_on: ~
-    agents:
-      queue: neuron
-    command: bash .buildkite/run-neuron-test.sh
-    soft_fail: true
-
-  - label: "Intel Test"
-    depends_on: ~
-    agents:
-      queue: cpu_queue
-    command: bash .buildkite/run-cpu-test.sh
-
   {% for step in steps %}
   - label: "{{ step.label }}"
     depends_on: ~
@@ -54,18 +27,19 @@ steps:
     plugins:
       - docker#v5.2.0:
           image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:472ad7e320a4948d6dd1b3d3ccd7d931d13539bf"
+          shm-size: "2g"
           always-pull: true
           propagate-environment: true
           {% if not step.no_gpu %}
           gpus: all
           {% endif %}
-          command: ["bash", "-c", "cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }}"]
+          command: ["bash", "-c", "cd {{ (step.working_dir or default_working_dir) | safe  }} && {{ step.command  or (step.commands | join(' && ')) | safe }} && python -c 'import torch; torch.cuda.empty_cache()'"]
           environment:
             - VLLM_USAGE_SOURCE=ci-test
             - HF_TOKEN
             - NVIDIA_VISIBLE_DEVICES=all
-            - CUDA_LAUNCH_BLOCKING=1
-            - PYTORCH_NO_CUDA_MEMORY_CACHING=1
+            - NVIDIA_DRIVER_CAPABILITIES=all
           volumes:
-            - /dev/shm:/dev/shm
+            - type: tmpfs
+              target: /dev/shm
   {% endfor %}
