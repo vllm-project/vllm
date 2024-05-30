@@ -19,7 +19,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MM_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import SamplerOutput, SequenceData, SequenceGroupMetadata
 from vllm.utils import (CudaMemoryProfiler, get_kv_cache_torch_dtype, is_hip,
@@ -125,7 +125,7 @@ class ModelRunner:
 
         # Create processor for multi-modal data
         if self.vision_language_config is not None:
-            self.multi_modal_input_processor = MM_REGISTRY \
+            self.multi_modal_input_processor = MULTIMODAL_REGISTRY \
                 .create_input_processor(
                     self.model_config,
                     self.vision_language_config,
@@ -813,7 +813,7 @@ class ModelRunner:
                 seq_data = SequenceData([0] * seq_len)
                 dummy_multi_modal_data = None
             else:
-                seq_data, dummy_multi_modal_data = MM_REGISTRY \
+                seq_data, dummy_multi_modal_data = MULTIMODAL_REGISTRY \
                     .dummy_data_for_profiling(seq_len, model_config, vlm_config)
 
             seq = SequenceGroupMetadata(

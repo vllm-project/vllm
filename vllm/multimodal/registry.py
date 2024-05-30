@@ -152,5 +152,5 @@ class MultiModalRegistry:
                                  vlm_config=vlm_config)
 
 
-MM_REGISTRY = MultiModalRegistry()
+MULTIMODAL_REGISTRY = MultiModalRegistry()
 """The global :class:`~MultiModalRegistry` which is used by model runners."""

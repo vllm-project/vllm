@@ -3,7 +3,7 @@ import pytest
 from transformers import CLIPImageProcessor
 
 from vllm.config import ModelConfig, VisionLanguageConfig
-from vllm.multimodal import MM_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import ImagePixelData
 
 
@@ -38,7 +38,7 @@ def test_clip_image_processor(hf_images, dtype):
             image,
             return_tensors="np",
         )
-        vllm_result = MM_REGISTRY.process_input(
+        vllm_result = MULTIMODAL_REGISTRY.process_input(
             ImagePixelData(image),
             model_config=model_config,
             vlm_config=vlm_config,

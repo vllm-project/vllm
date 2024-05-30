@@ -21,7 +21,8 @@ class MultiModalData:
     In this new file, subclass :class:`~MultiModalData` and
     :class:`~MultiModalPlugin`.
 
-    Finally, register the new plugin to :const:`vllm.multimodal.MM_REGISTRY`.
+    Finally, register the new plugin to
+    :const:`vllm.multimodal.MULTIMODAL_REGISTRY`.
     This enables models to call :meth:`MultiModalRegistry.register_input` for
     the new modality.
     """
