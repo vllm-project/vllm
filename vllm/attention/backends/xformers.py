@@ -111,8 +111,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     _self_cached_prefill_metadata: Optional["XFormersMetadata"] = None
     _self_cached_decode_metadata: Optional["XFormersMetadata"] = None
     # Cross-attention prefill/decode metadata cache
-    _cross_cached_prefill_metadata: Optional["XFormersMetadata"] = None
-    _cross_cached_decode_metadata: Optional["XFormersMetadata"] = None
 
     # Begin cross-attention fields...
 
