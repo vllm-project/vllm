@@ -214,8 +214,9 @@ if __name__ == '__main__':
         'FP8_E5M2 (without scaling) is only supported on cuda version greater '
         'than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead supported for '
         'common inference criteria.')
-    parser.add_argument("--custom-paged-attn", action="store_true",
-        help="Use custom paged attention")
+    parser.add_argument("--custom-paged-attn",
+                        action="store_true",
+                        help="Use custom paged attention")
     args = parser.parse_args()
     print(args)
 

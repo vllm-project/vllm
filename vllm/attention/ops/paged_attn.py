@@ -17,6 +17,7 @@ if custom_attn_available:
 _PARTITION_SIZE_V1V2 = 512
 _PARTITION_SIZE_CUSTOM = 256
 
+
 @dataclass
 class PagedAttentionMetadata:
     """Metadata for PagedAttention."""
@@ -110,12 +111,10 @@ class PagedAttention:
         block_size = value_cache.shape[3]
         num_seqs, num_heads, head_size = query.shape
         gqa_ratio = num_heads // num_kv_heads
-        use_custom = (custom_attn_available
-                        and query.dtype == torch.half
-                        and head_size == 128
-                        and block_size == 16
-                        and kv_cache_dtype == "auto"
-                        and (gqa_ratio >= 1 and gqa_ratio <= 16))
+        use_custom = (custom_attn_available and query.dtype == torch.half
+                      and head_size == 128 and block_size == 16
+                      and kv_cache_dtype == "auto"
+                      and (gqa_ratio >= 1 and gqa_ratio <= 16))
         if not use_custom:
             _PARTITION_SIZE = _PARTITION_SIZE_V1V2
         else:
