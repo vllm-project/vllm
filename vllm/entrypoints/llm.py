@@ -495,6 +495,7 @@ class LLM:
                       Sequence[PoolingParams]],
         lora_request: Optional[LoRARequest],
     ) -> None:
+
         if isinstance(inputs, (str, dict)):
             # Convert a single prompt to a list.
             inputs = [inputs]
@@ -503,30 +504,18 @@ class LLM:
 
         if params is None:
             # Use default sampling params.
-            sampling_params = [SamplingParams()] * num_requests
+            params = [SamplingParams()] * num_requests
         elif isinstance(params, list):
             if len(params) != num_requests:
                 raise ValueError("The lengths of prompts and params "
                                  "must be the same.")
+            if all(isinstance(param, SamplingParams) for param in params):
+                params = [
+                    self._add_guided_processor(param) for param in params if isinstance(param, SamplingParams) 
+                ]
         elif isinstance(params, SamplingParams):
-            sampling_params = [sampling_params] * num_requests
-
-        # Add guided decoding processor to the sampling params.
-        sampling_params = [
-            self._add_guided_processor(param) for param in sampling_params if isinstance(param, SamplingParams) 
-        ]
-
-        if (prompts is not None and prompt_token_ids is not None
-                and len(prompts) != len(prompt_token_ids)):
-            raise ValueError("The lengths of prompts and prompt_token_ids "
-                             "must be the same.")
-
-        # Add requests to the engine.
-        # if prompts is not None:
-        #     num_requests = len(prompts)
-        # else:
-        #     assert prompt_token_ids is not None
-        #     num_requests = len(prompt_token_ids)
+                params = self._add_guided_processor(params)
+                
 
         for i, request_inputs in enumerate(inputs):
             self._add_request(

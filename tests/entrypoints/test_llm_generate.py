@@ -11,22 +11,11 @@ from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 
+from ..conftest import cleanup
+
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
-@pytest.fixture(scope="module")
-def llm():
-    return LLM(model=MODEL_NAME, max_model_len=2048)
-
-
-@pytest.mark.skip_global_cleanup
-def test_multiple_sampling_params(llm):
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
 PROMPTS = [
     "Hello, my name is",
     "The president of the United States is",
@@ -48,10 +37,8 @@ def llm():
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(model=MODEL_NAME,
-              max_num_batched_tokens=4096,
-              tensor_parallel_size=1,
-              gpu_memory_utilization=0.10,
-              enforce_eager=True)
+              max_model_len= 1024)
+
 
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
@@ -136,6 +123,13 @@ def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_multiple_sampling_params(llm: LLM):
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
     sampling_params = [
         SamplingParams(temperature=0.01, top_p=0.95),
         SamplingParams(temperature=0.3, top_p=0.95),
@@ -174,7 +168,7 @@ def test_guided_regex(sample_regex, llm):
         sampling_params=sampling_params,
         use_tqdm=True,
     )
-
+    
     assert outputs is not None
     for output in outputs:
         assert output is not None
