@@ -283,8 +283,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_tool_choice(cls, data):
         if "tool_choice" in data and data["tool_choice"] != "none":
-            if type(data["tool_choice"]
-                    ) is not ChatCompletionNamedToolChoiceParam:
+            if not isinstance(data["tool_choice"], dict):
                 raise ValueError("Currently only named tools are supported.")
             if "tools" not in data or data["tools"] is None:
                 raise ValueError(
