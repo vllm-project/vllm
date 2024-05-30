@@ -1,4 +1,4 @@
-from typing import Callable, List, Tuple, Union, Optional
+from typing import Callable, List, Optional
 
 import torch
 from torch.nn import Parameter
@@ -6,12 +6,9 @@ from torch.nn import Parameter
 from vllm._C import ops
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinState, marlin_permute_scales, get_scale_perms
+from vllm.model_executor.layers.quantization.gptq_marlin import (
+    GPTQMarlinState, marlin_permute_scales)
 from vllm.model_executor.utils import set_weight_attrs
-
-from enum import Enum
-import numpy
-import torch.nn.functional as F
 
 __all__ = ["CompressedTensorsW4A16"]
 
@@ -43,7 +40,8 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
         weight_scale_dim = None
         scales_and_zp_size = input_size // group_size
 
-        if input_size != input_size_per_partition and self.group_size is not None:
+        if (input_size != input_size_per_partition
+                and self.group_size is not None):
             weight_scale_dim = 1
             scales_and_zp_size = input_size_per_partition // group_size
 
@@ -111,7 +109,6 @@ class CompressedTensorsW4A16(CompressedTensorsScheme):
         size_m = reshaped_x.shape[0]
         part_size_n = layer.output_size_per_partition
         part_size_k = layer.input_size_per_partition
-        full_size_k = layer.input_size
 
         out_shape = x.shape[:-1] + (part_size_n, )
 

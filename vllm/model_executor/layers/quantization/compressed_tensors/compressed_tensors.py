@@ -59,7 +59,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     layer_quant_details[target][
                         "input"] = QuantizationArgs.parse_obj(
                             quant_config.get("input_activations"))
-                except:
+                except Exception:
                     layer_quant_details[target]["input"] = None
 
         return cls(layer_quant_details=layer_quant_details, ignore=ignore)
