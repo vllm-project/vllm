@@ -3,20 +3,22 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "need test"    
+  - label: "check changes path"
+    key: "check-path"
     plugins:
         - monebag/monorepo-diff#v2.5.9:
             diff: "git diff --name-only HEAD~1"
             watch:
-              - path: ".buildkit/"
+              - path: ".buildkite/"
                 config:
-                  key: "test-check"
+                  key: "check-test"
                   command: echo "skip test"
 
   - label: "Run regression only if test check is passed"
     depends_on: "test-check"
     command: |
-      if [ $$(buildkite-agent step get "outcome" --step "test-check") == "skip test" ]; then
+      if [ $$(buildkite-agent step get "outcome" --step "check-path") != "" ]; then
+        if [ $$(buildkite-agent step get "outcome" --step "check-test") == "skip test" ]; then
           cat <<- YAML | buildkite-agent pipeline upload
           steps:
             - label: ":docker: build image"
@@ -88,5 +90,6 @@ steps:
                             - mountPath: /dev/shm
                               name: dshm
             {% endfor %}
-      YAML
+          YAML
+        fi
       fi
