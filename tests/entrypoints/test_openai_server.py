@@ -1044,6 +1044,56 @@ async def test_required_tool_use_not_yet_supported(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("guided_decoding_backend", ["outlines"])
+async def test_inconsistent_tool_choice_and_tools(
+        server, client: openai.AsyncOpenAI, guided_decoding_backend: str):
+    messages = [{
+        "role": "system",
+        "content": "you are a helpful assistant"
+    }, {
+        "role":
+        "user",
+        "content":
+        f"Give an example JSON for an employee profile that "
+        f"fits this schema: {TEST_SCHEMA}"
+    }]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(model=MODEL_NAME,
+                                             messages=messages,
+                                             max_tokens=1000,
+                                             tool_choice={
+                                                 "type": "function",
+                                                 "function": {
+                                                     "name":
+                                                     "dummy_function_name"
+                                                 }
+                                             })
+        ...
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": TEST_SCHEMA
+                }
+            }],
+            tool_choice={
+                "type": "function",
+                "function": {
+                    "name": "nondefined_function_name"
+                }
+            })
+        ...
+
+
+@pytest.mark.asyncio
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(

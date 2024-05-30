@@ -38,13 +38,7 @@ def _adapt_request_for_tool_use(request: Union[CompletionRequest,
     if request.tool_choice == "none":
         return request
 
-    if request.tool_choice == "auto":
-        raise ValueError("Tool choice 'auto' is not yet supported by vLLM.")
-
-    if request.tool_choice == "required":
-        raise ValueError(
-            "Tool choice 'required' is not yet supported by vLLM.")
-
+    # user has chosen to use a named tool
     if type(request.tool_choice) == ChatCompletionNamedToolChoiceParam:
         tool_name = request.tool_choice.function.name
         tools = {tool.function.name: tool.function for tool in request.tools}
