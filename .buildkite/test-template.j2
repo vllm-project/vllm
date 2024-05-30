@@ -9,7 +9,7 @@ steps:
         - monebag/monorepo-diff#v2.5.9:
             diff: "git diff --name-only HEAD~1"
             watch:
-              - path: ".buildkite/"
+              - path: ".buildkit/"
                 config:
                   command: echo "skip test"
 
