@@ -70,8 +70,8 @@ class LLMEngine:
     The :class:`~vllm.LLM` class wraps this class for offline batched inference
     and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
-    NOTE: The config arguments are derived from the :class:`~vllm.EngineArgs`
-    class. For the comprehensive list of arguments, see :ref:`engine_args`.
+    The config arguments are derived from :class:`~vllm.EngineArgs`. (See
+    :ref:`engine_args`)
 
     Args:
         model_config: The configuration related to the LLM model.

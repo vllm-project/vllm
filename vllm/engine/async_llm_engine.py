@@ -307,8 +307,6 @@ class AsyncLLMEngine:
     generate method when there are requests in the waiting queue. The generate
     method yields the outputs from the :class:`LLMEngine` to the caller.
 
-    NOTE: For the comprehensive list of arguments, see :class:`LLMEngine`.
-
     Args:
         worker_use_ray: Whether to use Ray for model workers. Required for
             distributed execution. Should be the same as
