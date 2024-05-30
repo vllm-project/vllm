@@ -264,7 +264,7 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Test requires 2 GPUs")
+                    reason="Requires 2 GPUs")
 def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
         model_ref = "EleutherAI/pythia-1.4b"
@@ -283,7 +283,7 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner):
         )
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Test requires 2 GPUs")
+                    reason="Requires 2 GPUs")
 def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
                                                                     tmp_path):
     model_ref = "EleutherAI/pythia-1.4b"

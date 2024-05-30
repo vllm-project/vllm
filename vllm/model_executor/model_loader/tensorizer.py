@@ -63,9 +63,9 @@ class TensorizerConfig:
     _is_sharded: bool = False
 
     def __post_init__(self):
-        # check if the configuration is for a sharded model
+        # check if the configuration is for a sharded vLLM model
         self._is_sharded = isinstance(self.tensorizer_uri, str) \
-            and re.search(r'%0\dd', self.tensorizer_uri)
+            and re.search(r'%0\dd', self.tensorizer_uri) is not None
 
     def _construct_tensorizer_args(self) -> "TensorizerArgs":
         tensorizer_args = {
@@ -84,7 +84,6 @@ class TensorizerConfig:
         self,
         parallel_config: "ParallelConfig",
     ) -> None:
-        # tensorizer_uri is used for a vLLM serialized model
         if parallel_config.tensor_parallel_size > 1 \
             and not self._is_sharded:
             raise ValueError(
