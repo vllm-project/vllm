@@ -177,7 +177,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   include(FetchContent)
   SET(CUTLASS_ENABLE_HEADERS_ONLY=ON)
   FetchContent_Declare(
-        cutlass 
+        cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         # CUTLASS 3.5.0
         GIT_TAG 7d49e6c7e2f8896c47f586706e67e1fb215529dc
@@ -200,11 +200,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
-  set_source_files_properties(
-      "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
-      PROPERTIES
-      COMPILE_FLAGS
-      "-gencode arch=compute_90a,code=sm_90a")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 11)
+    set_source_files_properties(
+          "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
+          PROPERTIES
+          COMPILE_FLAGS
+          "-gencode arch=compute_90a,code=sm_90a")
+  endif()
 
 endif()
 
