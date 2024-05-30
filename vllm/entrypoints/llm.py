@@ -30,12 +30,6 @@ class LLM:
     this class generates texts from the model, using an intelligent batching
     mechanism and efficient memory management.
 
-    NOTE: This class is intended to be used for offline inference. For online
-    serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
-
-    NOTE: For the comprehensive list of arguments, see
-    :class:`~vllm.EngineArgs`.
-
     Args:
         model: The name or path of a HuggingFace Transformers model.
         tokenizer: The name or path of a HuggingFace Transformers tokenizer.
@@ -89,6 +83,12 @@ class LLM:
             When a sequence has context length larger than this, we fall back
             to eager mode.
         disable_custom_all_reduce: See ParallelConfig
+        **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
+            :ref:`engine_args`)
+    
+    Note:
+        This class is intended to be used for offline inference. For online
+        serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
     """
 
     DEPRECATE_LEGACY: ClassVar[bool] = False
@@ -262,7 +262,7 @@ class LLM:
     ) -> List[RequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: This class automatically batches the given prompts, considering
+        This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
         into a single list and pass it to this method.
 
@@ -279,6 +279,11 @@ class LLM:
         Returns:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
+
+        Note:
+            Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the ``inputs`` parameter.
         """
         if prompt_token_ids is not None or multi_modal_data is not None:
             inputs = self._convert_v1_inputs(
@@ -402,7 +407,7 @@ class LLM:
     ) -> List[EmbeddingRequestOutput]:
         """Generates the completions for the input prompts.
 
-        NOTE: This class automatically batches the given prompts, considering
+        This class automatically batches the given prompts, considering
         the memory constraint. For the best performance, put all of your prompts
         into a single list and pass it to this method.
 
@@ -418,6 +423,11 @@ class LLM:
         Returns:
             A list of `EmbeddingRequestOutput` objects containing the
             generated embeddings in the same order as the input prompts.
+
+        Note:
+            Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
+            considered legacy and may be deprecated in the future. You should
+            instead pass them via the ``inputs`` parameter.
         """
         if prompt_token_ids is not None or multi_modal_data is not None:
             inputs = self._convert_v1_inputs(
