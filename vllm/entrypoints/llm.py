@@ -272,19 +272,19 @@ class LLM:
             assert prompt_token_ids is not None
             num_requests = len(prompt_token_ids)
 
-        if sampling_params is None:
+        if params is None:
             # Use default sampling params.
             sampling_params = [SamplingParams()] * num_requests
-        elif isinstance(sampling_params, list):
-            if len(sampling_params) != num_requests:
-                raise ValueError("The lengths of prompts and sampling_params "
+        elif isinstance(params, list):
+            if len(params) != num_requests:
+                raise ValueError("The lengths of prompts and params "
                                  "must be the same.")
-        elif isinstance(sampling_params, SamplingParams):
+        elif isinstance(params, SamplingParams):
             sampling_params = [sampling_params] * num_requests
 
         # Add guided decoding processor to the sampling params.
         sampling_params = [
-            self._add_guided_processor(params) for params in sampling_params
+            self._add_guided_processor(param) for param in sampling_params if isinstance(param, SamplingParams) 
         ]
 
         if (prompts is not None and prompt_token_ids is not None
@@ -298,11 +298,11 @@ class LLM:
         
 
         # Add requests to the engine.
-        if prompts is not None:
-            num_requests = len(prompts)
-        else:
-            assert prompt_token_ids is not None
-            num_requests = len(prompt_token_ids)
+        # if prompts is not None:
+        #     num_requests = len(prompts)
+        # else:
+        #     assert prompt_token_ids is not None
+        #     num_requests = len(prompt_token_ids)
 
         requests_data = []
         for i in range(num_requests):
