@@ -15,7 +15,6 @@ steps:
                   command: echo "skip test"
 
   - label: "Run regression only if test check is passed"
-    depends_on: "test-check"
     command: |
       if [ $$(buildkite-agent step get "outcome" --step "check-path") != "" ]; then
         if [ $$(buildkite-agent step get "outcome" --step "check-test") == "skip test" ]; then
