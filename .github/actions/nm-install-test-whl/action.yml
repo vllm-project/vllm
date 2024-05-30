@@ -38,9 +38,11 @@ runs:
         mv vllm vllm-ignore
         mv csrc csrc-ignore
         # activate venv and installs
-        COMMIT=${{ github.sha }}
-        VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-        source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+        if [ -n "${{ inputs.venv }}" ]; then
+          COMMIT=${{ github.sha }}
+          VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+          source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+        fi
         pip3 install coverage
         pip3 install pytest-cov
         pip3 install pytest-xdist
@@ -60,7 +62,7 @@ runs:
         # test and collect code coverage
         SUCCESS=0
         PYTHON_MAJOR_MINOR=$(echo "python${{ inputs.python }}" | cut -d'.' -f1,2)
-        VLLM_SRC=$(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/lib/${PYTHON_MAJOR_MINOR}/site-packages/vllm
+        VLLM_SRC=$(python -c "import vllm; print(vllm.__path__[0])")
         ./.github/scripts/run-tests -s ${VLLM_SRC} -t ${{ inputs.test_directory }} -r ${{ inputs.test_results }} -f ${{ inputs.test_skip_list }}|| SUCCESS=$?
         echo "status=${SUCCESS}" >> "$GITHUB_OUTPUT"
         exit ${SUCCESS}

@@ -2,13 +2,12 @@ name: HF cache
 description: 'mount HF cache'
 inputs:
   fs_cache:
-    description: 'filesystem to use for HF cache'
+    description: '(deprecated) filesystem to use for HF cache'
     required: true
 runs:
   using: composite
   steps:
   - run: |
-      sudo mkdir -m 777 -p /EFS
-      sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport ${{ inputs.fs_cache }}:/ /EFS
+      sudo mkdir -m 777 -p ${HF_HOME}
       sudo chown -R $(whoami):$(whoami) ${HF_HOME}
     shell: bash

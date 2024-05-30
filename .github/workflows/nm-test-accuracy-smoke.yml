@@ -64,9 +64,6 @@ on:
         type: string
         required: true
 
-env:
-  VENV_BASE: "LM_EVAL"
-
 jobs:
   TEST-ACCURACY-SMOKE:
 
@@ -74,6 +71,13 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.timeout) }}
 
     steps:
+
+      - name: set python
+        id: set_python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python }}
+
       - name: checkout repository code
         uses: actions/checkout@v4
         with:
@@ -88,13 +92,6 @@ jobs:
           hf_token: ${{ secrets.NM_HF_TOKEN }}
           Gi_per_thread: ${{ inputs.Gi_per_thread }}
           nvcc_threads: ${{ inputs.nvcc_threads }}
-
-      - name: set python
-        id: set_python
-        uses: ./.github/actions/nm-set-python/
-        with:
-          python: ${{ inputs.python }}
-          venv: ${{ env.VENV_BASE }}
 
       - name: hf cache
         id: hf_cache
@@ -114,10 +111,10 @@ jobs:
         uses: ./.github/actions/nm-install-whl/
         with:
             python: ${{ inputs.python }}
-            venv: ${{ env.VENV_BASE }}
+            venv:
 
       - name: run lm-eval-smoke
         uses: ./.github/actions/nm-lm-eval-smoke/
         with:
           python: ${{ inputs.python }}
-          venv: ${{ env.VENV_BASE }}
+          venv:

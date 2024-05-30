@@ -24,12 +24,12 @@ jobs:
             python: 3.8.17
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
-            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_label_solo: aws-test-a10g-24G
+            test_label_multi: aws-test-4-a10g-96G
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
             benchmark_timeout: 720
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
@@ -42,12 +42,12 @@ jobs:
             python: 3.9.17
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
-            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_label_solo: aws-test-a10g-24G
+            test_label_multi: aws-test-4-a10g-96G
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
             benchmark_timeout: 720
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
@@ -60,12 +60,12 @@ jobs:
             python: 3.10.12
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
-            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_label_solo: aws-test-a10g-24G
+            test_label_multi: aws-test-4-a10g-96G
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-nightly.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
             benchmark_timeout: 720
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"
@@ -78,12 +78,12 @@ jobs:
             python: 3.11.4
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
-            test_label_multi: aws-avx2-192G-4-a10g-96G
+            test_label_solo: aws-test-a10g-24G
+            test_label_multi: aws-test-4-a10g-96G
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_nightly_configs_list.txt
             benchmark_timeout: 720
             push_benchmark_results_to_gh_pages: "${{ github.event_name == 'schedule' || inputs.push_benchmark_results_to_gh_pages }}"

@@ -16,9 +16,11 @@ runs:
       mv vllm vllm-ignore || echo "no 'vllm' folder to move"
       mv csrc csrc-ignore || echo "no 'csrc' folder to move"
 
-      COMMIT=${{ github.sha }}
-      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      if [ -n "${{ inputs.venv }}" ]; then
+        COMMIT=${{ github.sha }}
+        VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+        source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      fi
 
       pip3 install git+https://github.com/EleutherAI/lm-evaluation-harness.git@262f879a06aa5de869e5dd951d0ff2cf2f9ba380
       pip3 install pytest openai==1.3.9

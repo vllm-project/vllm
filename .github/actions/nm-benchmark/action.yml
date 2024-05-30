@@ -22,9 +22,11 @@ runs:
       # move source directories
       mv vllm vllm-ignore || echo "no 'vllm' folder to move"
       mv csrc csrc-ignore || echo "no 'csrc' folder to move"
-      COMMIT=${{ github.sha }}
-      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      if [ ! -z "${{ inputs.venv }}" ]; then
+        COMMIT=${{ github.sha }}
+        VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+        source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      fi
       pip3 install -r neuralmagic/benchmarks/requirements-benchmark.txt
       SUCCESS=0
       .github/scripts/nm-run-benchmarks.sh ${{ inputs.benchmark_config_list_file }} ${{ inputs.output_directory }} || SUCCESS=$?

@@ -67,9 +67,6 @@ on:
           - 'false'
         default: 'false'
 
-env:
-    VENV_BASE: "BENCHMARK"
-
 jobs:
 
   BENCHMARK:
@@ -81,6 +78,13 @@ jobs:
       gh_action_benchmark_input_artifact_name: ${{ steps.set_gh_action_benchmark_input_artifact_name.outputs.gh_action_benchmark_input_artifact_name}}
 
     steps:
+
+      - name: set python
+        id: set_python
+        uses: actions/setup-python@v5
+        with:
+            python-version: ${{ inputs.python }}
+
       - name: checkout repository code
         uses: actions/checkout@v4
         with:
@@ -95,13 +99,6 @@ jobs:
           hf_token: ${{ secrets.NM_HF_TOKEN }}
           Gi_per_thread: 1
           nvcc_threads: 0
-
-      - name: set python
-        id: set_python
-        uses: ./.github/actions/nm-set-python/
-        with:
-          python: ${{ inputs.python }}
-          venv: ${{ env.VENV_BASE }}
 
       - name: hf cache
         id: hf_cache
@@ -121,7 +118,7 @@ jobs:
         uses: ./.github/actions/nm-install-whl/
         with:
             python: ${{ inputs.python }}
-            venv: ${{ env.VENV_BASE }}
+            venv:
 
       - name: run benchmarks
         uses: ./.github/actions/nm-benchmark/
@@ -129,7 +126,7 @@ jobs:
           benchmark_config_list_file: ${{ inputs.benchmark_config_list_file }}
           output_directory: benchmark-results
           python: ${{ inputs.python }}
-          venv: ${{ env.VENV_BASE }}
+          venv:
 
       - name: store benchmark result artifacts
         if: success()
@@ -138,6 +135,12 @@ jobs:
           name: ${{ github.run_id }}-${{ inputs.label }}-${{ inputs.python }}
           path: benchmark-results
           retention-days: 2
+
+      - name: mount EFS
+        run: |
+            sudo mkdir -m 777 -p /EFS
+            sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport ${{ secrets.HF_FS_CACHE }}:/ /EFS
+            sudo chown -R $(whoami):$(whoami) /EFS
 
       - name: copy benchmark results to EFS store
         if: success()
@@ -160,7 +163,7 @@ jobs:
           # Metrics that we only want to observe are stored here
           observation_metrics_output_file_path: gh-action-benchmark-jsons/observation_metrics.json
           python: ${{ inputs.python }}
-          venv: ${{ env.VENV_BASE }}
+          venv:
 
       - name: set gh action benchmark input artifact name
         id: set_gh_action_benchmark_input_artifact_name

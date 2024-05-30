@@ -16,9 +16,11 @@ runs:
       mv vllm vllm-ignore || echo "no 'vllm' folder to move"
       mv csrc csrc-ignore || echo "no 'csrc' folder to move"
 
-      COMMIT=${{ github.sha }}
-      VENV="${{ inputs.venv }}-${COMMIT:0:7}"
-      source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      if [ -n "${{ inputs.venv }}" ]; then
+        COMMIT=${{ github.sha }}
+        VENV="${{ inputs.venv }}-${COMMIT:0:7}"
+        source $(pyenv root)/versions/${{ inputs.python }}/envs/${VENV}/bin/activate
+      fi
 
       pip3 install git+https://github.com/EleutherAI/lm-evaluation-harness.git@9516087b81a61d0e220b22cc1b75be76de23bc10
       pip3 install optimum auto-gptq

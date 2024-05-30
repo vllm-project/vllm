@@ -56,9 +56,6 @@ on:
         type: string
         required: true
 
-env:
-    VENV_BASE: "TEST"
-
 jobs:
 
     TEST:
@@ -67,6 +64,12 @@ jobs:
         timeout-minutes: ${{ fromJson(inputs.timeout) }}
 
         steps:
+
+            - name: set python
+              id: set_python
+              uses: actions/setup-python@v5
+              with:
+                python-version: ${{ inputs.python }}
 
             - name: checkout
               id: checkout
@@ -83,13 +86,6 @@ jobs:
                 hf_token: ${{ secrets.NM_HF_TOKEN }}
                 Gi_per_thread: 1
                 nvcc_threads: 0
-
-            - name: set python
-              id: set_python
-              uses: ./.github/actions/nm-set-python/
-              with:
-                python: ${{ inputs.python }}
-                venv: ${{ env.VENV_BASE }}
 
             - name: hf cache
               id: hf_cache
@@ -119,7 +115,7 @@ jobs:
               with:
                 pypi: ${{ secrets.NM_PRIVATE_PYPI_LOCATION }}
                 python: ${{ inputs.python }}
-                venv: TEST
+                venv:
                 test_skip_list: ${{ inputs.test_skip_list }}
                 test_directory: tests
                 test_results: test-results

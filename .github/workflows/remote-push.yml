@@ -17,12 +17,12 @@ jobs:
             python: 3.8.17
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_solo: aws-test-a10g-24G
             test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
             benchmark_timeout: 480
         secrets: inherit
@@ -33,12 +33,12 @@ jobs:
             python: 3.9.17
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_solo: aws-test-a10g-24G
             test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
             benchmark_timeout: 480
         secrets: inherit
@@ -49,12 +49,12 @@ jobs:
             python: 3.10.12
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_solo: aws-test-a10g-24G
             test_label_multi: ignore
             test_timeout: 480
-            test_skip_list: neuralmagic/tests/skip-for-remote-push.txt
+            test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
             benchmark_timeout: 480
         secrets: inherit
@@ -65,12 +65,12 @@ jobs:
             python: 3.11.4
             gitref: ${{ github.ref }}
 
-            test_label_solo: aws-avx2-32G-a10g-24G
+            test_label_solo: aws-test-a10g-24G
             test_label_multi: ignore
             test_timeout: 480
             test_skip_list: neuralmagic/tests/skip-for-remote-push-tmp.txt
 
-            benchmark_label: aws-avx2-32G-a10g-24G
+            benchmark_label: aws-test-a10g-24G
             benchmark_config_list_file: ./.github/data/nm_benchmark_remote_push_configs_list.txt
             benchmark_timeout: 480
         secrets: inherit
