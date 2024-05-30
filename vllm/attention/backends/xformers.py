@@ -148,21 +148,9 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
     @property
     def is_all_cross_attn_metadata_set(self):
         # No cross-attention metadata is present whatsoever
-        no_md = (self.cross_seq_lens is
-                 None) and (self.cross_slot_mapping is
-                            None) and (self.cross_block_tables is None)
-        # If any cross-attention metadata is present, it is invalid
-        invalid_md_if_not_no_md = (self.cross_seq_lens is None) or (
-            self.cross_slot_mapping is None) or (self.cross_block_tables is
-                                                 None)
-
-        if no_md:
-            return False
-
-        assert (
-            not invalid_md_if_not_no_md), "Invalid cross-attention metadata"
-
-        return True
+        return (self.cross_seq_lens is not None) and \
+               (self.cross_slot_mapping is not None) and \
+               (self.cross_block_tables is not None)
 
     @property
     def attention_type(self) -> AttentionType:
@@ -173,8 +161,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
         if atype == AttentionType.ENCODER_DECODER:
             assert self.is_all_cross_attn_metadata_set, \
-            "Must have self.cross_seq_lens not None " + \
-            "in order to enable cross-attention"
+            "Must enable self.cross_seq_lens, self.cross_slot_mapping, " + \
+            "self.cross_block_tables in order to perform cross-attention"
 
             # Infer implicit cross-attention fields
             # from user-provided fields, if needed
