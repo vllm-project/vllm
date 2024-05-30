@@ -30,7 +30,7 @@ def main():
     complete_parser = subparsers.add_parser(
         "complete",
         help="Generate text completions based on the given prompt via the running API server",
-        usage="vllm complete <complete_prompt> [options]")
+        usage="vllm complete [options]")
     complete_parser.add_argument("--url",
                                  type=str,
                                  default=None,
@@ -55,6 +55,7 @@ def main():
     chat_parser.add_argument("--generation-prompt",
                              type=str,
                              help="the generation prompt to be added to the chat template")
+    chat_parser.set_defaults(func=interactive_cli)
 
     args = parser.parse_args()
     if hasattr(args, "func"):
@@ -74,9 +75,9 @@ def complete(args: argparse.Namespace) -> None:
     while True:
         input_prompt = input("Please enter prompt to complete:")
 
-        url = getattr(args, "url", f"http://{args.host}:{args.port}")
+        base_url = getattr(args, "url", f"http://{args.host}:{args.port}")
 
-        create_completion_url = url + COMPLETE_ROUTE
+        create_completion_url = base_url + COMPLETE_ROUTE
         create_completion_headers = {
             "Content-Type": "application/json"
         }
@@ -84,8 +85,7 @@ def complete(args: argparse.Namespace) -> None:
         if args.complete_model_name:
             complete_model_name = args.complete_model_name
         else:
-            list_models_url = url + LIST_MODELS_ROUTE
-            complete_model_name = _default_model(list_models_url)
+            complete_model_name = _default_model(base_url)
         
         completion_request_data = CompletionRequest(
             model=complete_model_name,
@@ -115,9 +115,9 @@ def chat(args: argparse.Namespace) -> None:
             message["generation prompt"] = args.generation_prompt
         conversation.append(message)
 
-        url = getattr(args, "url", f"http://{args.host}:{args.port}")
+        base_url = getattr(args, "url", f"http://{args.host}:{args.port}")
 
-        create_chat_completion_url = url + CHAT_COMPLETE_ROUTE
+        create_chat_completion_url = base_url + CHAT_COMPLETE_ROUTE
         create_chat_completion_headers = {
             "Content-Type": "application/json"
         }
@@ -125,8 +125,7 @@ def chat(args: argparse.Namespace) -> None:
         if args.chat_model_name:
             chat_model_name = args.chat_model_name
         else:
-            list_models_url = url + LIST_MODELS_ROUTE
-            chat_model_name = _default_model(list_models_url)
+            chat_model_name = _default_model(base_url)
 
         chat_request_data = ChatCompletionRequest(
             messages=conversation,
@@ -145,13 +144,14 @@ def chat(args: argparse.Namespace) -> None:
             )
             print(f"Response Content: {choice}")
         except Exception as err:
-            print(f"Error occurred in prompt completion: {err}")
+            print(f"Error occurred in chat completion: {err}")
             return
 
 
-def _default_model(url: str) -> str:
+def _default_model(base_url: str) -> str:
+    list_models_url = base_url + LIST_MODELS_ROUTE
     try:
-        models_dict = _get_response_dict(url)
+        models_dict = _get_response_dict(list_models_url)
         if "data" in models_dict and models_dict["data"]:
             return models_dict["data"][0]["id"]
         else:
