@@ -111,7 +111,6 @@ class TunedGemm:
             #print(">>> found rocblas")
             out = rocb_mm(inp_view, weights.t(), solidx)
         else:
-
             if (self.save_gemm == 1):
                 #print('>>>Tgemm Default',inp_view.shape,
                 #      inp.shape,weights.shape,soltype,solidx)
@@ -124,7 +123,19 @@ class TunedGemm:
                     })
                 ]).drop_duplicates()
                 self.tuned_df.to_csv(self.untune_path, index=False)
-            out = F.linear(inp, weights)
+
+            if n == 1 and inp_view.dtype == torch.float16:
+                out = torch.empty(inp_view.shape[0],
+                                  weights.shape[0],
+                                  dtype=inp_view.dtype,
+                                  device='cuda')
+                if (k == 8192 and
+                    (m == 1280 or m == 7168)) or (k == 3584 and m == 8192):
+                    _custom_C.LLMM1(weights, inp_view, out, 8)
+                elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
+                    _custom_C.LLMM1(weights, inp_view, out, 4)
+            else:
+                out = F.linear(inp, weights)
         if batched:
             return out.view(inp.shape[0], inp.shape[1], weights.shape[0])
         else:
