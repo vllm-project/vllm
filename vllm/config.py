@@ -155,12 +155,13 @@ class ModelConfig:
         architectures = getattr(self.hf_config, "architectures", [])
         self.embedding_mode = any(
             ModelRegistry.is_embedding_model(arch) for arch in architectures)
-    
+
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
         if quant_cfg is None:
             # SparseML uses a "compression_config" with a "quantization_config".
-            compression_cfg = getattr(self.hf_config, "compression_config", None)
+            compression_cfg = getattr(self.hf_config, "compression_config",
+                                      None)
             if compression_cfg is not None:
                 quant_cfg = compression_cfg.get("quantization_config", None)
 
