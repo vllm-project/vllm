@@ -222,7 +222,7 @@ class HfRunner:
         self,
         prompts: List[str],
         max_tokens: int,
-        images: Optional["torch.Tensor"] = None,
+        images: Optional[List[Image.Image]] = None,
     ) -> List[Tuple[List[int], str]]:
         outputs = self.generate(prompts,
                                 do_sample=False,
@@ -403,7 +403,7 @@ class VllmRunner:
             if images is not None:
                 prompt["multi_modal_data"] = MultiModalData(
                     type=MultiModalData.Type.IMAGE,
-                    data=images[i],
+                    data=images[i:i + 1],
                 )
 
             prompt_inputs.append(prompt)
