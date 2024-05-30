@@ -628,7 +628,7 @@ class ModelRunner:
             lora_mapping = None
 
         multi_modal_kwargs = {
-            k: torch.cat(v, dim=0)
+            k: torch.cat(v, dim=0).to(self.device)
             for k, v in multi_modal_kwargs_list.items()
         }
 

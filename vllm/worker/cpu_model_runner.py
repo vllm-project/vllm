@@ -156,7 +156,7 @@ class CPUModelRunner:
                 slot_mapping.append(slot)
 
         multi_modal_kwargs = {
-            k: torch.cat(v, dim=0)
+            k: torch.cat(v, dim=0).to(self.device)
             for k, v in multi_modal_kwargs_list.items()
         }
 
