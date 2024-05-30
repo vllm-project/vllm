@@ -602,3 +602,20 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Optional[Any]
+
+
+class TokenizeRequest(OpenAIBaseModel):
+    prompt: str
+    add_special_tokens: bool = Field(default=True)
+
+
+class TokenizeResponse(OpenAIBaseModel):
+    tokens: List[int]
+
+
+class DetokenizeRequest(OpenAIBaseModel):
+    tokens: List[int]
+
+
+class DetokenizeResponse(OpenAIBaseModel):
+    prompt: str

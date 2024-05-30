@@ -23,7 +23,11 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
-                                              EmbeddingRequest, ErrorResponse)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              EmbeddingRequest, ErrorResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
@@ -83,6 +87,20 @@ async def health() -> Response:
     """Health check."""
     await openai_serving_chat.engine.check_health()
     return Response(status_code=200)
+
+
+@app.post("/tokenize")
+async def tokenize(request: TokenizeRequest):
+    response = openai_serving_completion.create_tokenize(request)
+    assert isinstance(response, TokenizeResponse)
+    return JSONResponse(content=response.model_dump())
+
+
+@app.post("/detokenize")
+async def detokenize(request: DetokenizeRequest):
+    response = openai_serving_completion.create_detokenize(request)
+    assert isinstance(response, DetokenizeResponse)
+    return JSONResponse(content=response.model_dump())
 
 
 @app.get("/v1/models")

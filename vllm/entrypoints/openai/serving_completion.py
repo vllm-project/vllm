@@ -15,7 +15,10 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              UsageInfo)
+                                              DetokenizeRequest,
+                                              DetokenizeResponse,
+                                              TokenizeRequest,
+                                              TokenizeResponse, UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     OpenAIServing)
@@ -413,3 +416,16 @@ class OpenAIServingCompletion(OpenAIServing):
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
         )
+
+    def create_tokenize(self, request: TokenizeRequest) -> TokenizeResponse:
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request,
+            prompt=request.prompt,
+            add_special_tokens=request.add_special_tokens)
+        return TokenizeResponse(tokens=input_ids)
+
+    def create_detokenize(self,
+                          request: DetokenizeRequest) -> DetokenizeResponse:
+        (input_ids, input_text) = self._validate_prompt_and_tokenize(
+            request, prompt_ids=request.tokens)
+        return DetokenizeResponse(prompt=input_text)

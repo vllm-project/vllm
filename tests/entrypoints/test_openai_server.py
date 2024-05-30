@@ -8,6 +8,7 @@ import pytest
 # using Ray for overall ease of process management, parallel requests,
 # and debugging.
 import ray
+import requests
 import torch
 # downloading lora to test lora requests
 from huggingface_hub import snapshot_download
@@ -1152,6 +1153,40 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 17
     assert embeddings.usage.total_tokens == 17
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_tokenize(server, client: openai.AsyncOpenAI, model_name: str):
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME, tokenizer_mode="fast")
+
+    for add_special in [False, True]:
+        prompt = "This is a test prompt."
+        tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
+
+        response = requests.post("http://localhost:8000/tokenize",
+                                 json={
+                                     "add_special_tokens": add_special,
+                                     "prompt": prompt
+                                 })
+        assert response.json() == {"tokens": tokens}
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_detokenize(server, client: openai.AsyncOpenAI, model_name: str):
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    prompt = "This is a test prompt."
+    tokens = tokenizer.encode(prompt, add_special_tokens=False)
+
+    response = requests.post("http://localhost:8000/detokenize",
+                             json={"tokens": tokens})
+    assert response.json() == {"prompt": prompt}
 
 
 if __name__ == "__main__":
