@@ -3,14 +3,14 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: "need test"
-    key: "test-check"
+  - label: "need test"    
     plugins:
         - monebag/monorepo-diff#v2.5.9:
             diff: "git diff --name-only HEAD~1"
             watch:
               - path: ".buildkit/"
                 config:
+                  key: "test-check"
                   command: echo "skip test"
 
   - label: "Run regression only if test check is passed"
