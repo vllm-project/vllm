@@ -71,7 +71,7 @@ TEST_CHOICE = [
     "Swift", "Kotlin"
 ]
 
-pytestmark = pytest.mark.asyncio
+pytestmark = pytest.mark.openai
 
 
 @pytest.fixture(scope="session")
@@ -91,6 +91,8 @@ def server(zephyr_lora_files):
         "--max-model-len",
         "8192",
         "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         # lora config below
         "--enable-lora",
         "--lora-modules",
@@ -118,9 +120,11 @@ def embedding_server(zephyr_lora_files):
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.75",
         "--max-model-len",
         "8192",
-        "--enforce-eager",
     ])
     ray.get(server_runner.ready.remote())
     yield server_runner
@@ -136,6 +140,7 @@ def client():
     yield client
 
 
+@pytest.mark.asyncio
 async def test_check_models(server, client: openai.AsyncOpenAI):
     models = await client.models.list()
     models = models.data
@@ -147,6 +152,7 @@ async def test_check_models(server, client: openai.AsyncOpenAI):
     assert lora_models[1].id == "zephyr-lora2"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -178,6 +184,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     assert len(completion.choices[0].text) >= 5
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -265,6 +272,7 @@ async def test_no_logprobs_chat(server, client: openai.AsyncOpenAI,
     assert choice.logprobs is None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -364,6 +372,7 @@ async def test_single_chat_session(server, client: openai.AsyncOpenAI,
     assert message.content is not None and len(message.content) >= 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
                                  model_name: str):
@@ -419,6 +428,7 @@ async def test_too_many_logprobs(server, client: openai.AsyncOpenAI,
     assert message.content is not None and len(message.content) >= 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
@@ -455,6 +465,7 @@ async def test_completion_streaming(server, client: openai.AsyncOpenAI,
     assert "".join(chunks) == single_output
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -505,6 +516,7 @@ async def test_chat_streaming(server, client: openai.AsyncOpenAI,
     assert "".join(chunks) == output
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # just test 1 lora hereafter
     "model_name",
@@ -558,6 +570,7 @@ async def test_batch_completions(server, client: openai.AsyncOpenAI,
     assert texts[0] == texts[1]
 
 
+@pytest.mark.asyncio
 async def test_logits_bias(server, client: openai.AsyncOpenAI):
     prompt = "Hello, my name is"
     max_tokens = 5
@@ -605,6 +618,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
     assert first_response != completion.choices[0].text
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
@@ -627,6 +641,7 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
@@ -673,6 +688,7 @@ async def test_guided_json_chat(server, client: openai.AsyncOpenAI,
     assert json1["age"] != json2["age"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
@@ -693,6 +709,7 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
@@ -730,6 +747,7 @@ async def test_guided_regex_chat(server, client: openai.AsyncOpenAI,
     assert ip1 != ip2
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
@@ -749,6 +767,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
         assert completion.choices[i].text in TEST_CHOICE
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
@@ -787,6 +806,7 @@ async def test_guided_choice_chat(server, client: openai.AsyncOpenAI,
     assert choice1 != choice2
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
@@ -822,6 +842,7 @@ async def test_guided_decoding_type_error(server, client: openai.AsyncOpenAI,
             extra_body=dict(guided_regex=TEST_REGEX, guided_json=TEST_SCHEMA))
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("guided_decoding_backend",
                          ["outlines", "lm-format-enforcer"])
 async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
@@ -853,6 +874,7 @@ async def test_guided_choice_chat_logprobs(server, client: openai.AsyncOpenAI,
         assert item.logprob >= -9999.0, f"Failed (top_logprobs={top_logprobs})"
 
 
+@pytest.mark.asyncio
 async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
     for _ in range(2):
         resp = await client.chat.completions.create(
@@ -872,6 +894,7 @@ async def test_response_format_json_object(server, client: openai.AsyncOpenAI):
         assert loaded == {"result": 2}, loaded
 
 
+@pytest.mark.asyncio
 async def test_extra_fields(server, client: openai.AsyncOpenAI):
     with pytest.raises(BadRequestError) as exc_info:
         await client.chat.completions.create(
@@ -887,6 +910,7 @@ async def test_extra_fields(server, client: openai.AsyncOpenAI):
     assert "extra_forbidden" in exc_info.value.message
 
 
+@pytest.mark.asyncio
 async def test_complex_message_content(server, client: openai.AsyncOpenAI):
     resp = await client.chat.completions.create(
         model=MODEL_NAME,
@@ -906,6 +930,7 @@ async def test_complex_message_content(server, client: openai.AsyncOpenAI):
     assert content == "2"
 
 
+@pytest.mark.asyncio
 async def test_custom_role(server, client: openai.AsyncOpenAI):
     # Not sure how the model handles custom roles so we just check that
     # both string and complex message content are handled in the same way
@@ -936,6 +961,7 @@ async def test_custom_role(server, client: openai.AsyncOpenAI):
     assert content1 == content2
 
 
+@pytest.mark.asyncio
 async def test_guided_grammar(server, client: openai.AsyncOpenAI):
     simple_sql_grammar = """
 start: select_statement
@@ -970,6 +996,7 @@ number: "1" | "2"
     assert content.strip() == ground_truth
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
@@ -1001,6 +1028,7 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
         assert len(logprobs.tokens) > 5
 
 
+@pytest.mark.asyncio
 async def test_long_seed(server, client: openai.AsyncOpenAI):
     for seed in [
             torch.iinfo(torch.long).min - 1,
@@ -1020,6 +1048,7 @@ async def test_long_seed(server, client: openai.AsyncOpenAI):
                 or "less_than_equal" in exc_info.value.message)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [EMBEDDING_MODEL_NAME],
@@ -1058,6 +1087,7 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
     assert embeddings.usage.total_tokens == 5
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [EMBEDDING_MODEL_NAME],

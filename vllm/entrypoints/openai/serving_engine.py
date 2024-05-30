@@ -208,7 +208,8 @@ class OpenAIServing:
         return json_str
 
     async def _check_model(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[ErrorResponse]:
         if request.model in self.served_model_names:
             return None
@@ -220,7 +221,8 @@ class OpenAIServing:
             status_code=HTTPStatus.NOT_FOUND)
 
     def _maybe_get_lora(
-        self, request: Union[CompletionRequest, ChatCompletionRequest]
+        self, request: Union[CompletionRequest, ChatCompletionRequest,
+                             EmbeddingRequest]
     ) -> Optional[LoRARequest]:
         if request.model in self.served_model_names:
             return None
