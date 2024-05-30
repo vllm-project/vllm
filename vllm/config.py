@@ -253,6 +253,14 @@ class ModelConfig:
     def get_vocab_size(self) -> int:
         return self.hf_text_config.vocab_size
 
+    def get_output_size(self) -> int:
+        # the size of output of the last layer, before calculating logits
+        word_embed_proj_dim = getattr(self.hf_text_config,
+                                      "word_embed_proj_dim", None)
+        if word_embed_proj_dim is not None:
+            return word_embed_proj_dim
+        return self.hf_text_config.hidden_size
+
     def get_hidden_size(self) -> int:
         return self.hf_text_config.hidden_size
 

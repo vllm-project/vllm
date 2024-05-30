@@ -877,7 +877,7 @@ class ModelRunner:
 
         # Prepare buffer for outputs. These will be reused for all batch sizes.
         hidden_states = torch.zeros(
-            (max_batch_size, self.model_config.get_hidden_size()),
+            (max_batch_size, self.model_config.get_output_size()),
             dtype=self.model_config.dtype).cuda()
 
         graph_batch_size = _get_graph_batch_size(
