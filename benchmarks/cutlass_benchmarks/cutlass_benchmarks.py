@@ -284,6 +284,7 @@ if __name__ == '__main__':
             return torch.float8_e4m3fn
         raise ValueError("unsupported dtype")
 
+    # fmt: off
     parser = argparse.ArgumentParser(
         description="""
             Benchmark Cutlass GEMM.
@@ -299,6 +300,8 @@ if __name__ == '__main__':
                 - a .pkl file, that is a list of raw torch.benchmark.utils.Measurements for the pytorch and cutlass implementations for the various gemms.
             """,
         formatter_class=argparse.RawTextHelpFormatter)
+    # fmt: on
+
     parser.add_argument("--dtype",
                         type=to_torch_dtype,
                         required=True,
