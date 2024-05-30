@@ -126,7 +126,7 @@ class StreamingAttentionSink(nn.Module):
                 phys_bnums_list = attn_metadata.phys_bnums_list
             else:
                 phys_bnums_list = []
-            
+
             # batch size = num sequences
             batch_size = block_tables_tensor.shape[0]
             original_keys: List[Tuple[torch.Tensor]] = []
@@ -141,25 +141,16 @@ class StreamingAttentionSink(nn.Module):
                     phys_bnums = phys_bnums_list[i]
                 else:
                     if within_context_len:
-                        start_logic_bnum = 0
-                        phys_bnums = [
-                            block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                        ]
+                        phys_bnums = block_table[:-1]
                     else:
                         start_logic_bnum = (num_past_tokens - model_context_len) // block_size + 2
-                        phys_bnums = [block_table[0]] + [
-                            block_table[logic_bnum] for logic_bnum in range(start_logic_bnum, end_logic_bnum)
-                        ]
-                    phys_bnums = torch.tensor(phys_bnums, device=device)
+                        phys_bnums = torch.cat((block_table[0:1], block_table[start_logic_bnum : -1]))
                     phys_bnums_list.append(phys_bnums)
                 
                 rem = num_past_tokens % block_size
                 rem_phys_bnum = block_table[end_logic_bnum]
-
-                if rem == 0:
-                    # clear out new block
-                    key_cache.index_fill_(0, rem_phys_bnum.to(torch.int64), 0)
                 
+                # read unrotated keys from cache
                 # FA shape: [len(phys_bnums), block_size, num_heads, head_size]
                 # XF shape: [len(phys_bnums), num_heads, head_size/x, block_size, x]
                 full_past_keys = torch.index_select(key_cache, 0, phys_bnums)
@@ -169,55 +160,60 @@ class StreamingAttentionSink(nn.Module):
                     rem_past_keys = key_cache[rem_phys_bnum, :, :, :rem, :]
                 original_keys.append((full_past_keys.clone(), rem_past_keys.clone()))
                 
+                # use positions within cache (capped by context length)
                 pos_start = 0 if within_context_len else 2 * block_size - 1 - rem
                 pos_end = min(num_past_tokens, model_context_len - 1)
                 pos = torch.arange(pos_start, pos_end, device=device)
-                # if not within context length: pos = [0, 16] + [31 - rem, 4095)
                 if not within_context_len:
+                    # pos: [0, 16] + [31 - rem, 4095)
                     pos_sink = torch.arange(0, block_size, device=device)
                     pos = torch.cat((pos_sink, pos))
                 
+                # reshape for rotary embedding kernel
                 if self.attn_backend == _Backend.FLASH_ATTN:
                     full_past_keys = full_past_keys.flatten(0, 1)
                 elif self.attn_backend == _Backend.XFORMERS:
                     full_past_keys = full_past_keys.permute((0, 3, 1, 2, 4)).flatten(0, 1)
                     rem_past_keys = rem_past_keys.permute((2, 0, 1, 3))
                     
+                # combine full and remainder keys
                 full_past_keys = torch.cat((full_past_keys, rem_past_keys), dim=0)
                 full_past_keys = full_past_keys.flatten(1, -1)
-                # shape: [pos_end - pos_start, num_heads * head_size/x * x]
+                # shape: [pos_end - pos_start, num_heads * head_size]
                 
+                # rotate keys with new positions
                 dummy_q = torch.zeros_like(full_past_keys)
                 _, full_past_keys = self.rotary_emb(pos, dummy_q, full_past_keys)
                 
+                # reshape for writing back to cache
                 if self.attn_backend == _Backend.FLASH_ATTN:
                     full_past_keys = full_past_keys.unflatten(1, (key_cache.shape[2], key_cache.shape[3]))
                 elif self.attn_backend == _Backend.XFORMERS:
                     full_past_keys = full_past_keys.unflatten(1, (key_cache.shape[1], key_cache.shape[2], key_cache.shape[4]))
                 
-                full_past_keys, rem_past_keys = torch.split(
-                    full_past_keys, [len(phys_bnums) * block_size, rem])
+                # split into full and remainder keys
+                full_past_keys, rem_past_keys = torch.split(full_past_keys, [len(phys_bnums) * block_size, rem])
                 full_past_keys = full_past_keys.unflatten(0, (len(phys_bnums), block_size))
                 
+                # write rotated keys to cache for attention computation
                 if self.attn_backend == _Backend.FLASH_ATTN:
                     key_cache.index_put_((phys_bnums,), full_past_keys)
                     key_cache[rem_phys_bnum, :rem, :, :] = rem_past_keys
                 elif self.attn_backend == _Backend.XFORMERS:
                     full_past_keys = full_past_keys.permute((0, 2, 3, 1, 4))
+                    rem_past_keys = rem_past_keys.permute((1, 2, 0, 3))
                     key_cache.index_put_((phys_bnums,), full_past_keys)
-                    key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys.permute((1, 2, 0, 3))
+                    key_cache[rem_phys_bnum, :, :, :rem, :] = rem_past_keys
                 
                 if not within_context_len:
-                    blocks_to_ignore = (num_past_tokens - model_context_len) // block_size + 1
-                    # block_table[0] is attention sink
-                    capped_block_table = [block_table[0].item()] + block_table[blocks_to_ignore + 1:].tolist()
+                    # edit block table for attention kernel
+                    capped_block_table = phys_bnums.tolist()
+                    capped_block_table.append(rem_phys_bnum.item())
                     block_tables.append(capped_block_table)
 
-                    # edited context len is in range [4081, 4096]
-                    attn_metadata.seq_lens_tensor[i] = model_context_len  # pos_end + 1
-                    
-                    # edited position is in range [4080, 4095]
-                    positions[i] = model_context_len - 1  # pos_end
+                    # cap number of tokens to consider with model context len
+                    attn_metadata.seq_lens_tensor[i] = model_context_len
+                    positions[i] = model_context_len - 1
 
             if block_tables:
                 attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(

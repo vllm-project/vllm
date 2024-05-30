@@ -243,6 +243,7 @@ class LLMEngine:
                 stop_checker=StopChecker(
                     self.scheduler_config.max_model_len,
                     self.get_tokenizer_for_seq,
+                    model_config.use_attention_sinks,
                 ),
             ))
 
@@ -685,8 +686,6 @@ class LLMEngine:
                 execute_model_req=execute_model_req)
         else:
             output = []
-
-        print("\t\tFREE BLOCKS", self.scheduler.block_manager.get_num_free_gpu_blocks())
         
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,

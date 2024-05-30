@@ -6,7 +6,7 @@ from huggingface_hub import login
 
 
 # login(token='see Notes')
-MAX_GEN_TOKENS = 200
+MAX_GEN_TOKENS = 400
 
 
 def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
@@ -22,12 +22,16 @@ def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingPa
     return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS)) for prompt in prompts]
 
 
-def get_long_prompt(file_path="./paxos_paper.txt") -> Tuple[str, SamplingParams]:
+def get_long_prompt(file_path="./paxos_paper.txt", count=1) -> Tuple[str, SamplingParams]:
     # this file is 4060 tokens
     with open(file_path, "r") as f:
         prompt = f.read()
 
-    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS))]
+    return [(prompt, SamplingParams(
+                temperature=1,
+                min_tokens=100,
+                max_tokens=MAX_GEN_TOKENS
+            )) for _ in range(count)]
 
 
 def process_requests(engine: LLMEngine,
@@ -72,7 +76,7 @@ def main():
     print("max model len", engine.scheduler_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     # prompts = get_chat_prompts()
-    prompts = get_long_prompt()
+    prompts = get_long_prompt(count=1)
     process_requests(engine, prompts, tokenizer)
 
 
