@@ -107,7 +107,9 @@ def rewrite_quantized_gemms(
     mod: torch.fx.GraphModule,
     example_inputs: List[torch.Tensor]
 ) -> torch.fx.GraphModule:
+    # Disable for now
     return mod
+
     pattern_graph = symbolic_trace(pattern3).graph
 
     #x = torch.empty((16,16), dtype=torch.float16)

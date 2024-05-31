@@ -288,7 +288,7 @@ fused_add_rms_norm_kernel(
 
 }  // namespace vllm
 
-void rms_norm(torch::Tensor& out,     // [..., hidden_size]
+void/*torch::Tensor*/ rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
               double epsilon) {
@@ -304,6 +304,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
         out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
         weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
   });
+  //return out;
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
@@ -316,7 +317,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
                                          num_tokens, hidden_size);             \
       });
 
-void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
+void/*torch::Tensor*/ fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
                         double epsilon) {
@@ -349,4 +350,6 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);
   }
+
+  //return input;
 }

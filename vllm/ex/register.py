@@ -90,16 +90,18 @@ def register_defaults():
     logger.debug("REGISTER DEFAULTS")
     register_fusable(torch.Tensor.to)
     register_fusable(torch.Tensor.transpose)
+    register_fusable(torch.Tensor.numel)
     register_fusable('_operator.add')
     register_fusable('_operator.mul')
     register_fusable('_operator.getitem')
-    #register_fusable('torch.empty')  # maybe TBD
+    register_fusable('torch.empty')  # maybe TBD
     register_fusable('torch.relu')
     register_fusable('torch.nn.functional.silu')
     register_fusable('torch.ops.vllm.silu_and_mul')
     register_fusable('torch.matmul', True)
     register_fusable('torch._C._nn.linear', True)
-    #register_fusable('torch.ops.vllm.cutlass_scaled_mm_dq', True)
+    register_fusable('torch.ops._C.cutlass_scaled_mm_dq', True)
+    register_fusable('torch.ops._C.static_scaled_int8_quant')
 
 
 register_defaults()
