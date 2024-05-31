@@ -250,12 +250,9 @@ def run_model_bench(args):
 
     def model_shapes(model_name: str, tp_size: int) -> List[Tuple[int, int]]:
         KNs = []
-        for layer in copy.deepcopy(WEIGHT_SHAPES[model_name]):
-            assert len(layer) == 3
-            tp_split_dim = layer[2]
-            assert tp_split_dim in [0, 1]
-            layer[tp_split_dim] = layer[tp_split_dim] // tp_size
-            KNs.append((layer[0], layer[1]))
+        for KN, tp_split_dim in copy.deepcopy(WEIGHT_SHAPES[model_name]):
+            KN[tp_split_dim] = KN[tp_split_dim] // tp_size
+            KNs.append(KN)
         return KNs
 
     model_bench_data = []
