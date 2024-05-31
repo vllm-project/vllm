@@ -51,16 +51,15 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         bonus_token_ids: torch.Tensor,
         draft_token_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Sample token ids using rejection sampling. This accepts or rejects
-        tokens proposed by the draft model using the probability of each token
-        according to the draft and target models.
+        """Sample token ids using typical acceptance sampling. This accepts 
+        or rejects tokens proposed by the draft model using the probability
+        of each token according to the draft and target models.
 
         In the worst case where all draft tokens are rejected, it is guaranteed
-        one correct token will be emitted.
+        one token will be emitted.
 
-        In the case where all draft tokens are accepted, a bonus token will be
-        accepted as its cheap to have the target model score this speculative
-        sequence.
+        In the case where all draft tokens are accepted, the bonus token will be
+        accepted conditioned on self._disable_bonus_tokens being false.
 
         Args:
             target_probs: The probability distribution over token ids given
