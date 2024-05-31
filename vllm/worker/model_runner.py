@@ -386,7 +386,7 @@ class ModelRunner:
                 if lora_id > 0:
                     lora_requests.add(seq_group_metadata.lora_request)
 
-                lora_index_mapping += [lora_id] * (seq_len - context_len)
+                lora_index_mapping += [lora_id] * query_len
                 batch_lora_index_mapping += [lora_id if lora_id > 0 else -1]
                 lora_prompt_mapping.extend(
                     [lora_id] *
