@@ -31,26 +31,21 @@ class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
-
-    def init_state(self):
-        """Initialize the FSM states."""
-        self.fsm_state: DefaultDict[int, int] = defaultdict(int)
+        self._fsm_state: DefaultDict[int, int] = defaultdict(int)
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
         """Use the FSM to bias the logits before sampling the next token."""
         seq_id = hash(tuple(input_ids))
 
-        if len(input_ids) == 0:
-            self.init_state()
-        else:
+        if len(input_ids) > 0:
             last_token = input_ids[-1]
             last_seq_id = hash(tuple(input_ids[:-1]))
-            self.fsm_state[seq_id] = self._guide.get_next_state(
-                state=self.fsm_state[last_seq_id], token_id=last_token)
+            self._fsm_state[seq_id] = self._guide.get_next_state(
+                state=self._fsm_state[last_seq_id], token_id=last_token)
 
         instruction = self._guide.get_next_instruction(
-            state=self.fsm_state[seq_id])
+            state=self._fsm_state[seq_id])
 
         if type(instruction) == Generate:
             allowed_tokens = instruction.tokens
@@ -71,6 +66,13 @@ class BaseLogitsProcessor:
 
 class RegexLogitsProcessor(BaseLogitsProcessor):
 
+    @classmethod
+    @lru_cache(maxsize=32)
+    def _get_guide(cls, regex_string: str,
+                   tokenizer: PreTrainedTokenizerBase) -> Guide:
+        tokenizer = _adapt_tokenizer(tokenizer)
+        return RegexGuide(regex_string, tokenizer)
+
     def __init__(self, regex_string: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the regex-structured generation.
 
@@ -82,8 +84,8 @@ class RegexLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = _adapt_tokenizer(tokenizer)
-        super().__init__(RegexGuide(regex_string, tokenizer))
+        super().__init__(
+            RegexLogitsProcessor._get_guide(regex_string, tokenizer))
 
 
 class JSONLogitsProcessor(RegexLogitsProcessor):
@@ -123,6 +125,12 @@ class JSONLogitsProcessor(RegexLogitsProcessor):
 
 class CFGLogitsProcessor(BaseLogitsProcessor):
 
+    @classmethod
+    @lru_cache(maxsize=32)
+    def _get_guide(cls, cfg: str, tokenizer: PreTrainedTokenizerBase) -> Guide:
+        tokenizer = _adapt_tokenizer(tokenizer)
+        return CFGGuide(cfg, tokenizer)
+
     def __init__(self, cfg: str, tokenizer: PreTrainedTokenizerBase):
         """Compile the FSM that drives the context free grammar generation.
 
@@ -134,16 +142,10 @@ class CFGLogitsProcessor(BaseLogitsProcessor):
             The model's tokenizer
 
         """
-        tokenizer = _adapt_tokenizer(tokenizer)
-        super().__init__(CFGGuide(cfg, tokenizer))
-
-    def init_state(self):
-        """Initialize state with a CFGFSM copy."""
-        super().init_state()
-        self.fsm = self.fsm.copy()
+        super().__init__(CFGLogitsProcessor._get_guide(cfg, tokenizer))
 
 
-@lru_cache
+@lru_cache(maxsize=32)
 def _adapt_tokenizer(tokenizer: PreTrainedTokenizerBase):
     """Adapt vLLM's tokenizer to use to compile the FSM.
 
