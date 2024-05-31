@@ -3,7 +3,9 @@
 from typing import Optional
 
 import torch
+
 from vllm import _custom_ops as ops
+
 
 def _raise_import_error():
     if torch.cuda.get_device_capability() < (8, 0):
