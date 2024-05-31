@@ -44,6 +44,11 @@ using namespace cute;
 
 namespace {
 
+uint32_t next_pow_2(uint32_t const num) {
+  if (num <= 1) return num;
+  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
+}
+
 template <typename ElementAB_, typename ElementD_, typename TileShape,
           typename ClusterShape, typename KernelSchedule,
           typename EpilogueSchedule>
@@ -248,9 +253,9 @@ void cutlass_scaled_mm_dq_sm90_fp8_dispatch(torch::Tensor& out,
   using Cutlass3xGemmM128 =
       typename sm90_fp8_config<InType, OutType, 128>::Cutlass3xGemm;
 
-  int32_t const m = a.size(0);
-  int32_t const mp2 = std::max(
-      64, static_cast<int32_t>(pow(2, ceil(log2(m)))));  // next power of 2
+  uint32_t const m = a.size(0);
+  uint32_t const mp2 = std::max(64, next_pow_2(m)); // next power of 2
+
   if (mp2 <= 64) {
     // m in [1, 64]
     return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmM64>(
