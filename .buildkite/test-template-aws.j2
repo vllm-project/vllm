@@ -56,6 +56,7 @@ steps:
             - NVIDIA_VISIBLE_DEVICES=all
             - NVIDIA_DRIVER_CAPABILITIES=all
             - CUDA_LAUNCH_BLOCKING=1
+            - VLLM_ATTENTION_BACKEND=XFORMERS
           volumes:
             - type: tmpfs
               target: /dev/shm
