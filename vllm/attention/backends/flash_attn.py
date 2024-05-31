@@ -1,6 +1,6 @@
 """Attention layer with FlashAttention."""
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from vllm_flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
@@ -9,10 +9,12 @@ from vllm._C import cache_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata)
 
-_SUPPORTED_HEAD_SIZES = [32, 64, 96, 128, 160, 192, 224, 256]
-
 
 class FlashAttentionBackend(AttentionBackend):
+
+    @staticmethod
+    def get_supported_head_sizes() -> List[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
 
     @staticmethod
     def get_name() -> str:
@@ -217,7 +219,10 @@ class FlashAttentionImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
+        assert blocksparse_params is None, ValueError(
+            "FlashAttention does not support block-sparse attention.")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -237,10 +242,12 @@ class FlashAttentionImpl(AttentionImpl):
             # paged KV cache.
             raise ValueError(
                 "Sliding window is not supported in FlashAttention.")
-        if head_size not in _SUPPORTED_HEAD_SIZES:
+
+        support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
+        if head_size not in support_head_sizes:
             raise ValueError(
                 f"Head size {head_size} is not supported by FlashAttention. "
-                f"Supported head sizes are: {_SUPPORTED_HEAD_SIZES}.")
+                f"Supported head sizes are: {support_head_sizes}.")
 
     def forward(
         self,
