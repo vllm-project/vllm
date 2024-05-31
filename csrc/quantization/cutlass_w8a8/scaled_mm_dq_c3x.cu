@@ -1,4 +1,4 @@
-#include <cuda_runtime_api.h>
+#include <cudaTypedefs.h>
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
 

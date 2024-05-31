@@ -1,5 +1,6 @@
+#include <cudaTypedefs.h>
+
 #include <c10/cuda/CUDAGuard.h>
-#include <cuda_runtime.h>
 #include <torch/extension.h>
 
 void cutlass_scaled_mm_dq_sm75(torch::Tensor& c, torch::Tensor const& a,
@@ -17,10 +18,12 @@ void cutlass_scaled_mm_dq_sm89(torch::Tensor& c, torch::Tensor const& a,
                                torch::Tensor const& a_scales,
                                torch::Tensor const& b_scales);
 
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
 void cutlass_scaled_mm_dq_sm90(torch::Tensor& c, torch::Tensor const& a,
                                torch::Tensor const& b,
                                torch::Tensor const& a_scales,
                                torch::Tensor const& b_scales);
+#endif
 
 void cutlass_scaled_mm_dq(torch::Tensor& c, torch::Tensor const& a,
                           torch::Tensor const& b, torch::Tensor const& a_scales,
@@ -48,8 +51,6 @@ void cutlass_scaled_mm_dq(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
-
-  std::cout << CUDA_VERSION << std::endl;
 
   if (version_num >= 90) {
     // Hopper
