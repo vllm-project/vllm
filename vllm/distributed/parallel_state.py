@@ -13,12 +13,17 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+_ENABLE_CUSTOM_ALL_REDUCE = True
+
 # Tensor model parallel group that the current rank belongs to.
 _TP_DEVICE_GROUP: Optional[ProcessGroup] = None
 _TP_CPU_GROUP: Optional[ProcessGroup] = None
 _TP_PYNCCL_COMMUNICATOR = None
+_TP_CA_COMMUNICATOR = None
 # Pipeline model parallel group that the current rank belongs to.
 _PP_DEVICE_GROUP: Optional[ProcessGroup] = None
+_PP_CPU_GROUP: Optional[ProcessGroup] = None
+_PP_PYNCCL_COMMUNICATOR = None
 
 # when people blindly call `torch.distributed.all_reduce` etc,
 # it will use this group. It is initialized with the `backend`
@@ -47,9 +52,24 @@ _PP_GLOBAL_RANKS: Optional[List[int]] = None
 _LOCAL_RANK = -1
 
 
+def set_custom_all_reduce(enable: bool):
+    global _ENABLE_CUSTOM_ALL_REDUCE
+    _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def get_pp_pynccl_communicator():
+    global _PP_PYNCCL_COMMUNICATOR
+    return _PP_PYNCCL_COMMUNICATOR
+
+
 def get_tp_pynccl_communicator():
     global _TP_PYNCCL_COMMUNICATOR
     return _TP_PYNCCL_COMMUNICATOR
+
+
+def get_tp_ca_communicator():
+    global _TP_CA_COMMUNICATOR
+    return _TP_CA_COMMUNICATOR
 
 
 def get_local_rank():
@@ -100,6 +120,9 @@ def init_distributed_environment(
         if torch.cuda.is_available():
             data = data.to(device=f"cuda:{local_rank}")
         torch.distributed.all_reduce(data)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        del data
 
 
 def initialize_model_parallel(
@@ -149,7 +172,8 @@ def initialize_model_parallel(
     rank = torch.distributed.get_rank()
 
     # Build the tensor model-parallel groups.
-    global _TP_DEVICE_GROUP, _TP_CPU_GROUP, _TP_PYNCCL_COMMUNICATOR
+    global _TP_DEVICE_GROUP, _TP_CPU_GROUP
+    global _TP_PYNCCL_COMMUNICATOR, _TP_CA_COMMUNICATOR
     assert _TP_DEVICE_GROUP is None, (
         "tensor model parallel group is already initialized")
     for i in range(num_tensor_model_parallel_groups):
@@ -163,22 +187,41 @@ def initialize_model_parallel(
             _TP_CPU_GROUP = cpu_group
 
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
-        group=_TP_CPU_GROUP,
-        device=_LOCAL_RANK,
-    )
+    if tensor_model_parallel_size > 1:
+        _TP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
+            group=_TP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
+
+    # Initialize a custom fast all-reduce implementation.
+    if _ENABLE_CUSTOM_ALL_REDUCE:
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            CustomAllreduce)
+        _TP_CA_COMMUNICATOR = CustomAllreduce(
+            group=_TP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
     # Build the pipeline model-parallel groups.
-    global _PP_DEVICE_GROUP
+    global _PP_DEVICE_GROUP, _PP_CPU_GROUP
+    global _PP_PYNCCL_COMMUNICATOR
     global _PP_GLOBAL_RANKS
     assert _PP_DEVICE_GROUP is None, (
         "pipeline model parallel group is already initialized")
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group = torch.distributed.new_group(ranks, backend=backend)
+        cpu_group = torch.distributed.new_group(ranks, backend="gloo")
         if rank in ranks:
             _PP_DEVICE_GROUP = group
+            _PP_CPU_GROUP = cpu_group
             _PP_GLOBAL_RANKS = ranks
+
+    if pipeline_model_parallel_size > 1:
+        _PP_PYNCCL_COMMUNICATOR = PyNcclCommunicator(
+            group=_PP_CPU_GROUP,
+            device=_LOCAL_RANK,
+        )
 
 
 def ensure_model_parallel_initialized(
@@ -239,6 +282,13 @@ def get_pipeline_model_parallel_group():
     assert _PP_DEVICE_GROUP is not None, (
         "pipeline model parallel group is not initialized")
     return _PP_DEVICE_GROUP
+
+
+def get_pipeline_model_parallel_cpu_group():
+    """Get the pipeline model parallel cpu group the caller rank belongs to."""
+    assert _PP_CPU_GROUP is not None, (
+        "pipeline model parallel cpu group is not initialized")
+    return _PP_CPU_GROUP
 
 
 def get_tensor_model_parallel_world_size():

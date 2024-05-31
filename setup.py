@@ -358,11 +358,8 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if "vllm-nccl-cu12" in req:
-                req = req.replace("vllm-nccl-cu12",
-                                  f"vllm-nccl-cu{cuda_major}")
-            elif ("vllm-flash-attn" in req
-                  and not (cuda_major == "12" and cuda_minor == "1")):
+            if ("vllm-flash-attn" in req
+                    and not (cuda_major == "12" and cuda_minor == "1")):
                 # vllm-flash-attn is built only for CUDA 12.1.
                 # Skip for other versions.
                 continue
@@ -426,7 +423,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
-        "tensorizer": ["tensorizer==2.9.0"],
+        "tensorizer": ["tensorizer>=2.9.0"],
     },
     cmdclass={"build_ext": cmake_build_ext} if not _is_neuron() else {},
     package_data=package_data,

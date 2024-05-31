@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
+    VLLM_PORT: Optional[int] = None
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_INSTANCE_ID: Optional[str] = None
     VLLM_NCCL_SO_PATH: Optional[str] = None
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     VLLM_DO_NOT_TRACK: bool = False
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
+    VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
@@ -96,6 +98,12 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     'VLLM_HOST_IP':
     lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
 
+    # used in distributed environment to manually set the communication port
+    # '0' is used to make mypy happy
+    'VLLM_PORT':
+    lambda: int(os.getenv('VLLM_PORT', '0'))
+    if 'VLLM_PORT' in os.environ else None,
+
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE":
@@ -145,7 +153,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
-    lambda: os.environ.get("S3_ACCESS_KEY", None),
+    lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY":
     lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
     "S3_ENDPOINT_URL":
@@ -170,6 +178,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_CONFIGURE_LOGGING", "1")),
     "VLLM_LOGGING_CONFIG_PATH":
     lambda: os.getenv("VLLM_LOGGING_CONFIG_PATH"),
+
+    # this is used for configuring the default logging level
+    "VLLM_LOGGING_LEVEL":
+    lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
 
     # Trace function calls
     # If set to 1, vllm will trace function calls

@@ -4,10 +4,11 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from tests.models.utils import check_logprobs_close
+from .utils import check_logprobs_close
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
+    "mistralai/Mistral-7B-Instruct-v0.3",
 ]
 
 
