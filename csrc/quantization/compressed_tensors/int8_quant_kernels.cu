@@ -26,7 +26,7 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
 namespace vllm {
 
 template <typename scalar_t, typename scale_type>
-__global__ void static_scaled_int8_quant_kernel3(
+__global__ void static_scaled_int8_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ out,
     scale_type inverted_scale, const int hidden_size) {
   const int tid = threadIdx.x;
@@ -56,18 +56,6 @@ __global__ void static_scaled_int8_quant_kernel3(
   }
 }
 
-template <typename scalar_t, typename scale_type>
-__global__ void static_scaled_int8_quant_kernel(
-    const scalar_t* __restrict__ input, int8_t* __restrict__ out,
-    scale_type scale, const int hidden_size) {
-  const int tid = threadIdx.x;
-  const int token_idx = blockIdx.x;
-
-  for (int i = tid; i < hidden_size; i += blockDim.x) {
-    out[token_idx * hidden_size + i] =
-        float_to_int8_rn(((float)input[token_idx * hidden_size + i]) * scale);
-  }
-}
 }  // namespace vllm
 
 void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
