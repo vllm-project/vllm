@@ -328,8 +328,8 @@ class CustomAllreduce {
                                 CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
-      CUDACHECK(cudaIpcGetMemHandle(
-          (cudaIpcMemHandle_t*)handles[i].data(), base_ptr));
+      CUDACHECK(cudaIpcGetMemHandle((cudaIpcMemHandle_t*)handles[i].data(),
+                                    base_ptr));
       offsets[i] = ((char*)ptr) - ((char*)base_ptr);
     }
     return {handles, offsets};

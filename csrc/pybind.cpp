@@ -353,8 +353,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def("init_custom_ar", &init_custom_ar);  // modify inputs?
   custom_ar.def("should_custom_ar", &should_custom_ar);
-  custom_ar.def("all_reduce_reg", &all_reduce_reg);  // has out
-  custom_ar.def("all_reduce_unreg", &all_reduce_unreg); // has out
+  custom_ar.def("all_reduce_reg", &all_reduce_reg);      // has out
+  custom_ar.def("all_reduce_unreg", &all_reduce_unreg);  // has out
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);
   custom_ar.def("register_buffer", &register_buffer);
@@ -368,10 +368,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("dispose", torch::kCPU, &dispose);
   custom_ar.impl("meta_size", torch::kCPU, &meta_size);
   custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
-  custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU, &get_graph_buffer_ipc_meta);
-  custom_ar.impl("register_graph_buffers", torch::kCPU, &register_graph_buffers);
+  custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU,
+                 &get_graph_buffer_ipc_meta);
+  custom_ar.impl("register_graph_buffers", torch::kCPU,
+                 &register_graph_buffers);
 }
 #endif
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}

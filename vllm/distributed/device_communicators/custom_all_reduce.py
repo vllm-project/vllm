@@ -17,7 +17,8 @@ try:
 
     from vllm import _custom_ops as ops
 
-    # this should fail if not installed. TODO: replace with some kind of ops query
+    # this should fail if not installed.
+    # TODO: replace with some kind of ops query
     ops.meta_size()
     custom_ar = True
 

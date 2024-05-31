@@ -134,8 +134,8 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::tuple<std::vector<std::string>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
-    fptr_t _fa) {
+std::tuple<std::vector<std::string>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta(fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   return fa->get_graph_buffer_ipc_meta();
 }
