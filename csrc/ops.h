@@ -1,6 +1,8 @@
 #pragma once
 
-#include "register.h"
+#define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
+#define _CONCAT(A, B) A##B
+#define CONCAT(A, B) _CONCAT(A, B)
 
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -135,7 +137,7 @@ void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out);
 void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
                       torch::Tensor& out);
 void dispose(fptr_t _fa);
-int meta_size();
+int64_t meta_size();
 void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,
                      const std::vector<int64_t>& offsets);

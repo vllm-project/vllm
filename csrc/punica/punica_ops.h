@@ -1,6 +1,10 @@
 #pragma once
 
-#include "register.h"
+#include <torch/extension.h>
+
+#define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
+#define _CONCAT(A, B) A##B
+#define CONCAT(A, B) _CONCAT(A, B)
 
 void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w,
                    torch::Tensor indicies, int64_t layer_idx, double scale);

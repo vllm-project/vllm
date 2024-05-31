@@ -125,7 +125,7 @@ void dispose(fptr_t _fa) {
   delete fa;
 }
 
-int meta_size() { return sizeof(vllm::Signal); }
+int64_t meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, torch::Tensor& t,
                      const std::vector<std::string>& handles,

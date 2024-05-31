@@ -270,6 +270,7 @@ class LlamaModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    #@torch.compile
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -361,6 +362,7 @@ class LlamaForCausalLM(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
+    #@torch.compile
     def forward(
         self,
         input_ids: torch.Tensor,
