@@ -44,6 +44,21 @@ using namespace cute;
 
 namespace {
 
+// A wrapper for the GEMM kernel that is used to guard against compilation on
+// architectures that will never use the kernel. The purpose of this is to
+// reduce the size of the compiled binary.
+// __CUDA_ARCH__ is not defined in host code, so this lets us smuggle the ifdef
+// into code that will be executed on the device where it is defined.
+template <typename Kernel>
+struct enable_sm90_or_later : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ >= 900
+    Kernel::operator()(std::forward<Args>(args)...);
+#endif
+  }
+};
+
 template <typename ElementAB_, typename ElementD_, typename TileShape,
           typename ClusterShape, typename KernelSchedule,
           typename EpilogueSchedule>
@@ -114,9 +129,9 @@ struct cutlass_3x_gemm {
           KernelSchedule>::CollectiveOp;
   // clang-format on
 
-  using KernelType = cutlass::gemm::kernel::GemmUniversal<
+  using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
       cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-      cutlass::gemm::PersistentScheduler>;
+      cutlass::gemm::PersistentScheduler>>;
 
   struct GemmKernel : public KernelType {};
 };
