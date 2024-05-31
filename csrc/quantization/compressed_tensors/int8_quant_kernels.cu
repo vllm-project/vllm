@@ -26,6 +26,37 @@ static inline __device__ int8_t float_to_int8_rn(float x) {
 namespace vllm {
 
 template <typename scalar_t, typename scale_type>
+__global__ void static_scaled_int8_quant_kernel3(
+    const scalar_t* __restrict__ input, int8_t* __restrict__ out,
+    scale_type inverted_scale, const int hidden_size) {
+  const int tid = threadIdx.x;
+  const int token_idx = blockIdx.x;
+  const float4* vectorized = reinterpret_cast<const float4*>(input);
+  const int traverse_space = hidden_size >> 2;
+
+#pragma unroll 4
+  for (int i = tid; i < traverse_space; i += blockDim.x) {
+    int index = token_idx * traverse_space + i;
+
+    float4 data = vectorized[index];
+
+    data.x *= inverted_scale;
+    data.y *= inverted_scale;
+    data.z *= inverted_scale;
+    data.w *= inverted_scale;
+
+    // use char4 for vectorized stores
+    char4 store_value;
+    store_value.x = static_cast<char>(float_to_int8_rn(data.x));
+    store_value.y = static_cast<char>(float_to_int8_rn(data.y));
+    store_value.z = static_cast<char>(float_to_int8_rn(data.z));
+    store_value.w = static_cast<char>(float_to_int8_rn(data.w));
+
+    reinterpret_cast<char4*>(out)[index] = store_value;
+  }
+}
+
+template <typename scalar_t, typename scale_type>
 __global__ void static_scaled_int8_quant_kernel(
     const scalar_t* __restrict__ input, int8_t* __restrict__ out,
     scale_type scale, const int hidden_size) {
@@ -34,7 +65,7 @@ __global__ void static_scaled_int8_quant_kernel(
 
   for (int i = tid; i < hidden_size; i += blockDim.x) {
     out[token_idx * hidden_size + i] =
-        float_to_int8_rn(((float)input[token_idx * hidden_size + i]) / scale);
+        float_to_int8_rn(((float)input[token_idx * hidden_size + i]) * scale);
   }
 }
 }  // namespace vllm
@@ -48,12 +79,13 @@ void static_scaled_int8_quant(torch::Tensor& out,    // [..., hidden_size]
   int num_tokens = input.numel() / hidden_size;
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
+  const float inverted_scale = 1.0f / scale;
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "static_scaled_int8_quant_kernel", [&] {
         vllm::static_scaled_int8_quant_kernel<scalar_t, float>
             <<<grid, block, 0, stream>>>(input.data_ptr<scalar_t>(),
-                                         out.data_ptr<int8_t>(), scale,
+                                         out.data_ptr<int8_t>(), inverted_scale,
                                          hidden_size);
       });
 }
