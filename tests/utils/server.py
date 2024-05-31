@@ -97,10 +97,15 @@ class ServerContext:
         ray.init(ignore_reinit_error=True)
         log_banner(self._logger, "server startup command args",
                    shlex.join(self._args))
-        self.server_runner = ServerRunner.remote(self._args,
-                                                 logger=self._logger)
-        ray.get(self.server_runner.ready.remote())
-        return self.server_runner
+
+        try:
+            self.server_runner = ServerRunner.remote(self._args,
+                                                     logger=self._logger)
+            ray.get(self.server_runner.ready.remote())
+            return self.server_runner
+        except Exception as e:
+            self.__exit__(*sys.exc_info())
+            raise e
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         """
