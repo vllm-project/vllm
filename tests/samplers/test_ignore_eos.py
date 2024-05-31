@@ -7,7 +7,8 @@ import pytest
 
 from vllm import SamplingParams
 
-# We also test with llama because it has generation_config to specify EOS (past regression).
+# We also test with llama because it has generation_config to specify EOS
+# (past regression).
 MODELS = ["facebook/opt-125m", "meta-llama/Llama-2-7b-hf"]
 
 
