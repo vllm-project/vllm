@@ -1,13 +1,10 @@
-from abc import ABC, abstractmethod
-from functools import cached_property
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.jit
-import torch.nn as nn
 
 
-class SpecDecodeBaseSampler(ABC):
+class SpecDecodeBaseSampler():
     """Base class for samplers used for Speculative Decoding verification
         step.
     """
@@ -165,7 +162,8 @@ class SpecDecodeBaseSampler(ABC):
 
         # validate the shape of draft probs if it is set
         if draft_probs is not None:
-            draft_batch_size, num_draft_probs, draft_vocab_size = draft_probs.shape
+            (draft_batch_size, num_draft_probs,
+             draft_vocab_size) = draft_probs.shape
             assert draft_batch_size == target_batch_size
             assert num_draft_probs == num_target_probs
             assert (draft_vocab_size == target_vocab_size
