@@ -60,6 +60,7 @@ class MockEngine:
     def has_unfinished_requests_for_virtual_engine(self, virtual_engine):
         return self.request_id is not None
 
+
 class MockAsyncLLMEngine(AsyncLLMEngine):
 
     def _init_engine(self, *args, **kwargs):

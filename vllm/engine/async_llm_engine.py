@@ -520,8 +520,9 @@ class AsyncLLMEngine:
                 # they can process any other queued control plane messages,
                 # such as add/remove lora adapters.
                 if self.engine_use_ray:
-                    await (self.engine.stop_remote_worker_execution_loop_async.
-                           remote())  # type: ignore
+                    await (self.engine.stop_remote_worker_execution_loop.
+                           remote()  # type: ignore
+                           )
                 else:
                     await self.engine.stop_remote_worker_execution_loop_async()
                 await self._request_tracker.wait_for_new_requests()

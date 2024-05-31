@@ -352,6 +352,9 @@ class LLMEngine:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
+    def stop_remote_worker_execution_loop(self) -> None:
+        self.model_executor.stop_remote_worker_execution_loop()
+
     def encode_request(
         self,
         request_id: str,  # pylint: disable=unused-argument
