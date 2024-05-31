@@ -191,21 +191,29 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin.cu"
     "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
-    "csrc/custom_all_reduce.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_entry.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c2x.cu"
-    "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu")
+    "csrc/custom_all_reduce.cu")
 
-  #
+  # CUTLASS doesn't compile for sm90 on CUDA 11 so we only enable it in CUDA 12.
   # The CUTLASS kernels for Hopper require sm90a to be enabled.
   # This is done via the below gencode option, BUT that creates kernels for both sm90 and sm90a.
   # That adds an extra 17MB to compiled binary, so instead we selectively enable it.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
+    list(APPEND VLLM_EXT_SRC
+      "csrc/quantization/cutlass_w8a8/scaled_mm_dq_entry.cu"
+      "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c2x.cu"
+      "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu")
     set_source_files_properties(
           "csrc/quantization/cutlass_w8a8/scaled_mm_dq_c3x.cu"
           PROPERTIES
           COMPILE_FLAGS
           "-gencode arch=compute_90a,code=sm_90a")
+  else()
+    set_source_files_properties(
+          "csrc/pybind.cpp"
+          PROPERTIES
+          COMPILE_FLAGS
+          "-D DISABLE_CUTLASS_SCALED_MM")
+
   endif()
 
 endif()
