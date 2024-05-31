@@ -422,7 +422,8 @@ class Scheduler:
                 budget.subtract_num_seqs(seq_group.request_id,
                                          num_running_seqs)
                 if curr_loras is not None and seq_group.lora_int_id > 0:
-                    curr_loras.remove(seq_group.lora_int_id)
+                    if seq_group.lora_int_id in curr_loras:
+                        curr_loras.remove(seq_group.lora_int_id)
 
                 if running_queue:
                     # Preempt the lowest-priority sequence groups.
