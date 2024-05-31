@@ -1,7 +1,7 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Union
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
 from transformers import PretrainedConfig
@@ -45,6 +45,9 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
+        rope_scaling: Dictionary containing the scaling configuration for the
+            RoPE embeddings. When using this flag, don't update
+            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -66,6 +69,10 @@ class ModelConfig:
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode
+        disable_sliding_window: Whether to disable sliding window. If True,
+            we will disable the sliding window functionality of the model.
+            If the model does not support sliding window, this argument is
+            ignored.
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
@@ -84,6 +91,7 @@ class ModelConfig:
         seed: int,
         revision: Optional[str] = None,
         code_revision: Optional[str] = None,
+        rope_scaling: Optional[dict] = None,
         tokenizer_revision: Optional[str] = None,
         max_model_len: Optional[int] = None,
         quantization: Optional[str] = None,
@@ -92,6 +100,7 @@ class ModelConfig:
         max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: Optional[int] = None,
         max_logprobs: int = 5,
+        disable_sliding_window: bool = False,
         skip_tokenizer_init: bool = False,
         served_model_name: Optional[Union[str, List[str]]] = None,
     ) -> None:
@@ -102,6 +111,7 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
+        self.rope_scaling = rope_scaling
         self.tokenizer_revision = tokenizer_revision
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
@@ -113,14 +123,18 @@ class ModelConfig:
         self.max_seq_len_to_capture = (max_seq_len_to_capture
                                        or max_context_len_to_capture)
         self.max_logprobs = max_logprobs
+        self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
 
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision)
+                                    code_revision, rope_scaling)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
-        self.max_model_len = _get_and_verify_max_len(self.hf_text_config,
-                                                     max_model_len)
+        self.max_model_len = _get_and_verify_max_len(
+            hf_config=self.hf_text_config,
+            max_model_len=max_model_len,
+            disable_sliding_window=self.disable_sliding_window,
+            sliding_window_len=self.get_hf_config_sliding_window())
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         if not self.skip_tokenizer_init:
@@ -142,6 +156,17 @@ class ModelConfig:
         self.embedding_mode = any(
             ModelRegistry.is_embedding_model(arch) for arch in architectures)
 
+    def _parse_quant_hf_config(self):
+        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        if quant_cfg is None:
+            # SparseML uses a "compression_config" with a "quantization_config".
+            compression_cfg = getattr(self.hf_config, "compression_config",
+                                      None)
+            if compression_cfg is not None:
+                quant_cfg = compression_cfg.get("quantization_config", None)
+
+        return quant_cfg
+
     def _verify_quantization(self) -> None:
         supported_quantization = [*QUANTIZATION_METHODS]
         rocm_supported_quantization = ["gptq", "squeezellm"]
@@ -149,12 +174,13 @@ class ModelConfig:
             self.quantization = self.quantization.lower()
 
         # Parse quantization method from the HF model config, if available.
-        quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        quant_cfg = self._parse_quant_hf_config()
+
         if quant_cfg is not None:
             quant_method = quant_cfg.get("quant_method", "").lower()
 
             # Detect which checkpoint is it
-            for name, method in QUANTIZATION_METHODS.items():
+            for _, method in QUANTIZATION_METHODS.items():
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
@@ -215,7 +241,7 @@ class ModelConfig:
                 "must be divisible by pipeline parallel size "
                 f"({pipeline_parallel_size}).")
 
-    def get_sliding_window(self) -> Optional[int]:
+    def get_hf_config_sliding_window(self) -> Optional[int]:
         """Get the sliding window size, or None if disabled.
         """
 
@@ -226,6 +252,15 @@ class ModelConfig:
                 and not self.hf_text_config.use_sliding_window):
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
+
+    def get_sliding_window(self) -> Optional[int]:
+        """Get the sliding window size, or None if disabled.
+        """
+        # If user disables sliding window, return None.
+        if self.disable_sliding_window:
+            return None
+        # Otherwise get the value from the hf config.
+        return self.get_hf_config_sliding_window()
 
     def get_vocab_size(self) -> int:
         return self.hf_text_config.vocab_size
@@ -331,6 +366,7 @@ class CacheConfig:
         self.enable_prefix_caching = enable_prefix_caching
         self._verify_args()
         self._verify_cache_dtype()
+        self._verify_prefix_caching()
 
         # Will be set after profiling.
         self.num_gpu_blocks = None
@@ -350,16 +386,27 @@ class CacheConfig:
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
             pass
-        elif self.cache_dtype == "fp8":
+        elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
-                "But it may cause slight accuracy drop without scaling "
-                "factors. FP8_E5M2 (without scaling) is only supported on "
-                "cuda version greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 "
-                "is instead supported for common inference criteria.")
+                "Meanwhile, it may cause accuracy drop without a proper "
+                "scaling factor")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
+
+    def _verify_prefix_caching(self) -> None:
+        if not self.enable_prefix_caching:
+            return
+
+        if self.sliding_window is not None:
+            raise NotImplementedError(
+                "Prefix caching is not supported with sliding window. "
+                "Run with --disable-sliding-window to use prefix caching.")
+        if self.cache_dtype == "fp8":
+            raise NotImplementedError(
+                "Prefix caching is not supported for fp8 cache_dtype. "
+                "Run with --kv-cache-dtype auto to use prefix caching.")
 
     def verify_with_parallel_config(
         self,
@@ -968,6 +1015,7 @@ class LoRAConfig:
     lora_extra_vocab_size: int = 256
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
+    long_lora_scaling_factors: Optional[Tuple[float]] = None
 
     def __post_init__(self):
         # Keep this in sync with csrc/punica/bgmv/bgmv_config.h
@@ -1060,7 +1108,7 @@ _STR_DTYPE_TO_TORCH_DTYPE = {
     "bfloat16": torch.bfloat16,
 }
 
-_ROCM_NOT_SUPPORTED_DTYPE = ["float", "float32"]
+_ROCM_NOT_SUPPORTED_DTYPE: List[str] = []  #
 
 
 def _get_and_verify_dtype(
@@ -1092,14 +1140,6 @@ def _get_and_verify_dtype(
     else:
         raise ValueError(f"Unknown dtype: {dtype}")
 
-    if is_hip() and torch_dtype == torch.float32:
-        rocm_supported_dtypes = [
-            k for k, v in _STR_DTYPE_TO_TORCH_DTYPE.items()
-            if (k not in _ROCM_NOT_SUPPORTED_DTYPE)
-        ]
-        raise ValueError(f"dtype '{dtype}' is not supported in ROCm. "
-                         f"Supported dtypes are {rocm_supported_dtypes}")
-
     # Verify the dtype.
     if torch_dtype != config_dtype:
         if torch_dtype == torch.float32:
@@ -1120,6 +1160,8 @@ def _get_and_verify_dtype(
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     max_model_len: Optional[int],
+    disable_sliding_window: bool,
+    sliding_window_len: Optional[int],
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1139,6 +1181,7 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
+    # Choose the smallest "max_length" from the possible keys.
     max_len_key = None
     for key in possible_keys:
         max_len = getattr(hf_config, key, None)
@@ -1146,6 +1189,16 @@ def _get_and_verify_max_len(
             max_len_key = key if max_len < derived_max_model_len \
                 else max_len_key
             derived_max_model_len = min(derived_max_model_len, max_len)
+
+    # If sliding window is manually disabled, max_length should be less
+    # than the sliding window length in the model config.
+    if disable_sliding_window and sliding_window_len is not None:
+        max_len_key = "sliding_window" \
+            if sliding_window_len < derived_max_model_len else max_len_key
+        derived_max_model_len = min(derived_max_model_len, sliding_window_len)
+
+    # If none of the keys were found in the config, use a default and
+    # log a warning.
     if derived_max_model_len == float("inf"):
         if max_model_len is not None:
             # If max_model_len is specified, we use it.
@@ -1161,6 +1214,13 @@ def _get_and_verify_max_len(
 
     rope_scaling = getattr(hf_config, "rope_scaling", None)
     if rope_scaling is not None and rope_scaling["type"] != "su":
+        if disable_sliding_window:
+            # TODO(robertgshaw): Find a model that supports rope_scaling
+            # with sliding window to see if this case should be allowed.
+            raise NotImplementedError(
+                "Disabling sliding window is not supported for models "
+                "with rope_scaling. Please raise an issue so we can "
+                "investigate.")
         assert "factor" in rope_scaling
         scaling_factor = rope_scaling["factor"]
         if rope_scaling["type"] == "yarn":
@@ -1168,6 +1228,8 @@ def _get_and_verify_max_len(
                 "original_max_position_embeddings"]
         derived_max_model_len *= scaling_factor
 
+    # If the user specified a max length, make sure it is smaller than the
+    # derived length from the HF model config.
     if max_model_len is None:
         max_model_len = int(derived_max_model_len)
     elif max_model_len > derived_max_model_len:
@@ -1176,6 +1238,13 @@ def _get_and_verify_max_len(
         # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
         if model_max_length is not None and max_model_len <= model_max_length:
+            if disable_sliding_window:
+                # TODO(robertgshaw): Find a model that has model_max_length
+                # with sliding window to see if this case should be allowed.
+                raise NotImplementedError(
+                    "Disabling sliding window is not supported for models "
+                    "model_max_length in the config. Please raise an issue "
+                    "so we can investigate.")
             pass
         else:
             raise ValueError(
