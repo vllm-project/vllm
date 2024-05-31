@@ -104,8 +104,8 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
                 raise RuntimeError("No HuggingFace processor is available"
                                    "to process the image object")
             try:
-                return image_processor.preprocess(image) \
-                    .convert_to_tensors("pt").data
+                return image_processor.preprocess(image, return_tensors="pt") \
+                    .to(model_config.dtype).data
             except Exception:
                 logger.error("Failed to process image (%s)", image)
                 raise
