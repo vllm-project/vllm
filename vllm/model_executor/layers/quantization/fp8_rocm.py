@@ -170,7 +170,7 @@ class Fp8RocmLinearLayer(LinearMethodBase):
                 ).drop_duplicates()
                 df.to_csv("/projects/fp8_tune.csv", index=False)
                 # print(f"{m},{n},{k}")
-            algo = 0
+            algo = 11943
         res = ops.fp8_gemm_16(x8, weight.t(), asf, wsf, int(algo))
         return res
 
