@@ -944,10 +944,11 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
         })
     message = chat_completion.choices[0].message
     assert len(message.content) == 0
-    json1 = json.loads(message.tool_calls[0].function.arguments)
+    json_string = message.tool_calls[0].function.arguments
+    json1 = json.loads(json_string)
     jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
 
-    messages.append({"role": "assistant", "content": json1})
+    messages.append({"role": "assistant", "content": json_string})
     messages.append({
         "role":
         "user",
