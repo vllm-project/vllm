@@ -23,12 +23,12 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
             Require when bonus tokens will cause corrupt KV cache for
             proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
-                during sampling. This catches correctness issues but adds
-                nontrivial latency.
+            during sampling. This catches correctness issues but adds
+            nontrivial latency.
         """
         SpecDecodeBaseSampler.__init__(self, disable_bonus_tokens, strict_mode)
         nn.Module.__init__(self)
-    
+
     def forward(
         self,
         target_probs: torch.Tensor,
@@ -75,8 +75,6 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
         if self._strict_mode:
             self._raise_if_incorrect_input(target_probs, bonus_token_ids,
                                            draft_probs, draft_token_ids)
-
-        print('target_probs ' + str(target_probs))
 
         accepted, recovered_token_ids = self._batch_modified_rejection_sampling(
             target_probs,
@@ -239,6 +237,7 @@ class RejectionSampler(SpecDecodeBaseSampler, nn.Module):
         See https://en.wikipedia.org/wiki/Subnormal_number for more information.
         """
         return torch.finfo(self.probs_dtype).tiny
+
 
 # torch.multinomial forces a GPU<->CPU sync.
 # Therefore, we use an optimized implementation instead that skips the sync.

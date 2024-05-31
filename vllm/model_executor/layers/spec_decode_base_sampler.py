@@ -8,15 +8,14 @@ import torch.nn as nn
 
 
 class SpecDecodeBaseSampler(ABC):
-    """Apply modified rejection sampling as described in "Accelerating Large
-        Language Model Decoding with Speculative Sampling"
-        https://arxiv.org/pdf/2302.01318.pdf.
+    """Base class for samplers used for Speculative Decoding verification
+        step.
     """
 
     def __init__(self,
                  disable_bonus_tokens: bool = True,
                  strict_mode: bool = False):
-        """Create a rejection sampler.
+        """Base class constructor.
 
         Args:
             disable_bonus_tokens: Whether or not to disable the bonus token.
@@ -60,17 +59,29 @@ class SpecDecodeBaseSampler(ABC):
     def _create_output(
             self,
             accepted: torch.Tensor,  # [batch_size, k]
-            recovered_token_ids: torch.Tensor,  # [batch_size, k]
+            substitute_token_ids: torch.Tensor,  # [batch_size, k]
             draft_token_ids: torch.Tensor,  # [batch_size, k]
             bonus_token_ids: torch.Tensor,  # [batch_size]
     ) -> torch.Tensor:
         """Format output. Returns a matrix of token ids. When
-        a token is rejected via rejection sampling, all subsequent
-        token ids are set to -1 for the sequence.
+        a token is rejected via sampling, all subsequent token ids are 
+        set to -1 for the sequence.
 
-        shape = [batch_size, k + num_bonus_tokens]
+        Args:
+            accepted: A boolean tensor indicating if the corresponding
+            draft token in draft_token_ids should be accepted or not.
+            substitute_token_ids: A tensor of token_ids that can be used
+            as substitutes for the draft token ids if the proposed token
+            is rejected.
+            draft_token_ids: A tensor of token ids speculated by the 
+            draft model.
+            bonus_token_ids: Token ids to use as the bonus token if
+            all the draft tokens are accepted.
+        Returns:
+            A tensor containing the accepted token ids. The shape of the 
+            tensor is [batch_size, k + num_bonus_tokens]
         """
-        batch_size, k = recovered_token_ids.shape
+        batch_size, k = substitute_token_ids.shape
         bonus_token_ids = bonus_token_ids.squeeze()
         # Determine the index of the first False value for each row.
         limits = (accepted == 0).max(1).indices
@@ -108,7 +119,7 @@ class SpecDecodeBaseSampler(ABC):
 
         # Fill the recovered token ids.
         output.mul_(~after_false_mask).add_(
-            recovered_token_ids.mul(after_false_mask))
+            substitute_token_ids.mul(after_false_mask))
 
         self.num_accepted_tokens += accepted.sum()
         self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
@@ -123,16 +134,14 @@ class SpecDecodeBaseSampler(ABC):
         bonus_token_ids: torch.Tensor,
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
-        self._raise_if_incorrect_shape(
-            target_probs, draft_token_ids, bonus_token_ids, draft_probs)
-        self._raise_if_incorrect_dtype(
-            target_probs,  draft_token_ids, bonus_token_ids, draft_probs)
-        self._raise_if_inconsistent_device(
-            target_probs, draft_token_ids, bonus_token_ids, draft_probs)
+        self._raise_if_incorrect_shape(target_probs, draft_token_ids,
+                                       bonus_token_ids, draft_probs)
+        self._raise_if_incorrect_dtype(target_probs, draft_token_ids,
+                                       bonus_token_ids, draft_probs)
+        self._raise_if_inconsistent_device(target_probs, draft_token_ids,
+                                           bonus_token_ids, draft_probs)
         self._raise_if_out_of_bounds_vocab(target_probs.shape[-1],
-                                           draft_token_ids,
-                                           bonus_token_ids)
- 
+                                           draft_token_ids, bonus_token_ids)
 
     def _raise_if_incorrect_shape(
         self,
@@ -143,12 +152,12 @@ class SpecDecodeBaseSampler(ABC):
     ) -> None:
         (target_batch_size, num_target_probs,
          target_vocab_size) = target_probs.shape
-        
+
         # validate the shape of draft token ids.
         draft_token_ids_batch_size, num_draft_token_ids = draft_token_ids.shape
         assert draft_token_ids_batch_size == target_batch_size
         assert num_draft_token_ids == num_target_probs
-                    
+
         # validate the shape of bonus token ids
         bonus_batch_size, num_bonus_tokens = bonus_token_ids.shape
         assert bonus_batch_size == target_batch_size
@@ -183,11 +192,11 @@ class SpecDecodeBaseSampler(ABC):
         draft_probs: Optional[torch.Tensor] = None,
     ) -> None:
         devices = [
-            t.device for t in 
-            [target_probs, bonus_token_ids, draft_probs, draft_token_ids] if t is not None
+            t.device for t in
+            [target_probs, bonus_token_ids, draft_probs, draft_token_ids]
+            if t is not None
         ]
         assert all([devices[0] == device for device in devices])
-
 
     def _raise_if_out_of_bounds_vocab(
         self,
@@ -199,13 +208,3 @@ class SpecDecodeBaseSampler(ABC):
         assert torch.all(bonus_token_ids >= 0)
         assert torch.all(draft_token_ids < vocab_size)
         assert torch.all(draft_token_ids >= 0)
-
-def get_rejection_sampler(disable_bonus_tokens: bool = True, strict_mode: bool = False):
-    from vllm.model_executor.layers.rejection_sampler import RejectionSampler
-    return RejectionSampler(disable_bonus_tokens, strict_mode)
-
-
-def get_typical_acceptance_sampler(disable_bonus_tokens: bool = True, strict_mode: bool = False):
-    from vllm.model_executor.layers.typical_acceptance_sampler import (
-        TypicalAcceptanceSampler)
-    return TypicalAcceptanceSampler(disable_bonus_tokens, strict_mode)

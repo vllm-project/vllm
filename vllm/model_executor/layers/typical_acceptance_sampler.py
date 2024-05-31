@@ -10,24 +10,40 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 
 
 class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
-    """Apply modified rejection sampling as described in "Accelerating Large
-        Language Model Decoding with Speculative Sampling"
-        https://arxiv.org/pdf/2302.01318.pdf.
+    """Apply typical acceptance sampling as described in section 3.3.1 in 
+        "MEDUSA: Simple LLM Inference Acceleration Framework with 
+        Multiple Decoding Heads"
+        https://arxiv.org/pdf/2401.10774
     """
 
-    def __init__(self, disable_bonus_tokens: bool = False, strict_mode: bool = False):
-        """Create a rejection sampler.
+    def __init__(
+        self,
+        disable_bonus_tokens: bool = False,
+        strict_mode: bool = False,
+        posterior_threshold: float = 0.3,
+    ):
+        """Create a Typical Acceptance Sampler.
 
         Args:
+            disable_bonus_tokens: Whether or not to disable the bonus token.
+            Require when bonus tokens will cause corrupt KV cache for
+            proposal methods that require KV cache.
             strict_mode: Whether or not to perform shape/device/dtype checks
-                during sampling. This catches correctness issues but adds
-                nontrivial latency.
+            during sampling. This catches correctness issues but adds
+            nontrivial latency.
+            posterior_threshold : A threshold value that sets a lower bound 
+            for the posterior probability. Default is 0.3.
+
+
+
         """
         super().__init__()
         SpecDecodeBaseSampler.__init__(
-            self, disable_bonus_tokens=disable_bonus_tokens, strict_mode=strict_mode)
+            self,
+            disable_bonus_tokens=disable_bonus_tokens,
+            strict_mode=strict_mode)
         nn.Module.__init__(self)
-    
+
     def forward(
         self,
         target_probs: torch.Tensor,
@@ -54,10 +70,6 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
                 speculative tokens in a sequence are accepted.
             shape = [batch_size, num_bonus_tokens]
 
-            draft_probs: The probability distribution over token ids given
-                context according to the draft model.
-            shape = [batch_size, num_speculative_tokens, vocab_size]
-
             draft_token_ids: The token ids that were sampled from the draft
                 probabilities.
             shape = [batch_size, num_speculative_tokens]
@@ -71,15 +83,14 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         # Only perform shape/dtype/device checking in strict mode, as it adds
         # overhead.
         if self._strict_mode:
-            self._raise_if_incorrect_input(
-                target_probs, draft_token_ids, bonus_token_ids)
-        accepted = self._evaluate_posterior(target_probs, draft_token_ids)
+            self._raise_if_incorrect_input(target_probs, draft_token_ids,
+                                           bonus_token_ids)
+        accepted = self._evaluate_accepted_tokens(target_probs,
+                                                  draft_token_ids)
         recovered_token_ids = self._replacement_token_ids(target_probs)
-        output_token_ids = self._create_output(
-            accepted,
-            recovered_token_ids,
-            draft_token_ids, bonus_token_ids
-        )
+        output_token_ids = self._create_output(accepted, recovered_token_ids,
+                                               draft_token_ids,
+                                               bonus_token_ids)
         print('----test input----')
         print('target_probs ' + str(target_probs))
         print('draft_token_ids ' + str(draft_token_ids))
@@ -87,42 +98,55 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         print(output_token_ids)
         return output_token_ids
 
-    def _evaluate_posterior(
-        self, target_probs, draft_token_ids,
-        posterior_threshold=0.3, posterior_alpha = 0.09):
-        
-        """Evaluate the posterior probabilities of the candidates based on the provided logits and choose the best candidate.
-        Depending on the temperature value, the function either uses greedy decoding or evaluates posterior
-        probabilities to select the best candidate.
+    def _evaluate_accepted_tokens(self, target_probs, draft_token_ids):
+        r"""
+        Evaluates and returns a mask of accepted tokens based on the posterior probabilities.
 
-        Args:
-        - logits (torch.Tensor): Predicted logits of shape (batch_size, sequence_length, vocab_size).
-        - candidates (torch.Tensor): Candidate token sequences.
-        - temperature (float): Softmax temperature for probability scaling. A value of 0 indicates greedy decoding.
-        - posterior_threshold (float): Threshold for posterior probability.
-        - posterior_alpha (float): Scaling factor for the threshold.
-        - top_p (float, optional): Cumulative probability threshold for nucleus sampling. Defaults to 0.8.
-        - sampling (str, optional): Defines the sampling strategy ('typical' or 'nucleus'). Defaults to 'typical'.
-        - fast (bool, optional): If True, enables faster, deterministic decoding for typical sampling. Defaults to False.
+        Parameters:
+        ----------
+        target_probs : torch.Tensor
+            A tensor of shape (batch_size, k, vocab_size) representing the probabilities
+            of each token in the vocabulary for each position in the proposed sequence.
+            This is the distribution generated by the target model.
+        draft_token_ids : torch.Tensor
+            A tensor of shape (batch_size, k) representing the proposed token ids.
+
+        A draft token_id x_{n+k} is accepted if it satisifies the following condition 
+        
+        .. math::
+            p_{\text{original}}(x_{n+k} | x_1, x_2, \dots, x_{n+k-1}) > 
+            \min \left( \epsilon, \delta \exp \left( -H(p_{\text{original}}(\cdot | x_1, x_2, \ldots, x_{n+k-1})) \right) \right)
+        
+        where :math:`p_{\text{original}}` corresponds to target_probs
+        
+        This method computes the posterior probabilities for the given draft token ids based on the
+        provided target probabilities. It calculates the entropy of the posterior distribution and
+        determines a dynamic threshold for each token position using the provided posterior threshold
+        and posterior alpha values. The method then returns a boolean mask indicating which tokens
+        have posterior probabilities exceeding the threshold.
+
         Returns:
-        - best_candidate (torch.Tensor): Index of the chosen best candidate.
-        - accept_length (int): Length of the accepted candidate sequence.
+        -------
+        torch.Tensor
+            A boolean tensor of shape (batch_size, k) where each element indicates whether the
+            corresponding draft token has been accepted or rejected.
+            
         """
         candidates_prob = torch.gather(
-            target_probs, dim=-1, index=draft_token_ids.unsqueeze(-1)
-        ).squeeze(-1)
+            target_probs, dim=-1,
+            index=draft_token_ids.unsqueeze(-1)).squeeze(-1)
         posterior_entropy = -torch.sum(
-            target_probs * torch.log(target_probs + 1e-5), dim=-1
-        )  # torch.sum(torch.log(*)) is faster than torch.prod
+            target_probs * torch.log(target_probs + 1e-5), dim=-1)
         threshold = torch.minimum(
-            torch.ones_like(posterior_entropy) * posterior_threshold,
-            torch.exp(-posterior_entropy) * posterior_alpha,
+            torch.ones_like(posterior_entropy) * self._posterior_threshold,
+            torch.exp(-posterior_entropy) * self._posterior_alpha,
         )
-        posterior_mask = candidates_prob > threshold
-        return posterior_mask
+        accepted_mask = candidates_prob > threshold
+        return accepted_mask
 
     def _replacement_token_ids(self, target_probs):
         max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
-        output = -torch.ones((target_probs.shape[0], target_probs.shape[1]), dtype=self.token_id_dtype)
+        output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
+                             dtype=self.token_id_dtype)
         output[:, 0] = max_indices
         return output

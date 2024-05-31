@@ -9,9 +9,8 @@ from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
 from vllm.model_executor.utils import set_random_seed
 
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1)
-]
+CUDA_DEVICES = [f"cuda:{i}" for i in range(1)]
+
 
 def get_zero_temperature_prob_dist(batch_size, k, vocab_size):
     # Simulate temperature 0 probability distribution for target probabilities
@@ -19,15 +18,16 @@ def get_zero_temperature_prob_dist(batch_size, k, vocab_size):
     # probability 1.0
     target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     probs = torch.rand(batch_size, k, vocab_size)
-    _, max_indices = torch.max(probs, dim=-1)
+    _, zero_temperature_token_ids = torch.max(probs, dim=-1)
     # set the probability of the tokens with ids in max_indices to 1 and
     # the rest to 0.
     target_probs = torch.zeros_like(probs).scatter_(
-        -1, max_indices.unsqueeze(-1), 1.0)
-    return target_probs, max_indices
+        -1, zero_temperature_token_ids.unsqueeze(-1), 1.0)
+    return target_probs, zero_temperature_token_ids
 
-def get_draft_token_ids(
-    batch_size: int, k: int, vocab_size: int, token_ids_to_exclude: torch.Tensor):
+
+def get_draft_token_ids(batch_size: int, k: int, vocab_size: int,
+                        token_ids_to_exclude: torch.Tensor):
     # Populate draft_token_ids such that they exclude the token_ids
     # with probability = 1.0
     draft_token_ids = torch.empty(batch_size, k, dtype=torch.long)
@@ -35,11 +35,12 @@ def get_draft_token_ids(
         for j in range(k):
             # Generate a random token ID excluding max_indices[i, j]
             while True:
-                token_id = torch.randint(0, vocab_size, (1,)).item()
+                token_id = torch.randint(0, vocab_size, (1, )).item()
                 if token_id != token_ids_to_exclude[i, j]:
                     draft_token_ids[i, j] = token_id
                     break
     return draft_token_ids
+
 
 @pytest.mark.parametrize("k", list(range(1, 6)))
 @pytest.mark.parametrize("vocab_size", [30_000, 50_000])
@@ -104,7 +105,8 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
     oob_token_ids[0][0] = rogue_token_id
 
     with pytest.raises(AssertionError):
-        typical_acceptance_sampler(target_probs, bonus_token_ids, draft_token_ids)
+        typical_acceptance_sampler(target_probs, bonus_token_ids,
+                                   draft_token_ids)
 
 
 @pytest.mark.parametrize("seed", list(range(10)))
@@ -112,7 +114,7 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_uniform_target_distribution_accepts_all_tokens(
-    seed: int, disable_bonus_tokens: bool, device: str):
+        seed: int, disable_bonus_tokens: bool, device: str):
     set_random_seed(seed)
     k = 3
     batch_size = 5
@@ -130,24 +132,26 @@ def test_uniform_target_distribution_accepts_all_tokens(
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(
-        target_probs, bonus_token_ids, draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     if disable_bonus_tokens:
         assert torch.all(output_token_ids[:, -1] == -1)
     else:
         assert torch.all(output_token_ids[:, -1] == bonus_token_ids.squeeze())
-    
-    assert torch.all(output_token_ids[:, : k] == draft_token_ids)
+
+    assert torch.all(output_token_ids[:, :k] == draft_token_ids)
 
 
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_temperature_zero_target_distribution(
-    seed: int, disable_bonus_tokens: bool, device: str):
+def test_temperature_zero_target_distribution(seed: int,
+                                              disable_bonus_tokens: bool,
+                                              device: str):
     set_random_seed(seed)
     k = 3
     batch_size = 5
@@ -164,27 +168,28 @@ def test_temperature_zero_target_distribution(
         batch_size, k, vocab_size)
     # Populate draft_token_ids such that they exclude the token_ids
     # with probability = 1.0
-    draft_token_ids = get_draft_token_ids(
-        batch_size, k, vocab_size, zero_temperature_token_ids)
+    draft_token_ids = get_draft_token_ids(batch_size, k, vocab_size,
+                                          zero_temperature_token_ids)
     bonus_token_ids = torch.randint(low=0,
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(
-        target_probs, bonus_token_ids, draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[:, -1] == -1)
-    assert torch.all(
-        output_token_ids[:, 0] == zero_temperature_token_ids[:, 0])
+    assert torch.all(output_token_ids[:, 0] == zero_temperature_token_ids[:,
+                                                                          0])
 
 
 @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_mixed_target_distribution(
-    seed: int, disable_bonus_tokens: bool, device: str):
+def test_mixed_target_distribution(seed: int, disable_bonus_tokens: bool,
+                                   device: str):
     set_random_seed(seed)
     k = 3
     batch_size = 4
@@ -193,12 +198,12 @@ def test_mixed_target_distribution(
     typical_acceptance_sampler = TypicalAcceptanceSampler(
         strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
     typical_acceptance_sampler.init_gpu_tensors(rank=0)
-    # For batches 0 and 2 set the distribution to an uniform distribution. For 
+    # For batches 0 and 2 set the distribution to an uniform distribution. For
     # batches 1 and 3 set it to a temperature 0 distribution.
-    target_probs, zero_temperature_token_ids = (
-        get_zero_temperature_prob_dist(batch_size, k, vocab_size))
-    draft_token_ids = get_draft_token_ids(
-        batch_size, k, vocab_size, zero_temperature_token_ids)
+    target_probs, zero_temperature_token_ids = (get_zero_temperature_prob_dist(
+        batch_size, k, vocab_size))
+    draft_token_ids = get_draft_token_ids(batch_size, k, vocab_size,
+                                          zero_temperature_token_ids)
     # Create target_probs such that only one token_id has probability 1.0
     uniform_probs = torch.rand(2, k, vocab_size, dtype=torch.float32)
     target_probs[[1, 3]] = uniform_probs
@@ -206,15 +211,68 @@ def test_mixed_target_distribution(
                                     high=vocab_size,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
-    output_token_ids = typical_acceptance_sampler(
-        target_probs, bonus_token_ids, draft_token_ids)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
     assert output_token_ids.shape[0] == batch_size
     assert output_token_ids.shape[1] == (k + 1)
     assert torch.all(output_token_ids[[0, 2], 1:] == -1)
-    assert (
-        torch.all(output_token_ids[[0, 2], 0] == zero_temperature_token_ids[[0, 2], 0]))
-    assert  torch.all(output_token_ids[[1, 3], :-1] == draft_token_ids[[1, 3], :])
+    assert (torch.all(output_token_ids[[0, 2],
+                                       0] == zero_temperature_token_ids[[0, 2],
+                                                                        0]))
+    assert torch.all(
+        output_token_ids[[1, 3], :-1] == draft_token_ids[[1, 3], :])
     if disable_bonus_tokens:
         assert torch.all(output_token_ids[[1, 3], -1] == -1)
     else:
         assert torch.all(output_token_ids[[1, 3], -1] != -1)
+
+
+@pytest.mark.parametrize("seed", list(range(10)))
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_accept_tokens_partially(seed: int, disable_bonus_tokens: bool,
+                                 device: str):
+    set_random_seed(seed)
+    k = 5
+    batch_size = 1
+    vocab_size = 30_000
+    torch.set_default_device(device)
+    typical_acceptance_sampler = TypicalAcceptanceSampler(
+        strict_mode=True, disable_bonus_tokens=disable_bonus_tokens)
+    typical_acceptance_sampler.init_gpu_tensors(rank=0)
+    # For batches 0 and 2 set the distribution to an uniform distribution. For
+    # batches 1 and 3 set it to a temperature 0 distribution.
+    target_probs, zero_temperature_token_ids = (get_zero_temperature_prob_dist(
+        batch_size, k, vocab_size))
+    draft_token_ids = zero_temperature_token_ids
+    bonus_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, 1),
+                                    dtype=torch.int64)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
+    assert output_token_ids.shape[0] == batch_size
+    assert output_token_ids.shape[1] == (k + 1)
+    assert torch.all(output_token_ids[:, 0:-1] == draft_token_ids)
+    if disable_bonus_tokens:
+        assert torch.all(output_token_ids[:, -1] == -1)
+    else:
+        assert torch.all(output_token_ids[:, -1] == bonus_token_ids)
+    # Next only keep the first 2 draft tokens same as the zero temperature
+    # tokens. For the remaining 3 choose some other tokens. In the
+    # response we will expect the first 2 tokens to be the same as the
+    # draft tokens and the rest as -1
+    draft_token_ids_to_replace = get_draft_token_ids(
+        batch_size, k, vocab_size, zero_temperature_token_ids)
+    draft_token_ids = torch.cat(
+        (draft_token_ids[:, :2], draft_token_ids_to_replace[:, -3:]), dim=1)
+    output_token_ids = typical_acceptance_sampler(target_probs,
+                                                  bonus_token_ids,
+                                                  draft_token_ids)
+    assert output_token_ids.shape[0] == batch_size
+    assert output_token_ids.shape[1] == (k + 1)
+    assert torch.all(output_token_ids[:, :2] == draft_token_ids[:, :2])
+    assert torch.all(output_token_ids[:, -3:] == -1)
