@@ -32,8 +32,7 @@ __device__ inline void mma_sp(const FragB& a_frag0, const FragB& a_frag1,
   float* c = reinterpret_cast<float*>(&frag_c);
   if (psel == 0) {
     asm volatile(
-        "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16."
-        "f32 "
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
         "{%12,%13,%14,%15}, %16, 0x0;\n"
         : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
@@ -41,8 +40,7 @@ __device__ inline void mma_sp(const FragB& a_frag0, const FragB& a_frag1,
           "r"(b[4]), "r"(b[6]), "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
           "r"(e[0]));
     asm volatile(
-        "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16."
-        "f32 "
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
         "{%12,%13,%14,%15}, %16, 0x0;\n"
         : "=f"(c[4]), "=f"(c[5]), "=f"(c[6]), "=f"(c[7])
@@ -51,8 +49,7 @@ __device__ inline void mma_sp(const FragB& a_frag0, const FragB& a_frag1,
           "r"(e[0]));
   } else {
     asm volatile(
-        "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16."
-        "f32 "
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
         "{%12,%13,%14,%15}, %16, 0x1;\n"
         : "=f"(c[0]), "=f"(c[1]), "=f"(c[2]), "=f"(c[3])
@@ -60,8 +57,7 @@ __device__ inline void mma_sp(const FragB& a_frag0, const FragB& a_frag1,
           "r"(b[4]), "r"(b[6]), "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
           "r"(e[0]));
     asm volatile(
-        "mma.sp::ordered_metadata.sync.aligned.m16n8k32.row.col.f32.f16.f16."
-        "f32 "
+        "mma.sp.sync.aligned.m16n8k32.row.col.f32.f16.f16.f32 "
         "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9, %10,%11}, "
         "{%12,%13,%14,%15}, %16, 0x1;\n"
         : "=f"(c[4]), "=f"(c[5]), "=f"(c[6]), "=f"(c[7])
