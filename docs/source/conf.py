@@ -80,7 +80,7 @@ def setup(app):
     generate_examples()
 
 
-# Mock out external dependencies here.
+# Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
     "cpuinfo",
     "transformers",
