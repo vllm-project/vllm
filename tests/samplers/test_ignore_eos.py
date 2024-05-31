@@ -27,6 +27,6 @@ def test_ignore_eos(
 
     for prompt in example_prompts:
         ignore_eos_output = vllm_model.model.generate(
-           prompt, sampling_params=sampling_params)
+            prompt, sampling_params=sampling_params)
         output_length = len(ignore_eos_output[0].outputs[0].token_ids)
         assert output_length == max_tokens
