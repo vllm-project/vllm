@@ -947,7 +947,7 @@ async def test_named_tool_use(server, client: openai.AsyncOpenAI,
     json1 = json.loads(message.tool_calls[0].function.arguments)
     jsonschema.validate(instance=json1, schema=TEST_SCHEMA)
 
-    messages.append({"role": "assistant", "content": message.content})
+    messages.append({"role": "assistant", "content": json1})
     messages.append({
         "role":
         "user",
