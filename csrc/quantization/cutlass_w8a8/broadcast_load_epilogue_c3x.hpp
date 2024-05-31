@@ -33,10 +33,11 @@
 //
 // This file is a modified excerpt of
 // include/cutlass/epilogue/fusion/sm90_visitor_load_tma_warpspecialized.hpp
-// from https://github.com/NVIDIA/cutlass It has been modified to support either
-// row/column or scalar broadcasting where the tensor being loaded from is
-// always passed in via a device pointer. This lets one compiled kernel handle
-// all cases of per-tensor or per-channel/per-token quantization.
+// from https://github.com/NVIDIA/cutlass v3.5.0
+// It has been modified to support either row/column or scalar broadcasting
+// where the tensor being loaded from is always passed in via a device pointer.
+// This lets one compiled kernel handle all cases of per-tensor or
+// per-channel/per-token quantization.
 //
 // This interface also allows the scales to be passed in as tensors that
 // consistently reside on the device, which avoids an issue with a previous
@@ -82,6 +83,9 @@ struct Sm90RowOrScalarBroadcast {
     alignas(16) array_aligned<Element, size<1>(CtaTileShapeMNK{}) * Stages> smem_row;
   };
 
+  // This struct has been modified to have a bool indicating that ptr_row is a 
+  // scalar that must be broadcast, instead of containing a scalar that is 
+  // valid if ptr_row is null.
   struct Arguments {
     Element const* ptr_row = nullptr;
     bool row_broadcast = true;
@@ -264,6 +268,9 @@ struct Sm90ColOrScalarBroadcast {
   // Accumulator distributes col elements evenly amongst threads so we can just directly load from gmem
   struct SharedStorage { };
 
+  // This struct has been modified to have a bool indicating that ptr_col is a 
+  // scalar that must be broadcast, instead of containing a scalar that is 
+  // valid if ptr_col is null.
   struct Arguments {
     Element const* ptr_col = nullptr;
     bool col_broadcast = true;

@@ -33,7 +33,7 @@
 //
 // This file is a modified excerpt of
 // include/cutlass/epilogue/fusion/visitor_load.hpp from
-// https://github.com/NVIDIA/cutlass.
+// https://github.com/NVIDIA/cutlass v3.0.5
 // It has been modified to support either
 // row/column or scalar broadcasting where the tensor being loaded from is
 // always passed in via a device pointer. This lets one compiled kernel handle
@@ -66,6 +66,8 @@ template<
 >
 struct VisitorRowOrScalarBroadcast {
 
+  // This struct has been modified to have a bool indicating that ptr_row is a 
+  // scalar that must be broadcast.
   struct Arguments {
     Element const* ptr_row = nullptr;
     bool row_broadcast = true;
@@ -215,9 +217,11 @@ template<
 >
 struct VisitorColOrScalarBroadcast {
 
+  // This struct has been modified to have a bool indicating that ptr_col is a 
+  // scalar that must be broadcast.
   struct Arguments {
     Element const* ptr_col = nullptr;
-    Element null_default = Element(0);
+    bool col_broadcast = true;
     StrideMNL dCol = {};
   };
 
@@ -269,8 +273,8 @@ struct VisitorColOrScalarBroadcast {
     int m;
 
     // This function is modified from VisitorColBroadcast
-    CUTLASS_DEVICE
-    void begin_epilogue() {
+    CUTLASS_DEVICE void 
+    begin_epilogue() {
       clear(tC_rCol);
 
       Tensor pred = make_tensor<bool>(shape(tC_gCol));
