@@ -1,4 +1,4 @@
-# Weight Shapes are in the format,
+# Weight Shapes are in the format
 # ([K, N], TP_SPLIT_DIM)
 # Example:
 #  A shape of ([14336, 4096], 0) indicates the following GEMM shape,
