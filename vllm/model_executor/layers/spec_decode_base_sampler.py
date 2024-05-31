@@ -13,7 +13,6 @@ class SpecDecodeBaseSampler():
                  disable_bonus_tokens: bool = True,
                  strict_mode: bool = False):
         """Base class constructor.
-
         Args:
             disable_bonus_tokens: Whether or not to disable the bonus token.
             Require when bonus tokens will cause corrupt KV cache for
