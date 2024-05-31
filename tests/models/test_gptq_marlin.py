@@ -48,7 +48,7 @@ MODELS = [
     ("TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ", "gptq-8bit-32g-actorder_True"),
 
     # 4-bit, act_order==True, group_size=128
-    ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main"),
+    ("TechxGenus/gemma-1.1-2b-it-GPTQ", "main")
 ]
 
 
