@@ -1,3 +1,7 @@
+#include <cuda_runtime_api.h>
+
+#ifdef CUDART_VERSION && CUDART_VERSION >= 1200
+
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
@@ -241,3 +245,5 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
     }
   }
 }
+
+#endif
