@@ -64,7 +64,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
     input_dir = llama_2_7b_files
 
     with TemporaryDirectory() as output_dir:
-        llm = LLM(
+        llm_sharded_writer = LLM(
             model=input_dir,
             worker_use_ray=True,
             gpu_memory_utilization=gpu_memory_utilization,
@@ -72,12 +72,13 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
         )
 
         # Dump worker states to output directory
-        llm.llm_engine.model_executor.save_sharded_state(path=output_dir)
+        llm_sharded_writer.llm_engine.model_executor.save_sharded_state(
+            path=output_dir)
         # Copy metadata files to output directory
         for file in os.listdir(input_dir):
             if not any(file.endswith(ext) for ext in weights_patterns):
                 shutil.copy(f"{input_dir}/{file}", output_dir)
-        del llm
+        del llm_sharded_writer
         cleanup()
 
         llm_before = LLM(
