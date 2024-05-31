@@ -109,15 +109,14 @@ def lora_llm(long_context_infos):
         for info in long_context_infos.values()
     ]
 
-    llm = vllm.LLM(
-        "meta-llama/Llama-2-13b-chat-hf",
-        enable_lora=True,
-        max_num_seqs=16,
-        max_loras=2,
-        long_lora_scaling_factors=tuple(scaling_factors),
-        max_num_batched_tokens=4096 * 8,
-        tensor_parallel_size=4,
-    )
+    llm = vllm.LLM("meta-llama/Llama-2-13b-chat-hf",
+                   enable_lora=True,
+                   max_num_seqs=16,
+                   max_loras=2,
+                   long_lora_scaling_factors=tuple(scaling_factors),
+                   max_num_batched_tokens=4096 * 8,
+                   tensor_parallel_size=4,
+                   distributed_executor_backend="mp")
     yield llm
     del llm
 

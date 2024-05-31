@@ -9,6 +9,8 @@ from huggingface_hub import snapshot_download
 from vllm import LLM, SamplingParams
 from vllm.model_executor.model_loader.loader import ShardedStateLoader
 
+from .conftest import cleanup
+
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -18,9 +20,7 @@ prompts = [
 
 # Create a sampling params object.
 sampling_params = SamplingParams(
-    temperature=0.8,
-    top_p=0.95,
-    seed=0,
+    temperature=0,
     max_tokens=256,
     ignore_eos=True,
 )
@@ -43,48 +43,66 @@ def test_filter_subtensors():
         assert tensor.equal(state_dict[key])
 
 
-@pytest.mark.parametrize("enable_lora", [False, True])
-def test_sharded_state_loader(enable_lora):
-    weights_patterns = ("*.bin", "*.pt", "*.safetensors")
-
-    with TemporaryDirectory() as cache_dir, TemporaryDirectory() as output_dir:
+@pytest.fixture(scope="module")
+def llama_2_7b_files():
+    with TemporaryDirectory() as cache_dir:
         input_dir = snapshot_download("meta-llama/Llama-2-7b-hf",
-                                      cache_dir=cache_dir)
+                                      cache_dir=cache_dir,
+                                      ignore_patterns="*.bin*")
+        yield input_dir
 
+
+@pytest.mark.parametrize("enable_lora", [False, True])
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
+                              llama_2_7b_files):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
+    weights_patterns = ("*.safetensors", )
+    gpu_memory_utilization = 0.8
+    input_dir = llama_2_7b_files
+
+    with TemporaryDirectory() as output_dir:
         llm = LLM(
             model=input_dir,
             worker_use_ray=True,
-            gpu_memory_utilization=0.3,
+            gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tp_size,
         )
 
         # Dump worker states to output directory
-        model_executor = llm.llm_engine.model_executor
-        model_executor.save_sharded_state(path=output_dir)
+        llm.llm_engine.model_executor.save_sharded_state(path=output_dir)
         # Copy metadata files to output directory
         for file in os.listdir(input_dir):
             if not any(file.endswith(ext) for ext in weights_patterns):
                 shutil.copy(f"{input_dir}/{file}", output_dir)
-        del llm.llm_engine.model_executor
+        del llm
+        cleanup()
 
         llm_before = LLM(
             model=input_dir,
             worker_use_ray=True,
             enable_lora=enable_lora,
-            gpu_memory_utilization=0.3,
+            gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tp_size,
         )
         gen_before = llm_before.generate(prompts, sampling_params)
         out_before = [gen.outputs[0].__dict__ for gen in gen_before]
-        del llm_before.llm_engine.model_executor
+        del llm_before
+        cleanup()
 
         llm_after = LLM(
             model=output_dir,
             worker_use_ray=True,
             enable_lora=enable_lora,
-            gpu_memory_utilization=0.3,
+            gpu_memory_utilization=gpu_memory_utilization,
             load_format="sharded_state",
+            tensor_parallel_size=tp_size,
         )
         gen_after = llm_after.generate(prompts, sampling_params)
         out_after = [gen.outputs[0].__dict__ for gen in gen_after]
-        del llm_after.llm_engine.model_executor
+        del llm_after
+        cleanup()
 
         assert out_before == out_after
