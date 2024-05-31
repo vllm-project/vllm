@@ -1,3 +1,5 @@
+// clang-format will break include orders
+// clang-format off
 #include <cudaTypedefs.h>
 
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
@@ -10,8 +12,6 @@
 #include <sstream>
 #include <vector>
 
-// clang-format will break include orders
-// clang-format off
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
