@@ -26,6 +26,7 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
+# You can use `.buildkite/download-images.sh` to download the assets
 _PIXEL_VALUES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
