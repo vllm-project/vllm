@@ -90,7 +90,7 @@ autodoc_mock_imports = [
     "sentencepiece",
     "vllm.cuda_utils",
     "vllm._C",
-    "pillow",
+    "PIL",
     "numpy",
     "tqdm",
     "tensorizer",
