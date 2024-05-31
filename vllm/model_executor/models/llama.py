@@ -32,6 +32,7 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.linear import (LinearMethodBase,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -428,6 +429,99 @@ class LlamaForCausalLM(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                
+    def load_ammo_quantized_weights(
+        self,
+        model_name_or_path: str,
+        cache_dir: Optional[str] = None,
+        load_format: str = "auto",
+        revision: Optional[str] = None,
+        quant_config: Optional[QuantizationConfig] = None):
+        import os.path
+        #import json
+        params_dict = dict(self.named_parameters())
+        #with open("/projects/a.txt", "r") as f:
+        #    j = json.load(f)
+        #    for k, v in j.items():
+        #        params_dict[k].data.copy_(v)
+        quant_shards = [
+            ("mlp.gate_up_proj", "mlp.fc", 0),  # fc is gate_proj
+            ("mlp.gate_up_proj", "mlp.gate", 1),  # gate is up_proj
+        ]
+        quant_map = [
+            ("mlp.down_proj", "mlp.proj"),
+            ("self_attn.o_proj", "attention.dense"),
+            ("self_attn.qkv_proj", "attention.qkv"),
+        ]
+        tp_rank = get_tensor_model_parallel_rank()
+        quantized_filename: str = quant_config.quantized_weights_path[
+            f"rank0"]
+        #quantized_filename = "quantized/osf/rank0.safetensors"
+        if not quantized_filename.startswith('/'):
+            quantized_filename = os.path.join(model_name_or_path,
+                                              quantized_filename)
+            #if not os.path.isdir(quantized_filename):
+            #    quantized_filename = os.path.dirname(quantized_filename)
+        for name, loaded_weight in hf_model_weights_iterator(
+                quantized_filename, cache_dir, 'safetensors', revision):
+            #print(name)
+            name = name.replace('transformer', 'model')
+            name = name.replace('kv_cache_scaling_factor', 'qkv.output_scaling_factor')
+            #if "output_scaling_factor" in name:
+            #    print(f"{name} {loaded_weight}")
+            #if "kv_cache_scaling_factor" in name:
+            #    print(f"KVK: {name} {loaded_weight}")
+            #if "lm_head" in name:
+            #    print(f"LM {name}: {loaded_weight}")
+            for (param_name, weight_name, shard_id) in quant_shards:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                if "activation_scaling_factor" in name:
+                    asf_loader = getattr(param, "asf_loader",
+                                         default_weight_loader)
+                    asf_loader(param, loaded_weight, shard_id)
+                elif "weights_scaling_factor" in name:
+                    wsf_loader = getattr(param, "wsf_loader",
+                                         default_weight_loader)
+                    #print(f"{name} {shard_id} {loaded_weight}")
+                    wsf_loader(param, loaded_weight, shard_id)
+                elif "output_scaling_factor" in name:
+                    osf_loader = getattr(param, "osf_loader",
+                                         default_weight_loader)
+                    #print(f"{name} {shard_id} {loaded_weight}")
+                    osf_loader(param, loaded_weight, shard_id)
+                else:
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                for (param_name, weight_name) in quant_map:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    if "activation_scaling_factor" in name or "weights_scaling_factor" in name:
+                        param.data.copy_(loaded_weight)
+                    if "output_scaling_factor" in name:
+                        param.data.copy_(1 / loaded_weight.item())
+                    else:
+                        weight_loader = getattr(param, "weight_loader",
+                                                default_weight_loader)
+                        weight_loader(param, loaded_weight)
+                    break
+        rescale = [
+            "mlp.gate_up_proj.weight"
+            ]
+        for name, param in params_dict.items():
+            for suffix in rescale:
+                if name.endswith(suffix):
+                    param.rescale()
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

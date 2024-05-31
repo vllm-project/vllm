@@ -159,3 +159,25 @@ std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
 void register_graph_buffers(fptr_t _fa, const std::vector<std::string> &handles,
                             const std::vector<std::vector<int64_t>> &offsets);
 #endif
+
+void convert_fp8(
+  torch::Tensor& src_cache,
+  torch::Tensor& dst_cache,
+  torch::Tensor& scale);
+
+torch::Tensor fp8_gemm(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  torch::Tensor& scaleD,
+  int algo_idx
+);
+
+torch::Tensor fp8_gemm_16(
+  torch::Tensor& a,
+  torch::Tensor& b,
+  torch::Tensor& scaleA,
+  torch::Tensor& scaleB,
+  int algo_idx
+);

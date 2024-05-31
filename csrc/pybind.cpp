@@ -60,6 +60,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "batched_rotary_embedding",
     &batched_rotary_embedding,
     "Apply GPT-NeoX or GPT-J style rotary embedding to query and key (supports multiple loras)");
+  
+// FP8
+  ops.def(
+    "convert_fp8",
+    &convert_fp8,
+    "Convert the key and value tensors to or from fp8 data type");
+  ops.def("fp8_gemm", &fp8_gemm, "fp8 GEMM");
+
+  ops.def("fp8_gemm_16", &fp8_gemm_16, "fp8 GEMM");
 
 // Quantization ops
 #ifndef USE_ROCM
@@ -90,10 +99,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "reshape_and_cache",
     &reshape_and_cache,
     "Reshape the key and value tensors and cache them");
-  cache_ops.def(
-    "convert_fp8",
-    &convert_fp8,
-    "Convert the key and value cache to fp8 data type");
 
   // Cuda utils
   pybind11::module cuda_utils = m.def_submodule("cuda_utils", "vLLM cuda utils");

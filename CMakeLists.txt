@@ -152,6 +152,13 @@ if(NVCC_THREADS AND VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 #
+# Set rocm version dev int.
+#
+if(VLLM_GPU_LANG STREQUAL "HIP")
+  list(APPEND VLLM_GPU_FLAGS "-DROCM_VERSION=${ROCM_VERSION_DEV_INT}")
+endif()
+
+#
 # Define extension targets
 #
 
@@ -167,6 +174,8 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/quantization/squeezellm/quant_cuda_kernel.cu"
   "csrc/quantization/gptq/q_gemm.cu"
+  "csrc/quantization/fp8/convert_kernel.cu"
+  "csrc/quantization/fp8/gemm_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/moe_align_block_size_kernels.cu"
   "csrc/pybind.cpp")
