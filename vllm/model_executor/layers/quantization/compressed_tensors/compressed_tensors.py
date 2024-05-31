@@ -11,7 +11,7 @@ from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme, CompressedTensorsW4A16,
+    CompressedTensorsScheme, CompressedTensorsW4A16, CompressedTensors24,
     CompressedTensorsW8A8StaticTensor)
 
 
@@ -93,13 +93,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         return False
 
     def _get_schema(self, weight_quant: BaseModel, input_quant: BaseModel):
+        """
         if self._is_w4a16(weight_quant, input_quant):
             return CompressedTensorsW4A16(strategy=weight_quant.strategy,
                                           group_size=weight_quant.group_size)
-
+        
         elif self._is_static_tensor_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8StaticTensor()
-
+        """
+        return CompressedTensors24(strategy=weight_quant.strategy, 
+                                    num_bits=weight_quant.num_bits,
+                                    group_size=weight_quant.group_size)
+        
         raise NotImplementedError("Scheme not supported.")
 
     def get_scheme(self, layer: torch.nn.Module) -> "CompressedTensorsScheme":
