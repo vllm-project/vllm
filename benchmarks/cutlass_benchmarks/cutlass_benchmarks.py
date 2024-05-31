@@ -1,15 +1,16 @@
 import argparse
+import copy
+import itertools
+import pickle as pkl
+import time
+from typing import Callable, Iterable, List, Tuple
+
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
-import time
-import pickle as pkl
-import copy
-import itertools
-
 from weight_shapes import WEIGHT_SHAPES
+
 from vllm import _custom_ops as ops
-from typing import Tuple, Callable, Iterable, List
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
