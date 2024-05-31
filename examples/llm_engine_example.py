@@ -1,5 +1,4 @@
 import argparse
-
 from typing import List, Tuple
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
