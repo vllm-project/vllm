@@ -254,7 +254,8 @@ void cutlass_scaled_mm_dq_sm90_fp8_dispatch(torch::Tensor& out,
       typename sm90_fp8_config<InType, OutType, 128>::Cutlass3xGemm;
 
   uint32_t const m = a.size(0);
-  uint32_t const mp2 = std::max(64, next_pow_2(m));  // next power of 2
+  uint32_t const mp2 =
+      std::max(static_cast<uint32_t>(64), next_pow_2(m));  // next power of 2
 
   if (mp2 <= 64) {
     // m in [1, 64]
