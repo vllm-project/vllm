@@ -131,7 +131,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
   // PagedAttention V2.
-  // def(ops, "paged_attention_v2", &paged_attention_v2, {0});
   ops.def(
       "paged_attention_v2("
       "    Tensor! out, Tensor exp_sums, Tensor max_logits,"
@@ -171,8 +170,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
       "()");
-  //  ops.def(torch::schema("rms_norm(Tensor out, Tensor input, Tensor weight,
-  //  float epsilon) -> ()"), c10::AliasAnalysisKind::CONSERVATIVE);
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
@@ -351,20 +348,30 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
                   &get_max_shared_memory_per_block_device_attribute);
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #ifndef USE_ROCM
+TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
-  pybind11::module custom_ar = m.def_submodule("custom_ar", "custom allreduce");
-  custom_ar.def("init_custom_ar", &init_custom_ar, "init_custom_ar");
-  custom_ar.def("should_custom_ar", &should_custom_ar, "should_custom_ar");
-  custom_ar.def("all_reduce_reg", &all_reduce_reg, "all_reduce_reg");
-  custom_ar.def("all_reduce_unreg", &all_reduce_unreg, "all_reduce_unreg");
-  custom_ar.def("dispose", &dispose, "dispose");
-  custom_ar.def("meta_size", &meta_size, "meta_size");
-  custom_ar.def("register_buffer", &register_buffer, "register_buffer");
-  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta,
-                "get_graph_buffer_ipc_meta");
-  custom_ar.def("register_graph_buffers", &register_graph_buffers,
-                "register_graph_buffers");
+  custom_ar.def("init_custom_ar", &init_custom_ar);  // modify inputs?
+  custom_ar.def("should_custom_ar", &should_custom_ar);
+  custom_ar.def("all_reduce_reg", &all_reduce_reg);  // has out
+  custom_ar.def("all_reduce_unreg", &all_reduce_unreg); // has out
+  custom_ar.def("dispose", &dispose);
+  custom_ar.def("meta_size", &meta_size);
+  custom_ar.def("register_buffer", &register_buffer);
+  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
+  custom_ar.def("register_graph_buffers", &register_graph_buffers);
+
+  custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
+  custom_ar.impl("should_custom_ar", torch::kCUDA, &should_custom_ar);
+  custom_ar.impl("all_reduce_reg", torch::kCUDA, &all_reduce_reg);
+  custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
+  custom_ar.impl("dispose", torch::kCPU, &dispose);
+  custom_ar.impl("meta_size", torch::kCPU, &meta_size);
+  custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
+  custom_ar.impl("get_graph_buffer_ipc_meta", torch::kCPU, &get_graph_buffer_ipc_meta);
+  custom_ar.impl("register_graph_buffers", torch::kCPU, &register_graph_buffers);
+}
 #endif
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 }

@@ -312,11 +312,12 @@ class CustomAllreduce {
     return it->second;
   }
 
-  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
+  std::pair<std::vector<std::string>, std::vector<int64_t>>
   get_graph_buffer_ipc_meta() {
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
-    std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
+    std::string empty_handle_str(handle_sz, 0);
+    std::vector<std::string> handles(num_buffers, empty_handle_str);
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
       auto ptr = graph_unreg_buffers_[i];
@@ -328,10 +329,10 @@ class CustomAllreduce {
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
       CUDACHECK(cudaIpcGetMemHandle(
-          (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
+          (cudaIpcMemHandle_t*)handles[i].data(), base_ptr));
       offsets[i] = ((char*)ptr) - ((char*)base_ptr);
     }
-    return std::make_pair(handles, offsets);
+    return {handles, offsets};
   }
 
   void check_rank_data_capacity(size_t num = 1) {

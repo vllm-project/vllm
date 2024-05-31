@@ -1,4 +1,4 @@
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, List
 
 import torch
 
@@ -360,4 +360,50 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
         device)
 
 
-#TODO: custom_ar
+def init_custom_ar(meta: torch.Tensor,
+                   rank_data: torch.Tensor,
+                   handles: List[str],
+                   offsets: List[int],
+                   rank: int,
+                   full_nvlink: bool) -> int:
+    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles, offsets, rank, full_nvlink)
+
+
+def should_custom_ar(inp: torch.Tensor,
+                     max_size: int,
+                     world_size: int,
+                     full_nvlink: bool) -> bool:
+    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size, full_nvlink)
+
+
+def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
+    torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
+
+
+def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor, out: torch.Tensor) -> None:
+    torch.ops._C_custom_ar.all_reduce_unreg(fa, inp, reg_buffer, out)
+
+
+def dispose(fa: int) -> None:
+    torch.ops._C_custom_ar.dispose(fa)
+
+
+def meta_size() -> int:
+    return torch.ops._C_custom_ar.meta_size()
+
+
+def register_buffer(fa: int,
+                    t: torch.Tensor,
+                    handles: List[str],
+                    offsets: List[int]) -> None:
+    return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
+
+
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
+    return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
+
+
+def register_graph_buffers(fa: int,
+                           handles: List[str],
+                           offsets: List[List[int]]) -> None:
+    torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)

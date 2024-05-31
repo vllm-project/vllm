@@ -5,13 +5,13 @@
 
 #include "custom_all_reduce.cuh"
 
-// fake pointer type
-using fptr_t = uint64_t;
+// fake pointer type, must match fptr_t type in ops.h
+using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int rank,
+                      const std::vector<int64_t>& offsets, int64_t rank,
                       bool full_nvlink) {
   int world_size = offsets.size();
   if (world_size > 8)
@@ -55,7 +55,7 @@ bool _is_weak_contiguous(torch::Tensor& t) {
           t.numel() * t.element_size());
 }
 
-bool should_custom_ar(torch::Tensor& inp, int max_size, int world_size,
+bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
                       bool full_nvlink) {
   auto inp_size = inp.numel() * inp.element_size();
   // custom allreduce requires input byte size to be multiples of 16
@@ -134,7 +134,7 @@ void register_buffer(fptr_t _fa, torch::Tensor& t,
   fa->register_buffer(handles, offsets, t.data_ptr());
 }
 
-std::pair<std::vector<uint8_t>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
+std::tuple<std::vector<std::string>, std::vector<int64_t>> get_graph_buffer_ipc_meta(
     fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   return fa->get_graph_buffer_ipc_meta();
