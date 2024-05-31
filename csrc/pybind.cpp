@@ -143,7 +143,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
-
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
   // Activation ops
