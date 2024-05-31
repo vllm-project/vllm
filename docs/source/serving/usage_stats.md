@@ -29,7 +29,7 @@ Here is an example as of v0.4.0:
   "dtype": "torch.float16",
   "tensor_parallel_size": 1,
   "block_size": 16,
-  "gpu_memory_utilization": 0.9,
+  "gpu_memory_utilization": 0.98,
   "quantization": null,
   "kv_cache_dtype": "auto",
   "enable_lora": false,

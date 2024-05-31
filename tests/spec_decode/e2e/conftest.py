@@ -14,7 +14,8 @@ if (not is_hip()):
                         nvmlInit)
 
 from vllm import LLM
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.arg_utils import (DEFAULT_GPU_MEMORY_UTILIZATION,
+                                   AsyncEngineArgs)
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.utils import set_random_seed
@@ -52,7 +53,7 @@ class AsyncLLM:
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_seq_len_to_capture: int = 8192,

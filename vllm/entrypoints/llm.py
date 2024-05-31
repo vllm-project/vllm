@@ -4,7 +4,7 @@ from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 from tqdm import tqdm
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.arg_utils import DEFAULT_GPU_MEMORY_UTILIZATION, EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.inputs import (PromptInputs, PromptStrictInputs, TextPrompt,
                          TextTokensPrompt, TokensPrompt,
@@ -111,7 +111,7 @@ class LLM:
         revision: Optional[str] = None,
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.9,
+        gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
         swap_space: int = 4,
         enforce_eager: bool = False,
         max_context_len_to_capture: Optional[int] = None,

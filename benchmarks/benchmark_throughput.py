@@ -10,6 +10,7 @@ from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
 
+from vllm.engine.arg_utils import DEFAULT_GPU_MEMORY_UTILIZATION
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
 
@@ -78,7 +79,7 @@ def run_vllm(
     enable_prefix_caching: bool,
     enable_chunked_prefill: bool,
     max_num_batched_tokens: int,
-    gpu_memory_utilization: float = 0.9,
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION,
     download_dir: Optional[str] = None,
 ) -> float:
     from vllm import LLM, SamplingParams
@@ -313,12 +314,14 @@ if __name__ == "__main__":
         'The "auto" option will use FP16 precision '
         'for FP32 and FP16 models, and BF16 precision '
         'for BF16 models.')
-    parser.add_argument('--gpu-memory-utilization',
-                        type=float,
-                        default=0.9,
-                        help='the fraction of GPU memory to be used for '
-                        'the model executor, which can range from 0 to 1.'
-                        'If unspecified, will use the default value of 0.9.')
+    parser.add_argument(
+        '--gpu-memory-utilization',
+        type=float,
+        default=DEFAULT_GPU_MEMORY_UTILIZATION,
+        help='the fraction of GPU memory to be used for '
+        'the model executor, which can range '
+        'from 0 to 1. If unspecified, will use the default value of {}.'.
+        format(DEFAULT_GPU_MEMORY_UTILIZATION))
     parser.add_argument("--enforce-eager",
                         action="store_true",
                         help="enforce eager execution")

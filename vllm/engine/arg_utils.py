@@ -19,6 +19,9 @@ def nullable_str(val: str):
     return val
 
 
+DEFAULT_GPU_MEMORY_UTILIZATION = 0.98
+
+
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -45,7 +48,7 @@ class EngineArgs:
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = False
     swap_space: int = 4  # GiB
-    gpu_memory_utilization: float = 0.90
+    gpu_memory_utilization: float = DEFAULT_GPU_MEMORY_UTILIZATION
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: int = 256
     max_logprobs: int = 5  # OpenAI default value
@@ -356,9 +359,10 @@ class EngineArgs:
             type=float,
             default=EngineArgs.gpu_memory_utilization,
             help='The fraction of GPU memory to be used for the model '
-            'executor, which can range from 0 to 1. For example, a value of '
-            '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9.')
+            'executor, which can range from '
+            '0 to 1. For example, a value of 0.5 would imply 50%% GPU '
+            'memory utilization. If unspecified, will use the default value'
+            ' of {}.'.format(DEFAULT_GPU_MEMORY_UTILIZATION))
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,

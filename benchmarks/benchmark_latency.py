@@ -10,6 +10,7 @@ import torch
 from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import DEFAULT_GPU_MEMORY_UTILIZATION
 from vllm.inputs import PromptStrictInputs
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 
@@ -215,11 +216,13 @@ if __name__ == '__main__':
         type=str,
         default=None,
         help='Path to save the latency results in JSON format.')
-    parser.add_argument('--gpu-memory-utilization',
-                        type=float,
-                        default=0.9,
-                        help='the fraction of GPU memory to be used for '
-                        'the model executor, which can range from 0 to 1.'
-                        'If unspecified, will use the default value of 0.9.')
+    parser.add_argument(
+        '--gpu-memory-utilization',
+        type=float,
+        default=DEFAULT_GPU_MEMORY_UTILIZATION,
+        help='the fraction of GPU memory to be used for '
+        'the model executor, which can range '
+        ' from 0 to 1. If unspecified, will use the default value of {}.'.
+        format(DEFAULT_GPU_MEMORY_UTILIZATION))
     args = parser.parse_args()
     main(args)

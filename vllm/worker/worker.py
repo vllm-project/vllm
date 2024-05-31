@@ -56,6 +56,7 @@ class Worker(WorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.load_config = load_config
+        self.speculative_config = speculative_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
@@ -157,6 +158,7 @@ class Worker(WorkerBase):
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
@@ -164,12 +166,36 @@ class Worker(WorkerBase):
             "Error in memory profiling. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+        # Determine GPU memory available for KV-cache
+        available_gpu_memory = int(total_gpu_memory *
+                                   self.cache_config.gpu_memory_utilization)
+
+        # Ensure we have at least "minimum" dynamic memory
+        # (to accommodate possible dynamic allocations)
+        gb = 1024 * 1024 * 1024
+        min_dynamic_memory = int(1.5 * gb)
+        
+        unused_gpu_memory = total_gpu_memory - available_gpu_memory
+        reserve_more = min_dynamic_memory - unused_gpu_memory
+
+        if reserve_more > 0:
+            available_gpu_memory -= reserve_more
+
+        assert available_gpu_memory > peak_memory, (
+            "Error in memory profiling, peak_memory = {} is more"
+            " than available_gpu_memory = {} (gpu_memory_utilization = {})."
+            " Try increasing gpu_memory_utilization".format(
+                peak_memory, available_gpu_memory,
+                self.cache_config.gpu_memory_utilization))
+
+        kv_cache_memory = available_gpu_memory - peak_memory
+
+        # Compute GPU/CPU blocks
         cache_block_size = self.get_cache_block_size_bytes()
-        num_gpu_blocks = int(
-            (total_gpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
+        num_gpu_blocks = kv_cache_memory // cache_block_size
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
+
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
         if self.model_runner.lora_manager:
