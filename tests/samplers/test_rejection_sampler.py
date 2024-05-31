@@ -9,7 +9,7 @@ from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.utils import set_random_seed
 
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 1)
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
 

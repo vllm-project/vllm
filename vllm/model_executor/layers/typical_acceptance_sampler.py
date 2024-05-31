@@ -17,7 +17,8 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         self,
         disable_bonus_tokens: bool = False,
         strict_mode: bool = False,
-        posterior_threshold: float = 0.3,
+        posterior_threshold: float = 0.09,
+        posterior_alpha: float = 0.3,
     ):
         """Create a Typical Acceptance Sampler.
 
@@ -29,10 +30,14 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
             during sampling. This catches correctness issues but adds
             nontrivial latency.
             posterior_threshold : A threshold value that sets a lower bound 
-            for the posterior probability. Default is 0.3.
-            posterior_alpha : A threshold value that sets a lower bound 
-            for the posterior probability. Default is 0.3.
+            on the posterior probability of a token in target model for it
+            to be accepted. Default is 0.09
+            posterior_alpha : A scaling factor for the entropy-based
+            threshold in typical acceptance sampling. Typically defaults to
+            sqrt of posterior_threshold and is set to 0.3.
         """
+        self._posterior_threshold = posterior_threshold
+        self._posterior_alpha = posterior_alpha
         super().__init__()
         SpecDecodeBaseSampler.__init__(
             self,
@@ -111,18 +116,27 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         .. math::
             p_{\text{original}}(x_{n+k} | x_1, x_2, \dots, x_{n+k-1}) > 
             \min \left( \epsilon, \delta * \exp \left(
-                -H(p_{\text{original}}(\cdot | x_1, x_2, \ldots, x_{n+k-1})) \right) \right)
+                -H(p_{\text{original}}(
+                    \cdot | x_1, x_2, \ldots, x_{n+k-1})) \right) \right)
         
         where :math:`p_{\text{original}}` corresponds to target_probs 
         and :math:`\epsilon` and :math:`\delta` correspond to hyperparameters
-        specified using self._posterior_threshold_ and self._posterior_alpha_
+        specified using self._posterior_threshold and self._posterior_alpha
+
+        This method computes the posterior probabilities for the given
+        draft token ids based on the provided target probabilities. It
+        calculates the entropy of the posterior distribution and determines
+        a dynamic threshold for each token position using the provided
+        posterior_threshold and posterior_alpha values. The method then
+        returns a boolean mask indicating which tokens can be accepted.
 
         Returns:
         -------
         torch.Tensor
             A boolean tensor of shape (batch_size, k) where each element
             indicates whether the corresponding draft token has been accepted
-            or rejected.
+            or rejected. True indicates acceptance and false indicates
+            rejection.
             
         """
         candidates_prob = torch.gather(
@@ -138,6 +152,29 @@ class TypicalAcceptanceSampler(SpecDecodeBaseSampler, nn.Module):
         return accepted_mask
 
     def _replacement_token_ids(self, target_probs):
+        """
+        Generate one replacement token ID for each sequence based on target
+        probabilities. The replacement token is used as the fallback option
+        if typical acceptance sampling does not accept any draft tokens for
+        that particular sequence. 
+
+        This method computes the token IDs to be replaced by selecting the
+        token with the highest probability for each sequence in the first 
+        position. The rest of the output is filled with -1. 
+
+        Parameters
+        ----------
+        target_probs : torch.Tensor
+            A tensor of shape (batch_size, k, vocab_size) containing 
+            the target probability distribution
+
+        Returns
+        -------
+        torch.Tensor
+            A tensor of shape (batch_size, k) with the replacement 
+            token IDs. Only the first column is set, and the rest of the
+            columns are filled with -1.
+        """
         max_indices = torch.argmax(target_probs[:, 0, :], dim=1)
         output = -torch.ones((target_probs.shape[0], target_probs.shape[1]),
                              dtype=self.token_id_dtype)
