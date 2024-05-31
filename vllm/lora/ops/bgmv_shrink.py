@@ -9,6 +9,7 @@ import triton
 import triton.language as tl
 import torch
 
+
 @triton.jit
 def _bgmv_shrink_kernel(
     input_ptr,
@@ -27,49 +28,44 @@ def _bgmv_shrink_kernel(
     cn_stride,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    SPLIT_K: tl.constexpr,
 ):
-    pid_n = tl.program_id(axis=0)
-    pid_sk = tl.program_id(axis=1)
-    cur_batch = tl.program_id(axis=2)
+    cur_batch = tl.program_id(axis=0)
     lora_index = tl.load(lora_indices + cur_batch)
     if lora_index == -1:
         return
-    offset_n = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    offset_k = pid_sk * BLOCK_K + tl.arange(0, BLOCK_K)
-    rbn = tl.max_contiguous(tl.multiple_of(offset_n % N, BLOCK_N), BLOCK_N)
-    a_ptr = input_ptr + cur_batch * xm_stride + offset_k[:,None] * xk_stride
-    b_ptr = (
-        lora_ptr
-        + l0_stride * lora_index
-        + rbn[None, :] * lora_k_stride
-        + offset_k[:, None] * lora_n_stride
-    )
-    accumulator = tl.zeros((1,BLOCK_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_K * SPLIT_K)):
-        if EVEN_K:
-            tiled_a = tl.load(a_ptr)
-            tiled_b = tl.load(b_ptr)
-        else:
-            k_remaining = K - k * (BLOCK_K * SPLIT_K)
-            tiled_a = tl.load(
-                a_ptr, mask=offset_k[None, :] < k_remaining, other=0.0
-            )
-            tiled_b = tl.load(
-                b_ptr, mask=offset_k[:, None] < k_remaining, other=0.0
-            )
-        accumulator += tl.sum(tiled_a[None,:] * tiled_b, 1)
-        a_ptr += BLOCK_K * SPLIT_K * xk_stride
-        b_ptr += BLOCK_K * SPLIT_K * lora_n_stride
+
+    offset_n = tl.arange(0, BLOCK_N)
+    offset_k = tl.arange(0, BLOCK_K)
+    a_ptr = input_ptr + cur_batch * xm_stride
+    b_ptr = lora_ptr + l0_stride * lora_index
+    rank_mask = offset_n[:, None] < N
+    accumulator = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for k in range(0, K, BLOCK_K):
+        current_k = k + offset_k
+        # vector load
+        current_k_c = tl.max_contiguous(current_k, BLOCK_K)
+        tiled_a = tl.load(
+            a_ptr + current_k_c * xk_stride,
+            mask=current_k < K,
+            other=0.0,
+        )  # [BLOCK_K]
+        b_ptr_mask = (rank_mask < N) & (current_k[None, :] < K)
+
+        tiled_b = tl.load(
+            b_ptr
+            + offset_n[:, None] * lora_k_stride
+            + current_k[None, :] * lora_n_stride,
+            mask=b_ptr_mask,
+            other=0.0,
+        )  # [BLOCK_N,BLOCK_K]
+
+        accumulator += tl.sum(tiled_a * tiled_b, 1)
     accumulator *= scaling
-    offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
-    c_ptr = out_ptr + cur_batch * cm_stride + offset_cn[None, :] * cn_stride
-    c_mask = offset_cn[None, :] < N
-    if SPLIT_K:
-        tl.store(c_ptr, accumulator, mask=c_mask)
-    else:
-        tl.atomic_add(c_ptr, accumulator, mask=c_mask)
+    offset_cn = tl.arange(0, BLOCK_N)
+    c_ptr = out_ptr + cur_batch * cm_stride + offset_cn * cn_stride
+    c_mask = offset_cn < N
+
+    tl.store(c_ptr, accumulator, mask=c_mask)
 
 
 @torch.inference_mode()
@@ -107,15 +103,12 @@ def bgmv_shrink(
     assert output_tensor.is_contiguous()
     # TODO tuning this config
     N, K = lora_a_weights.shape[-2:]  # K=hidden_size,N=rank
-    BLOCK_N = 16
-    BLOCK_K = 32
-    SPLIT_K = 1
-    EVEN_K = K % (BLOCK_K * SPLIT_K) == 0
+    BLOCK_K = 512
+    BLOCK_N = triton.next_power_of_2(output_tensor.size(1))
     grid = [
-        triton.cdiv(N, BLOCK_N),
-        SPLIT_K,
         batchs,
     ]
+    config = {"num_stages": 4, "num_warps": 8}
     _bgmv_shrink_kernel[grid](
         inputs,
         lora_a_weights,
@@ -133,7 +126,6 @@ def bgmv_shrink(
         output_tensor.stride(1),
         BLOCK_N,
         BLOCK_K,
-        EVEN_K,
-        SPLIT_K,
+        **config,
     )
     return
