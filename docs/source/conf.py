@@ -83,11 +83,14 @@ def setup(app):
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
     "cpuinfo",
+    "torch",
     "transformers",
+    "psutil",
     "prometheus_client",
     "sentencepiece",
     "vllm.cuda_utils",
     "vllm._C",
+    "numpy",
     "tqdm",
     "tensorizer",
 ]
