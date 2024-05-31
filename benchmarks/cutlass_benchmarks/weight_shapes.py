@@ -8,7 +8,7 @@
 #   - TP1 : K = 4096, N = 6144
 #   - TP4 : K = 4096, N = 1536
 
-# TP1 shapes 
+# TP1 shapes
 WEIGHT_SHAPES = {
     "mistralai/Mistral-7B-v0.1": [
         [4096, 6144, 1],
