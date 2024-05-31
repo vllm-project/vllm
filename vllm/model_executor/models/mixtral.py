@@ -278,15 +278,6 @@ class MixtralAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
 
-        if isinstance(
-                quant_config,
-                Fp8Config) and not quant_config.is_checkpoint_fp8_serialized:
-            print_warning_once(
-                "For Mixtral FP8 quantization, we currently do not quantize "
-                "the attention layers until their FP8 performance is improved."
-            )
-            quant_config = None
-
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
