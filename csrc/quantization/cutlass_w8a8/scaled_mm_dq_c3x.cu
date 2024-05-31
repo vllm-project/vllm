@@ -1,6 +1,6 @@
 #include <cuda_runtime_api.h>
 
-#ifdef CUDART_VERSION && CUDART_VERSION >= 1200
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
 
 #include <torch/extension.h>
 

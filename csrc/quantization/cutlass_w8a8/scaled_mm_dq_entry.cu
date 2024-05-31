@@ -49,11 +49,13 @@ void cutlass_scaled_mm_dq(torch::Tensor& c, torch::Tensor const& a,
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
 
+  std::cout << CUDA_VERSION << std::endl;
+
   if (version_num >= 90) {
     // Hopper
 
     // Guard against compilation issues for sm90 kernels
-#ifdef CUDART_VERSION&& CUDART_VERSION >= 1200
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
     cutlass_scaled_mm_dq_sm90(c, a, b, a_scales, b_scales);
 #else
     cutlass_scaled_mm_dq_sm80(c, a, b, a_scales, b_scales);
