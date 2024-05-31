@@ -66,7 +66,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
     with TemporaryDirectory() as output_dir:
         llm_sharded_writer = LLM(
             model=input_dir,
-            distributed_executor_backend="mp"
+            distributed_executor_backend="mp",
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tp_size,
         )
@@ -83,7 +83,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
 
         llm_before = LLM(
             model=input_dir,
-            distributed_executor_backend="mp"
+            distributed_executor_backend="mp",
             enable_lora=enable_lora,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tp_size,
@@ -95,7 +95,7 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
 
         llm_after = LLM(
             model=output_dir,
-            distributed_executor_backend="mp"
+            distributed_executor_backend="mp",
             enable_lora=enable_lora,
             gpu_memory_utilization=gpu_memory_utilization,
             load_format="sharded_state",
