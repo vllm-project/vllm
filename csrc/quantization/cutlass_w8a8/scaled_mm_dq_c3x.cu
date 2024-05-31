@@ -251,17 +251,19 @@ void cutlass_scaled_mm_dq_sm90_fp8_dispatch(torch::Tensor& out,
   int32_t const m = a.size(0);
   int32_t const mp2 = std::max(
       64, static_cast<int32_t>(pow(2, ceil(log2(m)))));  // next power of 2
-  if (mp2 == 64) {
+  if (mp2 <= 64) {
+    // m in [1, 64]
     return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmM64>(
         out, a, b, a_scales, b_scales);
-  }
-  if (mp2 == 128) {
+  } else if (mp2 <= 128) {
+    // m in (64, 128]
     return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmM128>(
         out, a, b, a_scales, b_scales);
+  } else {
+    // m in (128, inf)
+    return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmDefault>(
+        out, a, b, a_scales, b_scales);
   }
-  // mp2 > 128
-  return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmDefault>(
-      out, a, b, a_scales, b_scales);
 }
 
 void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
