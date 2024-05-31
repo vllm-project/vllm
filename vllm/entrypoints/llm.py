@@ -267,7 +267,6 @@ class LLM:
             Using ``prompts`` and ``prompt_token_ids`` as keyword parameters is
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
-
         """
         if prompt_token_ids is not None:
             inputs = self._convert_v1_inputs(
