@@ -13,8 +13,8 @@ from vllm.spec_decode.hidden_states_worker import HiddenStatesWorker
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.metrics import AsyncMetricsCollector
-from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
+from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.util import (create_sequence_group_output,
                                    get_all_num_logprobs, get_all_seq_ids,
@@ -34,7 +34,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     speculative_config = kwargs.get("speculative_config")
     assert speculative_config is not None
 
-    if speculative_config.draft_model_config.hf_config.model_type == "mlp_speculator":
+    if (speculative_config.draft_model_config.hf_config.model_type ==
+            "mlp_speculator"):
         target_worker = HiddenStatesWorker(*args, **kwargs)
     else:
         target_worker = Worker(*args, **kwargs)
@@ -107,7 +108,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
-        elif draft_worker_kwargs["model_config"].hf_config.model_type == "mlp_speculator":
+        elif draft_worker_kwargs[
+                "model_config"].hf_config.model_type == "mlp_speculator":
             proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
         else:
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
@@ -173,7 +175,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
         if isinstance(self.scorer_worker, HiddenStatesWorker):
-            self.scorer_worker.speculator = self.proposer_worker.model_runner.model
+            self.scorer_worker.speculator = (
+                self.proposer_worker.model_runner.model)
 
         self._metrics.init_gpu_tensors(self.rank)
         self.rejection_sampler.init_gpu_tensors(self.rank)
@@ -241,8 +244,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                             num_cpu_blocks=num_cpu_blocks)
 
         if not isinstance(self.scorer_worker, HiddenStatesWorker):
-            self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
-                                              num_cpu_blocks=num_cpu_blocks)
+            self.proposer_worker.initialize_cache(
+                num_gpu_blocks=num_gpu_blocks, num_cpu_blocks=num_cpu_blocks)
 
     @torch.inference_mode()
     def execute_model(

@@ -982,7 +982,9 @@ class SpeculativeConfig:
             raise ValueError("Expected num_speculative_tokens to be greater "
                              f"than zero ({self.num_speculative_tokens}).")
 
-        if self.draft_model_config and self.draft_model_config.hf_config.model_type != "mlp_speculator":
+        if (self.draft_model_config
+                and self.draft_model_config.hf_config.model_type !=
+                "mlp_speculator"):
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config)
 

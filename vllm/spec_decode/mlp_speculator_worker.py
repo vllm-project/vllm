@@ -1,11 +1,9 @@
-import copy
 import weakref
 from typing import List, Tuple
 
 import torch
 
-from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
-                           SequenceGroupMetadata)
+from vllm.sequence import ExecuteModelRequest, SamplerOutput
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.top1_proposer import Top1Proposer
 from vllm.worker.worker import Worker
@@ -29,7 +27,6 @@ class MLPSpeculatorWorker(Worker):
             max_proposal_len=self.max_model_len,
         )
 
-
     def set_include_gpu_probs_tensor(self):
         # Need include_gpu_probs_tensor for multi_step_worker
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
@@ -50,8 +47,7 @@ class MLPSpeculatorWorker(Worker):
         self._raise_if_unsupported(execute_model_req)
 
         model_outputs = self.model_runner.execute_model(
-            execute_model_req.seq_group_metadata_list, self.gpu_cache
-        )
+            execute_model_req.seq_group_metadata_list, self.gpu_cache)
 
         assert len(model_outputs) == sample_len
 

@@ -67,7 +67,9 @@ class ModelInput(NamedTuple):
             num_prefills=0,
         )
 
-class MLPSpeculatorModelRunner:
+
+class MLPSpeculatorModelRunner("ModelRunner"):
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -93,10 +95,10 @@ class MLPSpeculatorModelRunner:
         self.kv_cache_dtype = kv_cache_dtype
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
-        self.prev_request_context_lengths = {}
+        self.prev_request_context_lengths: Dict[str, int] = {}
 
     def load_model(self) -> None:
-        with CudaMemoryProfiler() as m:
+        with CudaMemoryProfiler():
             self.model = get_model(
                 model_config=self.model_config,
                 device_config=self.device_config,
@@ -124,8 +126,11 @@ class MLPSpeculatorModelRunner:
 
     def prepare_input_tensors(
         self,
-        seq_group_metadata_list: List[SequenceGroupMetadata],
+        seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ):
+        if not seq_group_metadata_list:
+            return ModelInput.empty(self.device)
+
         input_tokens: List[int] = []
         input_positions: List[int] = []
 
@@ -133,9 +138,6 @@ class MLPSpeculatorModelRunner:
         context_lens: List[int] = []
         query_lens: List[int] = []
         accepted_lengths_list: List[int] = []
-
-        if len(seq_group_metadata_list) == 0:
-            return ModelInput.empty(self.device)
 
         for seq_group_metadata in seq_group_metadata_list:
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -169,14 +171,18 @@ class MLPSpeculatorModelRunner:
                 input_tokens.extend(tokens)
                 input_positions.extend(list(range(context_len, seq_len)))
 
-                if seq_group_metadata.request_id in self.prev_request_context_lengths:
-                    prev_context_length = self.prev_request_context_lengths[seq_group_metadata.request_id]
+                if seq_group_metadata.request_id in (
+                        self.prev_request_context_lengths):
+                    prev_context_length = self.prev_request_context_lengths[
+                        seq_group_metadata.request_id]
                     accepted_length = context_len - prev_context_length
                     accepted_lengths_list.append(accepted_length)
-                self.prev_request_context_lengths[seq_group_metadata.request_id] = context_len
+                self.prev_request_context_lengths[
+                    seq_group_metadata.request_id] = context_len
 
         if not self.model.first_decode_step:
-            self.model.accepted_token_lengths = torch.tensor(accepted_lengths_list, device=self.device, dtype=torch.long)
+            self.model.accepted_token_lengths = torch.tensor(
+                accepted_lengths_list, device=self.device, dtype=torch.long)
 
         input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
@@ -190,24 +196,25 @@ class MLPSpeculatorModelRunner:
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
-        return input_tokens_tensor, input_positions_tensor, seq_lens_tensor, query_lens_tensor
+        return (input_tokens_tensor, input_positions_tensor, seq_lens_tensor,
+                query_lens_tensor)
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            seq_group_metadata_list: List[SequenceGroupMetadata],
-            kv_caches: List[torch.Tensor],
+        self,
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+        kv_caches: List[torch.Tensor],
     ) -> Optional[SamplerOutput]:
-        input_tokens, input_positions, seq_lens, query_lens = self.prepare_input_tensors(seq_group_metadata_list)
+        (input_tokens, input_positions, seq_lens,
+         query_lens) = self.prepare_input_tensors(seq_group_metadata_list)
 
-        sampling_metadata = SamplingMetadata.prepare(
-            seq_group_metadata_list, seq_lens, query_lens, self.device,
-            self.pin_memory)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     seq_lens, query_lens,
+                                                     self.device,
+                                                     self.pin_memory)
 
         output = self.model.generate_proposals(
-            input_ids=input_tokens,
-            sampling_metadata=sampling_metadata
-        )
+            input_ids=input_tokens, sampling_metadata=sampling_metadata)
 
         return output
 

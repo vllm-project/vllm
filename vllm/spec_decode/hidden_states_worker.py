@@ -1,8 +1,11 @@
 from typing import List, Optional
 
-from vllm.sequence import SequenceGroupMetadata, ExecuteModelRequest, SamplerOutput
-from vllm.worker.worker import Worker
 import torch
+
+from vllm.sequence import (ExecuteModelRequest, SamplerOutput,
+                           SequenceGroupMetadata)
+from vllm.worker.worker import Worker
+
 
 class HiddenStatesWorker(Worker):
 
@@ -29,7 +32,8 @@ class HiddenStatesWorker(Worker):
         decode_meta = attn_metadata.decode_metadata
         if prefill_meta is None and decode_meta.use_cuda_graph:
             graph_batch_size = input_tokens.shape[0]
-            model_executable = self.model_runner.graph_runners[graph_batch_size]
+            model_executable = self.model_runner.graph_runners[
+                graph_batch_size]
         else:
             model_executable = self.model_runner.model
         execute_model_kwargs = {
@@ -45,7 +49,8 @@ class HiddenStatesWorker(Worker):
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
-        logits = self.model_runner.model.compute_logits(hidden_states, sampling_metadata)
+        logits = self.model_runner.model.compute_logits(
+            hidden_states, sampling_metadata)
 
         # Only perform sampling in the driver worker.
         if not self.model_runner.is_driver_worker:
@@ -59,20 +64,27 @@ class HiddenStatesWorker(Worker):
 
         # we only need to pass hidden states of most recent token
         if seq_group_metadata_list[0].is_prompt:
-            hidden_states = hidden_states.index_select(0, sampling_metadata.selected_token_indices)
+            hidden_states = hidden_states.index_select(
+                0, sampling_metadata.selected_token_indices)
 
         return output, hidden_states
 
-
     @torch.inference_mode()
     def execute_model(
-            self,
-            execute_model_req: Optional[ExecuteModelRequest] = None
+        self,
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
 
-        sampler_output, hidden_states = self._get_hidden_states(execute_model_req.seq_group_metadata_list, self.gpu_cache)
+        if execute_model_req is None:
+            return []
 
-        # if we are executing the prompt, we need to flag the first decode step since pruning is handled differently
+        sampler_output, hidden_states = self._get_hidden_states(
+            execute_model_req.seq_group_metadata_list, self.gpu_cache)
+
+        assert self.speculator is not None
+
+        # if we are executing the prompt, we need to flag the first decode step
+        # since pruning is handled differently
         if execute_model_req.seq_group_metadata_list[0].is_prompt:
             self.speculator.first_decode_step = True
 

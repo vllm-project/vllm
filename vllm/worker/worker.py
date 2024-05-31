@@ -1,7 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
@@ -18,7 +18,7 @@ from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
-from vllm.worker.model_runner import ModelRunner, MLPSpeculatorModelRunner
+from vllm.worker.model_runner import MLPSpeculatorModelRunner, ModelRunner
 from vllm.worker.worker_base import WorkerBase
 
 
@@ -69,10 +69,11 @@ class Worker(WorkerBase):
             assert not self.lora_config, (
                 "To be tested: vision language model with LoRA settings.")
 
+        ModelRunnerClass: Type[ModelRunner]
         if self.model_config.embedding_mode:
             ModelRunnerClass = EmbeddingModelRunner
         elif model_config.hf_config.model_type == "mlp_speculator":
-            ModelRunnerClass = MLPSpeculatorModelRunner
+            ModelRunnerClass = MLPSpeculatorModelRunner  # type: ignore[assignment]
         else:
             ModelRunnerClass = ModelRunner
         self.model_runner = ModelRunnerClass(
