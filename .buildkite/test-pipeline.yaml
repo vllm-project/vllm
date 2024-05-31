@@ -118,7 +118,7 @@ steps:
 
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
-  command: pytest -v -s spec_decode
+  command: VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s spec_decode
 
 - label: LoRA Test %N
   #mirror_hardwares: [amd]
