@@ -11,15 +11,15 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import (
     get_local_rank, get_tensor_model_parallel_cpu_group)
 from vllm.logger import init_logger
+from vllm import _custom_ops as ops
 
 try:
     import pynvml
 
-    from vllm import _custom_ops as ops
+    # Simulate ImportError if custom_ar ops are not supported.
+    if not ops.is_custom_op_supported("custom_ar::meta_size"):
+        raise ImportError("custom_ar", __file__)
 
-    # this should fail if not installed.
-    # TODO: replace with some kind of ops query
-    ops.meta_size()
     custom_ar = True
 
     @contextmanager
@@ -30,7 +30,7 @@ try:
         finally:
             pynvml.nvmlShutdown()
 
-except (ImportError, AttributeError):
+except ImportError:
     # For AMD GPUs
     custom_ar = False
     pynvml = None

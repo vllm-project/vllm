@@ -350,8 +350,7 @@ def fused_topk(
                                         dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
     else:
-        # ruff: noqa: F401
-        import vllm._moe_C as moe_kernels
+        assert ops.is_custom_op_supported("moe::topk_softmax")
 
         topk_weights = torch.empty(M,
                                    topk,
@@ -365,7 +364,7 @@ def fused_topk(
                                             topk,
                                             dtype=torch.int32,
                                             device=hidden_states.device)
-        torch.ops._moe_C.topk_softmax(
+        ops.topk_softmax(
             topk_weights,
             topk_ids,
             token_expert_indicies,

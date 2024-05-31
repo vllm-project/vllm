@@ -3,12 +3,29 @@ from typing import Optional, Tuple, Type, List
 import torch
 
 try:
-    # ruff: noqa: F401 SIM105
+    # ruff: noqa: SIM105
     import vllm._C
 except ImportError as e:
     from vllm.logger import init_logger
     logger = init_logger(__name__)
     logger.warning("Failed to import from vllm._C with %r", e)
+
+try:
+    # ruff: noqa: SIM105
+    import vllm._C_moe
+except ImportError:
+    pass
+
+try:
+    # ruff: noqa: SIM105, F401
+    import vllm._C_punica
+except ImportError:
+    pass
+
+
+def is_custom_op_supported(op_name: str) -> bool:
+    op, overloads = torch._C._jit_get_operation(f'_C_{op_name}')
+    return op is not None
 
 
 # activation ops
@@ -306,6 +323,20 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                       num_tokens_post_pad)
 
 
+def topk_softmax(
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        token_expert_indicies: torch.Tensor,
+        gating_output: float
+) -> None:
+    torch.ops._moe_C.topk_softmax(
+        topk_weights,
+        topk_ids,
+        token_expert_indicies,
+        gating_output
+    )
+
+
 def reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -360,6 +391,7 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
         device)
 
 
+# custom ar
 def init_custom_ar(meta: torch.Tensor,
                    rank_data: torch.Tensor,
                    handles: List[str],
@@ -407,3 +439,39 @@ def register_graph_buffers(fa: int,
                            handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
+
+
+# punica
+def dispatch_bgmv(
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        indicies: torch.Tensor,
+        layer_idx: int,
+        scale: float,
+) -> None:
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
+
+
+def dispatch_bgmv_low_level(
+        y: torch.Tensor,
+        x: torch.Tensor,
+        w_t_all: torch.Tensor,
+        indicies: torch.Tensor,
+        layer_idx: int,
+        scale: float,
+        h_in: int,
+        h_out: int,
+        y_offset: int,
+) -> None:
+    torch.ops._punica_C.dispatch_bgmv_low_level(
+        y,
+        x,
+        w_t_all,
+        indicies,
+        layer_idx,
+        scale,
+        h_in,
+        h_out,
+        y_offset,
+    )
