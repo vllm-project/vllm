@@ -2,7 +2,7 @@ steps:
   - label: "check changes path"
     plugins:
         - monebag/monorepo-diff#v2.5.9:
-            diff: "git diff --diff-filter=ACM $(git merge-base origin/main HEAD)"
+            diff: "git diff --name-only --diff-filter=ACM $(git merge-base origin/main HEAD)"
             watch:
               - path:
                   - ".buildkite/"
