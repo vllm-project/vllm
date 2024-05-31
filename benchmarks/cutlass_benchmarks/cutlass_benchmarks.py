@@ -4,13 +4,16 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 import time
 import pickle as pkl
+import copy
+import itertools
 
 from weight_shapes import WEIGHT_SHAPES
 from vllm import _custom_ops as ops
-from typing import Tuple, Callable, Iterable
+from typing import Tuple, Callable, Iterable, List
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())[1:]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512]
+DEFAULT_TP_SIZES = [1]
 
 # helpers
 
@@ -244,14 +247,21 @@ def run_model_bench(args):
     for i, model in enumerate(args.models):
         print(f"[{i}]  {model}")
 
-    model_bench_data = []
-    models = args.models
-    for model in models:
-        Ms = args.batch_sizes
+    def model_shapes(model_name: str, tp_size: int) -> List[Tuple[int, int]]:
         KNs = []
-        for layer in WEIGHT_SHAPES[model]:
+        for layer in copy.deepcopy(WEIGHT_SHAPES[model_name]):
+            assert len(layer) == 3
+            tp_split_dim = layer[2]
+            assert tp_split_dim in [0, 1]
+            layer[tp_split_dim] = layer[tp_split_dim] // tp_size
             KNs.append((layer[0], layer[1]))
+        return KNs
 
+    model_bench_data = []
+    models_tps = list(itertools.product(args.models, args.tp_sizes))
+    for model, tp_size in models_tps:
+        Ms = args.batch_sizes
+        KNs = model_shapes(model, tp_size)
         MKNs = []
         for m in Ms:
             for k, n in KNs:
@@ -261,8 +271,9 @@ def run_model_bench(args):
         model_bench_data.append(data)
 
     # Print all results
-    for data, model in zip(model_bench_data, models):
-        print(f"== Results {args.dtype} {model} ====")
+    for data, model_tp in zip(model_bench_data, models_tps):
+        model, tp_size = model_tp
+        print(f"== Results {args.dtype} {model}-TP{tp_size} ====")
         print_timers(data)
 
     timestamp = int(time.time())
@@ -329,6 +340,10 @@ Benchmark Cutlass GEMM.
                               type=str,
                               default=DEFAULT_MODELS,
                               choices=WEIGHT_SHAPES.keys())
+    model_parser.add_argument("--tp-sizes",
+                              nargs="+",
+                              type=int,
+                              default=DEFAULT_TP_SIZES)
     model_parser.add_argument("--batch-sizes",
                               nargs="+",
                               type=int,
