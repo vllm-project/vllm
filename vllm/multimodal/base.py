@@ -16,7 +16,7 @@ class MultiModalData:
     """
     Base class that contains multi-modal data.
 
-    To add a new modality, add a new file under `multimodal` directory.
+    To add a new modality, add a new file under ``multimodal`` directory.
 
     In this new file, subclass :class:`~MultiModalData` and
     :class:`~MultiModalPlugin`.
