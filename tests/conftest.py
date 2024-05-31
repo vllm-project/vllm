@@ -26,6 +26,10 @@ _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
 # Multi modal related
+_PIXEL_VALUES_FILES = [
+    os.path.join(_TEST_DIR, "images", filename) for filename in
+    ["stop_sign_pixel_values.pt", "cherry_blossom_pixel_values.pt"]
+]
 _IMAGE_FEATURES_FILES = [
     os.path.join(_TEST_DIR, "images", filename) for filename in
     ["stop_sign_image_features.pt", "cherry_blossom_image_features.pt"]
@@ -38,7 +42,8 @@ _IMAGE_PROMPTS = [
     "<image>\nUSER: What's the content of the image?\nASSISTANT:",
     "<image>\nUSER: What is the season?\nASSISTANT:"
 ]
-assert len(_IMAGE_FEATURES_FILES) == len(_IMAGE_FILES) == len(_IMAGE_PROMPTS)
+assert len(_PIXEL_VALUES_FILES) == len(_IMAGE_FEATURES_FILES) == len(
+    _IMAGE_FILES) == len(_IMAGE_PROMPTS)
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -98,6 +103,11 @@ def vllm_images(request) -> List[MultiModalData]:
         return [
             ImagePixelData(Image.open(filename)) for filename in _IMAGE_FILES
         ]
+
+
+@pytest.fixture()
+def vllm_image_tensors(request) -> List[torch.Tensor]:
+    return [torch.load(filename) for filename in _PIXEL_VALUES_FILES]
 
 
 @pytest.fixture()

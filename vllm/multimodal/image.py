@@ -1,6 +1,5 @@
-from typing import Dict, Tuple, Type
+from typing import Dict, Tuple, Type, Union
 
-import numpy as np
 import torch
 from PIL import Image
 
@@ -50,9 +49,7 @@ def get_dummy_image_data(
 
     fake_mm_data: MultiModalData
     if config_input_type == ImageInputType.PIXEL_VALUES:
-        values_arr = values.squeeze(dim=0).permute((1, 2, 0)).numpy()
-        image = Image.fromarray(values_arr, mode="RGB")
-        fake_mm_data = ImagePixelData(image)
+        fake_mm_data = ImagePixelData(values)
     elif config_input_type == ImageInputType.IMAGE_FEATURES:
         fake_mm_data = ImageFeatureData(values)
     else:
@@ -62,10 +59,19 @@ def get_dummy_image_data(
 
 
 class ImagePixelData(MultiModalData):
+    """
+    The pixel data of an image. Can be one of:
 
-    def __init__(self, image: Image.Image) -> None:
-        # So that this class can be created inside the Image context manager
-        image.load()
+    - :class:``PIL.Image``: An image object. Requires that a HuggingFace
+      processor is available to the model.
+    - :class:``torch.Tensor``: The raw pixel data which is passed to the model
+      without additional pre-processing.
+    """
+
+    def __init__(self, image: Union[Image.Image, torch.Tensor]) -> None:
+        if isinstance(image, Image.Image):
+            # So that this class can be created inside the Image context manager
+            image.load()
 
         self.image = image
 
@@ -92,26 +98,31 @@ class ImagePixelPlugin(MultiModalPlugin[ImagePixelData]):
         image = data.image
         image_processor = self._get_hf_image_processor(model_config,
                                                        vlm_config)
-        if image_processor is None:
-            # NOTE: This is based on the code found in
-            # torchvision.transforms.v2.functional.pil_to_tensor
-            image_arr = np.array(image, copy=True)
-            pixel_values = torch.as_tensor(image_arr) \
-                .view(1, image.height, image.width, -1) \
-                .permute((0, 3, 1, 2)) \
-                .to(model_config.dtype)
+
+        if isinstance(image, Image.Image):
+            if image_processor is None:
+                raise RuntimeError("No HuggingFace processor is available"
+                                   "to process the image object")
+            try:
+                return image_processor.preprocess(image) \
+                    .convert_to_tensors("pt").data
+            except Exception:
+                logger.error("Failed to process image (%s)", image)
+                raise
+        elif isinstance(image, torch.Tensor):
+            pixel_values = image.to(model_config.dtype)
 
             return {"pixel_values": pixel_values}
 
-        try:
-            return image_processor.preprocess(image) \
-                .convert_to_tensors("pt").data
-        except Exception:
-            logger.error("Failed to process image (%s)", image)
-            raise
+        raise TypeError(f"Invalid image type: {type(image)}")
 
 
 class ImageFeatureData(MultiModalData):
+    """
+    The feature vector of an image, passed directly to the model.
+
+    This should be the output of the vision tower.
+    """
 
     def __init__(self, image_features: torch.Tensor) -> None:
         self.image_features = image_features
