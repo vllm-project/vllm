@@ -29,11 +29,7 @@ from torch.nn.parameter import Parameter
 from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
-<<<<<<< HEAD
-from vllm.config import LoRAConfig
-=======
-from vllm.config import CacheConfig
->>>>>>> main
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -321,7 +317,7 @@ class CohereForCausalLM(nn.Module):
             "up_proj",
         ],
     }
-        # LoRA specific attributes
+    # LoRA specific attributes
     supported_lora_modules = [
         "qkv_proj",
         "o_proj",
@@ -349,10 +345,13 @@ class CohereForCausalLM(nn.Module):
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.quant_config = quant_config
-        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, 
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
                                                 scale=config.logit_scale)
-        self.model = CohereModel(config, cache_config, quant_config, lora_config=lora_config)
+        self.model = CohereModel(config,
+                                 cache_config,
+                                 quant_config,
+                                 lora_config=lora_config)
         self.sampler = Sampler()
 
     @torch.no_grad()
@@ -370,9 +369,11 @@ class CohereForCausalLM(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
         #TODO not sure, check later
-        embedding_weights = self.model.embed_tokens.weight if hasattr(self.model.embed_tokens,'weight') else self.model.embed_tokens.base_layer.weight
-        logits = self.logits_processor(embedding_weights,
-                                       hidden_states, sampling_metadata)
+        embedding_weights = self.model.embed_tokens.weight if hasattr(
+            self.model.embed_tokens,
+            'weight') else self.model.embed_tokens.base_layer.weight
+        logits = self.logits_processor(embedding_weights, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
