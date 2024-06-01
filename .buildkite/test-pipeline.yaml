@@ -6,7 +6,7 @@
 steps:
 - label: Versioning
   working_dir: "/vllm-workspace"
-  command: python collect_env.py
+  command: python3 collect_env.py
 
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
