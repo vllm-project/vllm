@@ -278,7 +278,7 @@ class LLM:
         """
         if self.llm_engine.model_config.embedding_mode:
             raise ValueError(
-                "LLM.generate() is only supported for generation models."
+                "LLM.generate() is only supported for generation models (XForCausalLM)."
             )
     
         if prompt_token_ids is not None or multi_modal_data is not None:
@@ -427,7 +427,7 @@ class LLM:
         """
         if not self.llm_engine.model_config.embedding_mode:
             raise ValueError(
-                "LLM.encode() is only supported for embedding models."
+                "LLM.encode() is only supported for embedding models (XModel)."
             )
 
         if prompt_token_ids is not None or multi_modal_data is not None:
