@@ -1,5 +1,6 @@
-from vllm import LLM, SamplingParams
 from time import time
+
+from vllm import LLM, SamplingParams
 
 # Common prefix.
 prefix = (
