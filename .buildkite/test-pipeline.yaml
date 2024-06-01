@@ -5,7 +5,9 @@
 
 steps:
 - label: Versioning
+  working_dir: "/vllm-workspace"
   command: python collect_env.py
+
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests/spec_decode/e2e"
