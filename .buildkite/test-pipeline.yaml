@@ -4,6 +4,8 @@
 # the final pipeline yaml file.
 
 steps:
+- label: Versioning
+  command: python collect_env.py
 - label: Speculative decoding tests
   #mirror_hardwares: [amd]
   working_dir: "/vllm-workspace/tests/spec_decode/e2e"

@@ -3,23 +3,6 @@
 {% set default_working_dir = "/vllm-workspace/tests" %}
 
 steps:
-  - label: ":docker: build image"
-    agents:
-      queue: cpu_queue
-    commands:
-      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "docker build --build-arg max_jobs=16 --tag {{ docker_image }} --target test --progress plain ."
-      - "docker push {{ docker_image }}"
-    env:
-      DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 5
-        - exit_status: -10  # Agent was lost
-          limit: 5
-  - wait
-
   {% for step in steps %}
   - label: "{{ step.label }}"
     agents:
@@ -42,7 +25,7 @@ steps:
           limit: 5
     plugins:
       - docker#v5.2.0:
-          image: {{ docker_image }}
+          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:452a3d88f34325c15a33a765d67b2d126999a6c4"
           shm-size: "32g"
           always-pull: true
           propagate-environment: true
@@ -56,7 +39,6 @@ steps:
             - NVIDIA_VISIBLE_DEVICES=all
             - NVIDIA_DRIVER_CAPABILITIES=all
             - CUDA_LAUNCH_BLOCKING=1
-            - VLLM_ATTENTION_BACKEND=XFORMERS
           volumes:
             - type: tmpfs
               target: /dev/shm
