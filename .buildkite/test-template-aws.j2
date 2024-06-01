@@ -25,7 +25,7 @@ steps:
           limit: 5
     plugins:
       - docker#v5.2.0:
-          image: "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:452a3d88f34325c15a33a765d67b2d126999a6c4"
+          image: "us-central1-docker.pkg.dev/vllm-405802/vllm-ci-test-repo/vllm-test:e79655a130c643a2b1bc4abefc20bd14b46b556b"
           shm-size: "32g"
           always-pull: true
           propagate-environment: true
