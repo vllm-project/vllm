@@ -269,7 +269,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return output
+        return torch.narrow(output, 0, 0, x.shape[0])
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
