@@ -1,8 +1,8 @@
 #include "cache.h"
 #include "ops.h"
+#include "registration.h"
 
 #include <torch/library.h>
-#include <Python.h>
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
