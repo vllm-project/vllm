@@ -233,27 +233,43 @@ class Fp8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
         # ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.act_scale is None and x_scale computed from x.
         #   If static,  layer.act_scale is scalar and x_scale set to act_scale.
-        qinput, x_scale = ops.scaled_fp8_quant(x,
-                                               layer.act_scale,
-                                               batch_dim_padding=17)
 
-        # Fused GEMM_DQ -- note we padded the input above because
-        # torch._scaled_mm is more performant for matrices with
-        # batch dimension > 16. Note that this could change
-        # in the future.
-        output, _ = torch._scaled_mm(
-            qinput,
-            layer.weight,
-            out_dtype=x.dtype,
-            scale_a=x_scale,
-            scale_b=layer.weight_scale,
-            bias=bias,
-        )
+        # We use the CUTLASS kernels by default but they don't support bias yet
+        if bias is None:
+            qinput, x_scale = ops.scaled_fp8_quant(x, layer.act_scale)
 
-        return torch.narrow(output, 0, 0, x.shape[0])
+            # Fused GEMM_DQ
+            output = ops.cutlass_scaled_mm_dq(
+                qinput,
+                layer.weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+            )
+
+        else:
+            qinput, x_scale = ops.scaled_fp8_quant(x,
+                                                   layer.act_scale,
+                                                   batch_dim_padding=17)
+
+            # Fused GEMM_DQ -- note we padded the input above because
+            # torch._scaled_mm is more performant for matrices with
+            # batch dimension > 16. Note that this could change
+            # in the future.
+            output, _ = torch._scaled_mm(
+                qinput,
+                layer.weight,
+                out_dtype=x.dtype,
+                scale_a=x_scale,
+                scale_b=layer.weight_scale,
+                bias=bias,
+            )
+
+        return output
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
