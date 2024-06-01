@@ -158,6 +158,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         current_index = 0
         for i in range(len(quant_states)):
             output_size = quant_states[i].shape[0]
+            # It is more efficient to use out kwarg like
+            # matmul_4bit(..., out = ...).  Infeasible now due to the bug
+            # https://github.com/TimDettmers/bitsandbytes/issues/1235.
+            # Need to change  after the bug is fixed.
             out[:, current_index:current_index + output_size] = matmul_4bit(
                 bf_x, qweight[offsets[i]:offsets[i + 1]].t(), quant_states[i])
 
