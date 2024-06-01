@@ -21,9 +21,9 @@ The custom PagedAttention kernel is enabled for dtype: fp16, block-size=16, head
 
 ## Fp8 Quantization
 
-To use fp8 quantization, first step is to use Nvidia ammo to quantize your model to fp8 format, following this [instruction](https://github.com/vllm-project/vllm/blob/main/examples/fp8/quantizer/README.md). This will give a safetensor file that contains the quantized weights and the corresponding scaling factors of your model. We will need to put the safetensor file under your model folder, and add file called `serenity_config.json`, which contains a json object with a key: `"quantized_weights": "quantized/osf/rank0.safetensors"`, the value should be the releative path of your safetensor file containing the quantized weights.
+To use fp8 quantization, first step is to quantize your model to fp8 format. Generating a safetensor file that contains the quantized weights and the corresponding scaling factors of your model. The safetensor file should be added under your model folder along with a file called `serenity_config.json`, which contains a json object with a key: `"quantized_weights": "quantized/osf/rank0.safetensors"`, the value should be the relative path of your safetensor file containing the quantized weights.
 
-Then we can run a model with fp8 quantization using vllm, just add a parameter `quantization="fp8"` when creating the vllm.LLM object.
+Then we can run a model with fp8 quantization using vllm, just add a parameter `quantization="fp8"` when creating the `vllm.LLM` object.
 
 ## Gemm Tunning for Fp8
 
@@ -37,7 +37,7 @@ Next, run gradlib to obtain the best solutions of these shapes:
 cd gradlib_fp8
 python3 -m pip uninstall gradlib
 python3 setup.py install
-python3 gemm_tunner.py --input_file /fp8_shapes.csv --tuned_file /tuned_fp8_16.csv
+python3 gemm_tuner.py --input_file /fp8_shapes.csv --tuned_file /tuned_fp8_16.csv
 cd ../gradlib
 python3 -m pip uninstall gradlib
 python3 setup.py install

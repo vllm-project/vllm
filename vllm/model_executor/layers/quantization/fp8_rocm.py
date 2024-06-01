@@ -59,7 +59,7 @@ class Fp8RocmConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "serenity"
+        return "Fp8Rocm"
 
     def get_linear_method(self) -> "Fp8RocmLinearLayer":
         return Fp8RocmLinearLayer(self)
