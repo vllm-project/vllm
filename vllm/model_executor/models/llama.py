@@ -454,8 +454,7 @@ class LlamaForCausalLM(nn.Module):
             ("self_attn.qkv_proj", "attention.qkv"),
         ]
         tp_rank = get_tensor_model_parallel_rank()
-        quantized_filename: str = quant_config.quantized_weights_path[
-            f"rank0"]
+        quantized_filename: str = quant_config.quantized_weights_path
         #quantized_filename = "quantized/osf/rank0.safetensors"
         if not quantized_filename.startswith('/'):
             quantized_filename = os.path.join(model_name_or_path,
