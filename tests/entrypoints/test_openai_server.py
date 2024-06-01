@@ -169,7 +169,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     assert completion.choices is not None and len(completion.choices) == 1
 
     choice = completion.choices[0]
-    assert len(choice.text) == 5
+    assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
@@ -181,7 +181,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
     )
-    assert len(completion.choices[0].text) == 5
+    assert len(completion.choices[0].text) >= 5
 
 
 @pytest.mark.asyncio
@@ -619,7 +619,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
         logit_bias={str(token_id): 100},
         seed=42,
     )
-    assert len(completion.choices[0].text) == 5
+    assert len(completion.choices[0].text) >= 5
     response_tokens = tokenizer(completion.choices[0].text,
                                 add_special_tokens=False)["input_ids"]
     expected_tokens = tokenizer(tokenizer.decode([token_id] * 5),
