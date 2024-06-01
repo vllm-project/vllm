@@ -547,7 +547,7 @@ class ShardedStateLoader(BaseModelLoader):
 
 
 class BitsAndBytesModelLoader(BaseModelLoader):
-    """Model loader to load model weights with BitAndBytes quabntization."""
+    """Model loader to load model weights with BitAndBytes quantization."""
 
     default_target_modules = [
         "gate_proj", "down_proj", "up_proj", "q_proj", "k_proj", "v_proj",
@@ -654,7 +654,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     ) -> Tuple[Generator[Tuple[str, torch.Tensor], None, None], Dict[str,
                                                                      Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
-
         as well as the quantization state dictionary."""
 
         # only load the bitsandbytes module when needed

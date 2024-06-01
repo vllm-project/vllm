@@ -35,7 +35,7 @@ class BitsAndBytesConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(self) -> List[torch.dtype]:
-        return [torch.half]
+        return [torch.float32, torch.float16, torch.bfloat16]
 
     @classmethod
     def get_min_capability(self) -> int:
@@ -123,7 +123,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
             qweight,
             {
                 "input_dim": 0,
-                # In bitsandbytes, a tensor of shape [n,m] is qunatized to
+                # In bitsandbytes, a tensor of shape [n,m] is quantized to
                 #[n*m/pack_ratio, 1],so the output_dim is 0
                 "output_dim": 0,
                 "pack_factor": quant_ratio,
@@ -140,7 +140,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         # only load the bitsandbytes module when needed
         from bitsandbytes import matmul_4bit
 
-        orginal_type = x.dtype
+        original_type = x.dtype
         bf_x = x.to(torch.bfloat16)
 
         qweight = layer.qweight
@@ -167,7 +167,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             current_index += output_size
 
-        out = out.to(orginal_type)
+        out = out.to(original_type)
 
         if bias is not None:
             out += bias
