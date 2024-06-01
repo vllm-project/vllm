@@ -83,7 +83,7 @@ RUN python3 check-wheel-size.py dist
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM nvidia/cuda:12.4.1-base-ubuntu22.04 AS vllm-base
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04 AS vllm-base
 WORKDIR /vllm-workspace
 
 RUN apt-get update -y \
