@@ -2,6 +2,8 @@ from typing import List, Optional, Tuple, Type
 
 import torch
 
+# TODO: try torch.ops.load_library here
+
 try:
     # ruff: noqa: SIM105
     import vllm._C
