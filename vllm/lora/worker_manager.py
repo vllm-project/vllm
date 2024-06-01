@@ -42,7 +42,8 @@ class AbstractWorkerLoRAManager(ABC):
         yield
         self._cached_dummy_lora = False
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def is_enabled(self) -> bool:
         ...
 
