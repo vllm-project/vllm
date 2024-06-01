@@ -1,6 +1,8 @@
 #include "cache.h"
 #include "ops.h"
-#include <torch/extension.h>
+
+#include <torch/library.h>
+#include <Python.h>
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -101,5 +103,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
 }
 
-// TODO: get rid of this?
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

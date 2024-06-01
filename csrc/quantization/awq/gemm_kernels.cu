@@ -7,7 +7,7 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 }
  */
 
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
 #include "dequantize.cuh"
@@ -483,6 +483,21 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
   return _de_kernel;
 }
 
+torch::Tensor awq_dequantize_meta(torch::Tensor _kernel,
+                                  torch::Tensor _scaling_factors,
+                                  torch::Tensor _zeros, int64_t split_k_iters,
+                                  int64_t thx, int64_t thy) {
+  int in_c = _kernel.size(0);
+  int qout_c = _kernel.size(1);
+  int out_c = qout_c * 8;
+
+  auto options = torch::TensorOptions()
+                     .dtype(_scaling_factors.dtype())
+                     .device(_scaling_factors.device());
+
+  return torch::empty({in_c, out_c}, options);
+}
+
 // in_feats: M, IC [float16]
 // kernel: IC, OC // 8 [int32] -> cast to IC, OC [uint4b]
 // scaling_factors: IC // G, OC [float16]
@@ -546,4 +561,14 @@ torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
             num_in_feats, num_in_channels, num_out_channels, out_feats);
   }
   return _out_feats.sum(0);
+}
+
+torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
+                            torch::Tensor _scaling_factors,
+                            torch::Tensor _zeros, int64_t split_k_iters) {
+  int num_in_feats = _in_feats.size(0);
+  auto options = torch::TensorOptions()
+                     .dtype(_in_feats.dtype())
+                     .device(_in_feats.device());
+  return torch::empty({_kernel.size(1) * 8}, options);
 }

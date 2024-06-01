@@ -1,3 +1,4 @@
+#include "registration.h"
 #include "moe_ops.h"
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
@@ -8,5 +9,4 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 }
 
-// TODO: get rid of this?
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

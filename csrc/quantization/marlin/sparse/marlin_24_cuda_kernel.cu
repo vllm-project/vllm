@@ -16,7 +16,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <torch/extension.h>
+#include <torch/all.h>
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -1122,4 +1122,12 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
       thread_m, sms, max_par);
 
   return c;
+}
+
+torch::Tensor gptq_marlin_24_gemm_meta(
+    torch::Tensor& a, torch::Tensor& b_q_weight, torch::Tensor& b_meta,
+    torch::Tensor& b_scales, torch::Tensor& workspace, int64_t num_bits,
+    int64_t size_m, int64_t size_n, int64_t size_k) {
+  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
+  return torch::empty({size_m, size_n}, options);
 }

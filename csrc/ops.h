@@ -1,8 +1,15 @@
 #pragma once
 
-#define TORCH_LIBRARY_EXPAND(NAME, MODULE) TORCH_LIBRARY(NAME, MODULE)
-#define _CONCAT(A, B) A##B
-#define CONCAT(A, B) _CONCAT(A, B)
+#include <torch/library.h>
+
+// Note on op signatures (TODO)
+// The X_meta signatures are for the meta functions corresponding to op X.
+// They must be kept in sync with the signature for X.  Generally, only
+// functions that return Tensors require a meta function.
+//
+// See the following links for detailed docs on op registration and function schemas.
+// https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
+// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
 
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -58,22 +65,45 @@ torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
+torch::Tensor aqlm_gemm_meta(const torch::Tensor& input, const torch::Tensor& codes,
+                             const torch::Tensor& codebooks,
+                             const torch::Tensor& scales,
+                             const torch::Tensor& codebook_partition_sizes,
+                             const std::optional<torch::Tensor>& bias);
+
 torch::Tensor aqlm_dequant(const torch::Tensor& codes,
                            const torch::Tensor& codebooks,
                            const torch::Tensor& codebook_partition_sizes);
 
+torch::Tensor aqlm_dequant_meta(const torch::Tensor& codes,
+                                const torch::Tensor& codebooks,
+                                const torch::Tensor& codebook_partition_sizes);
+
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
                        int64_t split_k_iters);
+
+torch::Tensor awq_gemm_meta(torch::Tensor _in_feats, torch::Tensor _kernel,
+                            torch::Tensor _scaling_factors, torch::Tensor _zeros,
+                            int64_t split_k_iters);
 
 torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _scaling_factors,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
+torch::Tensor awq_dequantize_meta(torch::Tensor _kernel,
+                                  torch::Tensor _scaling_factors,
+                                  torch::Tensor _zeros, int64_t split_k_iters,
+                                  int64_t thx, int64_t thy);
+
 torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                           torch::Tensor& b_scales, torch::Tensor& workspace,
                           int64_t size_m, int64_t size_n, int64_t size_k);
+
+torch::Tensor marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
+                               torch::Tensor& b_scales, torch::Tensor& workspace,
+                               int64_t size_m, int64_t size_n, int64_t size_k);
 
 torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   torch::Tensor& b_meta,
@@ -82,15 +112,32 @@ torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                   int64_t size_m, int64_t size_n,
                                   int64_t size_k);
 
+torch::Tensor gptq_marlin_24_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
+                                       torch::Tensor& b_meta,
+                                       torch::Tensor& b_scales,
+                                       torch::Tensor& workspace, int64_t num_bits,
+                                       int64_t size_m, int64_t size_n,
+                                       int64_t size_k);
+
 torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& b_scales, torch::Tensor& g_idx,
                                torch::Tensor& perm, torch::Tensor& workspace,
                                int64_t num_bits, int64_t size_m, int64_t size_n,
                                int64_t size_k, bool is_k_full);
 
+torch::Tensor gptq_marlin_gemm_meta(torch::Tensor& a, torch::Tensor& b_q_weight,
+                                    torch::Tensor& b_scales, torch::Tensor& g_idx,
+                                    torch::Tensor& perm, torch::Tensor& workspace,
+                                    int64_t num_bits, int64_t size_m, int64_t size_n,
+                                    int64_t size_k, bool is_k_full);
+
 torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
                                  int64_t size_k, int64_t size_n,
                                  int64_t num_bits);
+
+torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
+                                      torch::Tensor& perm, int64_t size_k,
+                                      int64_t size_n, int64_t num_bits);
 
 void cutlass_scaled_mm_dq(torch::Tensor& out, torch::Tensor const& a,
                           torch::Tensor const& b, torch::Tensor const& a_scales,
@@ -111,6 +158,11 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
                         torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
                         bool use_exllama, int64_t bit);
+
+torch::Tensor gptq_gemm_meta(torch::Tensor a, torch::Tensor b_q_weight,
+                             torch::Tensor b_gptq_qzeros,
+                             torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
+                             bool use_exllama, int64_t bit);
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 

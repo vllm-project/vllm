@@ -1,116 +1,9 @@
 #include "cache.h"
 #include "cuda_utils.h"
 #include "ops.h"
-// #include "quantization/gptq_marlin/gptq_marlin.cuh"  //??
-#include <torch/extension.h>
+#include "registration.h"
 
-torch::Tensor gptq_marlin_repack_meta(torch::Tensor& b_q_weight,
-                                      torch::Tensor& perm, int64_t size_k,
-                                      int64_t size_n, int64_t num_bits);
-
-// See
-// https://docs.google.com/document/d/1_W62p8WJOQQUzPsJYa7s701JXt0qf2OfLub2sbkHOaU/edit#heading=h.ptttacy8y1u9
-// https://github.com/pytorch/pytorch/blob/main/aten/src/ATen/native/README.md#annotations
-
-// where should these live?  near the implementations of the kernels?
-namespace vllm::meta {
-
-torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
-                        const torch::Tensor& codebooks,
-                        const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias) {
-  auto input_sizes = input.sizes();
-
-  auto out_features = codes.size(0) * codebooks.size(2);
-  auto flat_input = input.reshape({-1, input.size(-1)});
-  auto flat_output = torch::empty(
-      {flat_input.size(0), out_features},
-      torch::TensorOptions().dtype(input.dtype()).device(input.device()));
-
-  auto output_sizes = input_sizes.vec();
-  output_sizes.pop_back();
-  output_sizes.push_back(-1);
-  return flat_output.reshape(output_sizes);
-}
-
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes) {
-  auto in_features = codes.size(1) * 8;
-  auto out_features = codes.size(0);
-  return torch::empty({out_features, in_features},
-                      torch::TensorOptions()
-                          .dtype(codebooks.dtype())
-                          .device(codebooks.device()));
-}
-
-torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
-                       torch::Tensor _scaling_factors, torch::Tensor _zeros,
-                       int64_t split_k_iters) {
-  int num_in_feats = _in_feats.size(0);
-  auto options = torch::TensorOptions()
-                     .dtype(_in_feats.dtype())
-                     .device(_in_feats.device());
-#if 0
-  at::Tensor _out_feats =
-      torch::empty({num_in_feats, _kernel.size(1) * 8}, options);
-  return _out_feats.sum(0);
-#else
-  return torch::empty({_kernel.size(1) * 8}, options);
-#endif
-}
-
-torch::Tensor awq_dequantize(torch::Tensor _kernel,
-                             torch::Tensor _scaling_factors,
-                             torch::Tensor _zeros, int64_t split_k_iters,
-                             int64_t thx, int64_t thy) {
-  int in_c = _kernel.size(0);
-  int qout_c = _kernel.size(1);
-  int out_c = qout_c * 8;
-
-  auto options = torch::TensorOptions()
-                     .dtype(_scaling_factors.dtype())
-                     .device(_scaling_factors.device());
-
-  return torch::empty({in_c, out_c}, options);
-}
-
-torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                          torch::Tensor& b_scales, torch::Tensor& workspace,
-                          int64_t size_m, int64_t size_n, int64_t size_k) {
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  return torch::empty({size_m, size_n}, options);
-}
-
-torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                  torch::Tensor& b_meta,
-                                  torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits,
-                                  int64_t size_m, int64_t size_n,
-                                  int64_t size_k) {
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  return torch::empty({size_m, size_n}, options);
-}
-
-torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full) {
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  return torch::empty({size_m, size_n}, options);
-}
-
-torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
-                        torch::Tensor b_gptq_qzeros,
-                        torch::Tensor b_gptq_scales, torch::Tensor b_g_idx,
-                        bool use_exllama, int64_t bit) {
-  auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
-  return torch::empty({a.size(0), b_q_weight.size(1)}, options);
-}
-
-}  // namespace vllm::meta
+#include <torch/library.h>
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -201,38 +94,37 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantized GEMM for AQLM.
   ops.def("aqlm_gemm", &aqlm_gemm);
   ops.impl("aqlm_gemm", torch::kCUDA, &aqlm_gemm);
-  ops.impl("aqlm_gemm", torch::kMeta, &vllm::meta::aqlm_gemm);
+  ops.impl("aqlm_gemm", torch::kMeta, &aqlm_gemm_meta);
 
   // Decompression method for AQLM.
   ops.def("aqlm_dequant", &aqlm_dequant);
   ops.impl("aqlm_dequant", torch::kCUDA, &aqlm_dequant);
-  ops.impl("aqlm_dequant", torch::kMeta, &vllm::meta::aqlm_dequant);
+  ops.impl("aqlm_dequant", torch::kMeta, &aqlm_dequant_meta);
 
   // Quantized GEMM for AWQ.
   ops.def("awq_gemm", &awq_gemm);
   ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
-  ops.impl("awq_gemm", torch::kMeta, &vllm::meta::awq_gemm);
+  ops.impl("awq_gemm", torch::kMeta, &awq_gemm_meta);
 
   // Dequantization for AWQ.
   ops.def("awq_dequantize", &awq_dequantize);
   ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
-  ops.impl("awq_dequantize", torch::kMeta, &vllm::meta::awq_dequantize);
+  ops.impl("awq_dequantize", torch::kMeta, &awq_dequantize_meta);
 
   // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
   ops.def("marlin_gemm", &marlin_gemm);
   ops.impl("marlin_gemm", torch::kCUDA, &marlin_gemm);
-  ops.impl("marlin_gemm", torch::kMeta, &vllm::meta::marlin_gemm);
+  ops.impl("marlin_gemm", torch::kMeta, &marlin_gemm_meta);
 
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
   ops.def("gptq_marlin_24_gemm", &gptq_marlin_24_gemm);
   ops.impl("gptq_marlin_24_gemm", torch::kCUDA, &gptq_marlin_24_gemm);
-  ops.impl("gptq_marlin_24_gemm", torch::kMeta,
-           &vllm::meta::gptq_marlin_24_gemm);
+  ops.impl("gptq_marlin_24_gemm", torch::kMeta, &gptq_marlin_24_gemm_meta);
 
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def("gptq_marlin_gemm", &gptq_marlin_gemm);
   ops.impl("gptq_marlin_gemm", torch::kCUDA, &gptq_marlin_gemm);
-  ops.impl("gptq_marlin_gemm", torch::kMeta, &vllm::meta::gptq_marlin_gemm);
+  ops.impl("gptq_marlin_gemm", torch::kMeta, &gptq_marlin_gemm_meta);
 
   // gptq_marlin repack from GPTQ.
   ops.def("gptq_marlin_repack", &gptq_marlin_repack);
@@ -251,7 +143,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantized GEMM for GPTQ.
   ops.def("gptq_gemm", &gptq_gemm);
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
-  ops.impl("gptq_gemm", torch::kMeta, &vllm::meta::gptq_gemm);
+  ops.impl("gptq_gemm", torch::kMeta, &gptq_gemm_meta);
 
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
@@ -375,4 +267,4 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 }
 #endif
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
