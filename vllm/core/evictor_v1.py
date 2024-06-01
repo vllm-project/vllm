@@ -1,5 +1,5 @@
 import enum
-from abc import ABC, abstractmethod, abstractproperty
+from abc import ABC, abstractmethod
 from typing import OrderedDict
 
 from vllm.block import PhysicalTokenBlock
