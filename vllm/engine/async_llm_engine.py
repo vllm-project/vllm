@@ -525,6 +525,12 @@ class AsyncLLMEngine:
                     "Engine iteration timed out. This should never happen!")
                 self.set_errored(exc)
                 raise
+            except Exception as e:
+                # maybe cuda out of memory or other exception, this exception lead to AsyncEngineDeadError: Background loop has errored already.
+                logger.error(f"Engine iteration error: {str(e)}")
+
+                # abort all of request that impacted by this exception, then later request can be processed normally.
+                self._error_callback(e)
             await asyncio.sleep(0)
 
     async def add_request(
