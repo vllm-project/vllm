@@ -278,9 +278,9 @@ class LLM:
         """
         if self.llm_engine.model_config.embedding_mode:
             raise ValueError(
-                "LLM.generate() is only supported for generation models (XForCausalLM)."
-            )
-    
+                "LLM.generate() is only supported for generation models "
+                "(XForCausalLM).")
+
         if prompt_token_ids is not None or multi_modal_data is not None:
             inputs = self._convert_v1_inputs(
                 prompts=cast(Optional[Union[str, List[str]]], prompts),
