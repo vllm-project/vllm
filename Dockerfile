@@ -79,30 +79,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 RUN python3 check-wheel-size.py dist
 
-# the `vllm_nccl` package must be installed from source distribution
-# pip is too smart to store a wheel in the cache, and other CI jobs
-# will directly use the wheel from the cache, which is not what we want.
-# we need to remove it manually
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip cache remove vllm_nccl*
 #################### EXTENSION Build IMAGE ####################
-
-#################### FLASH_ATTENTION Build IMAGE ####################
-FROM dev as flash-attn-builder
-# max jobs used for build
-ARG max_jobs=2
-ENV MAX_JOBS=${max_jobs}
-# flash attention version
-ARG flash_attn_version=v2.5.8
-ENV FLASH_ATTN_VERSION=${flash_attn_version}
-
-WORKDIR /usr/src/flash-attention-v2
-
-# Download the wheel or build it if a pre-compiled release doesn't exist
-RUN pip --verbose wheel flash-attn==${FLASH_ATTN_VERSION} \
-    --no-build-isolation --no-deps --no-cache-dir
-
-#################### FLASH_ATTENTION Build IMAGE ####################
 
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
@@ -122,10 +99,6 @@ RUN ldconfig /usr/local/cuda-12.4/compat/
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/root/.cache/pip \
     pip install dist/*.whl --verbose
-
-RUN --mount=type=bind,from=flash-attn-builder,src=/usr/src/flash-attention-v2,target=/usr/src/flash-attention-v2 \
-    --mount=type=cache,target=/root/.cache/pip \
-    pip install /usr/src/flash-attention-v2/*.whl --no-cache-dir
 #################### vLLM installation IMAGE ####################
 
 

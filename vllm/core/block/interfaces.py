@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, FrozenSet, List, Optional, Protocol
+from typing import FrozenSet, List, Optional, Protocol, Tuple
 
 from vllm.utils import Device
 
@@ -122,7 +122,7 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+    def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -187,7 +187,7 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def clear_copy_on_writes(self) -> Dict[int, List[int]]:
+    def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         pass
 
     @abstractmethod
@@ -202,4 +202,13 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_common_computed_block_ids(
             self, seq_block_ids: List[List[int]]) -> List[int]:
+        pass
+
+    @abstractmethod
+    def allocate_or_get_null_block(self) -> Block:
+        """
+        Null blocks are used as a placeholders for KV cache blocks that have
+        been dropped due to sliding window.
+        There is at most one null block per allocator.
+        """
         pass

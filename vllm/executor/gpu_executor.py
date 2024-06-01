@@ -1,9 +1,9 @@
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.sequence import ExecuteModelRequest, PoolerOutput, SamplerOutput
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -15,14 +15,13 @@ class GPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
-
-        If speculative decoding is enabled, we instead create the speculative
-        worker.
         """
-        if self.speculative_config is None:
-            self._init_non_spec_worker()
-        else:
-            self._init_spec_worker()
+        assert self.parallel_config.world_size == 1, (
+            "GPUExecutor only supports single GPU.")
+
+        self.driver_worker = self._create_worker()
+        self.driver_worker.init_device()
+        self.driver_worker.load_model()
 
     def _get_worker_kwargs(
             self,
@@ -45,6 +44,7 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             vision_language_config=self.vision_language_config,
+            speculative_config=self.speculative_config,
             is_driver_worker=rank == 0,
         )
 
@@ -52,52 +52,21 @@ class GPUExecutor(ExecutorBase):
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
+
+        if self.speculative_config is None:
+            worker_module_name = "vllm.worker.worker"
+            worker_class_name = "Worker"
+        else:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+
         wrapper = WorkerWrapperBase(
-            worker_module_name="vllm.worker.worker",
-            worker_class_name="Worker",
+            worker_module_name=worker_module_name,
+            worker_class_name=worker_class_name,
         )
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
         return wrapper.worker
-
-    def _init_non_spec_worker(self):
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU.")
-
-        self.driver_worker = self._create_worker()
-        self.driver_worker.init_device()
-        self.driver_worker.load_model()
-
-    def _init_spec_worker(self):
-        """Initialize a SpecDecodeWorker, using a draft model for proposals.
-        """
-        assert self.speculative_config is not None
-
-        from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
-
-        target_worker = self._create_worker()
-
-        draft_worker_kwargs = self._get_worker_kwargs()
-        # Override draft-model specific worker args.
-        draft_worker_kwargs.update(
-            model_config=self.speculative_config.draft_model_config,
-            parallel_config=self.speculative_config.draft_parallel_config,
-            # TODO allow draft-model specific load config.
-            #load_config=self.load_config,
-        )
-
-        spec_decode_worker = SpecDecodeWorker.create_worker(
-            scorer_worker=target_worker,
-            draft_worker_kwargs=draft_worker_kwargs,
-        )
-
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU.")
-
-        self.driver_worker = spec_decode_worker
-
-        # Load model handled in spec decode worker.
-        self.driver_worker.init_device()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
@@ -117,8 +86,8 @@ class GPUExecutor(ExecutorBase):
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self, execute_model_req: ExecuteModelRequest
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = self.driver_worker.execute_model(execute_model_req)
         return output
 
@@ -144,7 +113,7 @@ class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
     async def execute_model_async(
         self,
         execute_model_req: ExecuteModelRequest,
-    ) -> List[SamplerOutput]:
+    ) -> List[Union[SamplerOutput, PoolerOutput]]:
         output = await make_async(self.driver_worker.execute_model
                                   )(execute_model_req=execute_model_req, )
         return output

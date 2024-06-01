@@ -11,12 +11,17 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
+    def get_name() -> str:
+        raise NotImplementedError
+
+    @staticmethod
+    @abstractmethod
     def get_impl_cls() -> Type["AttentionImpl"]:
         raise NotImplementedError
 
     @staticmethod
     @abstractmethod
-    def make_metadata(*args, **kwargs) -> "AttentionMetadataPerStage":
+    def make_metadata(*args, **kwargs) -> "AttentionMetadata":
         raise NotImplementedError
 
     @staticmethod
@@ -34,7 +39,7 @@ class AttentionBackend(ABC):
     def swap_blocks(
         src_kv_cache: torch.Tensor,
         dst_kv_cache: torch.Tensor,
-        src_to_dst: Dict[int, int],
+        src_to_dst: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
@@ -42,14 +47,40 @@ class AttentionBackend(ABC):
     @abstractmethod
     def copy_blocks(
         kv_caches: List[torch.Tensor],
-        src_to_dists: Dict[int, List[int]],
+        src_to_dists: torch.Tensor,
     ) -> None:
         raise NotImplementedError
 
 
 @dataclass
-class AttentionMetadataPerStage:
-    """Attention metadata for a specific stage. I.e., prefill or decode."""
+class AttentionMetadata:
+    """Attention metadata for prefill and decode batched together."""
+    # Total number of prefill requests.
+    num_prefills: int
+    # Number of prefill tokens.
+    num_prefill_tokens: int
+    # Number of decode tokens. Note that it is equivalent to the number of
+    # decode requests.
+    num_decode_tokens: int
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+
+    @property
+    @abstractmethod
+    def prefill_metadata(self) -> Optional["AttentionMetadata"]:
+        """Return the attention metadata that's required to run prefill
+        attention."""
+        pass
+
+    @property
+    @abstractmethod
+    def decode_metadata(self) -> Optional["AttentionMetadata"]:
+        """Return the attention metadata that's required to run decode
+        attention."""
+        pass
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -65,42 +96,10 @@ class AttentionMetadataPerStage:
         }
 
 
-T = TypeVar("T", bound=AttentionMetadataPerStage)
+T = TypeVar("T", bound=AttentionMetadata)
 
 
-@dataclass
-class AttentionMetadata(Generic[T]):
-    """Attention metadata for prefill and decode batched together."""
-    # Total number of prefill requests.
-    num_prefills: int
-    # Number of prefill tokens.
-    num_prefill_tokens: int
-    # Number of decode tokens. Note that it is equivalent to the number of
-    # decode requests.
-    num_decode_tokens: int
-    # The attention metadata for prefill requests in a batch.
-    # None if there's no prefill requests in a batch.
-    prefill_metadata: Optional[T]
-    # The attention metadata for decode requests in a batch.
-    # None if there's no decode requests in a batch.
-    decode_metadata: Optional[T]
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor
-    # The kv cache's data type.
-    kv_cache_dtype: str
-
-    def __post_init__(self):
-        if self.num_prefill_tokens > 0:
-            assert self.num_prefills > 0
-            assert self.prefill_metadata is not None
-        if self.num_decode_tokens > 0:
-            assert self.decode_metadata is not None
-
-
-class AttentionImpl(ABC):
+class AttentionImpl(ABC, Generic[T]):
 
     @abstractmethod
     def __init__(
@@ -111,6 +110,8 @@ class AttentionImpl(ABC):
         num_kv_heads: Optional[int] = None,
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
+        kv_cache_dtype: str = "auto",
+        blocksparse_params: Optional[Dict[str, Any]] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -121,7 +122,7 @@ class AttentionImpl(ABC):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        kv_scale: float,
+        attn_metadata: T,
+        kv_scale: float = 1.0,
     ) -> torch.Tensor:
         raise NotImplementedError

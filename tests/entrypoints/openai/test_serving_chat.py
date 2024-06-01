@@ -1,10 +1,14 @@
 import asyncio
 from dataclasses import dataclass
 
+import pytest
+
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
 MODEL_NAME = "openai-community/gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
+
+pytestmark = pytest.mark.openai
 
 
 @dataclass
@@ -14,17 +18,22 @@ class MockModelConfig:
     tokenizer_mode = "auto"
     max_model_len = 100
     tokenizer_revision = None
+    embedding_mode = False
 
 
 @dataclass
 class MockEngine:
 
     async def get_model_config(self):
-        return MockModelConfig
+        return MockModelConfig()
 
 
 async def _async_serving_chat_init():
-    serving_completion = OpenAIServingChat(MockEngine(),
+    engine = MockEngine()
+    model_config = await engine.get_model_config()
+
+    serving_completion = OpenAIServingChat(engine,
+                                           model_config,
                                            served_model_names=[MODEL_NAME],
                                            response_role="assistant",
                                            chat_template=CHAT_TEMPLATE)

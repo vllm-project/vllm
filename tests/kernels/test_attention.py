@@ -3,12 +3,13 @@ from typing import List, Optional, Tuple
 
 import pytest
 import torch
-from allclose_default import get_default_atol, get_default_rtol
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import BlockDiagonalCausalMask
 
 from vllm import _custom_ops as ops
 from vllm.utils import get_max_shared_memory_bytes, is_hip
+
+from .allclose_default import get_default_atol, get_default_rtol
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
@@ -27,7 +28,7 @@ NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62
-HEAD_SIZES = [64, 80, 96, 112, 128, 256
+HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256
               ] if not is_hip() else [64, 80, 96, 112, 128]
 
 BLOCK_SIZES = [16, 32]
@@ -236,14 +237,14 @@ def test_paged_attention(
         dequantized_key_cache = torch.empty(size=key_cache_shape,
                                             dtype=dtype,
                                             device=device)
-        ops.convert_fp8(key_cache, dequantized_key_cache)
+        ops.convert_fp8(dequantized_key_cache, key_cache)
         key_cache = dequantized_key_cache
 
         value_cache_shape = value_cache.shape
         dequantized_value_cache = torch.empty(size=value_cache_shape,
                                               dtype=dtype,
                                               device=device)
-        ops.convert_fp8(value_cache, dequantized_value_cache)
+        ops.convert_fp8(dequantized_value_cache, value_cache)
         value_cache = dequantized_value_cache
 
     ref_output = torch.empty_like(query)

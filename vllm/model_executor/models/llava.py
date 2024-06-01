@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Literal, Optional, Tuple, TypedDict, Union
 
 import torch
 from torch import nn
@@ -7,7 +7,7 @@ from torch import nn
 from transformers import CLIPVisionModel, LlavaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import VisionLanguageConfig
+from vllm.config import CacheConfig, VisionLanguageConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -18,6 +18,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
+
+from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
     "language_model.lm_head": "lm_head",
@@ -40,7 +42,7 @@ class LlavaMultiModalProjector(nn.Module):
                                   text_hidden_size,
                                   bias=True)
 
-    def forward(self, image_features):
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states = self.linear_2(hidden_states)
@@ -50,28 +52,46 @@ class LlavaMultiModalProjector(nn.Module):
 def _merge_vision_embeddings(input_ids: torch.Tensor,
                              inputs_embeds: torch.Tensor,
                              vision_embeddings: torch.Tensor,
-                             image_token_id: int):
+                             image_token_id: int) -> torch.Tensor:
     """In place merges in vision_embeddings with inputs_embeds."""
     mask = (input_ids == image_token_id)
-    inputs_embeds[mask] = vision_embeddings.view(-1,
+
+    image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
+    if mask.sum() != image_feature_size:
+        raise ValueError(f"image_feature_size should be {image_feature_size}, "
+                         f"but found: {mask.sum()}")
+
+    inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
                                                  vision_embeddings.shape[-1])
 
+    return inputs_embeds
 
-class LlavaForConditionalGeneration(nn.Module):
+
+class LlavaImagePixelInputs(TypedDict):
+    type: Literal["pixel_values"]
+    data: torch.Tensor
+    """Shape: (batch_size, num_channels, height, width)"""
+
+
+class LlavaImageFeatureInputs(TypedDict):
+    type: Literal["image_features"]
+    data: torch.Tensor
+    """Shape: (batch_size, image_feature_size, hidden_size)"""
+
+
+LlavaImageInputs = Union[LlavaImagePixelInputs, LlavaImageFeatureInputs]
+
+
+class LlavaForConditionalGeneration(VisionLanguageModelBase):
 
     def __init__(self,
-                 config: "LlavaConfig",
+                 config: LlavaConfig,
                  vision_language_config: VisionLanguageConfig,
-                 quant_config: Optional["QuantizationConfig"] = None) -> None:
-        super().__init__()
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
+        super().__init__(vision_language_config)
+
         self.config = config
-
-        self.vision_language_config = vision_language_config
-
-        assert self.vision_language_config, (
-            "Provide `image_input_type` and other vision "
-            "related configurations through LLM entrypoint "
-            "or engine arguments.")
 
         if self.vision_language_config.image_input_type == (
                 VisionLanguageConfig.ImageInputType.PIXEL_VALUES):
@@ -85,7 +105,8 @@ class LlavaForConditionalGeneration(nn.Module):
             projector_hidden_act=config.projector_hidden_act)
 
         self.quant_config = quant_config
-        self.language_model = LlamaModel(config.text_config, quant_config)
+        self.language_model = LlamaModel(config.text_config, cache_config,
+                                         quant_config)
         self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
@@ -96,14 +117,96 @@ class LlavaForConditionalGeneration(nn.Module):
                                                 config.vocab_size, logit_scale)
         self.sampler = Sampler()
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        image_input: Optional[torch.Tensor] = None
-    ) -> SamplerOutput:  # noqa: E501
+    def _validate_image_data(self, data: torch.Tensor) -> torch.Tensor:
+        if list(data.shape[1:]) != list(
+                self.vision_language_config.image_input_shape[1:]):
+            raise ValueError(
+                f"The expected image tensor shape is batch dimension plus "
+                f"{self.vision_language_config.image_input_shape[1:]}. "
+                f"You supplied {data.shape}. "
+                f"If you are using vLLM's entrypoint, make sure your "
+                f"supplied image input is consistent with "
+                f"image_input_shape in engine args.")
+
+        return data
+
+    def _parse_and_validate_image_input(
+            self, data: object) -> Optional[LlavaImageInputs]:
+        expected_input_type = self.vision_language_config.image_input_type
+        ImageInputType = VisionLanguageConfig.ImageInputType
+
+        if data is None:
+            return None
+
+        if expected_input_type == ImageInputType.PIXEL_VALUES:
+            if not isinstance(data, torch.Tensor):
+                raise TypeError("Image pixel vector should be a tensor, "
+                                f"but received type: {type(data)}")
+
+            return LlavaImagePixelInputs(
+                type="pixel_values",
+                data=self._validate_image_data(data),
+            )
+        elif expected_input_type == ImageInputType.IMAGE_FEATURES:
+            if not isinstance(data, torch.Tensor):
+                raise TypeError("Image feature vector should be a tensor, "
+                                f"but received type: {type(data)}")
+
+            return LlavaImageFeatureInputs(
+                type="image_features",
+                data=self._validate_image_data(data),
+            )
+
+        return None
+
+    def _select_image_features(self, image_features: torch.Tensor, *,
+                               strategy: str) -> torch.Tensor:
+        # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
+        if strategy == "default":
+            return image_features[:, 1:]
+        elif strategy == "full":
+            return image_features
+
+        raise ValueError(f"Unexpected select feature strategy: {strategy}")
+
+    def _image_pixels_to_features(self, vision_tower: CLIPVisionModel,
+                                  pixel_values: torch.Tensor) -> torch.Tensor:
+        # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
+        image_outputs = vision_tower(pixel_values.to(vision_tower.device),
+                                     output_hidden_states=True)
+
+        image_features = image_outputs.hidden_states[
+            self.config.vision_feature_layer]
+
+        return self._select_image_features(
+            image_features,
+            strategy=self.config.vision_feature_select_strategy,
+        )
+
+    def _process_image_pixels(self,
+                              inputs: LlavaImagePixelInputs) -> torch.Tensor:
+        assert self.vision_tower is not None
+
+        pixel_values = inputs["data"]
+
+        return self._image_pixels_to_features(self.vision_tower, pixel_values)
+
+    def _process_image_input(self,
+                             image_input: LlavaImageInputs) -> torch.Tensor:
+        if image_input["type"] == "pixel_values":
+            assert self.vision_tower is not None
+            image_features = self._process_image_pixels(image_input)
+        else:
+            image_features = image_input["data"]
+
+        return self.multi_modal_projector(image_features)
+
+    def forward(self,
+                input_ids: torch.Tensor,
+                positions: torch.Tensor,
+                kv_caches: List[torch.Tensor],
+                attn_metadata: AttentionMetadata,
+                image_input: Optional[torch.Tensor] = None) -> SamplerOutput:
         """Run forward pass for Llava 1.5.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -140,42 +243,20 @@ class LlavaForConditionalGeneration(nn.Module):
                 For PIXEL_VALUES, expecting [1, 3, 336, 336].
                 For IMAGE_FEATURES, expecting [1, 576, 1024].
         """
-        if image_input is not None:
-            if list(image_input.shape[1:]) != list(
-                    self.vision_language_config.image_input_shape[1:]):
-                raise ValueError(
-                    f"The expected image tensor shape is batch dimension "
-                    f"plus "
-                    f"{self.vision_language_config.image_input_shape[1:]}."
-                    f" You supplied {image_input.shape}. "
-                    f"If you are using vLLM's entrypoint, make sure your "
-                    f"supplied image input is consistent with "
-                    f"image_input_shape in engine args.")
-            if self.vision_tower is not None:
-                # TODO(xwjiang): Maybe port minimal CLIPVisionModel over.
-                image_outputs = self.vision_tower(image_input,
-                                                  output_hidden_states=True)
-                image_features = image_outputs.hidden_states[
-                    self.config.vision_feature_layer]
-                # Copied from https://github.com/huggingface/transformers/blob/39c3c0a72af6fbda5614dde02ff236069bb79827/src/transformers/models/llava/modeling_llava.py#L421  # noqa
-                if self.config.vision_feature_select_strategy == "default":
-                    image_features = image_features[:, 1:]
-                elif self.config.vision_feature_select_strategy == "full":
-                    image_features = image_features
-                else:
-                    raise ValueError(
-                        f"Unexpected select feature strategy: "
-                        f"{self.config.vision_feature_select_strategy}")
-            else:
-                image_features = image_input
-            vision_embeddings = self.multi_modal_projector(image_features)
+        parsed_image_input = self._parse_and_validate_image_input(image_input)
+
+        if parsed_image_input is not None:
+            vision_embeddings = self._process_image_input(parsed_image_input)
             inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-            _merge_vision_embeddings(
+
+            inputs_embeds = _merge_vision_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
                 self.vision_language_config.image_token_id)
+
             input_ids = None
         else:
             inputs_embeds = None
+
         hidden_states = self.language_model(input_ids,
                                             positions,
                                             kv_caches,

@@ -1,4 +1,5 @@
 import copy
+import weakref
 from typing import List, Tuple
 
 import torch
@@ -32,7 +33,7 @@ class MultiStepWorker(Worker):
         super().init_device()
 
         self._proposer = Top1Proposer(
-            self,
+            weakref.proxy(self),
             self.device,
             self.vocab_size,
             max_proposal_len=self.max_model_len,
@@ -113,6 +114,7 @@ class MultiStepWorker(Worker):
                 token_logprob = seq_output.logprobs[token_id]
 
                 seq.append_token_id(token_id, token_logprob.logprob)
+                seq.update_num_computed_tokens(1)
 
     def _shallow_copy_inputs(
         self, seq_group_metadata_list: List[SequenceGroupMetadata]

@@ -57,7 +57,7 @@ from .conftest import run_greedy_equality_correctness_test
 @pytest.mark.parametrize("output_len", [
     256,
 ])
-@pytest.mark.parametrize("batch_size", [1, 64])
+@pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
                                       test_llm_generator, batch_size: int,
@@ -161,6 +161,47 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
                            batch_size: int, output_len: int):
+    """Verify that ngram speculative decoding produces exact equality
+    to without spec decode with many different values of k and
+    different ngram_prompt_lookup_max.
+    """
+    run_greedy_equality_correctness_test(baseline_llm_generator,
+                                         test_llm_generator,
+                                         batch_size,
+                                         max_output_len=output_len,
+                                         force_output_len=True)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4
+                         }])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_ngram_disable_queue(baseline_llm_generator, test_llm_generator,
+                             batch_size: int, output_len: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
     different ngram_prompt_lookup_max.

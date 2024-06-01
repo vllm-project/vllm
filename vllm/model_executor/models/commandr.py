@@ -29,7 +29,11 @@ from torch.nn.parameter import Parameter
 from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
+<<<<<<< HEAD
 from vllm.config import LoRAConfig
+=======
+from vllm.config import CacheConfig
+>>>>>>> main
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -125,6 +129,7 @@ class CohereAttention(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -176,12 +181,12 @@ class CohereAttention(nn.Module):
             rope_scaling=self.rope_scaling,
             is_neox_style=False,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
         if self.use_qk_norm:
             self.q_norm = LayerNorm(param_shape=(self.num_heads,
                                                  self.head_dim),
@@ -220,11 +225,14 @@ class CohereDecoderLayer(nn.Module):
 
     def __init__(self,
                  config: CohereConfig,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = CohereAttention(config, quant_config=quant_config)
+        self.self_attn = CohereAttention(config,
+                                         cache_config,
+                                         quant_config=quant_config)
 
         self.mlp = CohereMLP(config, quant_config=quant_config)
         self.input_layernorm = LayerNorm(param_shape=(config.hidden_size),
@@ -259,6 +267,7 @@ class CohereModel(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
@@ -271,7 +280,7 @@ class CohereModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
                                                    config.hidden_size)
         self.layers = nn.ModuleList([
-            CohereDecoderLayer(config, quant_config=quant_config)
+            CohereDecoderLayer(config, cache_config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = LayerNorm(param_shape=(config.hidden_size),
@@ -330,6 +339,7 @@ class CohereForCausalLM(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -342,7 +352,7 @@ class CohereForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, 
                                                 config.vocab_size,
                                                 scale=config.logit_scale)
-        self.model = CohereModel(config, quant_config, lora_config=lora_config)
+        self.model = CohereModel(config, cache_config, quant_config, lora_config=lora_config)
         self.sampler = Sampler()
 
     @torch.no_grad()
