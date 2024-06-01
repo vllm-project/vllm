@@ -1,3 +1,9 @@
+// clang-format will break include orders
+// clang-format off
+#include <cudaTypedefs.h>
+
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
+
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
@@ -6,8 +12,6 @@
 #include <sstream>
 #include <vector>
 
-// clang-format will break include orders
-// clang-format off
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
@@ -241,3 +245,5 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
     }
   }
 }
+
+#endif
