@@ -169,7 +169,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
     assert completion.choices is not None and len(completion.choices) == 1
 
     choice = completion.choices[0]
-    assert len(choice.text) >= 5
+    assert len(choice.text) == 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
         completion_tokens=5, prompt_tokens=6, total_tokens=11)
@@ -181,7 +181,7 @@ async def test_single_completion(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
     )
-    assert len(completion.choices[0].text) >= 5
+    assert len(completion.choices[0].text) == 5
 
 
 @pytest.mark.asyncio
@@ -287,8 +287,7 @@ async def test_too_many_completion_logprobs(server, client: openai.AsyncOpenAI,
         max_tokens=5,
         temperature=0.0,
     )
-    completion = completion.choices[0].text
-    assert completion is not None and len(completion) >= 0
+    assert len(completion.choices[0].text) >= 0
 
 
 @pytest.mark.asyncio
@@ -620,8 +619,7 @@ async def test_logits_bias(server, client: openai.AsyncOpenAI):
         logit_bias={str(token_id): 100},
         seed=42,
     )
-    assert completion.choices[0].text is not None and len(
-        completion.choices[0].text) >= 5
+    assert len(completion.choices[0].text) == 5
     response_tokens = tokenizer(completion.choices[0].text,
                                 add_special_tokens=False)["input_ids"]
     expected_tokens = tokenizer(tokenizer.decode([token_id] * 5),
@@ -668,9 +666,8 @@ async def test_guided_json_completion(server, client: openai.AsyncOpenAI,
                         guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 3
+    assert len(completion.choices) == 3
     for i in range(3):
-        assert completion.choices[i].text is not None
         output_json = json.loads(completion.choices[i].text)
         jsonschema.validate(instance=output_json, schema=TEST_SCHEMA)
 
@@ -737,9 +734,8 @@ async def test_guided_regex_completion(server, client: openai.AsyncOpenAI,
                         guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 3
+    assert len(completion.choices) == 3
     for i in range(3):
-        assert completion.choices[i].text is not None
         assert re.fullmatch(TEST_REGEX, completion.choices[i].text) is not None
 
 
@@ -796,7 +792,7 @@ async def test_guided_choice_completion(server, client: openai.AsyncOpenAI,
                         guided_decoding_backend=guided_decoding_backend))
 
     assert completion.id is not None
-    assert completion.choices is not None and len(completion.choices) == 2
+    assert len(completion.choices) == 2
     for i in range(2):
         assert completion.choices[i].text in TEST_CHOICE
 
@@ -1050,8 +1046,7 @@ async def test_echo_logprob_completion(server, client: openai.AsyncOpenAI,
 
         prompt_text = tokenizer.decode(prompt) if isinstance(prompt,
                                                              list) else prompt
-        assert (completion.choices[0].text is not None
-                and re.search(r"^" + prompt_text, completion.choices[0].text))
+        assert re.search(r"^" + prompt_text, completion.choices[0].text)
         logprobs = completion.choices[0].logprobs
         assert logprobs is not None
         assert len(logprobs.text_offset) > 5
@@ -1100,7 +1095,7 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
         encoding_format="float",
     )
     assert embeddings.id is not None
-    assert embeddings.data is not None and len(embeddings.data) == 1
+    assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 4096
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 9
@@ -1114,7 +1109,7 @@ async def test_single_embedding(embedding_server, client: openai.AsyncOpenAI,
         encoding_format="float",
     )
     assert embeddings.id is not None
-    assert embeddings.data is not None and len(embeddings.data) == 1
+    assert len(embeddings.data) == 1
     assert len(embeddings.data[0].embedding) == 4096
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 5
@@ -1139,7 +1134,7 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
         encoding_format="float",
     )
     assert embeddings.id is not None
-    assert embeddings.data is not None and len(embeddings.data) == 3
+    assert len(embeddings.data) == 3
     assert len(embeddings.data[0].embedding) == 4096
 
     # test List[List[int]]
@@ -1151,7 +1146,7 @@ async def test_batch_embedding(embedding_server, client: openai.AsyncOpenAI,
         encoding_format="float",
     )
     assert embeddings.id is not None
-    assert embeddings.data is not None and len(embeddings.data) == 4
+    assert len(embeddings.data) == 4
     assert len(embeddings.data[0].embedding) == 4096
     assert embeddings.usage.completion_tokens == 0
     assert embeddings.usage.prompt_tokens == 17
