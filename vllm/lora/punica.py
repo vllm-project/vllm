@@ -19,7 +19,7 @@ def _raise_import_error():
 
 
 def _check_punica_support():
-    if not ops.is_custom_op_supported("punica::dispatch_bgmv"):
+    if not ops.is_custom_op_supported("_punica_C::dispatch_bgmv"):
         _raise_import_error()
 
 

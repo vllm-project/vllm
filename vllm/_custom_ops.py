@@ -12,19 +12,19 @@ except ImportError as e:
 
 try:
     # ruff: noqa: SIM105
-    import vllm._C_moe
+    import vllm._moe_C
 except ImportError:
     pass
 
 try:
     # ruff: noqa: SIM105, F401
-    import vllm._C_punica
+    import vllm._punica_C
 except ImportError:
     pass
 
 
 def is_custom_op_supported(op_name: str) -> bool:
-    op, overloads = torch._C._jit_get_operation(f'_C_{op_name}')
+    op, overloads = torch._C._jit_get_operation(op_name)
     return op is not None
 
 
@@ -323,18 +323,11 @@ def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                                       num_tokens_post_pad)
 
 
-def topk_softmax(
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        token_expert_indicies: torch.Tensor,
-        gating_output: float
-) -> None:
-    torch.ops._moe_C.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output
-    )
+def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
+                 token_expert_indicies: torch.Tensor,
+                 gating_output: float) -> None:
+    torch.ops._moe_C.topk_softmax(topk_weights, topk_ids,
+                                  token_expert_indicies, gating_output)
 
 
 def reshape_and_cache(
@@ -392,27 +385,25 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 
 # custom ar
-def init_custom_ar(meta: torch.Tensor,
-                   rank_data: torch.Tensor,
-                   handles: List[str],
-                   offsets: List[int],
-                   rank: int,
+def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
+                   handles: List[str], offsets: List[int], rank: int,
                    full_nvlink: bool) -> int:
-    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles, offsets, rank, full_nvlink)
+    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
+                                                 offsets, rank, full_nvlink)
 
 
-def should_custom_ar(inp: torch.Tensor,
-                     max_size: int,
-                     world_size: int,
+def should_custom_ar(inp: torch.Tensor, max_size: int, world_size: int,
                      full_nvlink: bool) -> bool:
-    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size, full_nvlink)
+    return torch.ops._C_custom_ar.should_custom_ar(inp, max_size, world_size,
+                                                   full_nvlink)
 
 
 def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
     torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
 
 
-def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor, out: torch.Tensor) -> None:
+def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor,
+                     out: torch.Tensor) -> None:
     torch.ops._C_custom_ar.all_reduce_unreg(fa, inp, reg_buffer, out)
 
 
@@ -424,9 +415,7 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int,
-                    t: torch.Tensor,
-                    handles: List[str],
+def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
                     offsets: List[int]) -> None:
     return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
 
@@ -435,34 +424,34 @@ def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 
-def register_graph_buffers(fa: int,
-                           handles: List[str],
+def register_graph_buffers(fa: int, handles: List[str],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
 # punica
 def dispatch_bgmv(
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        indicies: torch.Tensor,
-        layer_idx: int,
-        scale: float,
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indicies: torch.Tensor,
+    layer_idx: int,
+    scale: float,
 ) -> None:
-    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx, scale)
+    torch.ops._punica_C.dispatch_bgmv(y, x, w_t_all, indicies, layer_idx,
+                                      scale)
 
 
 def dispatch_bgmv_low_level(
-        y: torch.Tensor,
-        x: torch.Tensor,
-        w_t_all: torch.Tensor,
-        indicies: torch.Tensor,
-        layer_idx: int,
-        scale: float,
-        h_in: int,
-        h_out: int,
-        y_offset: int,
+    y: torch.Tensor,
+    x: torch.Tensor,
+    w_t_all: torch.Tensor,
+    indicies: torch.Tensor,
+    layer_idx: int,
+    scale: float,
+    h_in: int,
+    h_out: int,
+    y_offset: int,
 ) -> None:
     torch.ops._punica_C.dispatch_bgmv_low_level(
         y,

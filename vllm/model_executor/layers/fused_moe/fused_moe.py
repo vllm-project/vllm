@@ -350,7 +350,7 @@ def fused_topk(
                                         dtype=torch.float32)
         topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
     else:
-        assert ops.is_custom_op_supported("moe::topk_softmax")
+        assert ops.is_custom_op_supported("_moe_C::topk_softmax")
 
         topk_weights = torch.empty(M,
                                    topk,
