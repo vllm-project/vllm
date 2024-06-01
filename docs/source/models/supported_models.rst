@@ -62,7 +62,7 @@ Alongside each architecture, we include some popular models that use it.
   * - :code:`GPTBigCodeForCausalLM`
     - StarCoder, SantaCoder, WizardCoder
     - :code:`bigcode/starcoder`, :code:`bigcode/gpt_bigcode-santacoder`, :code:`WizardLM/WizardCoder-15B-V1.0`, etc.
-    -
+    - ✅︎
   * - :code:`GPTJForCausalLM`
     - GPT-J
     - :code:`EleutherAI/gpt-j-6b`, :code:`nomic-ai/gpt4all-j`, etc.
