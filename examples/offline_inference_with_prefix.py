@@ -28,11 +28,10 @@ generating_prompts = [prefix + prompt for prompt in prompts]
 sampling_params = SamplingParams(temperature=0.0)
 
 # Create an LLM.
-regular_llm = LLM(model="facebook/opt-125m", 
-                  gpu_memory_utilization=0.4)
+regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
 
-prefix_cached_llm = LLM(model="facebook/opt-125m", 
-                        enable_prefix_caching=True, 
+prefix_cached_llm = LLM(model="facebook/opt-125m",
+                        enable_prefix_caching=True,
                         gpu_memory_utilization=0.4)
 print("Results without `enable_prefix_caching`")
 
@@ -71,8 +70,10 @@ for output in outputs:
 print("-" * 80)
 
 # Compare the results and display the speedup
-generated_same = all([regular_generated_texts[i] == cached_generated_texts[i]
-                        for i in range(len(prompts))])
+generated_same = all([
+    regular_generated_texts[i] == cached_generated_texts[i]
+    for i in range(len(prompts))
+])
 print(f"Generated answers are the same: {generated_same}")
 
 speedup = round(duration_regular / duration_cached, 2)
