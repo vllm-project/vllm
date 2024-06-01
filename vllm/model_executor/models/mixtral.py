@@ -29,10 +29,12 @@ from transformers import MixtralConfig
 
 from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.selector import _which_attn_to_use
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.attention_sinks import StreamingAttentionSink
 from vllm.model_executor.layers.fused_moe import fused_moe
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -254,7 +256,8 @@ class MixtralAttention(nn.Module):
                  rope_theta: float = 10000,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 use_attention_sinks: bool = False) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -317,6 +320,37 @@ class MixtralAttention(nn.Module):
             cache_config=cache_config,
         )
 
+        self.use_attention_sinks = use_attention_sinks
+        if use_attention_sinks:
+            if cache_config is not None:
+                kv_cache_dtype = cache_config.cache_dtype
+                block_size = cache_config.block_size
+            else:
+                kv_cache_dtype = "auto"
+                block_size = 16
+
+            attn_backend = _which_attn_to_use(
+                self.num_heads,
+                self.head_dim,
+                self.num_kv_heads,
+                sliding_window,
+                torch.get_default_dtype(),
+                kv_cache_dtype,
+                block_size
+            )
+
+            self.attention_sink = StreamingAttentionSink(
+                32768, # Mixtral context length
+                block_size,
+                kv_cache_dtype,
+                attn_backend,
+                self.num_kv_heads,
+                self.head_dim,
+                1.0,
+                self.rotary_emb,
+                self.attn
+            )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -326,8 +360,13 @@ class MixtralAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+
+        if self.use_attention_sinks:
+            attn_output = self.attention_sink(q, k, v, positions, kv_cache, attn_metadata)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -339,6 +378,7 @@ class MixtralDecoderLayer(nn.Module):
         config: MixtralConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -401,6 +441,7 @@ class MixtralModel(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.padding_idx = config.pad_token_id
@@ -417,7 +458,8 @@ class MixtralModel(nn.Module):
         self.layers = nn.ModuleList([
             MixtralDecoderLayer(config,
                                 cache_config,
-                                quant_config=quant_config)
+                                quant_config=quant_config,
+                                use_attention_sinks=use_attention_sinks)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -470,13 +512,15 @@ class MixtralForCausalLM(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        use_attention_sinks: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
-                                  lora_config=lora_config)
+                                  lora_config=lora_config,
+                                  use_attention_sinks=use_attention_sinks)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

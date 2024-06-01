@@ -27,7 +27,6 @@ class StreamingAttentionSink(nn.Module):
         kv_scale: float,
         rotary_emb_layer, # what if model doesn't use rope?
         attn_layer,
-        output_layer,
     ) -> None:
         super().__init__()
         self.model_context_len = model_context_len
@@ -39,7 +38,6 @@ class StreamingAttentionSink(nn.Module):
         self.kv_scale = kv_scale
         self.rotary_emb = rotary_emb_layer
         self.attn = attn_layer
-        self.output = output_layer
 
         if attn_backend not in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
             raise NotImplementedError(
@@ -95,8 +93,7 @@ class StreamingAttentionSink(nn.Module):
                         self.kv_scale
                     )
 
-            output, _ = self.output(attn_output)
-            return output
+            return attn_output
 
         elif attn_metadata.decode_metadata is not None:
             k_original = k.clone()
@@ -276,5 +273,4 @@ class StreamingAttentionSink(nn.Module):
             attn_metadata.decode_metadata.block_tables = original_block_tables
             attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
             
-            output, _ = self.output(attn_output)
-            return output
+            return attn_output

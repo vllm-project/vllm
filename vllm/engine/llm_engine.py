@@ -686,7 +686,7 @@ class LLMEngine:
                 execute_model_req=execute_model_req)
         else:
             output = []
-        
+
         request_outputs = self._process_model_outputs(
             output, scheduler_outputs.scheduled_seq_groups,
             scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)

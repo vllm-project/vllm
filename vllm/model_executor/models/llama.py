@@ -189,7 +189,6 @@ class LlamaAttention(nn.Module):
                 self.kv_scale,
                 self.rotary_emb,
                 self.attn,
-                self.o_proj
             )
 
     def forward(
@@ -203,20 +202,14 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         if self.use_attention_sinks:
-            return self.attention_sink(
-                q,
-                k,
-                v,
-                positions,
-                kv_cache,
-                attn_metadata
-            )
+            attn_output = self.attention_sink(q, k, v, positions, kv_cache, attn_metadata)
         else:
             q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                     self.kv_scale)
-            output, _ = self.o_proj(attn_output)
-            return output
+        
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class LlamaDecoderLayer(nn.Module):
