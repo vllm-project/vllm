@@ -44,7 +44,8 @@ class Evictor(ABC):
         """
         pass
 
-    @abstractproperty
+    @property
+    @abstractmethod
     def num_blocks(self) -> int:
         pass
 
