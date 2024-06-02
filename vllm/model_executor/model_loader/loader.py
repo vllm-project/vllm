@@ -26,8 +26,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
     get_quant_config, initialize_dummy_weights, np_cache_weights_iterator,
-    pt_weights_iterator, safetensors_weights_iterator)
+    pt_weights_iterator, safetensors_weights_iterator, gguf_weights_iterator)
 from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
+from vllm.model_executor.layers.quantization.ggml import GGMLConfig
 
 logger = init_logger(__name__)
 
@@ -38,14 +39,15 @@ def _get_quantization_config(
     """Get the quantization config."""
     if model_config.quantization is not None:
         quant_config = get_quant_config(model_config, load_config)
-        capability = torch.cuda.get_device_capability()
-        capability = capability[0] * 10 + capability[1]
-        if capability < quant_config.get_min_capability():
-            raise ValueError(
-                f"The quantization method {model_config.quantization} is not "
-                "supported for the current GPU. "
-                f"Minimum capability: {quant_config.get_min_capability()}. "
-                f"Current capability: {capability}.")
+        if not isinstance(quant_config, GGMLConfig):
+            capability = torch.cuda.get_device_capability()
+            capability = capability[0] * 10 + capability[1]
+            if capability < quant_config.get_min_capability():
+                raise ValueError(
+                    f"The quantization method {model_config.quantization} is not "
+                    "supported for the current GPU. "
+                    f"Minimum capability: {quant_config.get_min_capability()}. "
+                    f"Current capability: {capability}.")
         supported_dtypes = quant_config.get_supported_act_dtypes()
         if model_config.dtype not in supported_dtypes:
             raise ValueError(
@@ -539,6 +541,46 @@ class ShardedStateLoader(BaseModelLoader):
             )
 
 
+class GGUFModelLoader(BaseModelLoader):
+    """
+    Model loader that can load GGUF files. This is useful for loading models
+    that are quantized with GGUF and saved in the GGUF format. This loader
+    supports loading both full models and sharded models.
+    """
+
+    def __init__(self, load_config: LoadConfig):
+        super().__init__(load_config)
+        if load_config.model_loader_extra_config:
+            raise ValueError(f"Model loader extra config is not supported for "
+                             f"load format {load_config.load_format}")
+
+    def _prepare_weights(self, model_name_or_path: str):
+        if os.path.isfile(model_name_or_path):
+            return model_name_or_path
+        else:
+            raise ValueError(f"{model_name_or_path} is not a file.")
+
+    def _get_weights_iterator(
+            self, model_name_or_path: str) -> Generator[Tuple[str, torch.Tensor], None, None]:
+        local_model_path = self._prepare_weights(model_name_or_path)
+        return gguf_weights_iterator(local_model_path)
+
+    def load_model(self, *, model_config: ModelConfig,
+                   device_config: DeviceConfig,
+                   lora_config: Optional[LoRAConfig],
+                   vision_language_config: Optional[VisionLanguageConfig],
+                   parallel_config: ParallelConfig,
+                   scheduler_config: SchedulerConfig,
+                   cache_config: CacheConfig) -> nn.Module:
+        with set_default_torch_dtype(model_config.dtype):
+            with torch.device(device_config.device):
+                model = _initialize_model(model_config, self.load_config,
+                                          lora_config, vision_language_config,
+                                          cache_config)
+            model.load_weights(self._get_weights_iterator(model_config.model))
+        return model
+
+
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
 
@@ -553,5 +595,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.SHARDED_STATE:
         return ShardedStateLoader(load_config)
+    
+    if load_config.load_format == LoadFormat.GGUF:
+        return GGUFModelLoader(load_config)
 
     return DefaultModelLoader(load_config)

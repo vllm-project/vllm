@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Dict, Optional
 
 from transformers import AutoConfig, PretrainedConfig
@@ -18,17 +19,28 @@ _CONFIG_REGISTRY: Dict[str, PretrainedConfig] = {
 }
 
 
+_GGUF_ARCHITECTURE_REGISTRY: Dict[str, str] = {
+    "llama": "LlamaForCausalLM"
+}
+
+
 def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
                rope_scaling: Optional[dict] = None) -> PretrainedConfig:
+    is_gguf = Path(model).is_file() and Path(model).suffix == ".gguf"
     try:
+        gguf_file = None
+        if is_gguf:
+            gguf_file = Path(model).name
+            model = Path(model).parent
         config = AutoConfig.from_pretrained(
             model,
             trust_remote_code=trust_remote_code,
             revision=revision,
-            code_revision=code_revision)
+            code_revision=code_revision,
+            gguf_file=gguf_file)
     except ValueError as e:
         if (not trust_remote_code and
                 "requires you to execute the configuration file" in str(e)):
@@ -45,6 +57,9 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
+    if config.model_type in _GGUF_ARCHITECTURE_REGISTRY and is_gguf:
+        model_type = _GGUF_ARCHITECTURE_REGISTRY[config.model_type]
+        config.update({"architectures":[model_type]})
     if rope_scaling is not None:
         logger.info("Updating rope_scaling from %r to %r",
                     getattr(config, "rope_scaling", None), rope_scaling)
