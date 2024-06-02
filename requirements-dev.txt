@@ -36,5 +36,8 @@ aiohttp
 # Multimodal
 pillow
 
+# GGUF
+gguf
+
 # quantization
 bitsandbytes==0.42.0

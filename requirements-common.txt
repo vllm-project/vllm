@@ -5,7 +5,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests
 py-cpuinfo
-transformers >= 4.40.0  # Required for StarCoder2 & Llava, Llama 3.
+transformers >= 4.41.0  # Required for StarCoder2 & Llava, Llama 3.
 tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 aiohttp
