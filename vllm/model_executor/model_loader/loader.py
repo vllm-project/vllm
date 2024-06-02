@@ -30,6 +30,13 @@ from vllm.model_executor.models.vlm_base import VisionLanguageModelBase
 
 logger = init_logger(__name__)
 
+ATTENTION_SINKS_MODELS = {
+    "LlamaForCausalLM",
+    "MixtralForCausalLM",
+    "FalconForCausalLM",
+    "BloomForCausalLM"
+}
+
 
 def _get_quantization_config(
         model_config: ModelConfig,
@@ -79,9 +86,9 @@ def _get_model_initialization_kwargs(
         extra_kwargs["vision_language_config"] = vision_language_config
     
     if use_attention_sinks:
-        if model_class.__name__ not in ('LlamaForCausalLM', 'MixtralForCausalLM'):
-            raise NotImplementedError('Attention sinks is only supported '
-                                      'for Llama and Mixtral models currently.')
+        if model_class.__name__ not in ATTENTION_SINKS_MODELS:
+            raise NotImplementedError("Currently attention sinks is only supported "
+                                      f"for {ATTENTION_SINKS_MODELS}.")
         extra_kwargs["use_attention_sinks"] = True
     
     return extra_kwargs

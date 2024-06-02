@@ -5,21 +5,16 @@ from transformers import AutoTokenizer
 from huggingface_hub import login
 
 
-# login(token='see Notes')
-MAX_GEN_TOKENS = 400
+login(token='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')
+MAX_GEN_TOKENS = 1000
 
 
-def get_chat_prompts(file_path="./mt_bench.jsonl") -> List[Tuple[str, SamplingParams]]:
-    list_data_dict = []
+def get_prompt(model, file_path="./prompts.json") -> List[Tuple[str, SamplingParams]]:
     with open(file_path, "r") as f:
-        for line in f:
-            list_data_dict.append(json.loads(line))
+        prompts = json.load(f)
     
-    prompts = []
-    for sample in list_data_dict:
-        prompts += sample["turns"]
-    
-    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS)) for prompt in prompts]
+    prompt = prompts[model]
+    return [(prompt, SamplingParams(max_tokens=MAX_GEN_TOKENS))]
 
 
 def get_long_prompt(file_path="./paxos_paper.txt", count=1) -> Tuple[str, SamplingParams]:
@@ -61,22 +56,24 @@ def process_requests(engine: LLMEngine,
 
 
 def main():
-    # context length 4096
+    model = "meta-llama/Llama-2-13b-chat-hf"
     model = "lmsys/vicuna-7b-v1.5"
-    # model = "meta-llama/Llama-2-13b-chat-hf"
+    model = "mistralai/Mixtral-8x7B-Instruct-v0.1" # TODO
+    model = "mistralai/Mistral-7B-Instruct-v0.2" # llama under the hood
+    model = "tiiuae/falcon-7b-instruct" # alibi is garbage
+    model = "bigscience/bloom-7b1"
     args = EngineArgs(
         model=model,
         enforce_eager=True,
-        max_model_len=4096,
         block_size=16,
         use_attention_sinks=True
     )
 
     engine = LLMEngine.from_engine_args(args)
-    print("max model len", engine.scheduler_config.max_model_len)
+    print("max model len", engine.model_config.max_model_len)
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
-    # prompts = get_chat_prompts()
-    prompts = get_long_prompt(count=1)
+    prompts = get_prompt(model)
+    # prompts = get_long_prompt()
     process_requests(engine, prompts, tokenizer)
 
 

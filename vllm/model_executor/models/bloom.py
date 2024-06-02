@@ -28,6 +28,7 @@ from vllm.config import CacheConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention_sinks import get_attention_sink
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -74,6 +75,7 @@ class BloomAttention(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -112,6 +114,15 @@ class BloomAttention(nn.Module):
                               scaling,
                               alibi_slopes=alibi_slopes,
                               cache_config=cache_config)
+        
+        self.use_attention_sinks = use_attention_sinks
+        if use_attention_sinks:
+            self.attention_sink = get_attention_sink(
+                self,
+                cache_config,
+                sliding_window=None,
+                model_context_len=2048
+            )
 
     def forward(
         self,
@@ -123,7 +134,12 @@ class BloomAttention(nn.Module):
         del position_ids  # Unused.
         qkv, _ = self.query_key_value(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+
+        if self.use_attention_sinks:
+            attn_output = self.attention_sink(q, k, v, None, kv_cache, attn_metadata)
+        else:
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        
         output, _ = self.dense(attn_output)
         return output
 
@@ -163,6 +179,7 @@ class BloomBlock(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -170,7 +187,7 @@ class BloomBlock(nn.Module):
         self.input_layernorm = nn.LayerNorm(hidden_size,
                                             eps=config.layer_norm_epsilon)
         self.self_attention = BloomAttention(config, cache_config,
-                                             quant_config)
+                                             quant_config, use_attention_sinks)
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = BloomMLP(config, quant_config)
@@ -221,6 +238,7 @@ class BloomModel(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -235,7 +253,7 @@ class BloomModel(nn.Module):
 
         # Transformer blocks
         self.h = nn.ModuleList([
-            BloomBlock(config, cache_config, quant_config)
+            BloomBlock(config, cache_config, quant_config, use_attention_sinks)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -270,11 +288,12 @@ class BloomForCausalLM(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        use_attention_sinks: bool = False,
     ):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.transformer = BloomModel(config, cache_config, quant_config)
+        self.transformer = BloomModel(config, cache_config, quant_config, use_attention_sinks)
         self.lm_head_weight = self.transformer.word_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

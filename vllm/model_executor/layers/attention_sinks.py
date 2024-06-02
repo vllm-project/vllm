@@ -3,7 +3,7 @@ Attention computation layer with attention sink logic,
 as described in https://github.com/mit-han-lab/streaming-llm.
 Currently works for Llama (should eventually work for all RoPE models).
 """
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -11,7 +11,9 @@ import torch.nn as nn
 from vllm._C import cache_ops
 from vllm.attention import AttentionMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.attention.selector import _Backend
+from vllm.attention.selector import _Backend, _which_attn_to_use
+from vllm.config import CacheConfig
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import make_tensor_with_pad
 
 
@@ -25,10 +27,11 @@ class StreamingAttentionSink(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         kv_scale: float,
-        rotary_emb_layer, # what if model doesn't use rope?
+        rotary_emb_layer: Optional[RotaryEmbedding],
         attn_layer,
     ) -> None:
         super().__init__()
+        print("INIT Attention Sinks: context length", model_context_len, ", use rope?", rotary_emb_layer is not None)
         self.model_context_len = model_context_len
         self.block_size = block_size
         self.kv_cache_dtype = kv_cache_dtype
@@ -37,6 +40,7 @@ class StreamingAttentionSink(nn.Module):
         self.head_dim = head_dim
         self.kv_scale = kv_scale
         self.rotary_emb = rotary_emb_layer
+        self.use_alibi = rotary_emb_layer is None
         self.attn = attn_layer
 
         if attn_backend not in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
@@ -45,6 +49,20 @@ class StreamingAttentionSink(nn.Module):
                 'XFormers and FlashAttention currently.')
 
     def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        if self.use_alibi:
+            return self._forward_alibi(q, k, v, kv_cache, attn_metadata)
+        else:
+            return self._forward_rope(q, k, v, positions, kv_cache, attn_metadata)
+    
+    def _forward_rope(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -97,7 +115,7 @@ class StreamingAttentionSink(nn.Module):
 
         elif attn_metadata.decode_metadata is not None:
             k_original = k.clone()
-            device = positions.device
+            device = q.device
             block_size = self.block_size
             model_context_len = self.model_context_len
 
@@ -131,8 +149,6 @@ class StreamingAttentionSink(nn.Module):
                 num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
                 within_context_len = num_past_tokens < model_context_len
                 block_table = block_tables_tensor[i]
-
-                end_logic_bnum = num_past_tokens // block_size
                 
                 if hasattr(attn_metadata, 'phys_bnums_list'):
                     phys_bnums = phys_bnums_list[i]
@@ -145,7 +161,7 @@ class StreamingAttentionSink(nn.Module):
                     phys_bnums_list.append(phys_bnums)
                 
                 rem = num_past_tokens % block_size
-                rem_phys_bnum = block_table[end_logic_bnum]
+                rem_phys_bnum = block_table[num_past_tokens // block_size]
                 
                 # read unrotated keys from cache
                 # FA shape: [len(phys_bnums), block_size, num_heads, head_size]
@@ -211,15 +227,16 @@ class StreamingAttentionSink(nn.Module):
                     # cap number of tokens to consider with model context len
                     attn_metadata.seq_lens_tensor[i] = model_context_len
                     positions[i] = model_context_len - 1
+                else:
+                    block_tables.append(block_table.tolist())
 
-            if block_tables:
-                attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
-                    block_tables,
-                    max_len=model_context_len // block_size,
-                    pad=0,
-                    dtype=torch.int,
-                    device=device
-                )
+            attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
+                block_tables,
+                max_len=model_context_len // block_size,
+                pad=0,
+                dtype=torch.int,
+                device=device
+            )
 
             if not hasattr(attn_metadata, 'phys_bnums_list'):
                 attn_metadata.phys_bnums_list = phys_bnums_list
@@ -236,7 +253,7 @@ class StreamingAttentionSink(nn.Module):
                 phys_bnums = phys_bnums_list[i]
 
                 rem = num_past_tokens % block_size
-                rem_phys_bnum = block_table[end_logic_bnum]
+                rem_phys_bnum = block_table[num_past_tokens // block_size]
 
                 full_past_keys, rem_past_keys = original_keys[i]
                 key_cache.index_put_((phys_bnums,), full_past_keys)
@@ -274,3 +291,110 @@ class StreamingAttentionSink(nn.Module):
             attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
             
             return attn_output
+
+    def _forward_alibi(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        if attn_metadata.prefill_metadata is not None:
+            return self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+        elif attn_metadata.decode_metadata is not None:
+            device = q.device
+            block_size = self.block_size
+            model_context_len = self.model_context_len
+
+            # cache seq_lens
+            if hasattr(attn_metadata, 'seq_lens_clone'):
+                seq_lens = attn_metadata.seq_lens_clone
+            else:
+                seq_lens = attn_metadata.seq_lens_tensor.tolist()
+                attn_metadata.seq_lens_clone = seq_lens
+            
+            # cache block_tables
+            if hasattr(attn_metadata, 'block_tables_clone'):
+                original_block_tables = attn_metadata.block_tables_clone
+            else:
+                original_block_tables = attn_metadata.decode_metadata.block_tables.clone()
+                attn_metadata.block_tables_clone = original_block_tables
+
+            block_tables_tensor = attn_metadata.decode_metadata.block_tables
+            block_tables: List[List[int]] = []
+
+            # batch size = num sequences
+            batch_size = block_tables_tensor.shape[0]
+            for i in range(batch_size):
+                num_past_tokens = seq_lens[i] - 1  # assumes decode only yields 1 token
+                block_table = block_tables_tensor[i]                
+                
+                if num_past_tokens < model_context_len:
+                    block_tables.append(block_table.tolist())
+                    continue
+                
+                # edit block table for attention kernel
+                start_logic_bnum = (num_past_tokens - model_context_len) // block_size + 2
+                capped_block_table = [block_table[0].item()] + block_table[start_logic_bnum:].tolist()
+                block_tables.append(capped_block_table)
+
+                # cap number of tokens to consider with model context len
+                attn_metadata.seq_lens_tensor[i] = model_context_len
+
+            attn_metadata.decode_metadata.block_tables = make_tensor_with_pad(
+                block_tables,
+                max_len=model_context_len // block_size,
+                pad=0,
+                dtype=torch.int,
+                device=device
+            )
+
+            print(len(block_tables[0]), len(original_block_tables[0]), seq_lens[0])
+
+            # compute attention in kernel
+            attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
+            
+            # revert block_tables and seq_lens inside metadata
+            # so that next attn layer starts with same fields
+            attn_metadata.decode_metadata.block_tables = original_block_tables
+            attn_metadata.seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int, device=device)
+            
+            return attn_output
+
+
+def get_attention_sink(
+    model_attn: nn.Module,
+    cache_config: Optional[CacheConfig],
+    sliding_window: Optional[int],
+    model_context_len: int
+) -> StreamingAttentionSink:
+    if cache_config is not None:
+        kv_cache_dtype = cache_config.cache_dtype
+        block_size = cache_config.block_size
+    else:
+        kv_cache_dtype = "auto"
+        block_size = 16
+    
+    num_kv_heads = getattr(model_attn, "num_kv_heads", model_attn.num_heads)
+    attn_backend = _which_attn_to_use(
+        model_attn.num_heads,
+        model_attn.head_dim,
+        num_kv_heads,
+        sliding_window,
+        torch.get_default_dtype(),
+        kv_cache_dtype,
+        block_size
+    )
+
+    return StreamingAttentionSink(
+        model_context_len,
+        block_size,
+        kv_cache_dtype,
+        attn_backend,
+        num_kv_heads,
+        model_attn.head_dim,
+        getattr(model_attn, "kv_scale", 1.0),
+        getattr(model_attn, "rotary_emb", None),
+        model_attn.attn
+    )

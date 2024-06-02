@@ -32,7 +32,7 @@ from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention_sinks import StreamingAttentionSink
+from vllm.model_executor.layers.attention_sinks import get_attention_sink
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -47,7 +47,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.attention.selector import _which_attn_to_use
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip
 
@@ -162,33 +161,11 @@ class LlamaAttention(nn.Module):
         
         self.use_attention_sinks = use_attention_sinks
         if use_attention_sinks:
-            if cache_config is not None:
-                kv_cache_dtype = cache_config.cache_dtype
-                block_size = cache_config.block_size
-            else:
-                kv_cache_dtype = "auto"
-                block_size = 16
-            
-            attn_backend = _which_attn_to_use(
-                self.num_heads,
-                self.head_dim,
-                self.num_kv_heads,
+            self.attention_sink = get_attention_sink(
+                self,
+                cache_config,
                 sliding_window,
-                torch.get_default_dtype(),
-                kv_cache_dtype,
-                block_size
-            )
-            
-            self.attention_sink = StreamingAttentionSink(
-                max_position_embeddings, # Llama context length
-                block_size,
-                kv_cache_dtype,
-                attn_backend,
-                self.num_kv_heads,
-                self.head_dim,
-                self.kv_scale,
-                self.rotary_emb,
-                self.attn,
+                model_context_len=max_position_embeddings
             )
 
     def forward(
