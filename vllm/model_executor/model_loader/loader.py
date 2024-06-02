@@ -840,5 +840,8 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.BITSANDBYTES:
         return BitsAndBytesModelLoader(load_config)
+    
+    if load_config.load_format == LoadFormat.GGUF:
+        return GGUFModelLoader(load_config)
 
     return DefaultModelLoader(load_config)
