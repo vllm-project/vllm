@@ -1,5 +1,5 @@
 """Token blocks."""
-from typing import List
+from typing import Optional, List
 
 from vllm.utils import Device
 
@@ -25,6 +25,7 @@ class LogicalTokenBlock:
 
         self.token_ids = [_BLANK_TOKEN_ID] * block_size
         self.num_tokens = 0
+        self.block_hash: Optional[int] = None
 
     def is_empty(self) -> bool:
         return self.num_tokens == 0

@@ -269,15 +269,24 @@ class Sequence:
         return self.output_text[:-buffer_length] if truncate else (
             self.output_text)
 
-    def hash_of_block(self, logical_idx: int) -> int:
-        # TODO This can produce incorrect hash when block size > prompt size
-
-        # Compute the number of tokens in the sequence
+    def hash_of_block(self, logical_idx: int) -> Optional[int]:
+        """Return the hash of the block if it is full."""
         # TODO: The current hashing function is O(L^2). We should optimize
         # this in the future.
-        num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
-        return hash((hashed_tokens, self.lora_int_id))
+        assert logical_idx < len(self.logical_token_blocks), (
+            f"logical_idx={logical_idx} is out of range for "
+            f"logical_token_blocks={len(self.logical_token_blocks)}")
+        block = self.logical_token_blocks[logical_idx]
+        if block.block_hash is not None:
+            return block.block_hash
+        if not block.is_full():
+            return None
+        num_hashed_tokens = self.num_hashed_tokens_of_block(logical_idx)
+        hashed_tokens = self.data.get_prefix_token_ids(num_hashed_tokens)
+        block_hash = hash((hashed_tokens, self.lora_int_id))
+        # Cache the block hash for future use.
+        block.block_hash = block_hash
+        return block_hash
 
     def num_hashed_tokens_of_block(self, logical_idx: int):
         return logical_idx * self.block_size + self.block_size
@@ -632,7 +641,7 @@ class SequenceGroupMetadata:
         state: Internal state tied to this sequence group.
         multi_modal_data: Multi modal data.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
