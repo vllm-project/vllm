@@ -53,17 +53,20 @@ def convert_tensor_q8_0(data):
 
 def load_gguf_tensor(shape, ggml_type, data):
     scales = None
-    if ggml_type == GGML_TYPES["Q8_0"]:
-        scales, quants = convert_tensor_q8_0(data)
-    elif ggml_type == GGML_TYPES["Q4_0"]:
-        scales, quants = convert_tensor_q4_0(data)
-    else:
-        quants = load_dequant_gguf_tensor(shape, ggml_type, data)
-        return scales, quants
-
-    if scales is not None:
-        scales = scales.reshape(shape[::-1])
-    quants = quants.reshape(shape[::-1])
+    quants = load_dequant_gguf_tensor(shape, ggml_type, data)
+    quants = torch.from_numpy(quants)
     return scales, quants
+    # FIXME (Isotr0py): This remained for ggml runtime dequantization
+    # if ggml_type == GGML_TYPES["Q8_0"]:
+    #     scales, quants = convert_tensor_q8_0(data)
+    # elif ggml_type == GGML_TYPES["Q4_0"]:
+    #     scales, quants = convert_tensor_q4_0(data)
+    # else:
+    #     quants = load_dequant_gguf_tensor(shape, ggml_type, data)
+    #     quants = torch.from_numpy(quants)
+    #     return scales, quants
 
-
+    # if scales is not None:
+    #     scales = scales.reshape(shape[::-1])
+    # quants = quants.reshape(shape[::-1])
+    # return scales, quants

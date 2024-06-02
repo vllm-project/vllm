@@ -49,6 +49,22 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 from vllm.utils import is_hip, print_warning_once
 
+_GGUF_KEYS_MAPPING = {
+    "token_embd": "model.embed_tokens",
+    "blk": "model.layers",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_norm": "post_attention_layernorm",
+    "attn_norm": "input_layernorm",
+    "attn_q": "self_attn.q_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_output": "self_attn.o_proj",
+    "output.weight": "lm_head.weight",
+    "output_norm": "model.norm",
+}
+
 
 class LlamaMLP(nn.Module):
 
@@ -396,6 +412,9 @@ class LlamaForCausalLM(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            for key_to_modify, new_key in _GGUF_KEYS_MAPPING.items():
+                if key_to_modify in name:
+                    name = name.replace(key_to_modify, new_key)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
