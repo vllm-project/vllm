@@ -1,7 +1,7 @@
 import codecs
 import time
 from dataclasses import dataclass
-from typing import (AsyncGenerator, AsyncIterator, Dict, Iterable, List,
+from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable, List,
                     Optional)
 from typing import Sequence as GenericSequence
 from typing import TypedDict, Union, cast, final
@@ -9,7 +9,7 @@ from typing import TypedDict, Union, cast, final
 from fastapi import Request
 from openai.types.chat import ChatCompletionContentPartTextParam
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VisionLanguageConfig
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionContentPartParam, ChatCompletionLogProb,
@@ -26,6 +26,8 @@ from vllm.model_executor.guided_decoding import (
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
+from vllm.multimodal.utils import async_get_and_parse_image
+from vllm.multimodal.image import ImagePixelData
 
 logger = init_logger(__name__)
 
@@ -93,13 +95,33 @@ class OpenAIServingChat(OpenAIServing):
         parts: Iterable[ChatCompletionContentPartParam],
     ) -> ChatMessageParseResult:
         texts: List[str] = []
+        image_futures: List[Awaitable[ImagePixelData]] = []
 
+        image_count = 0
         for _, part in enumerate(parts):
             part_type = part["type"]
             if part_type == "text":
                 text = cast(ChatCompletionContentPartTextParam, part)["text"]
 
                 texts.append(text)
+            elif part_type == "image_url":
+                config = getattr(self.engine.engine, "vision_language_config", None)
+                if not isinstance(config, VisionLanguageConfig):
+                    logger.warning("Ignoring image_url input as the loaded model is not multimodal.")
+                    continue
+                elif image_count == 0:
+                    assert self.tokenizer is not None
+                    image_future = async_get_and_parse_image(part["image_url"])
+                    image_futures.appned(image_future)
+                    text = config.get_image_token_text(config, self.tokenizer)
+
+                    #NOTE: For now we assume image tokens are always concatenated at the beginning
+                    texts.insert(0, text)
+                    image_count += 1
+                else:
+                    logger.warning("Ignoring additional image_url input as the loaded model only supports one image.")
+                    continue
+
             else:
                 raise NotImplementedError(f"Unknown part type: {part_type}")
 

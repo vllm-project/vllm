@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
 import torch
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, PreTrainedTokenizerBase
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -1086,6 +1086,7 @@ class VisionLanguageConfig:
         PIXEL_VALUES = enum.auto()
         IMAGE_FEATURES = enum.auto()
 
+
     image_input_type: ImageInputType
     # The input id corresponding to image token.
     image_token_id: int
@@ -1105,6 +1106,12 @@ class VisionLanguageConfig:
             raise ValueError(f"{value} is not a valid choice. "
                              f"Expecting to choose from "
                              f"{[x.name for x in cls.ImageInputType]}.") from e
+        
+    def get_image_token_text(self, config: "VisionLanguageConfig",
+                             tokenizer: PreTrainedTokenizerBase) -> str:
+        
+        image_token_str = tokenizer.decode(config.image_token_id)
+        return image_token_str * config.image_feature_size
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
