@@ -27,7 +27,7 @@ static inline __device__ int8_t half_to_int8_rn(__half x) {
   uint32_t dst;
   unsigned short conv = *(reinterpret_cast<unsigned short*>(&(x)));
   asm("cvt.rni.sat.s8.f16 %0, %1;" : "=r"(dst) : "h"(conv));
-  return dst;
+  return static_cast<int8_t>dst;
 }
 
 namespace vllm {
