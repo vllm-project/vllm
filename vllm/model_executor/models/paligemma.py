@@ -11,7 +11,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -20,7 +19,6 @@ from vllm.sequence import SamplerOutput
 from .vlm_base import VisionLanguageModelBase
 
 _KEYS_TO_MODIFY_MAPPING = {
-    "language_model.lm_head": "lm_head",
     "language_model.model": "language_model",
 }
 
@@ -31,12 +29,13 @@ class PaliGemmaMultiModalProjector(nn.Module):
         super().__init__()
 
         self.linear = ColumnParallelLinear(vision_hidden_size,
-                                  projection_dim,
-                                  bias=True)
+                                           projection_dim,
+                                           bias=True)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.linear(image_features)
         return hidden_states
+
 
 class PaliGemmaImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -50,7 +49,8 @@ class PaliGemmaImageFeatureInputs(TypedDict):
     """Shape: (batch_size, image_feature_size, hidden_size)"""
 
 
-PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs, PaliGemmaImageFeatureInputs]
+PaliGemmaImageInputs = Union[PaliGemmaImagePixelInputs,
+                             PaliGemmaImageFeatureInputs]
 
 
 class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
@@ -79,10 +79,6 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
         self.language_model = GemmaModel(config.text_config, cache_config,
                                          quant_config)
         self.unpadded_vocab_size = config.text_config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.text_config.hidden_size,
-            org_num_embeddings=self.language_model.org_vocab_size)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
@@ -130,27 +126,26 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
 
         return None
 
-    def _image_pixels_to_features(self, 
-                                  vision_tower: SiglipVisionModel,
+    def _image_pixels_to_features(self, vision_tower: SiglipVisionModel,
                                   pixel_values: torch.Tensor) -> torch.Tensor:
 
         image_outputs = vision_tower(pixel_values.to(vision_tower.device),
                                      output_hidden_states=True)
 
         selected_image_features = image_outputs.last_hidden_state
-        
+
         return selected_image_features
 
-    def _process_image_pixels(self,
-                              inputs: PaliGemmaImagePixelInputs) -> torch.Tensor:
+    def _process_image_pixels(
+            self, inputs: PaliGemmaImagePixelInputs) -> torch.Tensor:
         assert self.vision_tower is not None
 
         pixel_values = inputs["data"]
 
         return self._image_pixels_to_features(self.vision_tower, pixel_values)
 
-    def _process_image_input(self,
-                             image_input: PaliGemmaImageInputs) -> torch.Tensor:
+    def _process_image_input(
+            self, image_input: PaliGemmaImageInputs) -> torch.Tensor:
         if image_input["type"] == "pixel_values":
             assert self.vision_tower is not None
             image_features = self._process_image_pixels(image_input)
@@ -158,25 +153,26 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
             image_features = image_input["data"]
 
         return self.multi_modal_projector(image_features)
-    
-    def _merge_vision_embeddings(self,
-                             input_ids: torch.Tensor,
-                             inputs_embeds: torch.Tensor,
-                             vision_embeddings: torch.Tensor,
-                             image_token_id: int) -> torch.Tensor:
+
+    def _merge_vision_embeddings(self, input_ids: torch.Tensor,
+                                 inputs_embeds: torch.Tensor,
+                                 vision_embeddings: torch.Tensor,
+                                 image_token_id: int) -> torch.Tensor:
         """In place merges in vision_embeddings with inputs_embeds."""
 
         # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
         vision_embeddings = vision_embeddings / (self.config.hidden_size**0.5)
         mask = (input_ids == image_token_id)
 
-        image_feature_size = vision_embeddings.shape[0] * vision_embeddings.shape[1]
+        image_feature_size = vision_embeddings.shape[
+            0] * vision_embeddings.shape[1]
         if mask.sum() != image_feature_size:
-            raise ValueError(f"image_feature_size should be {image_feature_size}, "
-                            f"but found: {mask.sum()}")
+            raise ValueError(
+                f"image_feature_size should be {image_feature_size}, "
+                f"but found: {mask.sum()}")
 
-        inputs_embeds[mask] = vision_embeddings.view(image_feature_size,
-                                                    vision_embeddings.shape[-1])
+        inputs_embeds[mask] = vision_embeddings.view(
+            image_feature_size, vision_embeddings.shape[-1])
 
         return inputs_embeds
 
@@ -211,8 +207,8 @@ class PaliGemmaForConditionalGeneration(VisionLanguageModelBase):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
-                                       sampling_metadata)
+        logits = self.logits_processor(self.language_model.embed_tokens.weight,
+                                       hidden_states, sampling_metadata)
         return logits
 
     def sample(
