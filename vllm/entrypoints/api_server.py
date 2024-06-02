@@ -73,13 +73,15 @@ async def generate(request: Request) -> Response:
         final_output = request_output
 
     assert final_output is not None
-    
-    # make sure prompt is a valid string else raises error
+
+    # make sure prompt is a valid string, to prevent errors
     prompt = final_output.prompt if isinstance(final_output.prompt,str) else ""
     text_outputs = [prompt + output.text for output in final_output.outputs]
 
-    ## add token_ids to response if detokenize==False in sampling_params
-    token_outputs = [output.token_ids for output in final_output.outputs] if not sampling_params.detokenize  else []
+    ## add token_ids to response if detokenize==False
+    token_outputs = []
+    if not sampling_params.detokenize:
+        token_outputs = [output.token_ids for output in final_output.outputs] 
 
     ret = {"text": text_outputs,"token_ids":token_outputs}
     return JSONResponse(ret)
