@@ -54,7 +54,7 @@ def convert_tensor_q8_0(data):
 def load_gguf_tensor(shape, ggml_type, data):
     scales = None
     quants = load_dequant_gguf_tensor(shape, ggml_type, data)
-    quants = torch.from_numpy(quants)
+    quants = torch.from_numpy(quants.copy())
     return scales, quants
     # FIXME (Isotr0py): This remained for ggml runtime dequantization
     # if ggml_type == GGML_TYPES["Q8_0"]:
