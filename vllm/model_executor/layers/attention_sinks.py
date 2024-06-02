@@ -350,8 +350,6 @@ class StreamingAttentionSink(nn.Module):
                 device=device
             )
 
-            print(len(block_tables[0]), len(original_block_tables[0]), seq_lens[0])
-
             # compute attention in kernel
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata, self.kv_scale)
             
