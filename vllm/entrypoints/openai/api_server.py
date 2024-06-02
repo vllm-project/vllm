@@ -36,7 +36,7 @@ openai_serving_chat: OpenAIServingChat
 openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 
-logger = init_logger('vllm.entrypoints.openai.api_server')
+logger = init_logger(__name__)
 
 _running_tasks: Set[asyncio.Task] = set()
 

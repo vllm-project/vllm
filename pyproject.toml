@@ -5,7 +5,6 @@ requires = [
     "ninja",
     "packaging",
     "setuptools >= 49.4.0",
-    "torch == 2.3.0",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
@@ -59,7 +58,7 @@ exclude = [
 ]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies, subtile"
+ignore-words-list = "dout, te, indicies"
 skip = "./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
 
 [tool.isort]

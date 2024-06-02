@@ -4,6 +4,3 @@
 # Dependencies for NVIDIA GPUs
 ray >= 2.9
 nvidia-ml-py # for pynvml package
-torch == 2.3.0
-xformers == 0.0.26.post1  # Requires PyTorch 2.3.0
-vllm-flash-attn == 2.5.8.post2  # Requires PyTorch 2.3.0

@@ -1,5 +1,5 @@
 import enum
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod, abstractproperty
 from typing import OrderedDict
 
 from vllm.block import PhysicalTokenBlock
@@ -44,8 +44,7 @@ class Evictor(ABC):
         """
         pass
 
-    @property
-    @abstractmethod
+    @abstractproperty
     def num_blocks(self) -> int:
         pass
 

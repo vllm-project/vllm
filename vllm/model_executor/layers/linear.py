@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils import partition_number
 
 logger = init_logger(__name__)
 
@@ -24,21 +25,6 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
         return shard_size, shard_offset
 
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
-
-
-def adjust_bitsandbytes_shard(param: Parameter,
-                              qkv_offsets: Dict[str, Tuple[int, int]],
-                              loaded_shard_id: str) -> Tuple[int, int]:
-    """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
-
-    total, _ = qkv_offsets["total"]
-    orig_offset, orig_size = qkv_offsets[loaded_shard_id]
-
-    quantized_total = param.data.shape[0]
-    quantized_offset = orig_offset * quantized_total // total
-    quantized_size = orig_size * quantized_total // total
-
-    return quantized_size, quantized_offset
 
 
 class LinearMethodBase(QuantizeMethodBase):
@@ -52,7 +38,7 @@ class LinearMethodBase(QuantizeMethodBase):
                        **extra_weight_attrs):
         """Create weights for a linear layer. 
            The weights will be set as attributes of the layer.
-
+        
         Args:
             layer: The layer that is using the LinearMethodBase factory.
             input_size_per_partition: Size of the weight input dim on rank X.
@@ -431,12 +417,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
-            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
-            if use_bitsandbytes:
-                shard_size = loaded_weight.shape[output_dim]
-                shard_offset = loaded_weight.shape[output_dim] * \
-                    loaded_shard_id
-
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
             start_idx = tp_rank * shard_size
@@ -520,13 +500,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads = divide(self.total_num_heads, tp_size)
+        tp_rank = get_tensor_model_parallel_rank()
+        self.num_heads = partition_number(self.total_num_heads, tp_size)[tp_rank]
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
             self.num_kv_head_replicas = divide(tp_size,
                                                self.total_num_kv_heads)
         else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads = partition_number(self.total_num_kv_heads, tp_size)[tp_rank]
             self.num_kv_head_replicas = 1
         input_size = self.hidden_size
         output_size = (self.num_heads +
@@ -636,29 +617,20 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset)
 
-            use_bitsandbytes = getattr(param, "use_bitsandbytes", False)
-            if use_bitsandbytes:
-                orig_qkv_offsets = {
-                    "q": (0, self.num_heads * self.head_size),
-                    "k": (self.num_heads * self.head_size,
-                          self.num_kv_heads * self.head_size),
-                    "v":
-                    ((self.num_heads + self.num_kv_heads) * self.head_size,
-                     self.num_kv_heads * self.head_size),
-                    "total":
-                    ((self.num_heads + 2 * self.num_kv_heads) * self.head_size,
-                     0)
-                }
-                shard_size, shard_offset = adjust_bitsandbytes_shard(
-                    param, orig_qkv_offsets, loaded_shard_id)
-
             param_data = param_data.narrow(output_dim, shard_offset,
                                            shard_size)
-            if loaded_shard_id == "q":
-                shard_id = tp_rank
+            assert self.num_kv_head_replicas == 1, self.num_kv_head_replicas
+
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+            if loaded_shard_id == 'q':
+                start_idx = partition_number(self.total_num_heads, tp_size)[:tp_rank].sum() * self.head_size
             else:
-                shard_id = tp_rank // self.num_kv_head_replicas
-            start_idx = shard_id * shard_size
+                assert loaded_shard_id in ['k', 'v']
+                start_idx = partition_number(self.total_num_kv_heads, tp_size)[:tp_rank].sum() * self.head_size
+            if packed_dim == output_dim:
+                start_idx = start_idx // param.pack_factor
+
             loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                  shard_size)
         # Special case for for AQLM codebooks.
@@ -730,7 +702,9 @@ class RowParallelLinear(LinearBase):
                  skip_bias_add: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  reduce_results: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 head_dim: Optional[int] = None,
+                 ):
         super().__init__(input_size, output_size, skip_bias_add, params_dtype,
                          quant_config)
 
@@ -739,7 +713,13 @@ class RowParallelLinear(LinearBase):
 
         # Divide the weight matrix along the last dimension.
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.head_dim = head_dim
+        tp_rank = get_tensor_model_parallel_rank()
+        if head_dim is None:
+            self.input_size_per_partition = divide(input_size, self.tp_size)
+        else:
+            num_heads = divide(input_size, head_dim)
+            self.input_size_per_partition = partition_number(num_heads, self.tp_size)[tp_rank] * head_dim
         assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
@@ -769,11 +749,17 @@ class RowParallelLinear(LinearBase):
                                            None)
 
         tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         input_dim = getattr(param, "input_dim", None)
         param_data = param.data
         if input_dim is not None:
             shard_size = param_data.shape[input_dim]
-            start_idx = tp_rank * shard_size
+            if self.head_dim is None:
+                start_idx = tp_rank * shard_size
+            else:
+                num_heads = divide(self.input_size, self.head_dim)
+                start_idx = partition_number(num_heads, tp_size)[:tp_rank].sum() * self.head_dim
+
             loaded_weight = loaded_weight.narrow(input_dim, start_idx,
                                                  shard_size)
 

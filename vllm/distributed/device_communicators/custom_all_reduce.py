@@ -6,8 +6,6 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.distributed.device_communicators.custom_all_reduce_utils import (
-    gpu_p2p_access_check)
 from vllm.distributed.parallel_state import (
     get_local_rank, get_tensor_model_parallel_cpu_group)
 from vllm.logger import init_logger
@@ -67,6 +65,7 @@ def _is_full_nvlink(device_ids: List[int]) -> bool:
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
+    from vllm.distributed.utils import gpu_p2p_access_check
     for i in range(world_size):
         if i == rank:
             continue

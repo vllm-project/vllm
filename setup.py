@@ -187,22 +187,19 @@ class cmake_build_ext(build_ext):
         if not os.path.exists(self.build_temp):
             os.makedirs(self.build_temp)
 
-        targets = []
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
-            targets.append(remove_prefix(ext.name, "vllm."))
 
-        num_jobs, _ = self.compute_num_jobs()
+            ext_target_name = remove_prefix(ext.name, "vllm.")
+            num_jobs, _ = self.compute_num_jobs()
 
-        build_args = [
-            "--build",
-            ".",
-            f"-j={num_jobs}",
-            *[f"--target={name}" for name in targets],
-        ]
+            build_args = [
+                '--build', '.', '--target', ext_target_name, '-j',
+                str(num_jobs)
+            ]
 
-        subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+            subprocess.check_call(['cmake', *build_args], cwd=self.build_temp)
 
 
 def _is_cuda() -> bool:
@@ -361,8 +358,11 @@ def get_requirements() -> List[str]:
         cuda_major, cuda_minor = torch.version.cuda.split(".")
         modified_requirements = []
         for req in requirements:
-            if ("vllm-flash-attn" in req
-                    and not (cuda_major == "12" and cuda_minor == "1")):
+            if "vllm-nccl-cu12" in req:
+                req = req.replace("vllm-nccl-cu12",
+                                  f"vllm-nccl-cu{cuda_major}")
+            elif ("vllm-flash-attn" in req
+                  and not (cuda_major == "12" and cuda_minor == "1")):
                 # vllm-flash-attn is built only for CUDA 12.1.
                 # Skip for other versions.
                 continue

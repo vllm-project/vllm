@@ -126,5 +126,5 @@ PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
 
 class LLMInputs(TypedDict):
     prompt_token_ids: List[int]
-    prompt: NotRequired[Optional[str]]
-    multi_modal_data: NotRequired[Optional["MultiModalData"]]
+    prompt: Optional[str]
+    multi_modal_data: Optional["MultiModalData"]

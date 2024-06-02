@@ -1,4 +1,4 @@
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod, abstractproperty
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
@@ -42,8 +42,7 @@ class AbstractWorkerLoRAManager(ABC):
         yield
         self._cached_dummy_lora = False
 
-    @property
-    @abstractmethod
+    @abstractproperty
     def is_enabled(self) -> bool:
         ...
 

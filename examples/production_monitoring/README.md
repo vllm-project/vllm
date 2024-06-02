@@ -29,8 +29,7 @@ python3 ../../benchmarks/benchmark_serving.py \
     --model mistralai/Mistral-7B-v0.1 \
     --tokenizer mistralai/Mistral-7B-v0.1 \
     --endpoint /v1/completions \
-    --dataset-name sharegpt \
-    --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+    --dataset ShareGPT_V3_unfiltered_cleaned_split.json \
     --request-rate 3.0
 ```
 

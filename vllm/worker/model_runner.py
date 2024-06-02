@@ -1,11 +1,12 @@
 import time
 import warnings
-from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple, Union, Type
 
 import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
@@ -112,6 +113,16 @@ class ModelRunner:
         self.graph_block_tables = np.zeros(
             (max(_BATCH_SIZES_TO_CAPTURE), self.get_max_block_per_batch()),
             dtype=np.int32)
+
+        # Lazy initialization
+        self.attn_backend: Type[AttentionBackend]
+        self.model: nn.Module  # Set after load_model
+        # Set if the backend is flashinfer.
+        self.flashinfer_workspace_buffer: torch.Tensor
+        # Set after load_model.
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
+
+    def load_model(self) -> None:
         self.attn_backend = get_attn_backend(
             self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
@@ -121,15 +132,6 @@ class ModelRunner:
             self.kv_cache_dtype,
             self.block_size,
         )
-
-        # Lazy initialization
-        self.model: nn.Module  # Set after load_model
-        # Set if the backend is flashinfer.
-        self.flashinfer_workspace_buffer: torch.Tensor
-        # Set after load_model.
-        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
-
-    def load_model(self) -> None:
         with CudaMemoryProfiler() as m:
             self.model = get_model(
                 model_config=self.model_config,
@@ -518,6 +520,9 @@ class ModelRunner:
         else:
             multi_modal_input = None
 
+        seq_lens_tensor = torch.tensor(seq_lens,
+                                       dtype=torch.int,
+                                       device=self.device)
         query_lens_tensor = torch.tensor(query_lens,
                                          dtype=torch.long,
                                          device=self.device)
