@@ -52,6 +52,7 @@ class EngineArgs:
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
+    rope_theta: Optional[float] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: bool = False
@@ -346,6 +347,12 @@ class EngineArgs:
                             type=json.loads,
                             help='RoPE scaling configuration in JSON format. '
                             'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument('--rope-theta',
+                            default=None,
+                            type=float,
+                            help='RoPE theta. Use with `rope_scaling`. In '
+                            'some cases, changing the RoPE theta improves the '
+                            'performance of the scaled model.')
         parser.add_argument('--enforce-eager',
                             action='store_true',
                             help='Always use eager-mode PyTorch. If False, '
@@ -584,8 +591,8 @@ class EngineArgs:
         model_config = ModelConfig(
             self.model, self.tokenizer, self.tokenizer_mode,
             self.trust_remote_code, self.dtype, self.seed, self.revision,
-            self.code_revision, self.rope_scaling, self.tokenizer_revision,
-            self.max_model_len, self.quantization,
+            self.code_revision, self.rope_scaling, self.rope_theta,
+            self.tokenizer_revision, self.max_model_len, self.quantization,
             self.quantization_param_path, self.enforce_eager,
             self.max_context_len_to_capture, self.max_seq_len_to_capture,
             self.max_logprobs, self.disable_sliding_window,

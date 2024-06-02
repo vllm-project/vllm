@@ -22,7 +22,8 @@ def get_config(model: str,
                trust_remote_code: bool,
                revision: Optional[str] = None,
                code_revision: Optional[str] = None,
-               rope_scaling: Optional[dict] = None) -> PretrainedConfig:
+               rope_scaling: Optional[dict] = None,
+               rope_theta: Optional[float] = None) -> PretrainedConfig:
     try:
         config = AutoConfig.from_pretrained(
             model,
@@ -45,10 +46,12 @@ def get_config(model: str,
         config = config_class.from_pretrained(model,
                                               revision=revision,
                                               code_revision=code_revision)
-    if rope_scaling is not None:
-        logger.info("Updating rope_scaling from %r to %r",
-                    getattr(config, "rope_scaling", None), rope_scaling)
-        config.update({"rope_scaling": rope_scaling})
+    for key in ["rope_scaling", "rope_theta"]:
+        if locals()[key] is not None:
+            logger.info("Updating %s from %r to %r", key,
+                        getattr(config, key, None),
+                        locals()[key])
+            config.update({key: locals()[key]})
     return config
 
 
