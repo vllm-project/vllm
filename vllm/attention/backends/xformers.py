@@ -150,7 +150,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         self.attn_bias: Optional[List[AttentionBias]] = None
         self.encoder_attn_bias: Optional[List[AttentionBias]] = None
         self.cross_attn_bias: Optional[List[AttentionBias]] = None
-        
+
         if self.is_all_encoder_attn_metadata_set:
             self._maybe_compute_implicit_encoder_attrs()
 
@@ -172,10 +172,6 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
                (self.cross_slot_mapping is not None) and \
                (self.cross_block_tables is not None)
 
-    @property
-    def attention_type(self) -> AttentionType:
-        return self._attn_type
-
     def _maybe_compute_implicit_encoder_attrs(self):
         '''
         Encoder attention and cross-attention require some encoder-related
@@ -191,6 +187,10 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         if self.max_encoder_seq_len is None:
             assert self.encoder_seq_lens is not None
             self.max_encoder_seq_len = max(self.encoder_seq_lens)
+
+    @property
+    def attention_type(self) -> AttentionType:
+        return self._attn_type
 
     @attention_type.setter
     def attention_type(self, atype: AttentionType) -> None:
