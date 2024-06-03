@@ -1,4 +1,3 @@
-import os
 from unittest.mock import patch
 
 import pytest
@@ -19,7 +18,7 @@ def test_env(name: str, device: str, monkeypatch):
     Note that we do not test FlashAttn because it is the default backend.
     """
 
-    monkeypatch.setenv(_backend_env_var,name)
+    monkeypatch.setenv(_backend_env_var, name)
 
     if device == "cpu":
         with patch("vllm.attention.selector.is_cpu", return_value=True):
@@ -40,7 +39,7 @@ def test_env(name: str, device: str, monkeypatch):
 def test_flash_attn(monkeypatch):
     """Test FlashAttn validation."""
 
-    monkeypatch.setenv(_backend_env_var,_flash_attn_val)
+    monkeypatch.setenv(_backend_env_var, _flash_attn_val)
 
     # Unsupported CUDA arch
     with patch("torch.cuda.get_device_capability", return_value=[7, 5]):
@@ -75,6 +74,6 @@ def test_flash_attn(monkeypatch):
 
 def test_invalid_env(monkeypatch):
     """Throw an exception if the backend name is invalid."""
-    monkeypatch.setenv(_backend_env_var,_invalid_val)
+    monkeypatch.setenv(_backend_env_var, _invalid_val)
     with pytest.raises(ValueError):
         which_attn_to_use(8, 16, 8, None, torch.float16, None, 16)
