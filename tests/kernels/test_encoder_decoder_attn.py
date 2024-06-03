@@ -14,7 +14,7 @@ from typing import List, Optional, Union
 import pytest
 import torch
 
-from tests.kernels.utils import override_backend
+from tests.kernels.utils import override_backend_env_variable
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.backends.abstract import AttentionBackend, AttentionType
 from vllm.attention.backends.utils import (
@@ -1236,7 +1236,7 @@ def test_encoder_attention(num_heads: int, head_size: int, backend_name: str,
     '''
 
     # Force Attention wrapper backend
-    override_backend(monkeypatch, backend_name)
+    override_backend_env_variable(monkeypatch, backend_name)
 
     # Attention scale factor, attention backend instance, attention wrapper
     # instance. Encoder attention does not require KV cache.
@@ -1342,7 +1342,7 @@ def test_enc_dec_self_and_cross_attention_prefill_decode_phases(
     '''
 
     # Force Attention wrapper backend
-    override_backend(monkeypatch, backend_name)
+    override_backend_env_variable(monkeypatch, backend_name)
 
     # Num KV cache blocks
     num_blocks = 4096
@@ -1568,7 +1568,7 @@ def test_enc_dec_no_rocm_hip_support(num_heads: int, head_size: int,
     '''
 
     # Force Attention wrapper backend
-    override_backend(monkeypatch, backend_name)
+    override_backend_env_variable(monkeypatch, backend_name)
 
     # Num KV cache blocks
     num_blocks = 4096
