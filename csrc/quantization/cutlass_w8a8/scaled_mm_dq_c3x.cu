@@ -1,3 +1,9 @@
+// clang-format will break include orders
+// clang-format off
+#include <cudaTypedefs.h>
+
+#if defined CUDA_VERSION && CUDA_VERSION >= 12000
+
 #include <torch/extension.h>
 
 #include <ATen/cuda/CUDAContext.h>
@@ -6,19 +12,20 @@
 #include <sstream>
 #include <vector>
 
-// clang-format will break include orders
-// clang-format off
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cutlass/numeric_types.h"
 
+#include "cutlass/util/device_memory.h"
+
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
+#include "broadcast_load_epilogue_c3x.hpp"
 #include "common.hpp"
 // clang-format on
 
@@ -44,6 +51,11 @@ using namespace cute;
 
 namespace {
 
+uint32_t next_pow_2(uint32_t const num) {
+  if (num <= 1) return num;
+  return 1 << (CHAR_BIT * sizeof(num) - __builtin_clz(num - 1));
+}
+
 template <typename ElementAB_, typename ElementD_, typename TileShape,
           typename ClusterShape, typename KernelSchedule,
           typename EpilogueSchedule>
@@ -61,7 +73,7 @@ struct cutlass_3x_gemm {
 
   using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
 
-  using ScaleA = cutlass::epilogue::fusion::Sm90ColBroadcast<
+  using ScaleA = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
       0 /*Stages*/, typename EpilogueDescriptor::TileShape, float,
       Stride<Int<1>, Int<0>, Int<0>>>;
 
@@ -69,7 +81,7 @@ struct cutlass_3x_gemm {
       cutlass::epilogue::collective::detail::RowBroadcastDescriptor<
           EpilogueDescriptor, float>;
 
-  using ScaleB = cutlass::epilogue::fusion::Sm90RowBroadcast<
+  using ScaleB = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
       ScaleBDescriptor::Stages, typename EpilogueDescriptor::TileShape,
       typename ScaleBDescriptor::Element, Stride<Int<0>, Int<1>, Int<0>>>;
 
@@ -162,13 +174,9 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
 
   using ScaleA_Args = typename Gemm::ScaleA::Arguments;
   using ScaleB_Args = typename Gemm::ScaleB::Arguments;
-  ScaleA_Args a_args = a_scales.numel() == 1
-                           ? ScaleA_Args{nullptr, a_scales.item<float>(), {}}
-                           : ScaleA_Args{a_scales.data_ptr<float>(), {}, {}};
 
-  ScaleB_Args b_args = b_scales.numel() == 1
-                           ? ScaleB_Args{nullptr, b_scales.item<float>(), {}}
-                           : ScaleB_Args{b_scales.data_ptr<float>(), {}, {}};
+  ScaleA_Args a_args{a_scales.data_ptr<float>(), a_scales.numel() != 1, {}};
+  ScaleB_Args b_args{b_scales.data_ptr<float>(), b_scales.numel() != 1, {}};
 
   args.epilogue.thread = {a_args, {b_args}};
 
@@ -178,13 +186,95 @@ void cutlass_scaled_mm_dq_dispatcher(torch::Tensor& out, torch::Tensor const& a,
   CUTLASS_CHECK(gemm_op.can_implement(args));
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
-  TORCH_CHECK(workspace_size == 0);
+  cutlass::device_memory::allocation<uint8_t> workspace(workspace_size);
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
-  cutlass::Status status = gemm_op.run(args, stream);
+
+  cutlass::Status status = gemm_op.run(args, workspace.get(), stream);
   CUTLASS_CHECK(status);
 }
+
+template <typename InType, typename OutType, int32_t M>
+struct sm90_fp8_config {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_128, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm90_fp8_config<InType, OutType, 128> {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _128>;
+  using ClusterShape = Shape<_2, _1, _1>;
+
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
+template <typename InType, typename OutType>
+struct sm90_fp8_config<InType, OutType, 64> {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  using KernelSchedule =
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _64, _128>;
+  using ClusterShape = Shape<_1, _8, _1>;
+
+  using Cutlass3xGemm =
+      cutlass_3x_gemm<InType, OutType, TileShape, ClusterShape, KernelSchedule,
+                      EpilogueSchedule>;
+};
+
 }  // namespace
+
+template <typename InType, typename OutType>
+void cutlass_scaled_mm_dq_sm90_fp8_dispatch(torch::Tensor& out,
+                                            torch::Tensor const& a,
+                                            torch::Tensor const& b,
+                                            torch::Tensor const& a_scales,
+                                            torch::Tensor const& b_scales) {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
+  using Cutlass3xGemmDefault =
+      typename sm90_fp8_config<InType, OutType, 0>::Cutlass3xGemm;
+  using Cutlass3xGemmM64 =
+      typename sm90_fp8_config<InType, OutType, 64>::Cutlass3xGemm;
+  using Cutlass3xGemmM128 =
+      typename sm90_fp8_config<InType, OutType, 128>::Cutlass3xGemm;
+
+  uint32_t const m = a.size(0);
+  uint32_t const mp2 =
+      std::max(static_cast<uint32_t>(64), next_pow_2(m));  // next power of 2
+
+  if (mp2 <= 64) {
+    // m in [1, 64]
+    return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmM64>(
+        out, a, b, a_scales, b_scales);
+  } else if (mp2 <= 128) {
+    // m in (64, 128]
+    return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmM128>(
+        out, a, b, a_scales, b_scales);
+  } else {
+    // m in (128, inf)
+    return cutlass_scaled_mm_dq_dispatcher<Cutlass3xGemmDefault>(
+        out, a, b, a_scales, b_scales);
+  }
+}
 
 void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
                                torch::Tensor const& b,
@@ -219,25 +309,17 @@ void cutlass_scaled_mm_dq_sm90(torch::Tensor& out, torch::Tensor const& a,
     TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
-    using TileShape = Shape<_128, _128, _128>;
-    using ClusterShape = Shape<_1, _2, _1>;
-    using KernelSchedule =
-        typename cutlass::gemm::KernelCpAsyncWarpSpecializedCooperative;
-    using EpilogueSchedule =
-        typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-
     if (out.dtype() == torch::kBFloat16) {
-      return cutlass_scaled_mm_dq_dispatcher<
-          cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::bfloat16_t, TileShape,
-                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+      return cutlass_scaled_mm_dq_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                                    cutlass::bfloat16_t>(
           out, a, b, a_scales, b_scales);
     } else {
       TORCH_CHECK(out.dtype() == torch::kFloat16);
-
-      return cutlass_scaled_mm_dq_dispatcher<
-          cutlass_3x_gemm<cutlass::float_e4m3_t, cutlass::half_t, TileShape,
-                          ClusterShape, KernelSchedule, EpilogueSchedule>>(
+      return cutlass_scaled_mm_dq_sm90_fp8_dispatch<cutlass::float_e4m3_t,
+                                                    cutlass::half_t>(
           out, a, b, a_scales, b_scales);
     }
   }
 }
+
+#endif
