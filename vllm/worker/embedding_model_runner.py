@@ -4,14 +4,16 @@ import torch
 
 from vllm.attention import AttentionMetadata
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.layers import PromptAdapterMapping
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import PoolerOutput, SequenceData, SequenceGroupMetadata
 from vllm.worker.model_runner import ModelRunner
 
@@ -32,6 +34,7 @@ class EmbeddingModelRunner(ModelRunner):
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         vision_language_config: Optional[VisionLanguageConfig] = None,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
     ):
         super().__init__(model_config,
                          parallel_config,
@@ -42,7 +45,8 @@ class EmbeddingModelRunner(ModelRunner):
                          lora_config=lora_config,
                          kv_cache_dtype=kv_cache_dtype,
                          is_driver_worker=is_driver_worker,
-                         vision_language_config=vision_language_config)
+                         vision_language_config=vision_language_config,
+                         prompt_adapter_config=prompt_adapter_config)
 
     @torch.inference_mode()
     def execute_model(
@@ -51,11 +55,16 @@ class EmbeddingModelRunner(ModelRunner):
         kv_caches: List[torch.Tensor],
     ) -> Optional[PoolerOutput]:
         (input_tokens, input_positions, attn_metadata, pooling_metadata,
-         lora_requests, lora_mapping, multi_modal_input
+         lora_requests, lora_mapping, multi_modal_input,
+         prompt_adapter_requests, prompt_adapter_mapping
          ) = self.prepare_input_tensors(seq_group_metadata_list)
 
         if self.lora_config:
             self.set_active_loras(lora_requests, lora_mapping)
+
+        if self.prompt_adapter_config:
+            self.set_active_prompt_adapters(prompt_adapter_requests,
+                                            prompt_adapter_mapping)
 
         # Currently cuda graph is only supported by the decode phase.
         prefill_meta = attn_metadata.prefill_metadata
@@ -90,24 +99,16 @@ class EmbeddingModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, PoolingMetadata,
-               Set[LoRARequest], LoRAMapping, Dict[str, torch.Tensor]]:
+               Set[LoRARequest], LoRAMapping, torch.Tensor,
+               Set[PromptAdapterRequest], PromptAdapterMapping]:
         if self.is_driver_worker:
             assert seq_group_metadata_list is not None
             # Prepare input tensors.
-            (
-                input_tokens,
-                input_positions,
-                attn_metadata,
-                seq_lens,
-                _,
-                lora_mapping,
-                lora_requests,
-                multi_modal_kwargs,
-                slot_mapping,
-                num_prefill_tokens,
-                num_decode_tokens,
-                num_prefills,
-            ) = self._prepare_model_input(seq_group_metadata_list)
+            (input_tokens, input_positions, attn_metadata, seq_lens, _,
+             lora_mapping, lora_requests, multi_modal_input, slot_mapping,
+             num_prefill_tokens, num_decode_tokens, num_prefills,
+             prompt_adapter_mapping, prompt_adapter_requests
+             ) = self._prepare_model_input(seq_group_metadata_list)
             # Prepare PoolingMetadata
             pooling_metadata = self._prepare_pooling(seq_group_metadata_list,
                                                      seq_lens)
@@ -117,11 +118,13 @@ class EmbeddingModelRunner(ModelRunner):
                 "input_positions": input_positions,
                 "lora_requests": lora_requests,
                 "lora_mapping": lora_mapping,
-                "multi_modal_kwargs": multi_modal_kwargs,
+                "multi_modal_input": multi_modal_input,
                 "num_prefill_tokens": num_prefill_tokens,
                 "num_decode_tokens": num_decode_tokens,
                 "slot_mapping": slot_mapping,
                 "num_prefills": num_prefills,
+                "prompt_adapter_requests": prompt_adapter_requests,
+                "prompt_adapter_mapping": prompt_adapter_mapping,
             }
             if attn_metadata:
                 metadata_dict.update(attn_metadata.asdict_zerocopy())
@@ -132,7 +135,11 @@ class EmbeddingModelRunner(ModelRunner):
             input_positions = metadata_dict.pop("input_positions")
             lora_mapping = metadata_dict.pop("lora_mapping")
             lora_requests = metadata_dict.pop("lora_requests")
-            multi_modal_kwargs = metadata_dict.pop("multi_modal_kwargs")
+            multi_modal_input = metadata_dict.pop("multi_modal_input")
+            prompt_adapter_mapping = metadata_dict.pop(
+                "prompt_adapter_mapping")
+            prompt_adapter_requests = metadata_dict.pop(
+                "prompt_adapter_requests")
             if metadata_dict:
                 attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
@@ -143,7 +150,8 @@ class EmbeddingModelRunner(ModelRunner):
                                                prompt_lens=None)
 
         return (input_tokens, input_positions, attn_metadata, pooling_metadata,
-                lora_requests, lora_mapping, multi_modal_kwargs)
+                lora_requests, lora_mapping, multi_modal_input,
+                prompt_adapter_requests, prompt_adapter_mapping)
 
     def _prepare_pooling(
         self,

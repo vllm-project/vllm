@@ -98,7 +98,7 @@ class CPUExecutor(ExecutorBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.driver_worker.list_prompt_adapters()
-        
+
     def check_health(self) -> None:
         # CPUExecutor will always be healthy as long as
         # it's running.

@@ -10,6 +10,8 @@ import safetensors.torch
 import torch
 from torch import nn
 
+from vllm.adapter_commons.models import (AdapterLRUCache, AdapterModel,
+                                         AdapterModelManager)
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
@@ -18,8 +20,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA,
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              parse_fine_tuned_lora_name, replace_submodule)
-from vllm.utils import LRUCache, is_pin_memory_available
-from vllm.adapter_commons.models import AdapterModel, AdapterLRUCache, AdapterModelManager
+from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -489,7 +490,7 @@ class LoRAModelManager(AdapterModelManager):
     @property
     def deactivate_lora(self):
         return self.deactivate_adapter
-        
+
     def _set_long_lora_context(self, lora: LoRAModel):
         if self.long_lora_context is None:
             return
@@ -563,7 +564,7 @@ class LoRAModelManager(AdapterModelManager):
     @property
     def get_lora(self):
         return self.get_adapter
-        
+
     def remove_all_loras(self):
         """Remove all LoRAModels from the manager."""
         self._registered_adapters.clear()
@@ -719,7 +720,8 @@ class LoRAModelManager(AdapterModelManager):
 
 class LoRALRUCache(AdapterLRUCache[LoRAModel]):
 
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], None]):
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int],
+                                                                   None]):
         super().__init__(capacity, deactivate_lora_fn)
 
 

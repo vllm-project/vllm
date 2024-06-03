@@ -43,8 +43,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
 from vllm.prompt_adapter.layers import apply_prompt_adapter
+from vllm.sequence import SamplerOutput
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:

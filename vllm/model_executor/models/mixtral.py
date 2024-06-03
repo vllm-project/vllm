@@ -51,9 +51,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.prompt_adapter.layers import apply_prompt_adapter
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
-from vllm.prompt_adapter.layers import apply_prompt_adapter
 
 
 class MixtralMoE(nn.Module):

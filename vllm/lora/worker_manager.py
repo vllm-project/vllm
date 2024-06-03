@@ -1,18 +1,17 @@
-from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional, Set, Type, Union
 
 import torch
 
+from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
-from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 
 logger = init_logger(__name__)
+
 
 class WorkerLoRAManager(AbstractWorkerManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.
@@ -39,14 +38,14 @@ class WorkerLoRAManager(AbstractWorkerManager):
         self.embedding_padding_modules = embedding_padding_modules
         self._cached_dummy_lora: Union[None, Literal[False], LoRAModel] = False
         self.max_num_seqs = max_num_seqs
-        self.max_num_batched_tokens = max_num_batched_tokens 
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.vocab_size = vocab_size
         self.lora_config = lora_config
         self.max_position_embeddings = max_position_embeddings
         super().__init__(device)
         # Lazily initialized by create_lora_manager.
         self._lora_manager: LoRAModelManager
-    
+
     @contextmanager
     def dummy_lora_cache(self):
         """Use this context manager to reuse the dummy lora model
@@ -54,7 +53,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
         self._cached_dummy_lora = None
         yield
         self._cached_dummy_lora = False
-        
+
     @property
     def is_enabled(self) -> bool:
         return True
@@ -172,8 +171,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     (unless they are already loaded) and least recently used LoRAs will
     be unloaded if the cache is above capacity."""
 
-    _manager_cls: Type[
-        LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
+    _manager_cls: Type[LRUCacheLoRAModelManager] = LRUCacheLoRAModelManager
 
     def create_lora_manager(
         self,

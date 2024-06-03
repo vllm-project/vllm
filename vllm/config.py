@@ -1106,6 +1106,7 @@ class PromptAdapterConfig:
         if self.max_cpu_prompt_adapters is None:
             self.max_cpu_prompt_adapters = self.max_prompt_adapters
 
+
 @dataclass
 class VisionLanguageConfig:
     """Configs the input data format and how models should run for

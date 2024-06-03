@@ -157,7 +157,8 @@ class SchedulerOutputs:
     def _sort_by_prompt_adapter_ids(self):
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
-            key=lambda g: (g.seq_group.prompt_adapter_id, g.seq_group.request_id))
+            key=lambda g:
+            (g.seq_group.prompt_adapter_id, g.seq_group.request_id))
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:

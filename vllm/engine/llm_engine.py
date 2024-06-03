@@ -9,8 +9,8 @@ from transformers import GenerationConfig, PreTrainedTokenizer
 import vllm
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig,
-                         VisionLanguageConfig, PromptAdapterConfig)
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, VisionLanguageConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -24,10 +24,10 @@ from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
                            PoolerOutput, SamplerOutput, Sequence,
@@ -456,8 +456,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request
-            )
+                prompt_adapter_request=prompt_adapter_request)
         elif isinstance(params, PoolingParams):
             seq_group = self._create_sequence_group_with_pooling(
                 request_id,
@@ -465,8 +464,7 @@ class LLMEngine:
                 params,
                 arrival_time=arrival_time,
                 lora_request=lora_request,
-                prompt_adapter_request=prompt_adapter_request
-            )
+                prompt_adapter_request=prompt_adapter_request)
         else:
             raise ValueError(
                 "Either SamplingParams or PoolingParams must be provided.")
@@ -495,8 +493,9 @@ class LLMEngine:
             prompt_token_ids = inputs["prompt_token_ids"]
 
         if prompt_adapter_request:
-            prompt_token_ids = [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
-                                    + prompt_token_ids
+            prompt_token_ids = \
+                [0] * prompt_adapter_request.prompt_adapter_num_virtual_tokens\
+                         + prompt_token_ids
 
         return LLMInputs(prompt_token_ids=prompt_token_ids,
                          prompt=inputs.get("prompt"),
@@ -558,10 +557,11 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        processed_inputs = self.process_model_inputs(request_id=request_id,
-                                                     inputs=inputs,
-                                                     lora_request=lora_request,
-                                                     prompt_adapter_request=prompt_adapter_request)
+        processed_inputs = self.process_model_inputs(
+            request_id=request_id,
+            inputs=inputs,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         self._add_processed_request(
             request_id=request_id,
@@ -569,8 +569,7 @@ class LLMEngine:
             params=params,
             arrival_time=arrival_time,
             lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request
-        )
+            prompt_adapter_request=prompt_adapter_request)
 
     def _create_sequence_group_with_sampling(
         self,
@@ -601,12 +600,13 @@ class LLMEngine:
             self.generation_config_fields)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  sampling_params=sampling_params,
-                                  lora_request=lora_request,
-                                  prompt_adapter_request=prompt_adapter_request)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            sampling_params=sampling_params,
+            lora_request=lora_request,
+            prompt_adapter_request=prompt_adapter_request)
 
         return seq_group
 
@@ -623,12 +623,13 @@ class LLMEngine:
         # Defensive copy of PoolingParams, which are used by the pooler
         pooling_params = pooling_params.clone()
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  lora_request=lora_request,
-                                  pooling_params=pooling_params,
-                                  prompt_adapter_request=prompt_adapter_request)
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            pooling_params=pooling_params,
+            prompt_adapter_request=prompt_adapter_request)
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -1002,6 +1003,6 @@ class LLMEngine:
 
     def list_prompt_adapters(self) -> List[int]:
         return self.model_executor.list_prompt_adapters()
-        
+
     def check_health(self) -> None:
         self.model_executor.check_health()

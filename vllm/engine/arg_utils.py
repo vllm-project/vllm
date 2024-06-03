@@ -7,8 +7,9 @@ from typing import List, Optional, Tuple, Union
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, SpeculativeConfig,
-                         TokenizerPoolConfig, VisionLanguageConfig, PromptAdapterConfig)
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TokenizerPoolConfig,
+                         VisionLanguageConfig)
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.utils import str_to_int_tuple
 
@@ -503,9 +504,6 @@ class EngineArgs:
                   'Enabling this will use the fully sharded layers. '
                   'At high sequence length, max rank or '
                   'tensor parallel size, this is likely faster.'))
-        # parser.add_argument('--enable-prompt-adapter',
-        #                     action='store_true',
-        #                     help='If True, enable handling of PromptAdapters.')
         parser.add_argument('--max-prompt-adapters',
                             type=int,
                             default=EngineArgs.max_prompt_adapters,
@@ -730,10 +728,10 @@ class EngineArgs:
             download_dir=self.download_dir,
             model_loader_extra_config=self.model_loader_extra_config,
         )
-        
+
         prompt_adapter_config = PromptAdapterConfig(
-            max_prompt_adapters=self.max_prompt_adapters) #if self.enable_prompt_adapter else None
-        
+            max_prompt_adapters=self.max_prompt_adapters)
+
         if self.image_input_type:
             if (not self.image_token_id or not self.image_input_shape
                     or not self.image_feature_size):

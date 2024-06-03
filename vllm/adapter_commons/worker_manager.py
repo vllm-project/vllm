@@ -1,10 +1,16 @@
 from abc import ABC, abstractmethod, abstractproperty
-from typing import Any, List, Optional, Set, Type, Dict
+from typing import Any, Optional, Set
+
 import torch
 
+from vllm.adapter_commons.models import AdapterModelManager
+
+
 class AbstractWorkerManager(ABC):
+
     def __init__(self, device: torch.device):
         self.device = device
+        self._model_manager: AdapterModelManager = None
 
     @abstractproperty
     def is_enabled(self) -> bool:
@@ -14,12 +20,17 @@ class AbstractWorkerManager(ABC):
     def create_manager(self, model: torch.nn.Module) -> Any:
         ...
 
-    def set_active_adapters(self, requests: Set[Any], mapping: Optional[Any]) -> None:
+    def set_active_adapters(self, requests: Set[Any],
+                            mapping: Optional[Any]) -> None:
         self._apply_adapters(requests)
         self._model_manager.set_adapter_mapping(mapping)
 
     @abstractmethod
     def add_dummy_adapter(self, request: Any) -> bool:
+        ...
+
+    @abstractmethod
+    def _load_adapter(self, request: Any) -> Any:
         ...
 
     def add_adapter(self, adapter_request: Any) -> bool:

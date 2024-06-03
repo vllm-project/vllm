@@ -10,8 +10,8 @@ import torch
 from vllm.block import LogicalTokenBlock
 from vllm.inputs import LLMInputs
 from vllm.lora.request import LoRARequest
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.pooling_params import PoolingParams
+from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -220,13 +220,13 @@ class Sequence:
     """
 
     def __init__(
-        self,
-        seq_id: int,
-        inputs: LLMInputs,
-        block_size: int,
-        eos_token_id: Optional[int] = None,
-        lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+            self,
+            seq_id: int,
+            inputs: LLMInputs,
+            block_size: int,
+            eos_token_id: Optional[int] = None,
+            lora_request: Optional[LoRARequest] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
@@ -484,7 +484,7 @@ class SequenceGroup:
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens\
                          if self.prompt_adapter_request else 0
-        
+
     def get_last_latency(self, now: float) -> Optional[float]:
         """Sets the last token time for Request level timings."""
         # If still in prefill phase, raise Error.
@@ -704,7 +704,7 @@ class SequenceGroupMetadata:
     def prompt_adapter_num_virtual_tokens(self) -> int:
         return self.prompt_adapter_request.prompt_adapter_num_virtual_tokens \
                         if self.prompt_adapter_request else 0
-        
+
     @property
     def token_chunk_size(self) -> int:
         """Return the number of tokens to be processed (chunk size)."""

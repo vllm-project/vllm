@@ -6,8 +6,8 @@ from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         VisionLanguageConfig, PromptAdapterConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, VisionLanguageConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
@@ -90,7 +90,6 @@ class CPUModelRunner:
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,
             cache_config=self.cache_config,
-            prompt_adapter_config = self.prompt_adapter_config
         )
 
     def _prepare_prompt(

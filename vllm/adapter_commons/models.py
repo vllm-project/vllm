@@ -1,13 +1,16 @@
-import os
-import json
-from typing import Any, Callable, Dict, Hashable, List, Optional, Set, Type, TypeVar
-import torch
+from abc import abstractproperty
+from typing import Any, Callable, Dict, Hashable, Optional, TypeVar
+
 from torch import nn
-from vllm.utils import LRUCache
+
 from vllm.logger import init_logger
+from vllm.utils import LRUCache
+
 logger = init_logger(__name__)
 
+
 class AdapterModel:
+
     def __init__(self, model_id=None):
         self.id = model_id
 
@@ -17,9 +20,14 @@ class AdapterModel:
         # Load weights or embeddings from local checkpoint
         raise NotImplementedError("Subclasses must implement this method.")
 
+
 T = TypeVar('T')
+
+
 class AdapterLRUCache(LRUCache[T]):
-    def __init__(self, capacity: int, deactivate_fn: Callable[[Hashable], None]):
+
+    def __init__(self, capacity: int, deactivate_fn: Callable[[Hashable],
+                                                              None]):
         super().__init__(capacity)
         self.deactivate_fn = deactivate_fn
 
@@ -28,7 +36,9 @@ class AdapterLRUCache(LRUCache[T]):
         self.deactivate_fn(key)
         return super()._on_remove(key, value)
 
+
 class AdapterModelManager:
+
     def __init__(
         self,
         model: nn.Module,
@@ -42,9 +52,18 @@ class AdapterModelManager:
         # Dict instead of a Set for compatibility with LRUCache.
         self._active_adapters: Dict[int, None] = {}
         self.adapter_type = 'Adapter'
+        self._last_mapping = None
 
     def __len__(self) -> int:
         return len(self._registered_adapters)
+
+    @abstractproperty
+    def adapter_slots(self):
+        ...
+
+    @abstractproperty
+    def capacity(self):
+        ...
 
     def _deactivate_adapter(self, adapter_id: int):
         raise NotImplementedError("Subclasses must implement this method.")
@@ -65,7 +84,7 @@ class AdapterModelManager:
     def add_adapter(self, adapter: Any) -> bool:
         if adapter.id not in self._registered_adapters:
             if len(self._registered_adapters) >= self.capacity:
-                raise RuntimeError("No free "+self.adapter_type+" slots.")
+                raise RuntimeError("No free " + self.adapter_type + " slots.")
             self._add_adapter(adapter)
             return True
         return False
@@ -74,7 +93,10 @@ class AdapterModelManager:
         if self._last_mapping != mapping:
             self._set_adapter_mapping(mapping)
         self._last_mapping = mapping
-    
+
+    def _set_adapter_mapping(self, mapping: Any) -> None:
+        raise NotImplementedError("Subclasses must implement this method.")
+
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
         return bool(self._registered_adapters.pop(adapter_id, None))

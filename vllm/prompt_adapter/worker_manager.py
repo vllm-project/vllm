@@ -1,18 +1,18 @@
 import logging
-from abc import ABC, abstractmethod, abstractproperty
-from typing import Any, List, Optional, Set, Type, Dict
-import math
+from typing import Any, Optional, Set, Type
+
 import torch
 
+from vllm.adapter_commons.worker_manager import AbstractWorkerManager
 from vllm.config import PromptAdapterConfig
 from vllm.prompt_adapter.models import (LRUCachePromptAdapterModelManager,
                                         PromptAdapterModel,
                                         PromptAdapterModelManager,
                                         create_prompt_adapter_manager)
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.prompt_adapter.layers import PromptAdapterMapping
-from vllm.adapter_commons.worker_manager import AbstractWorkerManager
+
 logger = logging.getLogger(__name__)
+
 
 class WorkerPromptAdapterManager(AbstractWorkerManager):
     """WorkerPromptAdapterManager that manages 
@@ -22,8 +22,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     loaded (unless they are already loaded), 
     and every other prompt_adapter will be unloaded."""
 
-    _manager_cls: Type[
-        PromptAdapterModelManager] = PromptAdapterModelManager
+    _manager_cls: Type[PromptAdapterModelManager] = PromptAdapterModelManager
 
     def __init__(
         self,
@@ -36,7 +35,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
         self._prompt_adapter_manager: Optional[
             PromptAdapterModelManager] = None
         self.max_num_seqs = max_num_seqs
-        self.max_num_batched_tokens = max_num_batched_tokens 
+        self.max_num_batched_tokens = max_num_batched_tokens
         self._prompt_adapter_model_cls = prompt_adapter_model_cls
         self.prompt_adapter_config = prompt_adapter_config
         super().__init__(device)
@@ -56,8 +55,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
             prompt_adapter_config=self.prompt_adapter_config,
             prompt_adapter_manager_cls=self._manager_cls,
         )
-        self._prompt_adapter_manager: PromptAdapterModelManager \
-                                    = prompt_adapter_manager
+        self._prompt_adapter_manager = prompt_adapter_manager
         return prompt_adapter_manager.model
 
     @property
@@ -83,7 +81,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
 
     def add_dummy_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        pass
+        return True
 
     @property
     def add_dummy_adapter(self):
@@ -92,7 +90,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     @property
     def create_manager(self):
         return self.create_prompt_adapter_manager
-        
+
     @property
     def _load_adapter(self):
         return self._load_prompt_adapter
@@ -120,7 +118,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
     @property
     def _apply_prompt_adapters(self):
         return self._apply_adapters
-    
+
 
 class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
     """WorkerPromptAdapterManager that manages 
@@ -147,7 +145,7 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
         self._prompt_adapter_manager: \
             LRUCachePromptAdapterModelManager = prompt_adapter_manager
         return prompt_adapter_manager.model
-        
+
     def _apply_adapters(
             self, prompt_adapter_requests: Set[PromptAdapterRequest]) -> None:
         prompt_adapters_map = {
@@ -165,8 +163,8 @@ class LRUCacheWorkerPromptAdapterManager(WorkerPromptAdapterManager):
         for prompt_adapter in prompt_adapters_map.values():
             self.add_prompt_adapter(prompt_adapter)
 
-    def add_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+    def add_adapter(self,
+                    prompt_adapter_request: PromptAdapterRequest) -> bool:
         if prompt_adapter_request.prompt_adapter_id not in \
             self.list_prompt_adapters():
             # Remove before we load the new prompt_adapter to save memory

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
+
 from vllm.adapter_commons.request import AdapterRequest
+
 
 @dataclass
 class LoRARequest(AdapterRequest):
@@ -25,11 +27,11 @@ class LoRARequest(AdapterRequest):
     @property
     def adapter_id(self):
         return self.lora_int_id
-    
+
     @property
     def name(self):
         return self.lora_name
-    
+
     @property
     def local_path(self):
         return self.lora_local_path

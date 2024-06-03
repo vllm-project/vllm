@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Tuple
+
 import torch
+
 
 @dataclass
 class PromptAdapterMapping:
@@ -13,7 +15,9 @@ class PromptAdapterMapping:
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
 
-def apply_prompt_adapter(instance, hidden_states: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+
+def apply_prompt_adapter(instance, hidden_states: torch.Tensor,
+                         positions: torch.Tensor) -> torch.Tensor:
     if hasattr(instance, 'prefix_encoder'):
         soft_prompt = instance.prefix_encoder.prompt_embedding
         indices = (positions < soft_prompt.shape[0])

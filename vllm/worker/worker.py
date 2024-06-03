@@ -7,13 +7,15 @@ import torch
 import torch.distributed
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, SchedulerConfig,
-                         SpeculativeConfig, VisionLanguageConfig, PromptAdapterConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.lora.request import LoRARequest
+from vllm.model_executor import set_random_seed
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -86,8 +88,7 @@ class Worker(WorkerBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
             vision_language_config=vision_language_config,
-            prompt_adapter_config = prompt_adapter_config
-        )
+            prompt_adapter_config=prompt_adapter_config)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: CacheEngine
@@ -332,14 +333,13 @@ class Worker(WorkerBase):
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.prompt_adapter_manager.add_prompt_adapter(
-            prompt_adapter_request)
-        
+        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
+
     def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.prompt_adapter_manager.remove_lora(prompt_adapter_id)
+        return self.model_runner.remove_lora(prompt_adapter_id)
 
     def list_prompt_adapters(self) -> Set[int]:
-        return self.prompt_adapter_manager.list_prompt_adapters()
+        return self.model_runner.list_prompt_adapters()
 
     @property
     def max_model_len(self) -> int:
