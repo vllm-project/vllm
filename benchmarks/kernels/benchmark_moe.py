@@ -298,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument("--model",
                         type=str,
                         default="mistralai/Mixtral-8x7B-Instruct-v0.1")
-    parser.add_argument("--tp-size", type=int, default=2)
+    parser.add_argument("--tp-size", "-tp", type=int, default=2)
     parser.add_argument("--dtype",
                         type=str,
                         choices=["auto", "fp8"],
