@@ -45,7 +45,7 @@ class WorkerPromptAdapterManager(AbstractWorkerManager):
         return True
 
     def reset_adapter(self):
-        self._adapter_manager.reset_adapter()
+        self._prompt_adapter_manager.reset_adapter()
 
     def create_prompt_adapter_manager(
         self,
