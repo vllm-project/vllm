@@ -1,21 +1,40 @@
 # formatting
 yapf==0.32.0
 toml==0.10.2
+tomli==2.0.1
 ruff==0.1.5
+codespell==2.2.6
+isort==5.13.2
+clang-format==18.1.5
 
 # type checking
-mypy==0.991
+mypy==1.9.0
 types-PyYAML
 types-requests
 types-setuptools
 
 # testing
 pytest
+tensorizer>=2.9.0
 pytest-forked
 pytest-asyncio
-httpx
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+awscli
 einops # required for MPT
-flash_attn # required for HuggingFace's llama implementation
-openai
+httpx
+peft
 requests
 ray
+sentence-transformers # required for embedding
+
+# Benchmarking
+aiohttp
+
+# Multimodal
+pillow
+
+# quantization
+bitsandbytes==0.42.0

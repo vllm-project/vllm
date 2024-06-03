@@ -33,14 +33,12 @@ class FCFS(Policy):
         now: float,
         seq_group: SequenceGroup,
     ) -> float:
-        return now - seq_group.arrival_time
+        return now - seq_group.metrics.arrival_time
 
 
 class PolicyFactory:
 
-    _POLICY_REGISTRY = {
-        'fcfs': FCFS,
-    }
+    _POLICY_REGISTRY = {'fcfs': FCFS}
 
     @classmethod
     def get_policy(cls, policy_name: str, **kwargs) -> Policy:

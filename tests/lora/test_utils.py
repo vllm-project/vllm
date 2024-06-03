@@ -2,8 +2,8 @@ from collections import OrderedDict
 
 from torch import nn
 
+from vllm.lora.utils import parse_fine_tuned_lora_name, replace_submodule
 from vllm.utils import LRUCache
-from vllm.lora.utils import (parse_fine_tuned_lora_name, replace_submodule)
 
 
 def test_parse_fine_tuned_lora_name():

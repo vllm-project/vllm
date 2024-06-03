@@ -1,40 +1,60 @@
-import copy
-from collections import defaultdict
-import os
 import time
-import pickle
-from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
-                    Union)
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, ClassVar, Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Type, TypeVar, Union
 
-from vllm.lora.request import LoRARequest
-from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig, LoRAConfig)
-from vllm.core.scheduler import Scheduler, SchedulerOutputs
+from transformers import GenerationConfig, PreTrainedTokenizer
+
+import vllm
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, SpeculativeConfig,
+                         VisionLanguageConfig)
+from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
+                                 SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics import StatLogger, Stats
-from vllm.engine.ray_utils import RayWorkerVllm, initialize_cluster, ray
+from vllm.engine.output_processor.interfaces import (
+    SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.engine.output_processor.util import create_output_by_sequence_group
+from vllm.executor.executor_base import ExecutorBase
+from vllm.executor.ray_utils import initialize_ray_cluster
+from vllm.inputs import LLMInputs, PromptInputs
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
+from vllm.lora.request import LoRARequest
+from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
+                          RequestOutputFactory)
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (SamplerOutput, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
-from vllm.transformers_utils.tokenizer import (detokenize_incrementally,
-                                               TokenizerGroup)
-from vllm.utils import Counter, set_cuda_visible_devices, get_ip, get_open_port, get_distributed_init_method
-
-if ray:
-    from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-
-if TYPE_CHECKING:
-    from ray.util.placement_group import PlacementGroup
+from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
+                           PoolerOutput, SamplerOutput, Sequence,
+                           SequenceGroup, SequenceGroupMetadata,
+                           SequenceStatus)
+from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.transformers_utils.tokenizer_group import (BaseTokenizerGroup,
+                                                     get_tokenizer_group)
+from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                  usage_message)
+from vllm.utils import Counter
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-# If the env var is set, it uses the Ray's compiled DAG API
-# which optimizes the control plane overhead.
-# Run VLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-USE_RAY_COMPILED_DAG = bool(os.getenv("VLLM_USE_RAY_COMPILED_DAG", 0))
+
+def _load_generation_config_dict(model_config: ModelConfig):
+    try:
+        return GenerationConfig.from_pretrained(
+            model_config.model,
+            revision=model_config.revision,
+        ).to_diff_dict()
+    except OSError:
+        # Not found.
+        return {}
+
+
+_O = TypeVar("_O", RequestOutput, EmbeddingRequestOutput)
 
 
 class LLMEngine:
@@ -47,11 +67,11 @@ class LLMEngine:
     iteration-level scheduling and efficient memory management to maximize the
     serving throughput.
 
-    The `LLM` class wraps this class for offline batched inference and the
-    `AsyncLLMEngine` class wraps this class for online serving.
+    The :class:`~vllm.LLM` class wraps this class for offline batched inference
+    and the :class:`AsyncLLMEngine` class wraps this class for online serving.
 
-    NOTE: The config arguments are derived from the `EngineArgs` class. For the
-    comprehensive list of arguments, see `EngineArgs`.
+    The config arguments are derived from :class:`~vllm.EngineArgs`. (See
+    :ref:`engine_args`)
 
     Args:
         model_config: The configuration related to the LLM model.
@@ -60,10 +80,67 @@ class LLMEngine:
         parallel_config: The configuration related to distributed execution.
         scheduler_config: The configuration related to the request scheduler.
         device_config: The configuration related to the device.
-        placement_group: Ray placement group for distributed execution.
-            Required for distributed execution.
+        lora_config (Optional): The configuration related to serving multi-LoRA.
+        vision_language_config (Optional): The configuration related to vision
+            language models.
+        speculative_config (Optional): The configuration related to speculative
+            decoding.
+        executor_class: The model executor class for managing distributed
+            execution.
         log_stats: Whether to log statistics.
+        usage_context: Specified entry point, used for usage info collection.
     """
+
+    DO_VALIDATE_OUTPUT: ClassVar[bool] = False
+    """A flag to toggle whether to validate the type of request output."""
+
+    @classmethod
+    @contextmanager
+    def enable_output_validation(cls):
+        cls.DO_VALIDATE_OUTPUT = True
+
+        yield
+
+        cls.DO_VALIDATE_OUTPUT = False
+
+    @classmethod
+    def validate_output(
+        cls,
+        output: object,
+        output_type: Type[_O],
+    ) -> _O:
+        do_validate = cls.DO_VALIDATE_OUTPUT
+
+        if ((TYPE_CHECKING or do_validate)
+                and not isinstance(output, output_type)):
+            raise TypeError(f"Expected output of type {output_type}, "
+                            f"but found type {type(output)}")
+
+        return output
+
+    @classmethod
+    def validate_outputs(
+        cls,
+        outputs: GenericSequence[object],
+        output_type: Type[_O],
+    ) -> List[_O]:
+        do_validate = cls.DO_VALIDATE_OUTPUT
+
+        outputs_: List[_O]
+        if TYPE_CHECKING or do_validate:
+            outputs_ = []
+            for output in outputs:
+                if not isinstance(output, output_type):
+                    raise TypeError(f"Expected output of type {output_type}, "
+                                    f"but found type {type(output)}")
+
+                outputs_.append(output)
+        else:
+            outputs_ = outputs
+
+        return outputs_
+
+    tokenizer: Optional[BaseTokenizerGroup]
 
     def __init__(
         self,
@@ -72,99 +149,254 @@ class LLMEngine:
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
         device_config: DeviceConfig,
+        load_config: LoadConfig,
         lora_config: Optional[LoRAConfig],
-        placement_group: Optional["PlacementGroup"],
+        vision_language_config: Optional[VisionLanguageConfig],
+        speculative_config: Optional[SpeculativeConfig],
+        decoding_config: Optional[DecodingConfig],
+        executor_class: Type[ExecutorBase],
         log_stats: bool,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ) -> None:
         logger.info(
-            "Initializing an LLM engine with config: "
-            f"model={model_config.model!r}, "
-            f"tokenizer={model_config.tokenizer!r}, "
-            f"tokenizer_mode={model_config.tokenizer_mode}, "
-            f"revision={model_config.revision}, "
-            f"tokenizer_revision={model_config.tokenizer_revision}, "
-            f"trust_remote_code={model_config.trust_remote_code}, "
-            f"dtype={model_config.dtype}, "
-            f"max_seq_len={model_config.max_model_len}, "
-            f"download_dir={model_config.download_dir!r}, "
-            f"load_format={model_config.load_format}, "
-            f"tensor_parallel_size={parallel_config.tensor_parallel_size}, "
-            f"disable_custom_all_reduce={parallel_config.disable_custom_all_reduce}, "
-            f"quantization={model_config.quantization}, "
-            f"enforce_eager={model_config.enforce_eager}, "
-            f"kv_cache_dtype={cache_config.cache_dtype}, "
-            f"device_config={device_config.device}, "
-            f"seed={model_config.seed})")
+            "Initializing an LLM engine (v%s) with config: "
+            "model=%r, speculative_config=%r, tokenizer=%r, "
+            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+            "rope_scaling=%r, tokenizer_revision=%s, "
+            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+            "disable_custom_all_reduce=%s, quantization=%s, "
+            "enforce_eager=%s, kv_cache_dtype=%s, "
+            "quantization_param_path=%s, device_config=%s, "
+            "decoding_config=%r, seed=%d, served_model_name=%s)",
+            vllm.__version__,
+            model_config.model,
+            speculative_config,
+            model_config.tokenizer,
+            model_config.skip_tokenizer_init,
+            model_config.tokenizer_mode,
+            model_config.revision,
+            model_config.rope_scaling,
+            model_config.tokenizer_revision,
+            model_config.trust_remote_code,
+            model_config.dtype,
+            model_config.max_model_len,
+            load_config.download_dir,
+            load_config.load_format,
+            parallel_config.tensor_parallel_size,
+            parallel_config.disable_custom_all_reduce,
+            model_config.quantization,
+            model_config.enforce_eager,
+            cache_config.cache_dtype,
+            model_config.quantization_param_path,
+            device_config.device,
+            decoding_config,
+            model_config.seed,
+            model_config.served_model_name,
+        )
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
+        self.vision_language_config = vision_language_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
         self.device_config = device_config
+        self.speculative_config = speculative_config
+        self.load_config = load_config
+        self.decoding_config = decoding_config or DecodingConfig()
         self.log_stats = log_stats
-        self._verify_args()
 
-        self._init_tokenizer()
-        self.seq_counter = Counter()
-
-        # Create the parallel GPU workers.
-        if self.parallel_config.worker_use_ray:
-            # Disable Ray usage stats collection.
-            ray_usage = os.environ.get("RAY_USAGE_STATS_ENABLED", "0")
-            if ray_usage != "1":
-                os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
-            self._init_workers_ray(placement_group)
+        if not self.model_config.skip_tokenizer_init:
+            self.tokenizer = self._init_tokenizer()
+            self.detokenizer = Detokenizer(self.tokenizer)
         else:
-            self._init_workers()
+            self.tokenizer = None
+            self.detokenizer = None
 
-        # Profile the memory usage and initialize the cache.
-        self._init_cache()
+        self.seq_counter = Counter()
+        self.generation_config_fields = _load_generation_config_dict(
+            model_config)
+
+        self.model_executor = executor_class(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            lora_config=lora_config,
+            vision_language_config=vision_language_config,
+            speculative_config=speculative_config,
+            load_config=load_config,
+        )
+
+        if not self.model_config.embedding_mode:
+            self._initialize_kv_caches()
+
+        # If usage stat is enabled, collect relevant info.
+        if is_usage_stats_enabled():
+            from vllm.model_executor.model_loader import (
+                get_architecture_class_name)
+            usage_message.report_usage(
+                get_architecture_class_name(model_config),
+                usage_context,
+                extra_kvs={
+                    # Common configuration
+                    "dtype":
+                    str(model_config.dtype),
+                    "tensor_parallel_size":
+                    parallel_config.tensor_parallel_size,
+                    "block_size":
+                    cache_config.block_size,
+                    "gpu_memory_utilization":
+                    cache_config.gpu_memory_utilization,
+
+                    # Quantization
+                    "quantization":
+                    model_config.quantization,
+                    "kv_cache_dtype":
+                    cache_config.cache_dtype,
+
+                    # Feature flags
+                    "enable_lora":
+                    bool(lora_config),
+                    "enable_prefix_caching":
+                    cache_config.enable_prefix_caching,
+                    "enforce_eager":
+                    model_config.enforce_eager,
+                    "disable_custom_all_reduce":
+                    parallel_config.disable_custom_all_reduce,
+                })
+
+        if self.tokenizer:
+            # Ping the tokenizer to ensure liveness if it runs in a
+            # different process.
+            self.tokenizer.ping()
 
         # Create the scheduler.
+        # NOTE: the cache_config here have been updated with the numbers of
+        # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
         # Metric Logging.
         if self.log_stats:
             self.stat_logger = StatLogger(
-                local_interval=_LOCAL_LOGGING_INTERVAL_SEC)
+                local_interval=_LOCAL_LOGGING_INTERVAL_SEC,
+                labels=dict(model_name=model_config.served_model_name),
+                max_model_len=self.model_config.max_model_len)
+            self.stat_logger.info("cache_config", self.cache_config)
 
-        self.forward_dag = None
-        if USE_RAY_COMPILED_DAG:
-            self.forward_dag = self._compiled_ray_dag()
+        # Create sequence output processor, e.g. for beam search or
+        # speculative decoding.
+        self.output_processor = (
+            SequenceGroupOutputProcessor.create_output_processor(
+                self.scheduler_config,
+                self.detokenizer,
+                self.scheduler,
+                self.seq_counter,
+                self.get_tokenizer_for_seq,
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    self.get_tokenizer_for_seq,
+                ),
+            ))
 
-    def get_tokenizer_for_seq(self, sequence: Sequence):
-        return self.tokenizer.get_lora_tokenizer(sequence.lora_request)
+    def _initialize_kv_caches(self) -> None:
+        """Initialize the KV cache in the worker(s).
 
-    def _init_workers(self):
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
+        The workers will determine the number of blocks in both the GPU cache
+        and the swap CPU cache.
+        """
+        num_gpu_blocks, num_cpu_blocks = (
+            self.model_executor.determine_num_available_blocks())
 
-        assert self.parallel_config.world_size == 1, (
-            "Ray is required if parallel_config.world_size > 1.")
+        if self.cache_config.num_gpu_blocks_override is not None:
+            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
+            logger.info(
+                "Overriding num_gpu_blocks=%d with "
+                "num_gpu_blocks_override=%d", num_gpu_blocks,
+                num_gpu_blocks_override)
+            num_gpu_blocks = num_gpu_blocks_override
 
-        self.workers: List[Worker] = []
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = Worker(
-            self.model_config,
-            self.parallel_config,
-            self.scheduler_config,
-            self.device_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=True,
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
+        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+
+    @classmethod
+    def from_engine_args(
+        cls,
+        engine_args: EngineArgs,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+    ) -> "LLMEngine":
+        """Creates an LLM engine from the engine arguments."""
+        # Create the engine configs.
+        engine_config = engine_args.create_engine_config()
+        distributed_executor_backend = (
+            engine_config.parallel_config.distributed_executor_backend)
+
+        # Initialize the cluster and specify the executor class.
+        if engine_config.device_config.device_type == "neuron":
+            from vllm.executor.neuron_executor import NeuronExecutor
+            executor_class = NeuronExecutor
+        elif engine_config.device_config.device_type == "cpu":
+            from vllm.executor.cpu_executor import CPUExecutor
+            executor_class = CPUExecutor
+        elif distributed_executor_backend == "ray":
+            initialize_ray_cluster(engine_config.parallel_config)
+            from vllm.executor.ray_gpu_executor import RayGPUExecutor
+            executor_class = RayGPUExecutor
+        elif distributed_executor_backend == "mp":
+            from vllm.executor.multiproc_gpu_executor import (
+                MultiprocessingGPUExecutor)
+            executor_class = MultiprocessingGPUExecutor
+        else:
+            from vllm.executor.gpu_executor import GPUExecutor
+            executor_class = GPUExecutor
+
+        # Create the LLM engine.
+        engine = cls(
+            **engine_config.to_dict(),
+            executor_class=executor_class,
+            log_stats=not engine_args.disable_log_stats,
+            usage_context=usage_context,
         )
-        self._run_workers("init_model")
-        self._run_workers("load_model")
+        return engine
 
-    def _init_tokenizer(self, **tokenizer_init_kwargs):
+    def __reduce__(self):
+        # This is to ensure that the LLMEngine is not referenced in
+        # the closure used to initialize Ray worker actors
+        raise RuntimeError("LLMEngine should not be pickled!")
+
+    def __del__(self):
+        # Shutdown model executor when engine is garbage collected
+        # Use getattr since __init__ can fail before the field is set
+        if model_executor := getattr(self, "model_executor", None):
+            model_executor.shutdown()
+
+    MISSING_TOKENIZER_GROUP_MSG = ("Unable to get tokenizer because "
+                                   "skip_tokenizer_init is True")
+
+    def get_tokenizer_group(
+            self,
+            fail_msg: str = MISSING_TOKENIZER_GROUP_MSG) -> BaseTokenizerGroup:
+        if self.tokenizer is None:
+            raise ValueError(fail_msg)
+
+        return self.tokenizer
+
+    def get_tokenizer(self) -> "PreTrainedTokenizer":
+        return self.get_tokenizer_group().get_lora_tokenizer(None)
+
+    def get_tokenizer_for_seq(self,
+                              sequence: Sequence) -> "PreTrainedTokenizer":
+        return self.get_tokenizer_group().get_lora_tokenizer(
+            sequence.lora_request)
+
+    def _init_tokenizer(self, **tokenizer_init_kwargs) -> BaseTokenizerGroup:
         init_kwargs = dict(
+            tokenizer_id=self.model_config.tokenizer,
             enable_lora=bool(self.lora_config),
             max_num_seqs=self.scheduler_config.max_num_seqs,
             max_input_length=None,
@@ -172,123 +404,9 @@ class LLMEngine:
             trust_remote_code=self.model_config.trust_remote_code,
             revision=self.model_config.tokenizer_revision)
         init_kwargs.update(tokenizer_init_kwargs)
-        self.tokenizer: TokenizerGroup = TokenizerGroup(
-            self.model_config.tokenizer, **init_kwargs)
 
-    def _init_workers_ray(self, placement_group: "PlacementGroup",
-                          **ray_remote_kwargs):
-        if self.parallel_config.tensor_parallel_size == 1:
-            num_gpus = self.cache_config.gpu_memory_utilization
-        else:
-            num_gpus = 1
-
-        self.driver_dummy_worker: RayWorkerVllm = None
-        self.workers: List[RayWorkerVllm] = []
-
-        driver_ip = get_ip()
-        for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-            if not bundle.get("GPU", 0):
-                continue
-            scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=placement_group,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=bundle_id,
-            )
-            worker = ray.remote(
-                num_cpus=0,
-                num_gpus=num_gpus,
-                scheduling_strategy=scheduling_strategy,
-                **ray_remote_kwargs,
-            )(RayWorkerVllm).remote(self.model_config.trust_remote_code)
-
-            worker_ip = ray.get(worker.get_node_ip.remote())
-            if worker_ip == driver_ip and self.driver_dummy_worker is None:
-                # If the worker is on the same node as the driver, we use it
-                # as the resource holder for the driver process.
-                self.driver_dummy_worker = worker
-            else:
-                self.workers.append(worker)
-
-        if self.driver_dummy_worker is None:
-            raise ValueError(
-                "Ray does not allocate any GPUs on the driver node. Consider "
-                "adjusting the Ray placement group or running the driver on a "
-                "GPU node.")
-
-        driver_node_id, driver_gpu_ids = ray.get(
-            self.driver_dummy_worker.get_node_and_gpu_ids.remote())
-        worker_node_and_gpu_ids = ray.get(
-            [worker.get_node_and_gpu_ids.remote() for worker in self.workers])
-
-        node_workers = defaultdict(list)
-        node_gpus = defaultdict(list)
-
-        node_workers[driver_node_id].append(0)
-        node_gpus[driver_node_id].extend(driver_gpu_ids)
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids,
-                                               start=1):
-            node_workers[node_id].append(i)
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
-
-        # Set CUDA_VISIBLE_DEVICES for the driver.
-        set_cuda_visible_devices(node_gpus[driver_node_id])
-        for worker, (node_id, _) in zip(self.workers, worker_node_and_gpu_ids):
-            worker.set_cuda_visible_devices.remote(node_gpus[node_id])
-
-        distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port())
-
-        # Lazy import the Worker to avoid importing torch.cuda/xformers
-        # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker
-
-        # Initialize torch distributed process group for the workers.
-        model_config = copy.deepcopy(self.model_config)
-        parallel_config = copy.deepcopy(self.parallel_config)
-        scheduler_config = copy.deepcopy(self.scheduler_config)
-        device_config = copy.deepcopy(self.device_config)
-
-        for rank, (worker, (node_id,
-                            _)) in enumerate(zip(self.workers,
-                                                 worker_node_and_gpu_ids),
-                                             start=1):
-            local_rank = node_workers[node_id].index(rank)
-            worker.init_worker.remote(
-                lambda rank=rank, local_rank=local_rank: Worker(
-                    model_config,
-                    parallel_config,
-                    scheduler_config,
-                    device_config,
-                    local_rank,
-                    rank,
-                    distributed_init_method,
-                    lora_config=self.lora_config,
-                    kv_cache_dtype=self.cache_config.cache_dtype,
-                ))
-
-        driver_rank = 0
-        driver_local_rank = node_workers[driver_node_id].index(driver_rank)
-        self.driver_worker = Worker(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            driver_local_rank,
-            driver_rank,
-            distributed_init_method,
-            lora_config=self.lora_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=True,
-        )
-
-        self._run_workers("init_model", cupy_port=get_open_port())
-        self._run_workers(
-            "load_model",
-            max_concurrent_workers=self.parallel_config.
-            max_parallel_loading_workers,
-        )
+        return get_tokenizer_group(self.parallel_config.tokenizer_pool_config,
+                                   **init_kwargs)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -298,104 +416,85 @@ class LLMEngine:
             self.lora_config.verify_with_scheduler_config(
                 self.scheduler_config)
 
-    def _init_cache(self) -> None:
-        """Profiles the memory usage and initializes the KV cache.
+    def _get_eos_token_id(
+            self, lora_request: Optional[LoRARequest]) -> Optional[int]:
+        if self.tokenizer is None:
+            logger.warning("Using None for EOS token id because tokenizer "
+                           "is not initialized")
+            return None
 
-        The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
-        that can be allocated with the remaining free memory.
-        More details can be found in the
-        :meth:`~vllm.worker.worker.Worker.profile_num_available_blocks` method
-        from class :class:`~vllm.worker.Worker`.
+        return self.tokenizer.get_lora_tokenizer(lora_request).eos_token_id
 
-        Afterwards, as there may be multiple workers,
-        we take the minimum number of blocks across all workers
-        to ensure this can be applied to all of them.
-
-        Finally, the engine will initialize the KV cache
-        with the calculated number of blocks.
-
-        .. tip::
-            You may limit the usage of GPU memory
-            by adjusting the `gpu_memory_utilization` parameters.
-        """
-        # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers(
-            "profile_num_available_blocks",
-            block_size=self.cache_config.block_size,
-            gpu_memory_utilization=self.cache_config.gpu_memory_utilization,
-            cpu_swap_space=self.cache_config.swap_space_bytes,
-            cache_dtype=self.cache_config.cache_dtype,
-        )
-
-        # Since we use a shared centralized controller, we take the minimum
-        # number of blocks across all workers to make sure all the memory
-        # operators can be applied to all workers.
-        num_gpu_blocks = min(b[0] for b in num_blocks)
-        num_cpu_blocks = min(b[1] for b in num_blocks)
-        # FIXME(woosuk): Change to debug log.
-        logger.info(f"# GPU blocks: {num_gpu_blocks}, "
-                    f"# CPU blocks: {num_cpu_blocks}")
-
-        if num_gpu_blocks <= 0:
-            raise ValueError("No available memory for the cache blocks. "
-                             "Try increasing `gpu_memory_utilization` when "
-                             "initializing the engine.")
-        max_seq_len = self.cache_config.block_size * num_gpu_blocks
-        if self.model_config.max_model_len > max_seq_len:
-            raise ValueError(
-                f"The model's max seq len ({self.model_config.max_model_len}) "
-                "is larger than the maximum number of tokens that can be "
-                f"stored in KV cache ({max_seq_len}). Try increasing "
-                "`gpu_memory_utilization` or decreasing `max_model_len` when "
-                "initializing the engine.")
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        # Initialize the cache.
-        self._run_workers("init_cache_engine", cache_config=self.cache_config)
-        # Warm up the model. This includes capturing the model into CUDA graph
-        # if enforce_eager is False.
-        self._run_workers("warm_up_model")
-
-    @classmethod
-    def from_engine_args(cls, engine_args: EngineArgs) -> "LLMEngine":
-        """Creates an LLM engine from the engine arguments."""
-        # Create the engine configs.
-        engine_configs = engine_args.create_engine_configs()
-        parallel_config = engine_configs[2]
-        # Initialize the cluster.
-        placement_group = initialize_cluster(parallel_config)
-        # Create the LLM engine.
-        engine = cls(*engine_configs,
-                     placement_group,
-                     log_stats=not engine_args.disable_log_stats)
-        return engine
-
-    def encode_request(
+    def _add_processed_request(
         self,
-        request_id: str,  # pylint: disable=unused-argument
-        prompt: Optional[str],
-        prompt_token_ids: Optional[List[int]] = None,
+        request_id: str,
+        processed_inputs: LLMInputs,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> None:
+        # Create the sequences.
+        block_size = self.cache_config.block_size
+        seq_id = next(self.seq_counter)
+        eos_token_id = self._get_eos_token_id(lora_request)
+
+        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+                       lora_request)
+
+        # Create a SequenceGroup based on SamplingParams or PoolingParams
+        if isinstance(params, SamplingParams):
+            seq_group = self._create_sequence_group_with_sampling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
+        elif isinstance(params, PoolingParams):
+            seq_group = self._create_sequence_group_with_pooling(
+                request_id,
+                seq,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+            )
+        else:
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
+
+        # Add the sequence group to the scheduler.
+        self.scheduler.add_seq_group(seq_group)
+
+    def process_model_inputs(
+        self,
+        request_id: str,
+        inputs: PromptInputs,
         lora_request: Optional[LoRARequest] = None,
-    ):
-        if prompt_token_ids is None:
-            assert prompt is not None
-            prompt_token_ids = self.tokenizer.encode(request_id=request_id,
-                                                     prompt=prompt,
-                                                     lora_request=lora_request)
-        return prompt_token_ids
+    ) -> LLMInputs:
+        if isinstance(inputs, str):
+            inputs = {"prompt": inputs}
+
+        if "prompt_token_ids" not in inputs:
+            tokenizer = self.get_tokenizer_group("prompts must be None if "
+                                                 "skip_tokenizer_init is True")
+
+            prompt_token_ids = tokenizer.encode(request_id=request_id,
+                                                prompt=inputs["prompt"],
+                                                lora_request=lora_request)
+        else:
+            prompt_token_ids = inputs["prompt_token_ids"]
+
+        return LLMInputs(prompt_token_ids=prompt_token_ids,
+                         prompt=inputs.get("prompt"),
+                         multi_modal_data=inputs.get("multi_modal_data"))
 
     def add_request(
         self,
         request_id: str,
-        prompt: Optional[str],
-        sampling_params: SamplingParams,
-        prompt_token_ids: Optional[List[int]] = None,
+        inputs: PromptInputs,
+        params: Union[SamplingParams, PoolingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
-        prefix_pos: Optional[int] = None,
     ) -> None:
         """Add a request to the engine's request pool.
 
@@ -405,18 +504,14 @@ class LLMEngine:
 
         Args:
             request_id: The unique ID of the request.
-            prompt: The prompt string. Can be None if prompt_token_ids is
-                provided.
-            sampling_params: The sampling parameters for text generation.
-            prompt_token_ids: The token IDs of the prompt. If None, we
-                use the tokenizer to convert the prompts to token IDs.
+            inputs: The inputs to the LLM. See
+                :class:`~vllm.inputs.PromptInputs`
+                for more details about the format of each input.
+            params: Parameters for sampling or pooling.
+                :class:`~vllm.SamplingParams` for text generation.
+                :class:`~vllm.PoolingParams` for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
-            prefix_pos: If not None, we use the given position as the prefix
-                position for each prompt. We will cache the prefix's KV
-                cache and reuse it for the next request with the same prefix.
-                This is an experimental feature, and may be replaced with
-                automatic prefix caching in the future.
 
         Details:
             - Set arrival_time to the current time if it is None.
@@ -446,33 +541,74 @@ class LLMEngine:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
         if arrival_time is None:
-            arrival_time = time.monotonic()
-        prompt_token_ids = self.encode_request(
+            arrival_time = time.time()
+
+        processed_inputs = self.process_model_inputs(request_id=request_id,
+                                                     inputs=inputs,
+                                                     lora_request=lora_request)
+
+        self._add_processed_request(
             request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            lora_request=lora_request)
+            processed_inputs=processed_inputs,
+            params=params,
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+        )
 
-        # Create the sequences.
-        block_size = self.cache_config.block_size
-        seq_id = next(self.seq_counter)
-        seq = Sequence(seq_id, prompt, prompt_token_ids, block_size,
-                       lora_request)
+    def _create_sequence_group_with_sampling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        sampling_params: SamplingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with SamplingParams."""
+        max_logprobs = self.get_model_config().max_logprobs
+        if (sampling_params.logprobs
+                and sampling_params.logprobs > max_logprobs) or (
+                    sampling_params.prompt_logprobs
+                    and sampling_params.prompt_logprobs > max_logprobs):
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs.")
 
-        # Check whether the input specifies prefix
-        prefix = self.scheduler.prefix_pool.add_or_get_prefix(
-            prompt_token_ids[:prefix_pos], lora_request.lora_int_id
-            if lora_request else 0) if prefix_pos is not None else None
-
-        # Defensive copy of SamplingParams, which are used by the sampler
-        sampling_params = copy.deepcopy(sampling_params)
+        # Defensive copy of SamplingParams, which are used by the sampler,
+        # this doesn't deep-copy LogitsProcessor objects
+        sampling_params = sampling_params.clone()
+        # Add the eos token id into the sampling_params to support min_tokens
+        # processing
+        if seq.eos_token_id is not None:
+            sampling_params.all_stop_token_ids.add(seq.eos_token_id)
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields)
 
         # Create the sequence group.
-        seq_group = SequenceGroup(request_id, [seq], sampling_params,
-                                  arrival_time, lora_request, prefix)
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  sampling_params=sampling_params,
+                                  lora_request=lora_request)
 
-        # Add the sequence group to the scheduler.
-        self.scheduler.add_seq_group(seq_group)
+        return seq_group
+
+    def _create_sequence_group_with_pooling(
+        self,
+        request_id: str,
+        seq: Sequence,
+        pooling_params: PoolingParams,
+        arrival_time: float,
+        lora_request: Optional[LoRARequest],
+    ) -> SequenceGroup:
+        """Creates a SequenceGroup with PoolingParams."""
+        # Defensive copy of PoolingParams, which are used by the pooler
+        pooling_params = pooling_params.clone()
+        # Create the sequence group.
+        seq_group = SequenceGroup(request_id=request_id,
+                                  seqs=[seq],
+                                  arrival_time=arrival_time,
+                                  lora_request=lora_request,
+                                  pooling_params=pooling_params)
+        return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
@@ -497,6 +633,10 @@ class LLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
+    def get_decoding_config(self) -> DecodingConfig:
+        """Gets the decoding configuration."""
+        return self.decoding_config
+
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
         return self.scheduler.get_num_unfinished_seq_groups()
@@ -505,259 +645,69 @@ class LLMEngine:
         """Returns True if there are unfinished requests."""
         return self.scheduler.has_unfinished_seqs()
 
-    def _check_beam_search_early_stopping(
+    def _process_sequence_group_outputs(
         self,
-        early_stopping: Union[bool, str],
-        sampling_params: SamplingParams,
-        best_running_seq: Sequence,
-        current_worst_seq: Sequence,
-    ) -> bool:
-        assert sampling_params.use_beam_search
-        length_penalty = sampling_params.length_penalty
-        if early_stopping is True:
-            return True
+        seq_group: SequenceGroup,
+        outputs: List[EmbeddingSequenceGroupOutput],
+    ) -> None:
+        seq_group.embeddings = outputs[0].embeddings
 
-        current_worst_score = (current_worst_seq.get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(
-                current_worst_seq).eos_token_id))
-        if early_stopping is False:
-            highest_attainable_score = (best_running_seq.get_beam_search_score(
-                length_penalty=length_penalty,
-                eos_token_id=self.get_tokenizer_for_seq(
-                    best_running_seq).eos_token_id))
-        else:
-            assert early_stopping == "never"
-            if length_penalty > 0.0:
-                # If length_penalty > 0.0, beam search will prefer longer
-                # sequences. The highest attainable score calculation is
-                # based on the longest possible sequence length in this case.
-                max_possible_length = max(
-                    best_running_seq.get_prompt_len() +
-                    sampling_params.max_tokens,
-                    self.scheduler_config.max_model_len)
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id,
-                        seq_len=max_possible_length))
-            else:
-                # Otherwise, beam search will prefer shorter sequences. The
-                # highest attainable score calculation is based on the current
-                # sequence length.
-                highest_attainable_score = (
-                    best_running_seq.get_beam_search_score(
-                        length_penalty=length_penalty,
-                        eos_token_id=self.get_tokenizer_for_seq(
-                            best_running_seq).eos_token_id))
-        return current_worst_score >= highest_attainable_score
+        for seq in seq_group.get_seqs():
+            seq.status = SequenceStatus.FINISHED_STOPPED
 
-    def _process_sequence_group_outputs(self, seq_group: SequenceGroup,
-                                        outputs: SequenceGroupOutput) -> None:
-
-        # Process prompt logprobs
-        prompt_logprobs = outputs.prompt_logprobs
-        if prompt_logprobs is not None:
-            seq_group.prompt_logprobs = prompt_logprobs
-
-        # Process samples
-        samples = outputs.samples
-        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        existing_finished_seqs = seq_group.get_finished_seqs()
-        parent_child_dict = {
-            parent_seq.seq_id: []
-            for parent_seq in parent_seqs
-        }
-        for sample in samples:
-            parent_child_dict[sample.parent_seq_id].append(sample)
-        # List of (child, parent)
-        child_seqs: List[Tuple[Sequence, Sequence]] = []
-
-        # Process the child samples for each parent sequence
-        for parent in parent_seqs:
-            child_samples: List[SequenceOutput] = parent_child_dict[
-                parent.seq_id]
-            if len(child_samples) == 0:
-                # This parent sequence has no children samples. Remove
-                # the parent sequence from the sequence group since it will
-                # not be used in the future iterations.
-                parent.status = SequenceStatus.FINISHED_ABORTED
-                seq_group.remove(parent.seq_id)
-                self.scheduler.free_seq(parent)
-                continue
-            # Fork the parent sequence if there are multiple child samples.
-            for child_sample in child_samples[:-1]:
-                new_child_seq_id = next(self.seq_counter)
-                child = parent.fork(new_child_seq_id)
-                child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
-                child_seqs.append((child, parent))
-            # Continue the parent sequence for the last child sample.
-            # We reuse the parent sequence here to reduce redundant memory
-            # copies, especially when using non-beam search sampling methods.
-            last_child_sample = child_samples[-1]
-            parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
-            child_seqs.append((parent, parent))
-
-        for seq, _ in child_seqs:
-            self._decode_sequence(seq, seq_group.sampling_params)
-            self._check_stop(seq, seq_group.sampling_params)
-
-        # Non-beam search case
-        if not seq_group.sampling_params.use_beam_search:
-            # For newly created child sequences, add them to the sequence group
-            # and fork them in block manager if they are not finished.
-            for seq, parent in child_seqs:
-                if seq is not parent:
-                    seq_group.add(seq)
-                    if not seq.is_finished():
-                        self.scheduler.fork_seq(parent, seq)
-
-            # Free the finished and selected parent sequences' memory in block
-            # manager. Keep them in the sequence group as candidate output.
-            # NOTE: we need to fork the new sequences before freeing the
-            # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
-                    self.scheduler.free_seq(seq)
-            return
-
-        # Beam search case
-        # Select the child sequences to keep in the sequence group.
-        selected_child_seqs = []
-        unselected_child_seqs = []
-        beam_width = seq_group.sampling_params.best_of
-        length_penalty = seq_group.sampling_params.length_penalty
-
-        # Select the newly finished sequences with the highest scores
-        # to replace existing finished sequences.
-        # Tuple of (seq, parent, is_new)
-        existing_finished_seqs = [(seq, None, False)
-                                  for seq in existing_finished_seqs]
-        new_finished_seqs = [(seq, parent, True) for seq, parent in child_seqs
-                             if seq.is_finished()]
-        all_finished_seqs = existing_finished_seqs + new_finished_seqs
-        # Sort the finished sequences by their scores.
-        all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
-                               reverse=True)
-        for seq, parent, is_new in all_finished_seqs[:beam_width]:
-            if is_new:
-                # A newly generated child sequence finishes and has a high
-                # score, so we will add it into the sequence group.
-                selected_child_seqs.append((seq, parent))
-        for seq, parent, is_new in all_finished_seqs[beam_width:]:
-            if is_new:
-                # A newly generated child sequence finishes but has a low
-                # score, so we will not add it into the sequence group.
-                # Additionally, if this sequence is a continuation of a
-                # parent sequence, we will need remove the parent sequence
-                # from the sequence group.
-                unselected_child_seqs.append((seq, parent))
-            else:
-                # An existing finished sequence has a low score, so we will
-                # remove it from the sequence group.
-                seq_group.remove(seq.seq_id)
-
-        # select the top beam_width sequences from the running
-        # sequences for the next iteration to continue the beam
-        # search.
-        running_child_seqs = [(seq, parent) for seq, parent in child_seqs
-                              if not seq.is_finished()]
-        # Sort the running sequences by their scores.
-        running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
-            length_penalty=length_penalty,
-            eos_token_id=self.get_tokenizer_for_seq(x[0]).eos_token_id),
-                                reverse=True)
-
-        # Check if we can stop the beam search.
-        if len(running_child_seqs) == 0:
-            # No running sequences, stop the beam search.
-            stop_beam_search = True
-        elif len(all_finished_seqs) < beam_width:
-            # Not enough finished sequences, continue the beam search.
-            stop_beam_search = False
-        else:
-            # Check the early stopping criteria
-            best_running_seq = running_child_seqs[0][0]
-            current_worst_seq = all_finished_seqs[beam_width - 1][0]
-            stop_beam_search = self._check_beam_search_early_stopping(
-                seq_group.sampling_params.early_stopping,
-                seq_group.sampling_params, best_running_seq, current_worst_seq)
-
-        if stop_beam_search:
-            # Stop the beam search and remove all the running sequences from
-            # the sequence group.
-            unselected_child_seqs.extend(running_child_seqs)
-        else:
-            # Continue the beam search and select the top beam_width sequences
-            # to continue the beam search.
-            selected_child_seqs.extend(running_child_seqs[:beam_width])
-            # The remaining running sequences will not be used in the next
-            # iteration. Again, if these sequences are continuations of
-            # parent sequences, we will need to remove the parent sequences
-            # from the sequence group.
-            unselected_child_seqs.extend(running_child_seqs[beam_width:])
-
-        # For newly created child sequences, add them to the sequence group
-        # and fork them in block manager if they are not finished.
-        for seq, parent in selected_child_seqs:
-            if seq is not parent:
-                seq_group.add(seq)
-                if not seq.is_finished():
-                    self.scheduler.fork_seq(parent, seq)
-
-        # Free the finished and selected parent sequences' memory in block
-        # manager. Keep them in the sequence group as candidate output.
-        for seq, parent in selected_child_seqs:
-            if seq is parent and seq.is_finished():
-                self.scheduler.free_seq(seq)
-
-        # Remove the unselected parent sequences from the sequence group and
-        # free their memory in block manager.
-        for seq, parent in unselected_child_seqs:
-            if seq is parent:
-                # Remove the parent sequence if it is not selected for next
-                # iteration
-                seq_group.remove(seq.seq_id)
-                self.scheduler.free_seq(seq)
+        return
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
-            scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
+        self,
+        output: GenericSequence[Union[SamplerOutput, PoolerOutput]],
+        scheduled_seq_groups: List[ScheduledSequenceGroup],
+        ignored_seq_groups: List[SequenceGroup],
+        seq_group_metadata_list: List[SequenceGroupMetadata],
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        """Apply the model output to the sequences in the scheduled seq groups.
+
+        Returns RequestOutputs that can be returned to the client.
+        """
+
+        now = time.time()
+
+        # Organize outputs by [sequence group][step] instead of
+        # [step][sequence group].
+        output_by_sequence_group = create_output_by_sequence_group(
+            output, num_seq_groups=len(scheduled_seq_groups))
+
         # Update the scheduled sequence groups with the model outputs.
-        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
-        for seq_group, outputs in zip(scheduled_seq_groups, output):
-            self._process_sequence_group_outputs(seq_group, outputs)
+        for scheduled_seq_group, outputs, seq_group_meta in zip(
+                scheduled_seq_groups, output_by_sequence_group,
+                seq_group_metadata_list):
+            seq_group = scheduled_seq_group.seq_group
+            seq_group.update_num_computed_tokens(
+                scheduled_seq_group.token_chunk_size)
+            if self.model_config.embedding_mode:
+                self._process_sequence_group_outputs(seq_group, outputs)
+                continue
+
+            self.output_processor.process_prompt_logprob(seq_group, outputs)
+            if seq_group_meta.do_sample:
+                self.output_processor.process_outputs(seq_group, outputs)
 
         # Free the finished sequence groups.
         self.scheduler.free_finished_seq_groups()
 
         # Create the outputs.
-        request_outputs: List[RequestOutput] = []
-        for seq_group in scheduled_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+        request_outputs: List[Union[RequestOutput,
+                                    EmbeddingRequestOutput]] = []
+        for scheduled_seq_group in scheduled_seq_groups:
+            seq_group = scheduled_seq_group.seq_group
+            seq_group.maybe_set_first_token_time(now)
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
-        for seq_group in scheduler_outputs.ignored_seq_groups:
-            request_output = RequestOutput.from_seq_group(seq_group)
+        for seq_group in ignored_seq_groups:
+            request_output = RequestOutputFactory.create(seq_group)
             request_outputs.append(request_output)
-
-        # Update prefix state, now all the uncomputed prefixes are computed.
-        for seq_group in scheduled_seq_groups:
-            if (seq_group.prefix is not None and seq_group.prefix.allocated
-                    and not seq_group.prefix.computed):
-                seq_group.prefix.computed = True
-
-        # Log stats.
-        if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs))
-
         return request_outputs
 
-    def step(self) -> List[RequestOutput]:
+    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -775,7 +725,7 @@ class LLMEngine:
                 - A Sequence Group (SG) refer to a group of sequences
                   that are generated from the same prompt.
 
-            - Step 2: Calls the workers to execute the model.
+            - Step 2: Calls the distributed executor to execute the model.
             - Step 3: Processes the model output. This mainly includes:
 
                 - Decodes the relevant outputs.
@@ -797,7 +747,7 @@ class LLMEngine:
             >>> while True:
             >>>     if example_inputs:
             >>>         req_id, prompt, sampling_params = example_inputs.pop(0)
-            >>>         engine.add_request(str(req_id), prompt, sampling_params)
+            >>>         engine.add_request(str(req_id),prompt,sampling_params)
             >>>
             >>>     # continue the request processing
             >>>     request_outputs = engine.step()
@@ -811,239 +761,216 @@ class LLMEngine:
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         if not scheduler_outputs.is_empty():
-            # Execute the model.
-            all_outputs = self._run_workers(
-                "execute_model",
-                driver_kwargs={
-                    "seq_group_metadata_list": seq_group_metadata_list,
-                    "blocks_to_swap_in": scheduler_outputs.blocks_to_swap_in,
-                    "blocks_to_swap_out": scheduler_outputs.blocks_to_swap_out,
-                    "blocks_to_copy": scheduler_outputs.blocks_to_copy,
-                },
-                use_ray_compiled_dag=USE_RAY_COMPILED_DAG)
-
-            # Only the driver worker returns the sampling results.
-            output = all_outputs[0]
+            execute_model_req = ExecuteModelRequest(
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+                num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
+                running_queue_size=scheduler_outputs.running_queue_size,
+            )
+            output = self.model_executor.execute_model(
+                execute_model_req=execute_model_req)
         else:
             output = []
 
-        return self._process_model_outputs(output, scheduler_outputs)
+        request_outputs = self._process_model_outputs(
+            output, scheduler_outputs.scheduled_seq_groups,
+            scheduler_outputs.ignored_seq_groups, seq_group_metadata_list)
 
-    def do_log_stats(self) -> None:
+        # Log stats.
+        self.do_log_stats(scheduler_outputs, output)
+
+        if not request_outputs:
+            # Stop the execute model loop in parallel workers until there are
+            # more requests to process. This avoids waiting indefinitely in
+            # torch.distributed ops which may otherwise timeout, and unblocks
+            # the RPC thread in the workers so that they can process any other
+            # queued control plane messages, such as add/remove lora adapters.
+            self.model_executor.stop_remote_worker_execution_loop()
+
+        return request_outputs
+
+    def do_log_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs] = None,
+            model_output: Optional[List[SamplerOutput]] = None) -> None:
         """Forced log when no requests active."""
         if self.log_stats:
-            self.stat_logger.log(self._get_stats(scheduler_outputs=None))
+            self.stat_logger.log(
+                self._get_stats(scheduler_outputs, model_output))
 
-    def _get_stats(self,
-                   scheduler_outputs: Optional[SchedulerOutputs]) -> Stats:
-        """Get Stats to be Logged to Prometheus."""
-        now = time.monotonic()
+    def _get_stats(
+            self,
+            scheduler_outputs: Optional[SchedulerOutputs],
+            model_output: Optional[List[SamplerOutput]] = None) -> Stats:
+        """Get Stats to be Logged to Prometheus.
 
-        # KV Cache Usage in %.
+        Args:
+            scheduler_outputs: Optional, used to populate metrics related to
+                the scheduled batch,
+            model_output: Optional, used to emit speculative decoding metrics
+                which are created by the workers.
+        """
+        now = time.time()
+
+        # System State
+        #   Scheduler State
+        num_running_sys = len(self.scheduler.running)
+        num_swapped_sys = len(self.scheduler.swapped)
+        num_waiting_sys = len(self.scheduler.waiting)
+
+        # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
-        num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks()
-        gpu_cache_usage = 1.0 - (num_free_gpu / num_total_gpu)
+        gpu_cache_usage_sys = 0.
+        if num_total_gpu is not None:
+            num_free_gpu = self.scheduler.block_manager.get_num_free_gpu_blocks(
+            )
+            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
         num_total_cpu = self.cache_config.num_cpu_blocks
-        cpu_cache_usage = 0.
-        if num_total_cpu > 0:
+        cpu_cache_usage_sys = 0.
+        if num_total_cpu is not None and num_total_cpu > 0:
             num_free_cpu = self.scheduler.block_manager.get_num_free_cpu_blocks(
             )
-            cpu_cache_usage = 1.0 - (num_free_cpu / num_total_cpu)
+            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
-        # Scheduler State
-        num_running = len(self.scheduler.running)
-        num_swapped = len(self.scheduler.swapped)
-        num_waiting = len(self.scheduler.waiting)
+        # Iteration stats
+        num_prompt_tokens_iter = 0
+        num_generation_tokens_iter = 0
+        time_to_first_tokens_iter: List[float] = []
+        time_per_output_tokens_iter: List[float] = []
+        num_preemption_iter = (0 if scheduler_outputs is None else
+                               scheduler_outputs.preempted)
 
-        # Iteration stats if we have scheduler output.
-        num_prompt_tokens = 0
-        num_generation_tokens = 0
-        time_to_first_tokens = []
-        time_per_output_tokens = []
-        time_e2e_requests = []
+        # Request stats
+        #   Latency
+        time_e2e_requests: List[float] = []
+        #   Metadata
+        num_prompt_tokens_requests: List[int] = []
+        num_generation_tokens_requests: List[int] = []
+        best_of_requests: List[int] = []
+        n_requests: List[int] = []
+        finished_reason_requests: List[str] = []
+
+        # NOTE: This loop assumes prefill seq_groups are before
+        # decode seq_groups in scheduled_seq_groups.
         if scheduler_outputs is not None:
-            prompt_run = scheduler_outputs.prompt_run
+            num_generation_tokens_from_prefill_groups = 0.
+            # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
+            # the len of scheduler_outputs.scheduled_seq_groups is !=
+            # scheduler_outputs.num_prefill_groups, this means that
+            # chunked prefills have been detected.
 
-            # Number of Tokens.
-            if prompt_run:
-                num_prompt_tokens = sum(
-                    len(seq_group.prompt_token_ids)
-                    for seq_group in scheduler_outputs.scheduled_seq_groups)
-            else:
-                num_generation_tokens = scheduler_outputs.num_batched_tokens
+            for idx, scheduled_seq_group in enumerate(
+                    scheduler_outputs.scheduled_seq_groups):
+                group_was_prefill = idx < scheduler_outputs.num_prefill_groups
+                seq_group = scheduled_seq_group.seq_group
 
-            # Latency Timings.
-            time_last_iters = []
-            for seq_group in scheduler_outputs.scheduled_seq_groups:
-                # Time since last token. (n.b. updates seq_group.last_token_time)
-                time_last_iters.append(seq_group.get_last_latency(now))
-                # Time since arrival for all finished requests.
+                # NOTE: a seq_group that completed all of its prefill tokens
+                # in the last iteration will have seq_group.is_prefill() = False
+                # with group_was_prefill = True
+                if group_was_prefill:
+                    # Number of prompt tokens.
+                    num_prompt_tokens_iter += (
+                        scheduled_seq_group.token_chunk_size)
+
+                    # If the seq_group just finished the prefill state
+                    # get TTFT.
+                    if not seq_group.is_prefill():
+                        latency = seq_group.get_last_latency(now)
+                        time_to_first_tokens_iter.append(latency)
+
+                        # One generation token per finished prefill.
+                        num_generation_tokens_from_prefill_groups += (
+                            seq_group.num_seqs())
+                else:
+                    # TPOTs.
+                    latency = seq_group.get_last_latency(now)
+                    time_per_output_tokens_iter.append(latency)
+
+                # Because of chunked prefill, we can have a single sequence
+                # group that does multiple prompt_runs. To prevent logging
+                # the same metadata more than once per request, we standardize
+                # on logging request level information for finished requests,
+                # which can only happen once.
                 if seq_group.is_finished():
-                    time_e2e_requests.append(now - seq_group.arrival_time)
+                    # Latency timings
+                    time_e2e_requests.append(now -
+                                             seq_group.metrics.arrival_time)
 
-            time_to_first_tokens = time_last_iters if prompt_run else []
-            time_per_output_tokens = [] if prompt_run else time_last_iters
+                    # Metadata
+                    num_prompt_tokens_requests.append(
+                        len(seq_group.prompt_token_ids))
+                    num_generation_tokens_requests.extend([
+                        seq.get_output_len()
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+                    if seq_group.sampling_params is not None:
+                        best_of_requests.append(
+                            seq_group.sampling_params.best_of)
+                        n_requests.append(seq_group.sampling_params.n)
+                    finished_reason_requests.extend([
+                        SequenceStatus.get_finished_reason(seq.status)
+                        for seq in seq_group.get_finished_seqs()
+                    ])
+
+            # Number of generation tokens.
+            #   num_batched_tokens equals the number of prompt_tokens plus the
+            #   number of decode_tokens in a single iteration. So,
+            #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
+            #   + num_generation_tokens_from_prefill_groups (since we generate
+            #   one token on prefills on iters where the prefill finishes).
+            num_generation_tokens_iter = (
+                scheduler_outputs.num_batched_tokens - num_prompt_tokens_iter +
+                num_generation_tokens_from_prefill_groups)
+
+        # Spec decode, if enabled, emits specialized metrics from the worker in
+        # sampler output.
+        if model_output and (model_output[0].spec_decode_worker_metrics
+                             is not None):
+            spec_decode_metrics = model_output[0].spec_decode_worker_metrics
+        else:
+            spec_decode_metrics = None
 
         return Stats(
             now=now,
-            num_running=num_running,
-            num_swapped=num_swapped,
-            num_waiting=num_waiting,
-            gpu_cache_usage=gpu_cache_usage,
-            cpu_cache_usage=cpu_cache_usage,
-            num_prompt_tokens=num_prompt_tokens,
-            num_generation_tokens=num_generation_tokens,
-            time_to_first_tokens=time_to_first_tokens,
-            time_per_output_tokens=time_per_output_tokens,
+            # System stats
+            #   Scheduler State
+            num_running_sys=num_running_sys,
+            num_swapped_sys=num_swapped_sys,
+            num_waiting_sys=num_waiting_sys,
+            #   KV Cache Usage in %
+            gpu_cache_usage_sys=gpu_cache_usage_sys,
+            cpu_cache_usage_sys=cpu_cache_usage_sys,
+
+            # Iteration stats
+            num_prompt_tokens_iter=num_prompt_tokens_iter,
+            num_generation_tokens_iter=num_generation_tokens_iter,
+            time_to_first_tokens_iter=time_to_first_tokens_iter,
+            time_per_output_tokens_iter=time_per_output_tokens_iter,
+            spec_decode_metrics=spec_decode_metrics,
+            num_preemption_iter=num_preemption_iter,
+
+            # Request stats
+            #   Latency
             time_e2e_requests=time_e2e_requests,
+            #   Metadata
+            num_prompt_tokens_requests=num_prompt_tokens_requests,
+            num_generation_tokens_requests=num_generation_tokens_requests,
+            best_of_requests=best_of_requests,
+            n_requests=n_requests,
+            finished_reason_requests=finished_reason_requests,
         )
-
-    def _decode_sequence(self, seq: Sequence, prms: SamplingParams) -> None:
-        """Decodes the new token for a sequence."""
-        (new_tokens, new_output_text, prefix_offset,
-         read_offset) = detokenize_incrementally(
-             self.get_tokenizer_for_seq(seq),
-             all_input_ids=seq.get_token_ids(),
-             prev_tokens=seq.tokens,
-             prefix_offset=seq.prefix_offset,
-             read_offset=seq.read_offset,
-             skip_special_tokens=prms.skip_special_tokens,
-             spaces_between_special_tokens=prms.spaces_between_special_tokens,
-         )
-        if seq.tokens is None:
-            seq.tokens = new_tokens
-        else:
-            seq.tokens.extend(new_tokens)
-        seq.prefix_offset = prefix_offset
-        seq.read_offset = read_offset
-        seq.output_text += new_output_text
-
-    def _check_stop(self, seq: Sequence,
-                    sampling_params: SamplingParams) -> None:
-        """Stop the finished sequences."""
-        for stop_str in sampling_params.stop:
-            if seq.output_text.endswith(stop_str):
-                self._finalize_sequence(seq, sampling_params, stop_str)
-                seq.status = SequenceStatus.FINISHED_STOPPED
-                return
-        if seq.get_last_token_id() in sampling_params.stop_token_ids:
-            stop_str = self.get_tokenizer_for_seq(seq).convert_ids_to_tokens(
-                seq.get_last_token_id())
-            self._finalize_sequence(seq, sampling_params, stop_str)
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
-        # Check if the sequence has reached max_model_len.
-        if seq.get_len() > self.scheduler_config.max_model_len:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the sequence has reached max_tokens.
-        if seq.get_output_len() == sampling_params.max_tokens:
-            seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
-            return
-
-        # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos) and seq.get_last_token_id()
-                == self.get_tokenizer_for_seq(seq).eos_token_id):
-            seq.status = SequenceStatus.FINISHED_STOPPED
-            return
-
-    def _finalize_sequence(self, seq: Sequence,
-                           sampling_params: SamplingParams,
-                           stop_string: str) -> None:
-        if not sampling_params.include_stop_str_in_output and stop_string:
-            # Truncate the output text so that the stop string is
-            # not included in the output.
-            seq.output_text = seq.output_text[:-len(stop_string)]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "add_lora",
-            lora_request=lora_request,
-        )
+        return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        assert lora_id > 0, "lora_id must be greater than 0."
-        return self._run_workers(
-            "remove_lora",
-            lora_id=lora_id,
-        )
+        return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> List[int]:
-        return self._run_workers("list_loras")
+        return self.model_executor.list_loras()
 
-    def _run_workers(
-        self,
-        method: str,
-        *args,
-        driver_args: Optional[List[Any]] = None,
-        driver_kwargs: Optional[Dict[str, Any]] = None,
-        max_concurrent_workers: Optional[int] = None,
-        use_ray_compiled_dag: bool = False,
-        **kwargs,
-    ) -> Any:
-        """Runs the given method on all workers."""
-
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
-
-        if use_ray_compiled_dag:
-            # Right now, compiled DAG can only accept a single
-            # input. TODO(sang): Fix it.
-            output_channels = self.forward_dag.execute(1)
-        else:
-            # Start the ray workers first.
-            ray_worker_outputs = [
-                worker.execute_method.remote(method, *args, **kwargs)
-                for worker in self.workers
-            ]
-
-        if driver_args is None:
-            driver_args = args
-        if driver_kwargs is None:
-            driver_kwargs = kwargs
-
-        # Start the driver worker after all the ray workers.
-        driver_worker_output = getattr(self.driver_worker,
-                                       method)(*driver_args, **driver_kwargs)
-
-        # Get the results of the ray workers.
-        if self.workers:
-            if use_ray_compiled_dag:
-                try:
-                    ray_worker_outputs = [
-                        pickle.loads(chan.begin_read())
-                        for chan in output_channels
-                    ]
-                finally:
-                    # Has to call end_read in order to reuse the DAG.
-                    for chan in output_channels:
-                        chan.end_read()
-            else:
-                ray_worker_outputs = ray.get(ray_worker_outputs)
-
-        return [driver_worker_output] + ray_worker_outputs
-
-    def _compiled_ray_dag(self):
-        import pkg_resources
-        required_version = "2.9"
-        current_version = pkg_resources.get_distribution("ray").version
-        if current_version < required_version:
-            raise ValueError(f"Ray version {required_version} or greater is "
-                             f"required, but found {current_version}")
-
-        from ray.dag import MultiOutputNode, InputNode
-        assert self.parallel_config.worker_use_ray
-
-        # Right now, compiled DAG requires at least 1 arg. We send
-        # a dummy value for now. It will be fixed soon.
-        with InputNode() as input_data:
-            forward_dag = MultiOutputNode([
-                worker.execute_model_compiled_dag_remote.bind(input_data)
-                for worker in self.workers
-            ])
-        return forward_dag.experimental_compile()
+    def check_health(self) -> None:
+        self.model_executor.check_health()
